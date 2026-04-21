@@ -2,7 +2,7 @@
 
 Phase 1 work for the GODO LiDAR-based camera position tracker lives here.
 Scope: **data capture + noise characterization + analysis**, per
-[`SYSTEM_DESIGN.md §10`](../SYSTEM_DESIGN.md).
+[`SYSTEM_DESIGN.md §10`](../../SYSTEM_DESIGN.md).
 
 ```text
 src/godo_lidar/
@@ -89,11 +89,11 @@ uv run python scripts/analyze.py --mode visualize --csv data\...csv --out out/
 
 ## Backend selection: SDK-wrapper vs Non-SDK
 
-See [`SYSTEM_DESIGN.md §10.1`](../SYSTEM_DESIGN.md) for the full rationale.
+See [`SYSTEM_DESIGN.md §10.1`](../../SYSTEM_DESIGN.md) for the full rationale.
 Short version:
 
 - `--backend sdk` (pyrplidar) — fast empirical baseline. **Unofficial for
-  the C1** per [`RPLIDAR/RPLIDAR_C1.md §4`](../RPLIDAR/RPLIDAR_C1.md). Treat
+  the C1** per [`RPLIDAR/RPLIDAR_C1.md §4`](../../doc/RPLIDAR/RPLIDAR_C1.md). Treat
   as a reference, not as ground truth.
 - `--backend raw` — `pyserial` + in-house protocol parser
   (`capture/raw_parser.py`, derived directly from SLAMTEC protocol v2.8

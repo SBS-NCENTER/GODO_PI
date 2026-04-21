@@ -131,7 +131,7 @@ Total recovery time: 10–20 seconds (including boot)
 
 ```text
 /XR_FreeD_to_UDP                  ← legacy Arduino project (rollback + reference)
-/RPi5                             ← new C++ application (Phase 3+)
+/production/RPi5                  ← new C++ application (Phase 3+)
 ├─ CMakeLists.txt
 ├─ README.md
 ├─ CODEBASE.md                    ← module / feature change log
@@ -346,7 +346,7 @@ void udp_sender_thread() {
 ### Phase 1 — measurement and Python prototype (current)
 
 - [x] FreeD Pan semantics validated → **base-local, effectively world-frame under wheels-parallel rule**.
-- [ ] Scaffold `/Python` with UV.
+- [ ] Scaffold `/prototype/Python` with UV.
 - [ ] Clone `rplidar_sdk`, build `ultra_simple` on Mac/Windows.
 - [ ] Raw scan dump (design the text / binary format).
 - [ ] Python visualization (polar plot, quality histogram).
@@ -365,7 +365,7 @@ void udp_sender_thread() {
 
 - [ ] RPi 5 setup (OS, Docker, apt deps).
 - [ ] `Dockerfile.mapping` + one-time map build.
-- [ ] Scaffold `/RPi5` (CMake, submodules).
+- [ ] Scaffold `/production/RPi5` (CMake, submodules).
 - [ ] Port `lidar_reader` + `map_loader` + baseline AMCL.
 - [ ] Cross-check AMCL output against the Python reference.
 
@@ -412,7 +412,7 @@ void udp_sender_thread() {
    - [CLAUDE.md](./CLAUDE.md) — project guide.
    - [PROGRESS.md](./PROGRESS.md) — current state.
    - This file ([SYSTEM_DESIGN.md](./SYSTEM_DESIGN.md)) — end-to-end design.
-   - [RPLIDAR/RPLIDAR_C1.md](./RPLIDAR/RPLIDAR_C1.md) — C1 reference.
+   - [doc/RPLIDAR/RPLIDAR_C1.md](./doc/RPLIDAR/RPLIDAR_C1.md) — C1 reference.
    - [.claude/memory/MEMORY.md](./.claude/memory/MEMORY.md) — memory index.
 3. Ask Claude Code to read those five files and continue from there.
 
@@ -421,7 +421,7 @@ void udp_sender_thread() {
 ```text
 ┌──────────────────────────────────────────────────────────────┐
 │ Morning (before the LiDAR arrives)                           │
-│  □ Scaffold /Python with UV (30 min)                         │
+│  □ Scaffold /prototype/Python with UV (30 min)               │
 │  □ Clone rplidar_sdk, attempt a Windows build (30 min)       │
 │  □ Define the dump format (CSV: angle, distance, quality, flag)│
 │                                                              │
@@ -440,24 +440,24 @@ void udp_sender_thread() {
 
 ### Step 2 — expected artifacts
 
-- `/Python/pyproject.toml`.
-- `/Python/src/godo_lidar/` (package).
-- `/Python/scripts/dump_scan.py` (wraps the SDK).
-- `/Python/scripts/analyze.py` (visualization / analysis).
-- `/Python/data/YYYYMMDD_scan_*.csv` (gitignored).
+- `/prototype/Python/pyproject.toml`.
+- `/prototype/Python/src/godo_lidar/` (package).
+- `/prototype/Python/scripts/dump_scan.py` (wraps the SDK).
+- `/prototype/Python/scripts/analyze.py` (visualization / analysis).
+- `/prototype/Python/data/YYYYMMDD_scan_*.csv`.
 - Updated `/PROGRESS.md`.
 
 ### Step 3 — if you get stuck
 
 - SDK build fails on Windows → consult `rplidar_sdk/README.md`. Fallback: **use SLAMTEC RoboStudio pre-built to dump data first**.
 - COM port not recognized → reinstall SLAMTEC's official CP2102 driver.
-- Data looks wrong → run through the checklist in [RPLIDAR/RPLIDAR_C1.md §5](./RPLIDAR/RPLIDAR_C1.md#5-raw-vs-sdk-noise--root-causes).
+- Data looks wrong → run through the checklist in [doc/RPLIDAR/RPLIDAR_C1.md §5](./doc/RPLIDAR/RPLIDAR_C1.md#5-raw-vs-sdk-noise--root-causes).
 
 ---
 
 ## 10. Phase 1 Python prototype — tools and library plan
 
-> **Scope**: this section pins the tooling for the Phase 1 measurement work that lives under `/Python`. The production C++ binary (Phase 3+) is governed by §3 and §6 above.
+> **Scope**: this section pins the tooling for the Phase 1 measurement work that lives under `/prototype/Python`. The production C++ binary (Phase 3+) is governed by §3 and §6 above.
 
 ### 10.1 Two-backend acquisition framework (SDK-wrapper vs Non-SDK)
 
@@ -473,11 +473,11 @@ Phase 1 runs **two parallel acquisition backends** against the same physical set
 | Effort | A few lines of init code | Protocol implementation per the SLAMTEC v2.8 PDF |
 | Role | Fast empirical baseline on Windows | Research / byte-level debugging |
 
-> **Honesty note**: [RPLIDAR/RPLIDAR_C1.md §4](./RPLIDAR/RPLIDAR_C1.md#4-sdk-and-python-bindings) marks `pyrplidar` as **unofficial** for C1 and recommends "official C++ SDK + pybind11/ctypes" for production. We use `pyrplidar` in Phase 1 because it lets us start measuring on Windows today without a C++ toolchain. The authoritative three-way comparison — adding the official SDK's `ultra_simple` CLI as a third backend — is scheduled as a **Phase 1 follow-up task** once the C++ build environment is ready. Until then, the SDK-wrapper path should be treated as a baseline, not as a certified reference.
+> **Honesty note**: [doc/RPLIDAR/RPLIDAR_C1.md §4](./doc/RPLIDAR/RPLIDAR_C1.md#4-sdk-and-python-bindings) marks `pyrplidar` as **unofficial** for C1 and recommends "official C++ SDK + pybind11/ctypes" for production. We use `pyrplidar` in Phase 1 because it lets us start measuring on Windows today without a C++ toolchain. The authoritative three-way comparison — adding the official SDK's `ultra_simple` CLI as a third backend — is scheduled as a **Phase 1 follow-up task** once the C++ build environment is ready. Until then, the SDK-wrapper path should be treated as a baseline, not as a certified reference.
 
 The backends emit the **same `Frame` dataclass** (`angle_deg`, `distance_mm`, `quality`, `flag`, `timestamp_ns`), so every downstream analysis stage is backend-agnostic.
 
-See [RPLIDAR/RPLIDAR_C1.md §5](./RPLIDAR/RPLIDAR_C1.md#5-raw-vs-sdk-noise--root-causes) for the seven known causes of "SDK looks clean, raw is noisy".
+See [doc/RPLIDAR/RPLIDAR_C1.md §5](./doc/RPLIDAR/RPLIDAR_C1.md#5-raw-vs-sdk-noise--root-causes) for the seven known causes of "SDK looks clean, raw is noisy".
 
 ### 10.2 Library plan (Phase 1)
 
@@ -499,11 +499,11 @@ Excluded for Phase 1 (defer until actually needed):
 
 Every measurement run produces two files so that later sessions — including AI re-analysis without the hardware — can reproduce and verify it.
 
-1. **CSV dump** (`/Python/data/<timestamp>_<backend>_<tag>.csv`), one row per LiDAR sample:
+1. **CSV dump** (`/prototype/Python/data/<timestamp>_<backend>_<tag>.csv`), one row per LiDAR sample:
    ```text
    frame_idx,sample_idx,timestamp_ns,angle_deg,distance_mm,quality,flag
    ```
-2. **Session txt log** (`/Python/logs/<timestamp>_<backend>_<tag>.txt`):
+2. **Session txt log** (`/prototype/Python/logs/<timestamp>_<backend>_<tag>.txt`):
    - Header: timestamp, host, OS, python version, backend, baud, motor PWM, scan mode, port
    - Capture params: frame count, target distance, angular window, operator notes
    - Run stats: frames captured, samples/sec, dropped frames, mean / median quality, wall-clock duration

@@ -19,8 +19,8 @@ You are the **implementation-only agent** for GODO. You receive an approved plan
 3. The approved plan you received — read in full, do not skim.
 4. Context references:
    - `XR_FreeD_to_UDP/src/main.cpp` and `README.md` — **pattern reference** for FreeD D1 parsing and UDP transmission.
-   - `RPLIDAR/RPLIDAR_C1.md` — LiDAR specs and SDK usage.
-   - `Embedded_CheckPoint.md` — any C++ / real-time work.
+   - `doc/RPLIDAR/RPLIDAR_C1.md` — LiDAR specs and SDK usage.
+   - `doc/Embedded_CheckPoint.md` — any C++ / real-time work.
 
 ---
 
@@ -38,7 +38,7 @@ You are the **implementation-only agent** for GODO. You receive an approved plan
 
 ### Python (Phase 1~2, UV)
 
-- Project lives at `/Python`, managed by UV (`uv init`, `uv add`).
+- Project lives at `/prototype/Python`, managed by UV (`uv init`, `uv add`).
 - Python 3.12+.
 - **Type hints are mandatory** (target `mypy --strict`).
 - Format: `ruff format`. Lint: `ruff check`.
@@ -46,7 +46,7 @@ You are the **implementation-only agent** for GODO. You receive an approved plan
 - Layout:
 
   ```text
-  /Python
+  /prototype/Python
   ├─ pyproject.toml
   ├─ README.md
   ├─ CODEBASE.md
@@ -61,7 +61,7 @@ You are the **implementation-only agent** for GODO. You receive an approved plan
 ### C++ (Phase 3+, CMake)
 
 - Standard: **C++17 or later**.
-- CMake build (Phase 3 onward under `/RPi5`).
+- CMake build (Phase 3 onward under `/production/RPi5`).
 - **Strict RAII**: no raw `new` / `delete`; use `std::unique_ptr`, `std::shared_ptr`, or stack allocation.
 - **Minimize dynamic allocation**: hot loops must preallocate or use stack buffers.
 - **Error handling**: exceptions vs. error codes is a per-module decision; real-time threads must not throw.
@@ -69,7 +69,7 @@ You are the **implementation-only agent** for GODO. You receive an approved plan
 - Layout:
 
   ```text
-  /RPi5
+  /production/RPi5
   ├─ CMakeLists.txt
   ├─ README.md
   ├─ CODEBASE.md
@@ -148,7 +148,7 @@ Create the file if it does not exist.
 ## 5. Read-only folders (never modify)
 
 - ❌ `/XR_FreeD_to_UDP/*` — read only.
-- ❌ `/RPLIDAR/sources/*` — read only.
+- ❌ `/doc/RPLIDAR/sources/*` — read only.
 - ❌ `/.claude/agents/*.md` — do not modify your own or sibling agent definitions. (Only Parent + user may change these.)
 - ❌ `/.claude/memory/*.md` — memory is Parent's concern.
 - ❌ Large edits to `CLAUDE.md`, `SYSTEM_DESIGN.md`, `PROGRESS.md` — work logs go in `CODEBASE.md`. Upstream docs are updated by Parent once user confirms a decision.

@@ -22,8 +22,8 @@ Read the following in order. Re-read `PROGRESS.md` every invocation because stat
 4. `.claude/memory/MEMORY.md` — memory index; load any entry that looks relevant
 5. `CODEBASE.md` inside the target folder (if it exists)
 6. Conditionally:
-   - LiDAR-related work → `RPLIDAR/RPLIDAR_C1.md`
-   - Embedded / real-time / C++ work → `Embedded_CheckPoint.md`
+   - LiDAR-related work → `doc/RPLIDAR/RPLIDAR_C1.md`
+   - Embedded / real-time / C++ work → `doc/Embedded_CheckPoint.md`
    - FreeD protocol work → `XR_FreeD_to_UDP/README.md` and `XR_FreeD_to_UDP/src/main.cpp` (read-only reference)
 
 ---
@@ -50,7 +50,7 @@ Register each item via TaskCreate, then summarize here:
 ## File-level change spec
 | File | Change type (new / modify / delete) | Summary |
 | --- | --- | --- |
-| /Python/... | new | ... |
+| /prototype/Python/... | new | ... |
 
 ## Module boundaries and interfaces
 - Module A: role / public API
@@ -92,14 +92,14 @@ Register each item via TaskCreate, then summarize here:
 
 | Phase | Language | Folder |
 |---|---|---|
-| 1~2 (measurement / algorithm validation) | Python (UV) | `/Python` |
-| 3~ (production) | C++17+ (CMake) | `/RPi5` |
+| 1~2 (measurement / algorithm validation) | Python (UV) | `/prototype/Python` |
+| 3~ (production) | C++17+ (CMake) | `/production/RPi5` |
 
 Do not propose C++ work before Phase 3. Algorithm viability must be confirmed in Python first.
 
 ### Embedded considerations (Phase 3+ C++ only)
 
-Explicitly cite items from `Embedded_CheckPoint.md`:
+Explicitly cite items from `doc/Embedded_CheckPoint.md`:
 
 - Memory: minimize dynamic allocation, bound stack usage.
 - Real-time: `SCHED_FIFO`, CPU affinity, `mlockall`, `clock_nanosleep(TIMER_ABSTIME)` when required.
@@ -116,7 +116,7 @@ Explicitly cite items from `Embedded_CheckPoint.md`:
 ## 4. Read-only folders (never plan to modify)
 
 - `/XR_FreeD_to_UDP/*` — legacy Arduino asset. Reference-only for FreeD D1 protocol and UDP patterns. Also serves as a runtime rollback option.
-- `/RPLIDAR/sources/*` — SLAMTEC official PDFs. Never modify.
+- `/doc/RPLIDAR/sources/*` — SLAMTEC official PDFs. Never modify.
 
 Any plan that proposes writing into these folders must be rejected immediately.
 
@@ -146,6 +146,6 @@ Any plan that proposes writing into these folders must be rejected immediately.
 
 - ❌ Writing code (no Write/Edit; if you feel the urge, it means you should be more specific in the plan instead).
 - ❌ Modifying this file or any other agent-definition file.
-- ❌ Planning modifications to `/XR_FreeD_to_UDP/` or `/RPLIDAR/sources/`.
+- ❌ Planning modifications to `/XR_FreeD_to_UDP/` or `/doc/RPLIDAR/sources/`.
 - ❌ Skipping phases without explicit user confirmation.
 - ❌ Making design-level decisions unilaterally; escalate to Parent.

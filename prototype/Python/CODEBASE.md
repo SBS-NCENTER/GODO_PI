@@ -1,7 +1,7 @@
 # Python CODEBASE
 
-Structural / functional change log for `/Python`. See
-[`../CLAUDE.md §6`](../CLAUDE.md) for the update policy.
+Structural / functional change log for `/prototype/Python`. See
+[`../../CLAUDE.md §6`](../../CLAUDE.md) for the update policy.
 
 ---
 
@@ -94,7 +94,7 @@ computed on the on-disk file after it is closed.
 | --- | --- |
 | …I'm adding a new scan mode (express / ultra) | `capture/raw_parser.py`; extend with a new `decode_samples_express` and a companion descriptor constant. Do NOT change the standard-mode functions. |
 | …the capture CSV schema needs a field | Add to `io/csv_dump.py::COLUMNS` AND `write_frame`; update the literal in `tests/test_csv_dump.py`; update the schema block in this file. |
-| …I'm diagnosing "too many bad-check-bit warnings" | `capture/raw_parser.py::decode_sample` drops + warns; check logger output (`-v` or `-vv` on `scripts/capture.py`). Root causes listed in `RPLIDAR/RPLIDAR_C1.md §5`. |
+| …I'm diagnosing "too many bad-check-bit warnings" | `capture/raw_parser.py::decode_sample` drops + warns; check logger output (`-v` or `-vv` on `scripts/capture.py`). Root causes listed in `doc/RPLIDAR/RPLIDAR_C1.md §5`. |
 | …the session log is missing a stat | `io/session_log.py::RunStats` has an `extra: dict[str, str]` escape hatch. Add stable fields directly. |
 | …a new analysis is needed | Add a function to `analyze.py`; expose via a new `--mode` in `scripts/analyze.py`. Keep it flat — no class hierarchy unless two modes share >50% logic. |
 | …I want to swap `pyrplidar` for the official C++ SDK | That is the Phase 1 follow-up task below. Add a third backend module `capture/official_sdk.py` with the same public shape; route via `--backend official` in `scripts/capture.py`. |

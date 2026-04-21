@@ -35,5 +35,5 @@ GODO = a studio camera tracker that uses an **RPLIDAR C1 to measure the SHOTOKU 
 1. `CLAUDE.md` — project guide.
 2. `PROGRESS.md` — current state.
 3. `SYSTEM_DESIGN.md` — end-to-end design (**core**).
-4. `RPLIDAR/RPLIDAR_C1.md` — LiDAR hardware reference.
+4. `doc/RPLIDAR/RPLIDAR_C1.md` — LiDAR hardware reference.
 5. The rest of `.claude/memory/`.

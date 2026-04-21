@@ -1,10 +1,10 @@
 ---
 name: Test-session naming convention
-description: How field-test data is archived under `/Python/out/TS<N>/`, and what each session ID maps to physically.
+description: How field-test data is archived under `/prototype/Python/out/TS<N>/`, and what each session ID maps to physically.
 type: project
 ---
 
-Phase 1 field-test data is archived under `C:\Users\User\Desktop\GODO\Python\out\TS<N>\` with `data/` + `logs/` + `analysis/` + `README.md` subtree. Each `TS<N>` is a distinct test session (location + setup).
+Phase 1 field-test data is archived under `<repo-root>/prototype/Python/out/TS<N>/` with `data/` + `logs/` + `analysis/` + `README.md` subtree. Each `TS<N>` is a distinct test session (location + setup).
 
 **Why**: the user picks short numeric session IDs over descriptive names because reviewing / re-analyzing historic sessions by ID is faster than by prose location.
 

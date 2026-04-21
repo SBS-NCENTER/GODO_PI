@@ -59,7 +59,7 @@ Previous phase: Phase 0 (RPLIDAR C1 deep dive) completed on 2026-04-20.
 - **Arduino R4 WiFi**: the existing FreeD→UDP firmware is retained as a **rollback card**. On RPi 5 failure, swapping the cable reverts to the Arduino.
 - **Python (UV)**: used only for Phase 1 measurement / Phase 2 algorithm prototyping; not part of the production binary.
 
-See [RPLIDAR/RPLIDAR_C1.md](./RPLIDAR/RPLIDAR_C1.md) for the supporting evidence.
+See [RPLIDAR/RPLIDAR_C1.md](./doc/RPLIDAR/RPLIDAR_C1.md) for the supporting evidence.
 
 ---
 
@@ -68,7 +68,7 @@ See [RPLIDAR/RPLIDAR_C1.md](./RPLIDAR/RPLIDAR_C1.md) for the supporting evidence
 ### Phase 1 action items (empirical)
 
 1. **SHOTOKU FreeD Pan semantics validation (optional)** — rotate the pedestal 90° and observe FreeD Pan. User testimony already resolves this, but a physical confirmation is cheap.
-2. ~~**Python project scaffolding**~~ — **done 2026-04-21**; see `/Python/` (SDK-wrapper + Non-SDK backends, CSV+TXT dump, two CLI scripts, 29 unit tests green).
+2. ~~**Python project scaffolding**~~ — **done 2026-04-21**; see `/prototype/Python/` (SDK-wrapper + Non-SDK backends, CSV+TXT dump, two CLI scripts, 29 unit tests green).
 3. **Hardware smoke capture (1차 priority)** — plug the C1 in via the CP2102 adapter, run `uv run python scripts/capture.py --backend sdk --port COMn --frames 100 --tag smoke_sdk` and `--backend raw --tag smoke_raw` back-to-back at the same static position. Verify `data/*.csv` + `logs/*.txt` are produced. Then `uv run python scripts/analyze.py --mode compare --csv <sdk.csv> --other-csv <raw.csv> --out out/` for the side-by-side.
 4. **Noise characterization (2차 priority)** — `--mode noise` on a 100+ frame dump per backend; per-direction variance, √N verification.
 5. **Retro-reflector distinguishability test** — 3M retro-reflective tape (or bike reflectors) at distances 0.5 / 2 / 5 / 10 m, angles 0 / 30 / 45 / 60 / 75°. Thresholds to check: marker quality ≥ 200, background ≤ 100. Decides whether O4 is viable.
@@ -92,7 +92,7 @@ See [RPLIDAR/RPLIDAR_C1.md](./RPLIDAR/RPLIDAR_C1.md) for the supporting evidence
 
 ### 2026-04-21 (evening)
 
-- **Phase 1 Python scaffold complete** at `/Python/` via the full agent pipeline (planner → reviewer-A → writer → reviewer-B → fix pass). Ready for empirical capture.
+- **Phase 1 Python scaffold complete** at `/prototype/Python/` via the full agent pipeline (planner → reviewer-A → writer → reviewer-B → fix pass). Ready for empirical capture.
 - **SYSTEM_DESIGN.md §10 added**: two-backend acquisition framework (SDK-wrapper vs Non-SDK), library plan, CSV+TXT dump format, four-step test sequence (backend parity → noise → reflector → chroma NIR).
 - **Backend framing corrected honestly**: `pyrplidar` is ❌ for official C1 support per RPLIDAR_C1.md §4, so the "SDK backend" is relabeled **SDK-wrapper backend** with an explicit caveat. The authoritative three-way comparison (adding the official `ultra_simple` CLI) is deferred as a Phase 1 follow-up (now item #7 in Next up).
 - **Non-SDK backend implements standard scan mode only** (cmd `0xA5 0x20`, 5-byte sample layout per SLAMTEC v2.8 PDF). Express / Ultra / dense_boost are explicitly out of scope for Phase 1. Motor speed command is `0xA8 MOTOR_SPEED_CTRL` (RPM u16 LE) — C1 has no MOTOCTL pin per RPLIDAR_C1.md §6.
@@ -123,8 +123,8 @@ See [RPLIDAR/RPLIDAR_C1.md](./RPLIDAR/RPLIDAR_C1.md) for the supporting evidence
 
 - **Initial design session**.
 - **CLAUDE.md** restructured into a nine-section guide.
-- **Phase 0 completed**: [RPLIDAR/RPLIDAR_C1.md](./RPLIDAR/RPLIDAR_C1.md) authored from the official SLAMTEC datasheet.
-- Two PDFs (C1 datasheet v1.0, S&C-series protocol v2.8) saved to [RPLIDAR/sources/](./RPLIDAR/sources/) for offline reference.
+- **Phase 0 completed**: [RPLIDAR/RPLIDAR_C1.md](./doc/RPLIDAR/RPLIDAR_C1.md) authored from the official SLAMTEC datasheet.
+- Two PDFs (C1 datasheet v1.0, S&C-series protocol v2.8) saved to [RPLIDAR/sources/](./doc/RPLIDAR/sources/) for offline reference.
 - `PROGRESS.md` created for cross-session, cross-machine continuity.
 
 ---
@@ -133,6 +133,6 @@ See [RPLIDAR/RPLIDAR_C1.md](./RPLIDAR/RPLIDAR_C1.md) for the supporting evidence
 
 - Project guide: [CLAUDE.md](./CLAUDE.md)
 - **End-to-end design**: [SYSTEM_DESIGN.md](./SYSTEM_DESIGN.md)
-- RPLIDAR C1 specs & analysis: [RPLIDAR/RPLIDAR_C1.md](./RPLIDAR/RPLIDAR_C1.md)
-- Embedded reliability checklist: [Embedded_CheckPoint.md](./Embedded_CheckPoint.md)
+- RPLIDAR C1 specs & analysis: [RPLIDAR/RPLIDAR_C1.md](./doc/RPLIDAR/RPLIDAR_C1.md)
+- Embedded reliability checklist: [Embedded_CheckPoint.md](./doc/Embedded_CheckPoint.md)
 - Legacy asset (now inside the repo): [/XR_FreeD_to_UDP/](./XR_FreeD_to_UDP/) — Arduino R4 WiFi FreeD→UDP converter. Serves as a FreeD D1 protocol reference and a rollback card. Its functionality is being absorbed by the RPi 5 binary.

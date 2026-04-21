@@ -25,8 +25,8 @@ On every invocation:
 2. Consult `.claude/memory/MEMORY.md` and load any relevant memory entries.
 3. Obtain the review target (plan document or the diff / file list).
 4. Load reference docs as appropriate:
-   - Embedded / real-time / C++ work → `Embedded_CheckPoint.md` (mandatory).
-   - LiDAR work → `RPLIDAR/RPLIDAR_C1.md`.
+   - Embedded / real-time / C++ work → `doc/Embedded_CheckPoint.md` (mandatory).
+   - LiDAR work → `doc/RPLIDAR/RPLIDAR_C1.md`.
    - FreeD work → `XR_FreeD_to_UDP/src/main.cpp` + `README.md`.
 5. Express every finding as a (location, problem, recommendation) triple. Opinions without a citation are not acceptable.
 
@@ -63,7 +63,7 @@ You receive a plan document from the Planner and review it **before** implementa
 - [ ] HIL procedures specified for human operators when relevant.
 
 ### Read-only folders
-- [ ] No proposed writes into `/XR_FreeD_to_UDP/` or `/RPLIDAR/sources/`. (Reject immediately if present.)
+- [ ] No proposed writes into `/XR_FreeD_to_UDP/` or `/doc/RPLIDAR/sources/`. (Reject immediately if present.)
 
 ### Definition of Done
 - [ ] DoD is a verifiable checklist, not prose.
@@ -118,14 +118,14 @@ You receive the Writer's files and tests after implementation.
 - [ ] Array bounds checked (`std::span`, `.at()`, or explicit checks).
 - [ ] No dangling pointer or use-after-free potential.
 - [ ] Strict RAII.
-- [ ] All items in `Embedded_CheckPoint.md §1.1` addressed.
+- [ ] All items in `doc/Embedded_CheckPoint.md §1.1` addressed.
 
 ### Real-time safety (RT threads)
 - [ ] No dynamic allocation in hot loops (no `malloc`, `new`, `std::string` construction).
 - [ ] No lock contention (lock-free structures or atomics).
 - [ ] Timing uses `clock_nanosleep(TIMER_ABSTIME)` to avoid drift accumulation.
 - [ ] `SCHED_FIFO`, CPU affinity, `mlockall` all configured.
-- [ ] RT sections of `Embedded_CheckPoint.md` satisfied.
+- [ ] RT sections of `doc/Embedded_CheckPoint.md` satisfied.
 
 ### Test quality (**bias-blocking focus**)
 - [ ] Every public function has **both** success and failure tests.
@@ -147,7 +147,7 @@ You receive the Writer's files and tests after implementation.
 - [ ] Design-level shifts reported to Parent (upstream docs are Parent's to update).
 
 ### Read-only folders
-- [ ] No changes under `/XR_FreeD_to_UDP/` or `/RPLIDAR/sources/`. Reject on sight if present.
+- [ ] No changes under `/XR_FreeD_to_UDP/` or `/doc/RPLIDAR/sources/`. Reject on sight if present.
 
 ## B-2. Mode-B output format
 

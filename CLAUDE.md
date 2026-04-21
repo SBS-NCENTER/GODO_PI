@@ -72,7 +72,7 @@
 ```text
 ┌─────────────────────────────────────────────────────────────┐
 │ Phase 0. Deep analysis of RPLIDAR C1           ✅ done       │
-│   └─ Deliverable: RPLIDAR/RPLIDAR_C1.md                      │
+│   └─ Deliverable: doc/RPLIDAR/RPLIDAR_C1.md                  │
 ├─────────────────────────────────────────────────────────────┤
 │ Phase 1. Data normalization (Python prototype) ◄ current    │
 │   ├─ Raw data dump via the official SDK                     │
@@ -112,7 +112,7 @@
 ### Current hardware connection
 
 - The RPLIDAR C1 connects over USB through a **CP2102N-based 4-pin-to-USB-C module** (3.3 V TTL UART @ 460,800 bps internally).
-- MCU-direct connection details: see [RPLIDAR/RPLIDAR_C1.md §6](./RPLIDAR/RPLIDAR_C1.md#6-mcu--sbc-direct-connection).
+- MCU-direct connection details: see [doc/RPLIDAR/RPLIDAR_C1.md §6](./doc/RPLIDAR/RPLIDAR_C1.md#6-mcu--sbc-direct-connection).
 
 ---
 
@@ -132,21 +132,24 @@
 ├─ CLAUDE.md                     ← This document (SSOT)
 ├─ SYSTEM_DESIGN.md              ← End-to-end system design & implementation guide
 ├─ PROGRESS.md                   ← Cross-session progress log (Mac / Windows)
-├─ Embedded_CheckPoint.md        ← Embedded reliability checklist (reference)
 ├─ /.claude
 │    ├─ /agents                  ← Agent definitions (planner / writer / reviewer)
 │    └─ /memory                  ← Project persistent memory (portable)
 │         ├─ MEMORY.md
 │         └─ *.md                ← user / feedback / project / reference entries
-├─ /RPLIDAR                      ← RPLIDAR reference docs
-│    ├─ RPLIDAR_C1.md            ← C1 deep dive (Phase 0 output)
-│    └─ /sources                 ← Original datasheets (PDF)
-├─ /Python                       ← Python prototype project (Phase 1~2, UV)
-│    ├─ README.md
-│    └─ CODEBASE.md              ← Structural / functional change log
-├─ /RPi5                         ← Production C++ application (Phase 3~)
-│    ├─ README.md
-│    └─ CODEBASE.md
+├─ /doc                          ← Reference documents
+│    ├─ Embedded_CheckPoint.md   ← Embedded reliability checklist (reference)
+│    └─ /RPLIDAR                 ← RPLIDAR reference docs
+│         ├─ RPLIDAR_C1.md       ← C1 deep dive (Phase 0 output)
+│         └─ /sources            ← Original datasheets (PDF)
+├─ /prototype                    ← Prototyping / research stacks
+│    └─ /Python                  ← Python prototype project (Phase 1~2, UV)
+│         ├─ README.md
+│         └─ CODEBASE.md         ← Structural / functional change log
+├─ /production                   ← Production deployment stacks
+│    └─ /RPi5                    ← C++ application on Raspberry Pi 5 (Phase 3~)
+│         ├─ README.md
+│         └─ CODEBASE.md
 └─ /XR_FreeD_to_UDP              ← Legacy Arduino firmware (rollback card, reference)
      ├─ README.md
      ├─ platformio.ini
@@ -157,7 +160,7 @@
 
 1. Read `CLAUDE.md` and `PROGRESS.md` first for full context.
 2. Check `.claude/memory/MEMORY.md` and load relevant entries.
-3. As needed, open `SYSTEM_DESIGN.md`, `RPLIDAR/RPLIDAR_C1.md`, and other references.
+3. As needed, open `SYSTEM_DESIGN.md`, `doc/RPLIDAR/RPLIDAR_C1.md`, and other references.
 
 > Automatic memory loading depends on per-host caches, so **explicitly reading `.claude/memory/MEMORY.md` at the start of each session** is recommended. This folder is all you need to continue work on any machine.
 
@@ -171,7 +174,7 @@ These rules apply to the Parent orchestrator and all subagents. They are non-neg
 
 - **SSOT / DRY**: one concept, one location. No duplicate implementations.
 - **Minimal code**: implement exactly what is requested. No speculative abstractions, no "just in case" code, no drive-by refactoring.
-- **Long-term stability**: follow `Embedded_CheckPoint.md` for any code that will run for years in production.
+- **Long-term stability**: follow `doc/Embedded_CheckPoint.md` for any code that will run for years in production.
 - **Preserve existing assets**: minimize changes to the production `XR_FreeD_to_UDP` firmware. If changes are unavoidable, prepare a rollback plan first.
 - **Keep CLAUDE.md short**: this file is a guide, not a data store. Push long analyses, specs, and reports into dedicated reference documents and link to them.
 
@@ -190,7 +193,7 @@ These rules apply to the Parent orchestrator and all subagents. They are non-neg
 
 ### Read-only folders
 
-- `/XR_FreeD_to_UDP/*` and `/RPLIDAR/sources/*` are **read-only** for every agent. Reference them freely; never modify or delete.
+- `/XR_FreeD_to_UDP/*` and `/doc/RPLIDAR/sources/*` are **read-only** for every agent. Reference them freely; never modify or delete.
 
 ### Agent self-preservation
 
@@ -256,9 +259,9 @@ Planner ──► Reviewer (Mode-A) ──► (approve) Writer ──► Reviewe
 
 ### RPLIDAR C1 deep dive (Phase 0 output)
 
-→ **[RPLIDAR/RPLIDAR_C1.md](./RPLIDAR/RPLIDAR_C1.md)** — measurement principle, performance specs, UART protocol, SDK and Python bindings, root-cause analysis for "why raw Python data was noisy", MCU/SBC compatibility matrix, chroma-studio suitability, product-line positioning.
+→ **[doc/RPLIDAR/RPLIDAR_C1.md](./doc/RPLIDAR/RPLIDAR_C1.md)** — measurement principle, performance specs, UART protocol, SDK and Python bindings, root-cause analysis for "why raw Python data was noisy", MCU/SBC compatibility matrix, chroma-studio suitability, product-line positioning.
 
 ### Others
 
-- [Embedded_CheckPoint.md](./Embedded_CheckPoint.md) — embedded reliability checklist.
+- [doc/Embedded_CheckPoint.md](./doc/Embedded_CheckPoint.md) — embedded reliability checklist.
 - [PROGRESS.md](./PROGRESS.md) — cross-session progress state.

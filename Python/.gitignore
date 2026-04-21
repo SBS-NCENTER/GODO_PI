@@ -1,0 +1,29 @@
+# UV / venv
+.venv/
+.uv-cache/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Test / build artifacts
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+
+# Captured data and session logs (keep .gitkeep markers)
+data/*
+!data/.gitkeep
+logs/*
+!logs/.gitkeep
+out/*
+!out/.gitkeep
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

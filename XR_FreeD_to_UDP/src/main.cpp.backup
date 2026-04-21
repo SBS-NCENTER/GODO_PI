@@ -1,0 +1,1052 @@
+/**
+ * FreeD Serial -> UDP Forwarder
+ * Arduino UNO R4 WiFi + Ethernet Shield v2
+ *
+ * 기능: RS422 Serial (YL-128 TTL 변환) -> FreeD 29Byte 패킷 -> UDP 전송
+ *
+ * 하드웨어 연결:
+ *   - YL-128 TX -> Arduino RX1 (D0)
+ *   - YL-128 RX -> Arduino TX1 (D1) [사용 안 함]
+ *   - YL-128 GND -> Arduino GND
+ *   - Ethernet Shield v2 -> SPI (D10, D11, D12, D13)
+ *
+ * 빌드 설정:
+ *   - USE_DEBUG=1 : WiFi 모드 (디버깅용)
+ *   - USE_DEBUG=0 : Ethernet Shield v2 모드 (프로덕션)
+ *
+ * FreeD D1 패킷 구조 (29 Bytes):
+ *   [0]     : Type (0xD1)
+ *   [1]     : Camera ID
+ *   [2-4]   : Pan (signed 24-bit, 1/32768 degree)
+ *   [5-7]   : Tilt
+ *   [8-10]  : Roll
+ *   [11-13] : X Position (signed 24-bit, 1/64mm)
+ *   [14-16] : Y Position
+ *   [17-19] : Z Position
+ *   [20-22] : Zoom (unsigned 24-bit)
+ *   [23-25] : Focus (unsigned 24-bit)
+ *   [26-27] : Status (2 bytes)
+ *   [28]    : Checksum
+ *
+ * 체크섬: (64 - sum(packet[0:28])) % 256  (FreeD 표준)
+ */
+
+#include <Arduino.h>
+#include <EEPROM.h>
+
+// ============================================================================
+// 네트워크 라이브러리 분리 (컴파일 타임)
+// ============================================================================
+#if USE_DEBUG == 1
+    // WiFi 모드 (디버깅)
+    #include <WiFiS3.h>
+    #include <WiFiUdp.h>
+#else
+    // Ethernet 모드 (프로덕션)
+    #include <SPI.h>
+    #include <Ethernet.h>
+    #include <EthernetUdp.h>
+#endif
+
+// ============================================================================
+// FreeD 상수
+// ============================================================================
+namespace FreeD {
+    constexpr uint8_t  TYPE_D1     = 0xD1;
+    constexpr uint8_t  PACKET_LEN  = 29;
+    constexpr uint32_t BAUD_RATE   = 38400;
+
+    // 패킷 필드 오프셋
+    constexpr uint8_t OFF_TYPE     = 0;
+    constexpr uint8_t OFF_CAM_ID   = 1;
+    constexpr uint8_t OFF_PAN      = 2;
+    constexpr uint8_t OFF_TILT     = 5;
+    constexpr uint8_t OFF_ROLL     = 8;
+    constexpr uint8_t OFF_X        = 11;
+    constexpr uint8_t OFF_Y        = 14;
+    constexpr uint8_t OFF_Z        = 17;
+    constexpr uint8_t OFF_ZOOM     = 20;
+    constexpr uint8_t OFF_FOCUS    = 23;
+    constexpr uint8_t OFF_STATUS   = 26;
+    constexpr uint8_t OFF_CHECKSUM = 28;
+}
+
+// ============================================================================
+// 설정 구조체
+// ============================================================================
+struct RemapConfig {
+    uint8_t  enabled;
+    uint32_t inMin;
+    uint32_t inMax;
+    uint32_t offset;    // 0x080000
+    uint32_t scale;     // 50000
+};
+
+// 멀티 타겟 설정
+constexpr uint8_t MAX_TARGETS = 4;
+
+struct TargetConfig {
+    uint8_t  enabled;
+    uint8_t  ip[4];
+    uint16_t port;
+};
+
+struct AppConfig {
+    uint32_t magic;
+    uint8_t  mac[6];
+    uint8_t  localIP[4];
+    TargetConfig targets[MAX_TARGETS];  // 최대 4개 타겟
+    RemapConfig remap;
+    // WiFi 설정 (USE_DEBUG=1에서만 사용)
+    char wifiSSID[32];
+    char wifiPass[32];
+    uint8_t reserved[8];
+};
+
+constexpr uint32_t CONFIG_MAGIC = 0xFD251221;
+constexpr int EEPROM_ADDR = 0;
+
+// 기본 설정값
+AppConfig g_config = {
+    CONFIG_MAGIC,
+    {0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED},  // MAC
+    {10, 10, 204, 100},                      // Local IP (Ethernet)
+    {   // targets[4] - 멀티 타겟 설정
+        {1, {10, 10, 204, 184}, 50001},      // Target 0: 활성화
+        {0, {10, 10, 204, 185}, 50001},      // Target 1: 비활성화
+        {0, {10, 10, 204, 186}, 50001},      // Target 2: 비활성화
+        {0, {10, 10, 204, 187}, 50001},      // Target 3: 비활성화
+    },
+    {0, 0, 65445, 0x080000, 50000},          // Remap (disabled)
+    "SBS_TS5XR_2.4G",                        // WiFi SSID
+    "newscenter",                            // WiFi Password
+    {0}
+};
+
+// ============================================================================
+// 네트워크 전역 객체 (완전 분리)
+// ============================================================================
+#if USE_DEBUG == 1
+    // ===== WiFi 모드 전용 =====
+    WiFiUDP g_udp;
+    bool g_networkReady = false;
+    uint32_t g_lastWifiCheckMs = 0;
+    constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 10000;
+#else
+    // ===== Ethernet 모드 전용 =====
+    EthernetUDP g_udp;
+    bool g_networkReady = false;
+    bool g_linkWasUp = false;
+    uint32_t g_lastLinkCheckMs = 0;
+#endif
+
+// ============================================================================
+// FreeD 프레임 처리 변수
+// ============================================================================
+uint8_t g_frameBuffer[FreeD::PACKET_LEN];
+uint8_t g_frameIndex = 0;
+
+// 동기화 상태 머신
+enum class SyncState : uint8_t {
+    HUNTING,      // 0xD1 헤더 탐색
+    COLLECTING,   // 29바이트 수집
+};
+SyncState g_syncState = SyncState::HUNTING;
+
+// ============================================================================
+// 통계 변수
+// ============================================================================
+volatile uint32_t g_ppsCounter = 0;
+volatile uint32_t g_bytesReceived = 0;
+volatile uint32_t g_checksumErrors = 0;
+uint32_t g_lastStatsMs = 0;
+
+// ============================================================================
+// 디버깅 변수
+// ============================================================================
+bool g_dumpEnabled = false;      // dump 모드 활성화
+uint8_t g_dumpCount = 0;         // dump할 패킷 수
+uint8_t g_parityMode = 1;        // 0=None, 1=Odd, 2=Even
+
+// ============================================================================
+// 콘솔 명령 버퍼
+// ============================================================================
+char g_cmdBuffer[128];
+uint8_t g_cmdIndex = 0;
+
+// ============================================================================
+// 유틸리티 함수 (공통)
+// ============================================================================
+
+/**
+ * FreeD 체크섬 계산 (표준 방식)
+ * Python: (64 - sum(packet[0:28])) % 256
+ */
+uint8_t calculateChecksum(const uint8_t* packet) {
+    uint16_t sum = 0;
+    for (uint8_t i = 0; i < 28; i++) {
+        sum += packet[i];
+    }
+    return (64 - (sum & 0xFF)) & 0xFF;
+}
+
+/**
+ * 체크섬 검증
+ */
+bool verifyChecksum(const uint8_t* packet) {
+    return packet[FreeD::OFF_CHECKSUM] == calculateChecksum(packet);
+}
+
+/**
+ * 24-bit Big-Endian 읽기
+ */
+uint32_t readU24BE(const uint8_t* p) {
+    return ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | (uint32_t)p[2];
+}
+
+/**
+ * 24-bit Big-Endian 쓰기
+ */
+void writeU24BE(uint8_t* p, uint32_t val) {
+    val &= 0xFFFFFF;
+    p[0] = (uint8_t)(val >> 16);
+    p[1] = (uint8_t)(val >> 8);
+    p[2] = (uint8_t)(val);
+}
+
+/**
+ * Zoom/Focus 리매핑 (선형 스케일링)
+ */
+uint32_t applyRemap(uint32_t val) {
+    if (!g_config.remap.enabled) {
+        return val & 0xFFFFFF;
+    }
+
+    uint32_t inMin = g_config.remap.inMin;
+    uint32_t inMax = g_config.remap.inMax;
+
+    if (inMax <= inMin) {
+        return g_config.remap.offset & 0xFFFFFF;
+    }
+
+    if (val <= inMin) return g_config.remap.offset & 0xFFFFFF;
+    if (val >= inMax) return (g_config.remap.offset + g_config.remap.scale) & 0xFFFFFF;
+
+    uint64_t numerator = (uint64_t)g_config.remap.scale * (val - inMin);
+    uint32_t result = g_config.remap.offset + (uint32_t)(numerator / (inMax - inMin));
+
+    return result & 0xFFFFFF;
+}
+
+// ============================================================================
+// EEPROM 설정 관리 (공통)
+// ============================================================================
+void loadConfig() {
+    AppConfig temp;
+    EEPROM.get(EEPROM_ADDR, temp);
+
+    if (temp.magic == CONFIG_MAGIC) {
+        g_config = temp;
+        Serial.println(F("[CONFIG] Loaded from EEPROM"));
+    } else {
+        Serial.println(F("[CONFIG] Using defaults"));
+    }
+}
+
+void saveConfig() {
+    g_config.magic = CONFIG_MAGIC;
+    EEPROM.put(EEPROM_ADDR, g_config);
+    Serial.println(F("[CONFIG] Saved to EEPROM"));
+}
+
+// ============================================================================
+// 네트워크 함수 (완전 분리)
+// ============================================================================
+
+#if USE_DEBUG == 1
+// ===== WiFi 모드 구현 =====
+
+bool initNetwork() {
+    Serial.println(F("[WiFi] Initializing..."));
+    Serial.print(F("[WiFi] SSID: "));
+    Serial.println(g_config.wifiSSID);
+
+    WiFi.begin(g_config.wifiSSID, g_config.wifiPass);
+
+    uint32_t startMs = millis();
+    while (WiFi.status() != WL_CONNECTED) {
+        if (millis() - startMs > 10000) {
+            Serial.println(F("[WiFi] Connection timeout"));
+            g_networkReady = false;
+            return false;
+        }
+        delay(100);
+        Serial.print(F("."));
+    }
+    Serial.println();
+
+    Serial.print(F("[WiFi] Connected! IP: "));
+    Serial.println(WiFi.localIP());
+
+    if (!g_udp.begin(0)) {
+        Serial.println(F("[UDP] Failed to start"));
+        g_networkReady = false;
+        return false;
+    }
+
+    Serial.println(F("[UDP] Targets:"));
+    for (uint8_t i = 0; i < MAX_TARGETS; i++) {
+        if (g_config.targets[i].enabled) {
+            Serial.print(F("  ["));
+            Serial.print(i);
+            Serial.print(F("] "));
+            Serial.print(g_config.targets[i].ip[0]); Serial.print('.');
+            Serial.print(g_config.targets[i].ip[1]); Serial.print('.');
+            Serial.print(g_config.targets[i].ip[2]); Serial.print('.');
+            Serial.print(g_config.targets[i].ip[3]); Serial.print(':');
+            Serial.println(g_config.targets[i].port);
+        }
+    }
+
+    g_networkReady = true;
+    return true;
+}
+
+void checkNetworkStatus() {
+    uint32_t now = millis();
+
+    if (WiFi.status() != WL_CONNECTED) {
+        if (g_networkReady) {
+            Serial.println(F("[WiFi] Disconnected"));
+            g_networkReady = false;
+        }
+
+        if (now - g_lastWifiCheckMs >= WIFI_RETRY_INTERVAL_MS) {
+            g_lastWifiCheckMs = now;
+            Serial.println(F("[WiFi] Reconnecting..."));
+            initNetwork();
+        }
+    } else {
+        if (!g_networkReady) {
+            Serial.println(F("[WiFi] Reconnected"));
+            g_networkReady = true;
+        }
+    }
+}
+
+void sendUdpPacket(const uint8_t* data, uint8_t len) {
+    if (!g_networkReady) return;
+
+    // 모든 활성화된 타겟으로 전송
+    for (uint8_t i = 0; i < MAX_TARGETS; i++) {
+        if (g_config.targets[i].enabled) {
+            IPAddress target(g_config.targets[i].ip[0], g_config.targets[i].ip[1],
+                             g_config.targets[i].ip[2], g_config.targets[i].ip[3]);
+
+            g_udp.beginPacket(target, g_config.targets[i].port);
+            g_udp.write(data, len);
+            g_udp.endPacket();
+        }
+    }
+}
+
+void printNetworkStatus() {
+    Serial.print(F("WiFi: "));
+    Serial.println(WiFi.status() == WL_CONNECTED ? "CONNECTED" : "DISCONNECTED");
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.print(F("IP: "));
+        Serial.println(WiFi.localIP());
+    }
+}
+
+#else
+// ===== Ethernet 모드 구현 =====
+
+bool initNetwork() {
+    Serial.println(F("[ETH] Initializing (DHCP)..."));
+
+    Ethernet.init(10);  // W5500 CS = D10
+
+    // DHCP로 IP 자동 획득
+    Serial.println(F("[ETH] Requesting IP via DHCP..."));
+    if (Ethernet.begin(g_config.mac) == 0) {
+        Serial.println(F("[ETH] DHCP failed!"));
+
+        // DHCP 실패 시 링크 상태 확인
+        if (Ethernet.linkStatus() == LinkOFF) {
+            Serial.println(F("[ETH] No cable connected"));
+        }
+        g_networkReady = false;
+        return false;
+    }
+
+    Serial.print(F("[ETH] IP: "));
+    Serial.println(Ethernet.localIP());
+
+    if (!g_udp.begin(0)) {
+        Serial.println(F("[UDP] Failed to start"));
+        g_networkReady = false;
+        return false;
+    }
+
+    Serial.println(F("[UDP] Targets:"));
+    for (uint8_t i = 0; i < MAX_TARGETS; i++) {
+        if (g_config.targets[i].enabled) {
+            Serial.print(F("  ["));
+            Serial.print(i);
+            Serial.print(F("] "));
+            Serial.print(g_config.targets[i].ip[0]); Serial.print('.');
+            Serial.print(g_config.targets[i].ip[1]); Serial.print('.');
+            Serial.print(g_config.targets[i].ip[2]); Serial.print('.');
+            Serial.print(g_config.targets[i].ip[3]); Serial.print(':');
+            Serial.println(g_config.targets[i].port);
+        }
+    }
+
+    g_networkReady = true;
+    g_linkWasUp = true;
+    return true;
+}
+
+void checkNetworkStatus() {
+    uint32_t now = millis();
+
+    if (now - g_lastLinkCheckMs >= 2000) {
+        g_lastLinkCheckMs = now;
+
+        bool linkUp = (Ethernet.linkStatus() == LinkON);
+
+        if (linkUp && !g_linkWasUp) {
+            Serial.println(F("[ETH] Link UP"));
+            g_networkReady = true;
+        } else if (!linkUp && g_linkWasUp) {
+            Serial.println(F("[ETH] Link DOWN"));
+            g_networkReady = false;
+        }
+
+        g_linkWasUp = linkUp;
+    }
+
+    Ethernet.maintain();
+}
+
+void sendUdpPacket(const uint8_t* data, uint8_t len) {
+    if (!g_networkReady) return;
+
+    // 모든 활성화된 타겟으로 전송
+    for (uint8_t i = 0; i < MAX_TARGETS; i++) {
+        if (g_config.targets[i].enabled) {
+            IPAddress target(g_config.targets[i].ip[0], g_config.targets[i].ip[1],
+                             g_config.targets[i].ip[2], g_config.targets[i].ip[3]);
+
+            g_udp.beginPacket(target, g_config.targets[i].port);
+            g_udp.write(data, len);
+            g_udp.endPacket();
+        }
+    }
+}
+
+void printNetworkStatus() {
+    Serial.print(F("Ethernet Link: "));
+    Serial.println(Ethernet.linkStatus() == LinkON ? "UP" : "DOWN");
+    Serial.print(F("IP: "));
+    Serial.println(Ethernet.localIP());
+}
+
+#endif
+
+// ============================================================================
+// 디버깅 함수
+// ============================================================================
+
+/**
+ * Raw 바이트 덤프 출력
+ */
+void dumpPacket(const uint8_t* packet, uint8_t len, bool valid) {
+    Serial.print(valid ? F("[DUMP OK] ") : F("[DUMP NG] "));
+    for (uint8_t i = 0; i < len; i++) {
+        if (packet[i] < 0x10) Serial.print('0');
+        Serial.print(packet[i], HEX);
+        Serial.print(' ');
+    }
+
+    // 체크섬 정보 추가
+    uint8_t calcSum = calculateChecksum(packet);
+    Serial.print(F("| calc="));
+    if (calcSum < 0x10) Serial.print('0');
+    Serial.print(calcSum, HEX);
+    Serial.print(F(" pkt="));
+    if (packet[28] < 0x10) Serial.print('0');
+    Serial.println(packet[28], HEX);
+}
+
+/**
+ * Serial1 패리티 재설정
+ */
+void setSerialParity(uint8_t mode) {
+    Serial1.end();
+    delay(10);
+
+    switch (mode) {
+        case 0:
+            Serial1.begin(FreeD::BAUD_RATE, SERIAL_8N1);
+            Serial.println(F("[UART] Parity: None (8N1)"));
+            break;
+        case 1:
+            Serial1.begin(FreeD::BAUD_RATE, SERIAL_8O1);
+            Serial.println(F("[UART] Parity: Odd (8O1)"));
+            break;
+        case 2:
+            Serial1.begin(FreeD::BAUD_RATE, SERIAL_8E1);
+            Serial.println(F("[UART] Parity: Even (8E1)"));
+            break;
+        default:
+            Serial1.begin(FreeD::BAUD_RATE, SERIAL_8N1);
+            Serial.println(F("[UART] Parity: None (8N1) - default"));
+            break;
+    }
+    g_parityMode = mode;
+}
+
+// ============================================================================
+// FreeD 패킷 처리 (공통)
+// ============================================================================
+
+/**
+ * 유효한 FreeD 패킷 처리 및 UDP 전송
+ */
+void processAndSendPacket(uint8_t* packet) {
+    // Zoom/Focus 리매핑 (필요시)
+    if (g_config.remap.enabled) {
+        uint32_t zoomIn = readU24BE(&packet[FreeD::OFF_ZOOM]);
+        uint32_t focusIn = readU24BE(&packet[FreeD::OFF_FOCUS]);
+
+        uint32_t zoomOut = applyRemap(zoomIn);
+        uint32_t focusOut = applyRemap(focusIn);
+
+        writeU24BE(&packet[FreeD::OFF_ZOOM], zoomOut);
+        writeU24BE(&packet[FreeD::OFF_FOCUS], focusOut);
+
+        packet[FreeD::OFF_CHECKSUM] = calculateChecksum(packet);
+    }
+
+    sendUdpPacket(packet, FreeD::PACKET_LEN);
+    g_ppsCounter++;
+}
+
+/**
+ * 버퍼에서 다음 0xD1 위치 찾기
+ */
+int8_t findNextHeader(const uint8_t* buf, uint8_t len, uint8_t startPos) {
+    for (uint8_t i = startPos; i < len; i++) {
+        if (buf[i] == FreeD::TYPE_D1) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/**
+ * Serial1 데이터 처리 - 상태 머신 기반 프레임 동기화
+ */
+void processSerialData() {
+    while (Serial1.available() > 0) {
+        int c = Serial1.read();
+        if (c < 0) break;
+
+        uint8_t byte = (uint8_t)c;
+        g_bytesReceived++;
+
+        switch (g_syncState) {
+            case SyncState::HUNTING:
+                if (byte == FreeD::TYPE_D1) {
+                    g_frameBuffer[0] = byte;
+                    g_frameIndex = 1;
+                    g_syncState = SyncState::COLLECTING;
+                }
+                break;
+
+            case SyncState::COLLECTING:
+                g_frameBuffer[g_frameIndex++] = byte;
+
+                if (g_frameIndex >= FreeD::PACKET_LEN) {
+                    bool valid = verifyChecksum(g_frameBuffer);
+
+                    // dump 모드일 때 출력
+                    if (g_dumpEnabled && g_dumpCount > 0) {
+                        dumpPacket(g_frameBuffer, FreeD::PACKET_LEN, valid);
+                        g_dumpCount--;
+                        if (g_dumpCount == 0) {
+                            g_dumpEnabled = false;
+                            Serial.println(F("[DUMP] Finished"));
+                        }
+                    }
+
+                    if (valid) {
+                        processAndSendPacket(g_frameBuffer);
+                        g_syncState = SyncState::HUNTING;
+                        g_frameIndex = 0;
+                    } else {
+                        g_checksumErrors++;
+
+                        int8_t nextHeader = findNextHeader(g_frameBuffer, FreeD::PACKET_LEN, 1);
+
+                        if (nextHeader > 0) {
+                            uint8_t remaining = FreeD::PACKET_LEN - nextHeader;
+                            memmove(g_frameBuffer, &g_frameBuffer[nextHeader], remaining);
+                            g_frameIndex = remaining;
+                        } else {
+                            g_syncState = SyncState::HUNTING;
+                            g_frameIndex = 0;
+                        }
+                    }
+                }
+                break;
+        }
+    }
+}
+
+// ============================================================================
+// 콘솔 명령어 처리 (공통)
+// ============================================================================
+
+void printStatus() {
+    Serial.println(F("\n========== STATUS =========="));
+
+    #if USE_DEBUG == 1
+        Serial.println(F("Mode: WiFi (DEBUG)"));
+    #else
+        Serial.println(F("Mode: Ethernet (PRODUCTION)"));
+    #endif
+
+    printNetworkStatus();
+
+    Serial.println(F("Targets:"));
+    for (uint8_t i = 0; i < MAX_TARGETS; i++) {
+        Serial.print(F("  ["));
+        Serial.print(i);
+        Serial.print(F("] "));
+        if (g_config.targets[i].enabled) {
+            Serial.print(g_config.targets[i].ip[0]); Serial.print('.');
+            Serial.print(g_config.targets[i].ip[1]); Serial.print('.');
+            Serial.print(g_config.targets[i].ip[2]); Serial.print('.');
+            Serial.print(g_config.targets[i].ip[3]); Serial.print(':');
+            Serial.print(g_config.targets[i].port);
+            Serial.println(F(" [ON]"));
+        } else {
+            Serial.print(g_config.targets[i].ip[0]); Serial.print('.');
+            Serial.print(g_config.targets[i].ip[1]); Serial.print('.');
+            Serial.print(g_config.targets[i].ip[2]); Serial.print('.');
+            Serial.print(g_config.targets[i].ip[3]); Serial.print(':');
+            Serial.print(g_config.targets[i].port);
+            Serial.println(F(" [OFF]"));
+        }
+    }
+
+    Serial.print(F("Remap: "));
+    if (g_config.remap.enabled) {
+        Serial.print(F("ON ("));
+        Serial.print(g_config.remap.inMin);
+        Serial.print(F("-"));
+        Serial.print(g_config.remap.inMax);
+        Serial.print(F(" -> 0x"));
+        Serial.print(g_config.remap.offset, HEX);
+        Serial.print(F("+"));
+        Serial.print(g_config.remap.scale);
+        Serial.println(F(")"));
+    } else {
+        Serial.println(F("OFF"));
+    }
+
+    Serial.println(F("============================\n"));
+}
+
+void printHelp() {
+    Serial.println(F("\n===== COMMANDS ====="));
+    Serial.println(F("status              - Show status"));
+    Serial.println(F("dump [n]            - Dump n packets (default 5)"));
+    Serial.println(F("--- Target (Multi) ---"));
+    Serial.println(F("target <0-3> ip <a.b.c.d>  - Set target IP"));
+    Serial.println(F("target <0-3> port <n>      - Set target port"));
+    Serial.println(F("target <0-3> on|off        - Enable/disable target"));
+    Serial.println(F("--- Legacy (Target 0) ---"));
+    Serial.println(F("set ip <a.b.c.d>    - Set target 0 IP"));
+    Serial.println(F("set port <n>        - Set target 0 port"));
+    Serial.println(F("--- Serial ---"));
+    Serial.println(F("set parity n|o|e    - Set parity (none/odd/even)"));
+    #if USE_DEBUG == 1
+        Serial.println(F("set ssid <name>     - Set WiFi SSID"));
+        Serial.println(F("set pass <pw>       - Set WiFi password"));
+    #else
+        Serial.println(F("set local <a.b.c.d> - Set local IP"));
+    #endif
+    Serial.println(F("--- Remap ---"));
+    Serial.println(F("set remap on|off    - Enable/disable remap"));
+    Serial.println(F("set inmin <n>       - Remap input min"));
+    Serial.println(F("set inmax <n>       - Remap input max"));
+    Serial.println(F("set offset <hex>    - Remap offset"));
+    Serial.println(F("set scale <n>       - Remap scale"));
+    Serial.println(F("--- System ---"));
+    Serial.println(F("save                - Save to EEPROM"));
+    Serial.println(F("load                - Load from EEPROM"));
+    Serial.println(F("reboot              - Restart"));
+    Serial.println(F("====================\n"));
+}
+
+bool parseIP(const char* str, uint8_t* out) {
+    int a, b, c, d;
+    if (sscanf(str, "%d.%d.%d.%d", &a, &b, &c, &d) != 4) return false;
+    if (a < 0 || a > 255 || b < 0 || b > 255 ||
+        c < 0 || c > 255 || d < 0 || d > 255) return false;
+    out[0] = a; out[1] = b; out[2] = c; out[3] = d;
+    return true;
+}
+
+void processCommand(char* cmd) {
+    while (*cmd == ' ') cmd++;
+    char* end = cmd + strlen(cmd) - 1;
+    while (end > cmd && (*end == ' ' || *end == '\r' || *end == '\n')) {
+        *end-- = '\0';
+    }
+
+    if (strlen(cmd) == 0) return;
+
+    char* token = strtok(cmd, " ");
+    if (!token) return;
+
+    if (strcmp(token, "status") == 0) {
+        printStatus();
+        return;
+    }
+
+    if (strcmp(token, "help") == 0 || strcmp(token, "?") == 0) {
+        printHelp();
+        return;
+    }
+
+    if (strcmp(token, "save") == 0) {
+        saveConfig();
+        return;
+    }
+
+    if (strcmp(token, "load") == 0) {
+        loadConfig();
+        printStatus();
+        return;
+    }
+
+    if (strcmp(token, "reboot") == 0) {
+        Serial.println(F("[SYS] Rebooting..."));
+        delay(100);
+        NVIC_SystemReset();
+        return;
+    }
+
+    if (strcmp(token, "dump") == 0) {
+        char* countStr = strtok(NULL, " ");
+        uint8_t count = 5;  // 기본값
+        if (countStr) {
+            count = atoi(countStr);
+            if (count == 0 || count > 100) count = 5;
+        }
+        g_dumpCount = count;
+        g_dumpEnabled = true;
+        Serial.print(F("[DUMP] Will dump "));
+        Serial.print(count);
+        Serial.println(F(" packets..."));
+        return;
+    }
+
+    // 멀티 타겟 명령어: target <0-3> ip/port/on/off
+    if (strcmp(token, "target") == 0) {
+        char* idxStr = strtok(NULL, " ");
+        char* action = strtok(NULL, " ");
+        char* value = strtok(NULL, " ");
+
+        if (!idxStr) {
+            Serial.println(F("[ERR] Usage: target <0-3> ip/port/on/off [value]"));
+            return;
+        }
+
+        int idx = atoi(idxStr);
+        if (idx < 0 || idx >= MAX_TARGETS) {
+            Serial.println(F("[ERR] Target index must be 0-3"));
+            return;
+        }
+
+        if (!action) {
+            // target <n> 만 입력 시 해당 타겟 정보 표시
+            Serial.print(F("Target ["));
+            Serial.print(idx);
+            Serial.print(F("]: "));
+            Serial.print(g_config.targets[idx].ip[0]); Serial.print('.');
+            Serial.print(g_config.targets[idx].ip[1]); Serial.print('.');
+            Serial.print(g_config.targets[idx].ip[2]); Serial.print('.');
+            Serial.print(g_config.targets[idx].ip[3]); Serial.print(':');
+            Serial.print(g_config.targets[idx].port);
+            Serial.println(g_config.targets[idx].enabled ? " [ON]" : " [OFF]");
+            return;
+        }
+
+        if (strcmp(action, "ip") == 0) {
+            if (!value || !parseIP(value, g_config.targets[idx].ip)) {
+                Serial.println(F("[ERR] Invalid IP"));
+                return;
+            }
+            Serial.print(F("[OK] Target "));
+            Serial.print(idx);
+            Serial.print(F(" IP: "));
+            Serial.print(g_config.targets[idx].ip[0]); Serial.print('.');
+            Serial.print(g_config.targets[idx].ip[1]); Serial.print('.');
+            Serial.print(g_config.targets[idx].ip[2]); Serial.print('.');
+            Serial.println(g_config.targets[idx].ip[3]);
+            return;
+        }
+
+        if (strcmp(action, "port") == 0) {
+            if (!value) {
+                Serial.println(F("[ERR] Missing port"));
+                return;
+            }
+            g_config.targets[idx].port = atoi(value);
+            Serial.print(F("[OK] Target "));
+            Serial.print(idx);
+            Serial.print(F(" Port: "));
+            Serial.println(g_config.targets[idx].port);
+            return;
+        }
+
+        if (strcmp(action, "on") == 0) {
+            g_config.targets[idx].enabled = 1;
+            Serial.print(F("[OK] Target "));
+            Serial.print(idx);
+            Serial.println(F(" ENABLED"));
+            return;
+        }
+
+        if (strcmp(action, "off") == 0) {
+            g_config.targets[idx].enabled = 0;
+            Serial.print(F("[OK] Target "));
+            Serial.print(idx);
+            Serial.println(F(" DISABLED"));
+            return;
+        }
+
+        Serial.println(F("[ERR] Unknown action. Use: ip/port/on/off"));
+        return;
+    }
+
+    if (strcmp(token, "set") == 0) {
+        char* param = strtok(NULL, " ");
+        char* value = strtok(NULL, " ");
+
+        if (!param) {
+            Serial.println(F("[ERR] Missing parameter"));
+            return;
+        }
+
+        // Legacy: set ip/port → Target 0
+        if (strcmp(param, "ip") == 0) {
+            if (!value || !parseIP(value, g_config.targets[0].ip)) {
+                Serial.println(F("[ERR] Invalid IP"));
+                return;
+            }
+            Serial.print(F("[OK] Target 0 IP: "));
+            Serial.print(g_config.targets[0].ip[0]); Serial.print('.');
+            Serial.print(g_config.targets[0].ip[1]); Serial.print('.');
+            Serial.print(g_config.targets[0].ip[2]); Serial.print('.');
+            Serial.println(g_config.targets[0].ip[3]);
+            return;
+        }
+
+        if (strcmp(param, "port") == 0) {
+            if (!value) {
+                Serial.println(F("[ERR] Missing port"));
+                return;
+            }
+            g_config.targets[0].port = atoi(value);
+            Serial.print(F("[OK] Target 0 Port: "));
+            Serial.println(g_config.targets[0].port);
+            return;
+        }
+
+        if (strcmp(param, "parity") == 0) {
+            if (!value) {
+                Serial.println(F("[ERR] Use n/o/e (none/odd/even)"));
+                return;
+            }
+            if (value[0] == 'n' || value[0] == 'N') {
+                setSerialParity(0);
+            } else if (value[0] == 'o' || value[0] == 'O') {
+                setSerialParity(1);
+            } else if (value[0] == 'e' || value[0] == 'E') {
+                setSerialParity(2);
+            } else {
+                Serial.println(F("[ERR] Use n/o/e (none/odd/even)"));
+            }
+            return;
+        }
+
+        #if USE_DEBUG == 1
+        if (strcmp(param, "ssid") == 0) {
+            if (!value) {
+                Serial.println(F("[ERR] Missing SSID"));
+                return;
+            }
+            strncpy(g_config.wifiSSID, value, sizeof(g_config.wifiSSID) - 1);
+            g_config.wifiSSID[sizeof(g_config.wifiSSID) - 1] = '\0';
+            Serial.print(F("[OK] SSID: "));
+            Serial.println(g_config.wifiSSID);
+            return;
+        }
+
+        if (strcmp(param, "pass") == 0) {
+            if (!value) {
+                Serial.println(F("[ERR] Missing password"));
+                return;
+            }
+            strncpy(g_config.wifiPass, value, sizeof(g_config.wifiPass) - 1);
+            g_config.wifiPass[sizeof(g_config.wifiPass) - 1] = '\0';
+            Serial.println(F("[OK] Password set"));
+            return;
+        }
+        #else
+        if (strcmp(param, "local") == 0) {
+            if (!value || !parseIP(value, g_config.localIP)) {
+                Serial.println(F("[ERR] Invalid IP"));
+                return;
+            }
+            Serial.println(F("[OK] Local IP set. Reboot to apply."));
+            return;
+        }
+        #endif
+
+        if (strcmp(param, "remap") == 0) {
+            if (!value) {
+                Serial.println(F("[ERR] Use 'on' or 'off'"));
+                return;
+            }
+            if (strcmp(value, "on") == 0) {
+                g_config.remap.enabled = 1;
+                Serial.println(F("[OK] Remap ON"));
+            } else if (strcmp(value, "off") == 0) {
+                g_config.remap.enabled = 0;
+                Serial.println(F("[OK] Remap OFF"));
+            }
+            return;
+        }
+
+        if (strcmp(param, "inmin") == 0 && value) {
+            g_config.remap.inMin = strtoul(value, NULL, 10);
+            Serial.print(F("[OK] inMin: ")); Serial.println(g_config.remap.inMin);
+            return;
+        }
+
+        if (strcmp(param, "inmax") == 0 && value) {
+            g_config.remap.inMax = strtoul(value, NULL, 10);
+            Serial.print(F("[OK] inMax: ")); Serial.println(g_config.remap.inMax);
+            return;
+        }
+
+        if (strcmp(param, "offset") == 0 && value) {
+            g_config.remap.offset = strtoul(value, NULL, 16);
+            Serial.print(F("[OK] offset: 0x")); Serial.println(g_config.remap.offset, HEX);
+            return;
+        }
+
+        if (strcmp(param, "scale") == 0 && value) {
+            g_config.remap.scale = strtoul(value, NULL, 10);
+            Serial.print(F("[OK] scale: ")); Serial.println(g_config.remap.scale);
+            return;
+        }
+
+        Serial.println(F("[ERR] Unknown param. Type 'help'"));
+        return;
+    }
+
+    Serial.println(F("[ERR] Unknown cmd. Type 'help'"));
+}
+
+void processConsole() {
+    while (Serial.available() > 0) {
+        char c = Serial.read();
+
+        if (c == '\n' || c == '\r') {
+            if (g_cmdIndex > 0) {
+                g_cmdBuffer[g_cmdIndex] = '\0';
+                processCommand(g_cmdBuffer);
+                g_cmdIndex = 0;
+            }
+        } else if (g_cmdIndex < sizeof(g_cmdBuffer) - 1) {
+            g_cmdBuffer[g_cmdIndex++] = c;
+        }
+    }
+}
+
+// ============================================================================
+// 통계 출력 (공통)
+// ============================================================================
+void printStats() {
+    uint32_t now = millis();
+
+    if (now - g_lastStatsMs >= 1000) {
+        Serial.print(F("[STAT] PPS:"));
+        Serial.print(g_ppsCounter);
+        Serial.print(F(" BPS:"));
+        Serial.print(g_bytesReceived);
+        Serial.print(F(" ERR:"));
+        Serial.print(g_checksumErrors);
+        Serial.print(F(" SYNC:"));
+        Serial.println(g_syncState == SyncState::HUNTING ? "HUNT" : "COLL");
+
+        g_ppsCounter = 0;
+        g_bytesReceived = 0;
+        g_lastStatsMs = now;
+    }
+}
+
+// ============================================================================
+// setup() / loop()
+// ============================================================================
+void setup() {
+    Serial.begin(115200);
+    while (!Serial && millis() < 3000);
+
+    Serial.println(F("\n====================================="));
+    Serial.println(F("  FreeD Serial -> UDP Forwarder"));
+    #if USE_DEBUG == 1
+        Serial.println(F("  Mode: WiFi (DEBUG)"));
+    #else
+        Serial.println(F("  Mode: Ethernet (PRODUCTION)"));
+    #endif
+    Serial.println(F("=====================================\n"));
+
+    loadConfig();
+
+    // Serial1: 38400, 8O1 (Odd parity)
+    Serial1.begin(FreeD::BAUD_RATE, SERIAL_8O1);
+    Serial.println(F("[UART] Serial1: 38400, 8O1"));
+
+    initNetwork();
+
+    printStatus();
+    Serial.println(F("Type 'help' for commands.\n"));
+
+    g_lastStatsMs = millis();
+}
+
+void loop() {
+    // 1. 콘솔 명령어 처리
+    processConsole();
+
+    // 2. 네트워크 상태 확인 및 유지
+    checkNetworkStatus();
+
+    // 3. FreeD 시리얼 데이터 처리 (메인 로직)
+    processSerialData();
+
+    // 4. 통계 출력 (1초마다)
+    printStats();
+
+    // delay 없음 - 실시간 처리
+}

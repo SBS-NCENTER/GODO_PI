@@ -1,0 +1,45 @@
+# Root-level .gitignore for the GODO workspace.
+# Subdirectories (Python/, XR_FreeD_to_UDP/) have their own .gitignore files —
+# this file handles OS/editor noise and a cross-cutting safety net.
+
+# ---- OS ----
+.DS_Store
+Thumbs.db
+desktop.ini
+ehthumbs.db
+$RECYCLE.BIN/
+
+# ---- Editors / IDEs ----
+.vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+*~
+
+# ---- Python (safety net; Python/.gitignore handles its own tree) ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- Build artifacts ----
+build/
+dist/
+*.o
+*.obj
+*.exe
+
+# ---- Secrets (never commit) ----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials*.json

@@ -14,13 +14,10 @@ __pycache__/
 dist/
 build/
 
-# Captured data and session logs (keep .gitkeep markers)
-data/*
-!data/.gitkeep
-logs/*
-!logs/.gitkeep
-out/*
-!out/.gitkeep
+# Captured data, session logs, and test-session outputs are intentionally
+# tracked in git so collaborators can review results. If a specific capture
+# should stay local (e.g. contains sensitive content), add an explicit rule
+# for it here.
 
 # Editor / OS
 .vscode/

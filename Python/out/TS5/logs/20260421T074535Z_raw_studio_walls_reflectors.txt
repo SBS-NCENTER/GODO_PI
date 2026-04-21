@@ -1,0 +1,28 @@
+# GODO Phase 1 capture session log
+timestamp_utc   : 2026-04-21T07:46:28+00:00
+host            : BOOK-UMDIO66KVS
+os              : Windows-11-10.0.26200-SP0
+python          : 3.12.9
+
+## Capture parameters
+backend         : raw
+port            : COM3
+baud            : 460800
+motor_rpm       : firmware-default
+frames_requested: 500
+tag             : studio_walls_reflectors
+notes           : TS5 studio parity counterpart of sdk capture above
+
+## Run stats
+frames_captured : 500
+samples_total   : 253540
+duration_s      : 52.391
+samples_per_sec : 4839.4
+mean_quality    : 7.35
+median_quality  : 5.00
+dropped_frames  : 0
+
+## Artifact integrity
+csv_path        : data\20260421T074535Z_raw_studio_walls_reflectors.csv
+csv_byte_count  : 11714497
+csv_sha256      : 4d4760d04ac833c718862745540435e0642c8deaa71d72650573917b5c06cf3f

@@ -1,0 +1,28 @@
+# GODO Phase 1 capture session log
+timestamp_utc   : 2026-04-21T07:18:10+00:00
+host            : BOOK-UMDIO66KVS
+os              : Windows-11-10.0.26200-SP0
+python          : 3.12.9
+
+## Capture parameters
+backend         : sdk
+port            : COM3
+baud            : 460800
+motor_rpm       : firmware-default
+frames_requested: 500
+tag             : studio_walls_reflectors
+notes           : TS5 부조정실, reflector tapes on walls, crane base position, center of set
+
+## Run stats
+frames_captured : 500
+samples_total   : 254624
+duration_s      : 52.125
+samples_per_sec : 4884.9
+mean_quality    : 10.81
+median_quality  : 12.00
+dropped_frames  : 0
+
+## Artifact integrity
+csv_path        : data\20260421T071718Z_sdk_studio_walls_reflectors.csv
+csv_byte_count  : 11572298
+csv_sha256      : d667d7ca589e5585dfaa490eacbcb5658eaa24616f89997d34258d3a17d4634b

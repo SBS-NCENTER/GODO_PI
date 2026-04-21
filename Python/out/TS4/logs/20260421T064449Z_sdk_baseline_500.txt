@@ -1,0 +1,28 @@
+# GODO Phase 1 capture session log
+timestamp_utc   : 2026-04-21T06:45:41+00:00
+host            : BOOK-UMDIO66KVS
+os              : Windows-11-10.0.26200-SP0
+python          : 3.12.9
+
+## Capture parameters
+backend         : sdk
+port            : COM3
+baud            : 460800
+motor_rpm       : firmware-default
+frames_requested: 500
+tag             : baseline_500
+notes           : no reflector, same position, 500 frames baseline
+
+## Run stats
+frames_captured : 500
+samples_total   : 254236
+duration_s      : 52.000
+samples_per_sec : 4889.2
+mean_quality    : 10.70
+median_quality  : 11.00
+dropped_frames  : 0
+
+## Artifact integrity
+csv_path        : data\20260421T064449Z_sdk_baseline_500.csv
+csv_byte_count  : 11471625
+csv_sha256      : 6a418e81be18fe4698c5ccadeace31fd27ec0e7d1a68a8894103f811d4fdfc0d

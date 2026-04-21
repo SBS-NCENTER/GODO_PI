@@ -1,0 +1,28 @@
+# GODO Phase 1 capture session log
+timestamp_utc   : 2026-04-21T06:44:39+00:00
+host            : BOOK-UMDIO66KVS
+os              : Windows-11-10.0.26200-SP0
+python          : 3.12.9
+
+## Capture parameters
+backend         : raw
+port            : COM3
+baud            : 460800
+motor_rpm       : firmware-default
+frames_requested: 500
+tag             : reflector_2strips
+notes           : two 3M retro-reflective strips in front of LiDAR, 500 frames
+
+## Run stats
+frames_captured : 500
+samples_total   : 254008
+duration_s      : 52.578
+samples_per_sec : 4831.1
+mean_quality    : 12.28
+median_quality  : 12.00
+dropped_frames  : 0
+
+## Artifact integrity
+csv_path        : data\20260421T064346Z_raw_reflector_2strips.csv
+csv_byte_count  : 11451730
+csv_sha256      : 2b4ef3c11a0694d3202e9663b32fc4ef8feaf780b5695460e0589237fdaf9f5d

@@ -1,0 +1,28 @@
+# GODO Phase 1 capture session log
+timestamp_utc   : 2026-04-21T06:28:56+00:00
+host            : BOOK-UMDIO66KVS
+os              : Windows-11-10.0.26200-SP0
+python          : 3.12.9
+
+## Capture parameters
+backend         : sdk
+port            : COM3
+baud            : 460800
+motor_rpm       : firmware-default
+frames_requested: 100
+tag             : smoke_sdk
+notes           : static
+
+## Run stats
+frames_captured : 100
+samples_total   : 50304
+duration_s      : 12.062
+samples_per_sec : 4170.5
+mean_quality    : 10.21
+median_quality  : 8.00
+dropped_frames  : 0
+
+## Artifact integrity
+csv_path        : data\20260421T062844Z_sdk_smoke_sdk.csv
+csv_byte_count  : 2217275
+csv_sha256      : 6289754c53c904b11c555d9ef3720599b41d2a15f401521c80d17ff6d12e3a53

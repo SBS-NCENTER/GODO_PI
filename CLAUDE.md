@@ -191,6 +191,23 @@ These rules apply to the Parent orchestrator and all subagents. They are non-neg
 - Global behavioral preferences → update `.claude/memory/` (Parent's responsibility).
 - Never write long analysis directly into `CLAUDE.md`; create a dedicated document and link to it.
 
+### Memory storage — in-repo, not host cache
+
+GODO is collaborated on via GitHub, so every auto-memory operation
+(create, update, delete) MUST target the in-repo folder, not the
+host-specific default path:
+
+- ✅ `<repo-root>/.claude/memory/` — committed to git, shared with
+  every collaborator and every host (Mac / Windows).
+- ❌ `~/.claude/projects/<project-hash>/memory/` — host-local, not
+  shared, causes divergence between machines and collaborators.
+
+When the harness's system prompt names a host-specific memory path,
+treat that as a default to be **overridden by this rule**. All new
+memory entries and `MEMORY.md` updates are written under
+`<repo-root>/.claude/memory/`, committed with the change they
+describe, and pushed so collaborators see them on their next pull.
+
 ### Read-only folders
 
 - `/XR_FreeD_to_UDP/*` and `/doc/RPLIDAR/sources/*` are **read-only** for every agent. Reference them freely; never modify or delete.

@@ -4,8 +4,9 @@ description: User works on this GODO project from both Mac and Windows — proje
 type: user
 ---
 
-The GODO project is worked on from both macOS and Windows. Therefore:
+The GODO project is worked on from both macOS and Windows, and is shared via GitHub for collaboration. Therefore:
 
 - **All cross-session state, progress, and decisions must live inside the project directory** (`PROGRESS.md`, `CLAUDE.md`, `doc/RPLIDAR/*.md`, etc.), not in host-specific caches.
+- **Auto-memory writes go to `<repo-root>/.claude/memory/`, never to `~/.claude/projects/.../memory/`.** The in-repo folder is committed to git so every host (Mac / Windows) and every collaborator sees the same memory. The host-local default from the harness's system prompt is overridden by `CLAUDE.md §6 — Memory storage`. Commit memory changes in the same PR as the behavior they describe.
 - Avoid hard-coded absolute paths like `/Users/chunbae/...` in documents — they break on Windows. **Prefer project-relative paths.**
 - Large reference assets (datasheet PDFs, etc.) should be **copied into the repo** (e.g., `doc/RPLIDAR/sources/`) instead of linked externally, so they stay available offline and cross-platform.

@@ -43,3 +43,7 @@ dist/
 *.pem
 *.key
 credentials*.json
+
+# ---- LiDAR raw scan data (large, per-session, never share via git) ----
+# Analysis PNGs and logs under out/<session>/ are kept; only raw CSVs excluded.
+prototype/Python/out/*/data/

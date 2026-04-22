@@ -1,0 +1,19 @@
+# Normalize all text files to LF inside the repository.
+# Prevents CRLF/LF drift across macOS (LF), Linux/RPi 5 (LF), and Windows (CRLF).
+
+* text=auto eol=lf
+
+# Critical: silent CRLF on these breaks execution on Linux.
+#   - Shell scripts: `bash: $'\r': command not found`
+#   - systemd unit files: parse errors at service boot
+*.sh          text eol=lf
+*.service     text eol=lf
+
+# Binary formats — never normalize, never diff as text.
+*.pdf         binary
+*.png         binary
+*.jpg         binary
+*.jpeg        binary
+*.pgm         binary
+*.bin         binary
+*.zip         binary

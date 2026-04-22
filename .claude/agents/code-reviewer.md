@@ -146,6 +146,12 @@ You receive the Writer's files and tests after implementation.
 - [ ] `README.md` updated if public API changed.
 - [ ] Design-level shifts reported to Parent (upstream docs are Parent's to update).
 
+### Cross-platform hygiene (Mac / Windows / Linux RPi 5)
+- [ ] No CRLF line endings in newly-added text files. Verify with `git diff --cached | LC_ALL=C grep -c $'\r'` equals 0.
+- [ ] No staged paths under `prototype/Python/out/*/data/`. Verify with `git diff --cached --name-only | grep -E 'prototype/Python/out/[^/]+/data/'` produces no output.
+- [ ] No hardcoded machine-specific values in source files: LiDAR device paths (`/dev/tty*`, `COM\d+`), private IPv4 literals, or absolute host paths. Such values belong in `/scripts/run-*.sh`/`.ps1` or CLI arguments.
+- [ ] If the change introduces a new host or platform, a matching run script exists under `/scripts/`.
+
 ### Read-only folders
 - [ ] No changes under `/XR_FreeD_to_UDP/` or `/doc/RPLIDAR/sources/`. Reject on sight if present.
 

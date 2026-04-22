@@ -208,6 +208,15 @@ memory entries and `MEMORY.md` updates are written under
 `<repo-root>/.claude/memory/`, committed with the change they
 describe, and pushed so collaborators see them on their next pull.
 
+### Cross-platform hygiene (Mac / Windows / Linux RPi 5)
+
+The repo is worked on from three platforms. Git configuration files enforce the basics automatically on every clone; the rules below are for humans and agents to follow explicitly.
+
+- **Line endings**: `.gitattributes` normalizes all text to LF inside the repo. Never override with `git config core.autocrlf=true` locally. If a tool produces CRLF, fix the tool — do not commit CRLF to work around it.
+- **LiDAR raw data**: `prototype/Python/out/*/data/` is gitignored. Never bypass with `git add -f`. Raw CSVs are regenerable from a fresh scan; archival policy (LFS vs. out-of-repo) will be decided after Phase 1.
+- **Per-machine runtime config** (LiDAR port, UE host/port, map file path): lives in `/scripts/run-<platform>-<role>.sh` (or `.ps1` on Windows) or as CLI arguments. Never hardcode machine-specific values into source files.
+- **Machine switch protocol**: before ending a session on machine A, commit + push. Before starting on machine B, `git pull --rebase`. Concurrent edits across machines are disallowed; session state belongs in `PROGRESS.md` so the next machine can resume.
+
 ### Read-only folders
 
 - `/XR_FreeD_to_UDP/*` and `/doc/RPLIDAR/sources/*` are **read-only** for every agent. Reference them freely; never modify or delete.

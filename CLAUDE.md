@@ -139,6 +139,9 @@
 │         └─ *.md                ← user / feedback / project / reference entries
 ├─ /doc                          ← Reference documents
 │    ├─ Embedded_CheckPoint.md   ← Embedded reliability checklist (reference)
+│    ├─ /hardware                ← Hardware decision / measurement reports
+│    │    ├─ floor_tilt_survey_TS5.md
+│    │    └─ leveling_mount.md
 │    └─ /RPLIDAR                 ← RPLIDAR reference docs
 │         ├─ RPLIDAR_C1.md       ← C1 deep dive (Phase 0 output)
 │         └─ /sources            ← Original datasheets (PDF)

@@ -74,9 +74,12 @@ See [RPLIDAR/RPLIDAR_C1.md](./doc/RPLIDAR/RPLIDAR_C1.md) for the supporting evid
 5. **Retro-reflector distinguishability test** — 3M retro-reflective tape (or bike reflectors) at distances 0.5 / 2 / 5 / 10 m, angles 0 / 30 / 45 / 60 / 75°. Thresholds to check: marker quality ≥ 200, background ≤ 100. Decides whether O4 is viable.
 6. **Chroma-wall NIR reflectivity measurement** — verify effective range of C1 against the green / blue walls.
 7. **Official C++ SDK three-way comparison (Phase 1 follow-up)** — scaffold landed 2026-04-23 at `/production/RPi5/` as the `godo_smoke` binary + three-way workflow doc. The RPLIDAR SDK submodule is pinned at SHA `99478e5f…36869`; `scripts/build.sh` builds + runs the hardware-free test gate including byte-identity CSV parity against the Python prototype (`test_csv_parity`, `uv run`). Remaining work is the physical capture: plug the C1 into the RPi 5, run `scripts/run-pi5-smoke.sh`, then run `ultra_simple` and the two Python backends at the same static position, and diff the four CSVs per `production/RPi5/doc/smoke.md`. Resolves the "`pyrplidar` is unofficial for C1" caveat documented in SYSTEM_DESIGN.md §10.1.
+8. **Floor tilt survey at TS5 (Phase 1 measurement)** — inclinometer sweep across the crane movable area on a hybrid 0.25 m (dense) / 0.5 m (coarse) grid; measure and record max_tilt, mean_tilt, and 2D heatmap; also record the "LiDAR to farthest AMCL-confident wall" distance as an empirical R_max. Decides which mount tier the leveling design must target. See `/doc/hardware/floor_tilt_survey_TS5.md`.
+9. **Leveling mount design review (Phase 1 decision gate)** — apply the budget-driven threshold table (R_max = 10 m default, ε_target = 10 mm, Tier 1 ≤ 0.06°, gray 0.06°–0.12°, Tier 2 > 0.12°) to item #8's result. Choose between (a) passive bubble-level + shim and (b) 2-axis active gimbal. Document yaw-lock risk, acceptance test, and reflect the outcome into `SYSTEM_DESIGN.md §1` and `§8`. See `/doc/hardware/leveling_mount.md`.
 
 ### Phase 2 preparations (after Phase 1 results)
 
+- **Gated on item 9.2**: do not start map building until the leveling mount is selected and assembled.
 - Define the Docker image for map building (`Dockerfile.mapping`, optional `docker-compose.yml`).
 - Build the studio map once and commit it.
 - Start the C++ AMCL implementation.
@@ -91,6 +94,9 @@ See [RPLIDAR/RPLIDAR_C1.md](./doc/RPLIDAR/RPLIDAR_C1.md) for the supporting evid
 ## Session log
 
 ### 2026-04-23
+
+- **Floor tilt survey + leveling mount scaffolding landed** at `/doc/hardware/` via the agent pipeline (planner Plan A v2 → reviewer Mode-A conditional approval → writer). Two methodology documents are now in the repo: `floor_tilt_survey_TS5.md` (hybrid 0.25 m / 0.5 m grid, DWL2000XY primary instrument, drift-gate + cross-observer protocol, TS5 session sequencing with 30 min buffers) and `leveling_mount.md` (budget-driven Tier 1 ≤ 0.06° / gray 0.06°–0.12° / Tier 2 > 0.12° thresholds, passive-shim vs. 2-axis-gimbal candidates with yaw-lock risk spec, post-install 5-point acceptance test). CLAUDE.md §5 directory tree updated with the `/hardware` branch (Unicode box-drawing, not a table). PROGRESS.md `Next up` #8 and #9 added; Phase 2 preparations now gated on item 9.2.
+- **Field-dependent work remains pending**: #8 physical measurement at TS5, #8.4 analysis, #9.2 candidate selection, #9.3 `SYSTEM_DESIGN.md §1 / §8` update (Parent-led), #9.4 acceptance test. Raw inclinometer CSV is **not committed** (Reviewer Amendment N2) — only summary.json + heatmap.png + §5 fill-in will be committed post-session.
 
 - **Phase 3 RPi 5 C++ scaffold landed** at `/production/RPi5/` via the full agent pipeline (planner → reviewer-A conditional approval → writer). Delivers the `godo_smoke` binary and three-way comparison workflow.
 - **Toolchain**: Debian 13 Trixie aarch64, gcc 14.2, CMake 3.31.6, doctest 2.4.11 (apt `doctest-dev`), OpenSSL 3.5.5 (apt `libssl-dev`). `sudo apt install doctest-dev libssl-dev` was the only new host-side install this session.

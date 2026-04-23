@@ -10,6 +10,21 @@ Phase 1 field-test data is archived under `<repo-root>/prototype/Python/out/TS<N
 
 **How to apply**: when the user refers to "TS4" etc., resolve against this mapping; when starting a new field session, create the next `TS<N+1>` folder and include the physical location in the session README.
 
+## Bring-up area (not a test session)
+
+`<repo-root>/production/RPi5/out/<ts>_<tag>/` is the **bring-up archive** on
+the RPi 5 host. It holds ad-hoc `godo_smoke` captures that have NOT yet
+been promoted to a formal `TS<N>`. Contents are gitignored.
+
+Promote a captured run to a real session via
+`production/RPi5/scripts/promote_smoke_to_ts.sh <smoke-dir> TS<N> "<note>"`
+— this moves the directory to `<repo-root>/test_sessions/TS<N>/` and
+appends a `## Promotion` block to its session log.
+
+Do not conflate the two locations: `production/RPi5/out/` = scratch /
+bring-up; `prototype/Python/out/TS<N>/` and `<repo-root>/test_sessions/TS<N>/`
+= versioned test sessions.
+
 ## Session ID map
 
 | ID | Date | Location | Setup | Purpose |

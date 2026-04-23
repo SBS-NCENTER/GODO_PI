@@ -1,0 +1,3 @@
+[submodule "production/RPi5/external/rplidar_sdk"]
+	path = production/RPi5/external/rplidar_sdk
+	url = https://github.com/Slamtec/rplidar_sdk

@@ -1,0 +1,14 @@
+# CMake / build artefacts
+build/
+compile_commands.json
+CMakeUserPresets.json
+
+# Smoke-run outputs (data dumps + session logs)
+out/*/
+!out/.gitkeep
+
+# Defensive: rplidar_sdk build products live inside the submodule, which
+# has its own .gitignore. These lines guard against any future tool that
+# writes into the tree from the outer repo.
+external/rplidar_sdk/output/
+external/rplidar_sdk/obj/

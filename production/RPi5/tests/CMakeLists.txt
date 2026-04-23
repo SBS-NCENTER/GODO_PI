@@ -1,0 +1,127 @@
+# Test targets are split so that the "read back" side cannot accidentally
+# include production headers. See CODEBASE.md invariant (b).
+
+set(GODO_SMOKE_SRC_DIR "${CMAKE_SOURCE_DIR}/src/godo_smoke")
+
+# ----------------------------------------------------------------------------
+# test_write_driving — exercises production code paths (writer, args,
+# session_log, sample validation, and the duck-typed fake source).
+# ----------------------------------------------------------------------------
+
+add_executable(test_csv_writer_writes
+    test_csv_writer_writes.cpp
+    ${GODO_SMOKE_SRC_DIR}/csv_writer.cpp
+)
+target_include_directories(test_csv_writer_writes PRIVATE
+    "${GODO_SMOKE_SRC_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+)
+target_link_libraries(test_csv_writer_writes PRIVATE doctest::doctest)
+add_test(NAME test_csv_writer_writes COMMAND test_csv_writer_writes)
+set_tests_properties(test_csv_writer_writes PROPERTIES
+    LABELS "hardware-free")
+
+add_executable(test_args
+    test_args.cpp
+    ${GODO_SMOKE_SRC_DIR}/args.cpp
+)
+target_include_directories(test_args PRIVATE
+    "${GODO_SMOKE_SRC_DIR}"
+)
+target_link_libraries(test_args PRIVATE doctest::doctest)
+add_test(NAME test_args COMMAND test_args)
+set_tests_properties(test_args PROPERTIES LABELS "hardware-free")
+
+add_executable(test_session_log
+    test_session_log.cpp
+    ${GODO_SMOKE_SRC_DIR}/session_log.cpp
+    ${GODO_SMOKE_SRC_DIR}/timestamp.cpp
+)
+target_include_directories(test_session_log PRIVATE
+    "${GODO_SMOKE_SRC_DIR}"
+)
+target_link_libraries(test_session_log PRIVATE
+    doctest::doctest
+    OpenSSL::Crypto
+)
+add_test(NAME test_session_log COMMAND test_session_log)
+set_tests_properties(test_session_log PROPERTIES LABELS "hardware-free")
+
+add_executable(test_sample_invariants
+    test_sample_invariants.cpp
+    lidar_source_fake.cpp
+)
+target_include_directories(test_sample_invariants PRIVATE
+    "${GODO_SMOKE_SRC_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+)
+target_link_libraries(test_sample_invariants PRIVATE doctest::doctest)
+add_test(NAME test_sample_invariants COMMAND test_sample_invariants)
+set_tests_properties(test_sample_invariants PROPERTIES LABELS "hardware-free")
+
+# ----------------------------------------------------------------------------
+# test_read_back — parses a literal CSV string with stdlib only. Include
+# path intentionally EXCLUDES ${GODO_SMOKE_SRC_DIR} so any accidental
+# `#include "csv_writer.hpp"` fails to compile.
+# ----------------------------------------------------------------------------
+
+add_executable(test_csv_writer_readback
+    test_csv_writer_readback.cpp
+)
+target_include_directories(test_csv_writer_readback PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+)
+target_link_libraries(test_csv_writer_readback PRIVATE doctest::doctest)
+add_test(NAME test_csv_writer_readback COMMAND test_csv_writer_readback)
+set_tests_properties(test_csv_writer_readback PROPERTIES
+    LABELS "hardware-free")
+
+# ----------------------------------------------------------------------------
+# test_csv_parity — byte-identity vs. the Python prototype. Conditional
+# on `uv` and the prototype's uv.lock being present.
+# ----------------------------------------------------------------------------
+
+find_program(UV_EXE uv)
+set(GODO_PYTHON_DIR "${CMAKE_SOURCE_DIR}/../../prototype/Python")
+if(UV_EXE AND EXISTS "${GODO_PYTHON_DIR}/uv.lock")
+    add_executable(test_csv_parity
+        test_csv_parity.cpp
+        ${GODO_SMOKE_SRC_DIR}/csv_writer.cpp
+    )
+    target_include_directories(test_csv_parity PRIVATE
+        "${GODO_SMOKE_SRC_DIR}"
+    )
+    target_link_libraries(test_csv_parity PRIVATE doctest::doctest)
+    # CMake needs the raw absolute path in the compile-definition; use
+    # get_filename_component to normalise.
+    get_filename_component(GODO_PYTHON_DIR_ABS "${GODO_PYTHON_DIR}" ABSOLUTE)
+    target_compile_definitions(test_csv_parity PRIVATE
+        GODO_PYTHON_PROJECT_DIR="${GODO_PYTHON_DIR_ABS}"
+    )
+    add_test(NAME test_csv_parity COMMAND test_csv_parity)
+    set_tests_properties(test_csv_parity PROPERTIES
+        LABELS "hardware-free;python-required")
+    message(STATUS "test_csv_parity enabled (uv=${UV_EXE})")
+else()
+    message(STATUS
+        "test_csv_parity skipped (uv or prototype/Python/uv.lock not found)")
+endif()
+
+# ----------------------------------------------------------------------------
+# test_lidar_live — hardware-required; built but not run by default ctest.
+# ----------------------------------------------------------------------------
+
+add_executable(test_lidar_live
+    test_lidar_live.cpp
+    ${GODO_SMOKE_SRC_DIR}/lidar_source_rplidar.cpp
+    ${GODO_SMOKE_SRC_DIR}/timestamp.cpp
+)
+target_include_directories(test_lidar_live PRIVATE
+    "${GODO_SMOKE_SRC_DIR}"
+)
+target_link_libraries(test_lidar_live PRIVATE
+    doctest::doctest
+    rplidar_sdk::static
+)
+add_test(NAME test_lidar_live COMMAND test_lidar_live)
+set_tests_properties(test_lidar_live PROPERTIES LABELS "hardware-required")

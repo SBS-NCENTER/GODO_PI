@@ -1,4 +1,5 @@
-- [Dual-machine workflow](user_dual_machine.md) — GODO runs on Mac and Windows; keep all state in-repo, not in host-specific caches.
+- [Repo topology and multi-machine workflow](project_repo_topology.md) — SSOT = SBS-NCENTER/GODO_PI (company); chunbay/GODO is a mirror only. Three hosts: Mac, Windows, RPi5 (via SSH).
 - [CLAUDE.md stays concise](feedback_claudemd_concise.md) — CLAUDE.md is a short guide; detailed analyses go into separate reference docs with back-links.
 - [Project overview](project_overview.md) — GODO = RPi 5 single binary (LiDAR localization + FreeD merge + 59.94 fps UDP). Map built once via Docker. Details in SYSTEM_DESIGN.md.
 - [Test-session naming](project_test_sessions.md) — TS4 = Windows bench (2026-04-21). TS5 = 부조정실 chroma studio (production environment). Archive at `/prototype/Python/out/TS<N>/`.
+- [Studio lens context](project_lens_context.md) — Wide-angle ENG zoom lenses; entrance pupil shift per zoom is significant. Isolate from LiDAR error in Phase 5 tests.

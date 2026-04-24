@@ -120,15 +120,27 @@ void LidarSourceRplidar::scan_frames(int n_frames,
     }
 
     // grabScanDataHq returns one complete sorted 360-degree scan per call.
+    // It may return a transient non-OK (typically OPERATION_TIMEOUT) during
+    // motor spin-up before the first full revolution is assembled; the stock
+    // ultra_simple tolerates this by looping forever. We match that behaviour
+    // but cap consecutive failures so a truly broken unit fails loudly.
+    constexpr int kMaxConsecutiveFailures = 5;
     std::array<sl_lidar_response_measurement_node_hq_t, kMaxScanNodes> nodes{};
     int delivered = 0;
+    int consecutive_failures = 0;
     while (delivered < n_frames) {
         size_t count = nodes.size();
         const sl_result rc = impl_->drv->grabScanDataHq(nodes.data(), count);
         if (!SL_IS_OK(rc)) {
-            throw std::runtime_error(
-                "rplidar: grabScanDataHq failed mid-stream");
+            if (++consecutive_failures >= kMaxConsecutiveFailures) {
+                throw std::runtime_error(
+                    "rplidar: grabScanDataHq failed " +
+                    std::to_string(kMaxConsecutiveFailures) +
+                    " times in a row");
+            }
+            continue;
         }
+        consecutive_failures = 0;
         impl_->drv->ascendScanData(nodes.data(), count);
 
         Frame frame;

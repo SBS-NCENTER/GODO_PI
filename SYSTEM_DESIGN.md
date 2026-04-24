@@ -995,7 +995,7 @@ Both directories are gitignored; only `.gitkeep` is committed.
 Constants live in two tiers; mixing them is the root cause of "magic
 number" bugs and cross-host drift.
 
-### 12.1 Tier 1 — compile-time invariants (`core/constants.hpp`)
+### 11.1 Tier 1 — compile-time invariants (`core/constants.hpp`)
 
 Values that can never change without a protocol or algorithmic
 reinterpretation. `constexpr` in a header, included anywhere.
@@ -1021,7 +1021,7 @@ inline constexpr int64_t  FRAME_PERIOD_NS  = 16'683'350;
 Rule: any change requires a major version bump and coordinated downstream
 update (UE project file, legacy Arduino rollback etc.).
 
-### 12.2 Tier 2 — runtime-tunable (`Config`, TOML-backed)
+### 11.2 Tier 2 — runtime-tunable (`Config`, TOML-backed)
 
 Values that operators change per-host or per-operating-condition. Defaults
 live in `core/config_defaults.hpp` as `constexpr`; effective values are
@@ -1082,7 +1082,7 @@ priority = 50
 uds_socket = "/run/godo/ctl.sock"
 ```
 
-### 12.3 Reload classes — frontend editability
+### 11.3 Reload classes — frontend editability
 
 Every Tier-2 key is classified by **what it takes to apply a change**.
 The classification is surfaced through `GET /api/config` (Phase 4.5) so a
@@ -1104,7 +1104,7 @@ Implementation flow (deferred to Phase 4.5):
 4. Response body lists `applied`, `needs_restart`, `needs_recalibrate`.
 5. Frontend surfaces this as coloured badges next to each field.
 
-### 12.4 Magic-number ban — code review rule
+### 11.4 Magic-number ban — code review rule
 
 Numeric literals in `src/` require one of:
 

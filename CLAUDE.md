@@ -4,7 +4,7 @@
 
 - Technical / engineering terms: **keep English originals** (stack frame, calling convention, cache line — never translate).
 - Code, comments, commit messages, in-repo documents: **English**.
-- User-facing conversation: Korean, friendly tone (per the user's global preference).
+- User-facing conversation: Korean, tender/friendly tone.
 - Diagrams and tables: **Unicode box drawing only** (┌─┐│└─┘├┤┬┴┼▼▲►◄); never ASCII (+--+|).
 
 ---
@@ -267,7 +267,7 @@ Planner ──► Reviewer (Mode-A) ──► (approve) Writer ──► Reviewe
 | --- | --- | --- | --- |
 | Q4 | How much do chroma-studio fixtures (walls, TV trolleys, chairs, speakers) affect ICP/AMCL accuracy | To be measured empirically in Phase 1 | Phase 2 |
 | Q5 | Final UE-side error bound (target ≤ 1–2 cm) | Determined by integration test | Phase 5 |
-| Q6 | Trigger UX (physical button vs. network command) | Deferred | Phase 3 |
+| Q6 | Trigger UX (physical button vs. network command) | **Resolved (2026-04-24)**: both — GPIO button on RPi 5 + HTTP POST via `godo-webctl`, same command queue | — |
 | Q7 | FreeD merge location | **Resolved (2026-04-21)**: unified inside the RPi 5 C++ binary | — |
 | B | Coordinate-setup method | **Resolved (Phase 0)**: pre-built map + AMCL, see [SYSTEM_DESIGN.md §5](./SYSTEM_DESIGN.md) | — |
 | C | Compute pipeline | **Resolved (Phase 0)**: RPi 5 native C++ | — |

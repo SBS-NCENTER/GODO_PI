@@ -125,3 +125,69 @@ target_link_libraries(test_lidar_live PRIVATE
 )
 add_test(NAME test_lidar_live COMMAND test_lidar_live)
 set_tests_properties(test_lidar_live PROPERTIES LABELS "hardware-required")
+
+# ----------------------------------------------------------------------------
+# Phase 4-1 tests — hardware-free.
+# ----------------------------------------------------------------------------
+
+add_executable(test_yaw test_yaw.cpp)
+target_link_libraries(test_yaw PRIVATE doctest::doctest godo_yaw)
+add_test(NAME test_yaw COMMAND test_yaw)
+set_tests_properties(test_yaw PROPERTIES LABELS "hardware-free")
+
+add_executable(test_smoother test_smoother.cpp)
+target_link_libraries(test_smoother PRIVATE doctest::doctest godo_smoother)
+add_test(NAME test_smoother COMMAND test_smoother)
+set_tests_properties(test_smoother PROPERTIES LABELS "hardware-free")
+
+add_executable(test_freed_parser test_freed_parser.cpp)
+target_link_libraries(test_freed_parser PRIVATE doctest::doctest godo_freed)
+add_test(NAME test_freed_parser COMMAND test_freed_parser)
+set_tests_properties(test_freed_parser PROPERTIES LABELS "hardware-free")
+
+add_executable(test_udp_apply_offset test_udp_apply_offset.cpp)
+target_link_libraries(test_udp_apply_offset PRIVATE
+    doctest::doctest godo_udp)
+add_test(NAME test_udp_apply_offset COMMAND test_udp_apply_offset)
+set_tests_properties(test_udp_apply_offset PROPERTIES LABELS "hardware-free")
+
+add_executable(test_udp_loopback test_udp_loopback.cpp)
+target_link_libraries(test_udp_loopback PRIVATE doctest::doctest godo_udp)
+add_test(NAME test_udp_loopback COMMAND test_udp_loopback)
+set_tests_properties(test_udp_loopback PROPERTIES LABELS "hardware-free")
+
+add_executable(test_config test_config.cpp)
+target_link_libraries(test_config PRIVATE doctest::doctest godo_core)
+add_test(NAME test_config COMMAND test_config)
+set_tests_properties(test_config PROPERTIES LABELS "hardware-free")
+
+add_executable(test_rt_setup test_rt_setup.cpp)
+target_link_libraries(test_rt_setup PRIVATE doctest::doctest godo_rt)
+add_test(NAME test_rt_setup COMMAND test_rt_setup)
+set_tests_properties(test_rt_setup PROPERTIES LABELS "hardware-free")
+
+add_executable(test_seqlock_roundtrip test_seqlock_roundtrip.cpp)
+target_link_libraries(test_seqlock_roundtrip PRIVATE
+    doctest::doctest godo_core)
+add_test(NAME test_seqlock_roundtrip COMMAND test_seqlock_roundtrip)
+set_tests_properties(test_seqlock_roundtrip PROPERTIES LABELS "hardware-free")
+
+# PTY-based serial reader test — linked against godo_freed; needs libutil
+# for openpty().
+add_executable(test_freed_serial_reader test_freed_serial_reader.cpp)
+target_link_libraries(test_freed_serial_reader PRIVATE
+    doctest::doctest godo_freed util)
+add_test(NAME test_freed_serial_reader COMMAND test_freed_serial_reader)
+set_tests_properties(test_freed_serial_reader PROPERTIES LABELS "hardware-free")
+
+# End-to-end replay: spawns the real godo_tracker_rt binary, so it
+# depends on that target being built first.
+add_executable(test_rt_replay test_rt_replay.cpp)
+target_link_libraries(test_rt_replay PRIVATE
+    doctest::doctest godo_freed godo_udp util)
+target_compile_definitions(test_rt_replay PRIVATE
+    GODO_TRACKER_RT_PATH="$<TARGET_FILE:godo_tracker_rt>"
+)
+add_dependencies(test_rt_replay godo_tracker_rt)
+add_test(NAME test_rt_replay COMMAND test_rt_replay)
+set_tests_properties(test_rt_replay PROPERTIES LABELS "hardware-free")

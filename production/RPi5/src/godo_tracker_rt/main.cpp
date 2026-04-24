@@ -153,18 +153,17 @@ void thread_signal_handler() {
 
 }  // namespace
 
-int main(int argc, char** argv) {
-    std::setlocale(LC_ALL, "C");
-    godo::rt::setup::block_all_signals_process();
+int main(int argc, char** argv, char** envp) {
+    // Order matches SYSTEM_DESIGN.md §6.2: memory lock before any thread
+    // spawn, then process-wide signal mask, then locale. All three MUST
+    // precede std::thread/pthread_create calls.
     godo::rt::setup::lock_all_memory();
+    godo::rt::setup::block_all_signals_process();
+    std::setlocale(LC_ALL, "C");
 
     godo::core::Config cfg;
     try {
-        // envp is not in C++ standard main; use the GNU __environ symbol
-        // via a thin shim — construct a pointer from /proc/self/environ
-        // would be overkill. Use extern char** environ from <unistd.h>.
-        extern char** environ;
-        cfg = godo::core::Config::load(argc, argv, environ);
+        cfg = godo::core::Config::load(argc, argv, envp);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "godo_tracker_rt: %s\n", e.what());
         return 2;

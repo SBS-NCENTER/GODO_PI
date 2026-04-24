@@ -14,6 +14,12 @@ inline constexpr int      FREED_PACKET_LEN = 29;
 inline constexpr double   FREED_PAN_Q      = 1.0 / 32768.0;  // deg per lsb
 inline constexpr double   FREED_POS_Q      = 1.0 / 64.0;     // mm per lsb
 
+// Derived multipliers for Offset → wire-lsb re-encoding in apply_offset_inplace.
+// Named so sender.cpp has no magic literals. Changing Tier-1 quanta cascades.
+inline constexpr double   MM_PER_M              = 1000.0;
+inline constexpr double   FREED_POS_LSB_PER_M   = MM_PER_M / FREED_POS_Q;   // 64'000 lsb/m
+inline constexpr double   FREED_PAN_LSB_PER_DEG = 1.0 / FREED_PAN_Q;        // 32'768 lsb/deg
+
 // SLAMTEC C1 sample decoding — pinned by the SDK.
 inline constexpr double   RPLIDAR_Q14_DEG  = 90.0 / 16384.0;
 inline constexpr double   RPLIDAR_Q2_MM    = 1.0 / 4.0;

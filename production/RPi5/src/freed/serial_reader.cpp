@@ -97,28 +97,32 @@ void SerialReader::open_port() {
     tio.c_cc[VMIN]  = 1;    // at least one byte per read
     tio.c_cc[VTIME] = 1;    // 0.1 s timeout so we can poll g_running
 
-    if (::tcsetattr(fd_, TCSANOW, &tio) != 0) {
+    const bool termios_ok = (::tcsetattr(fd_, TCSANOW, &tio) == 0);
+    if (!termios_ok) {
         const int err = errno;
         // Pseudo-terminal slaves reject some real-hardware-only cflags
         // (PARENB/PARODD/CSTOPB) with EINVAL on Linux. The PTY is
         // transparent anyway — the master writes framed bytes verbatim —
         // so we log and continue rather than failing the test harness.
-        // Real PL011 ttys accept the flags; this path stays quiet there.
         std::fprintf(stderr,
             "freed::SerialReader: tcsetattr on %s failed (%s); continuing "
-            "with default termios — acceptable only on PTY test harnesses\n",
+            "with default termios + O_NONBLOCK — acceptable only on PTY "
+            "test harnesses\n",
             port_.c_str(), std::strerror(err));
         (void)err;
-    }
 
-    // Make the fd non-blocking regardless of termios state. The read loop
-    // polls with ~100 ms cadence via its own select-less EAGAIN spin.
-    // This guarantees the g_running flag is observed promptly on shutdown
-    // even when tcsetattr could not install VTIME=1.
-    const int flags = ::fcntl(fd_, F_GETFL, 0);
-    if (flags >= 0) {
-        ::fcntl(fd_, F_SETFL, flags | O_NONBLOCK);
+        // PTY-only fallback: force O_NONBLOCK and let the read loop nap
+        // on EAGAIN so g_running is still observed promptly without the
+        // VTIME=1 kernel-side timer we couldn't install.
+        const int flags = ::fcntl(fd_, F_GETFL, 0);
+        if (flags >= 0) {
+            ::fcntl(fd_, F_SETFL, flags | O_NONBLOCK);
+        }
     }
+    // On real PL011 (termios_ok == true) the fd stays blocking:
+    // read() wakes every ≤100 ms via VTIME=1, which is strictly cheaper
+    // than a userspace nanosleep cadence and gives the kernel full
+    // control over when to wake us.
 }
 
 void SerialReader::close_port() noexcept {

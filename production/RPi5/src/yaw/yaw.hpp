@@ -16,9 +16,16 @@ namespace godo::yaw {
 double lerp_angle(double a, double b, double frac) noexcept;
 
 // Fold a 64-bit signed integer into [-2^23, +2^23) modulo 2^24.
-// Used to re-encode FreeD D1 pan after we add a dyaw offset; the pan field
-// is a signed 24-bit integer with 1/32768 degree per lsb (encoded range
-// ±256°, NOT a mechanical crane limit).
+// Used at two sites — both are protocol-mandated ±2^23 lsb folds on
+// 24-bit signed wire fields:
+//   (a) FreeD D1 pan re-encode after a dyaw offset (1/32768 deg per lsb;
+//       encoded range ±256°, NOT a mechanical crane limit).
+//   (b) FreeD D1 X/Y re-encode after a dx/dy offset (1/64 mm per lsb;
+//       encoded range ±131'072 mm ≈ ±131 m — well beyond any studio).
+// The wrap at site (b) is the FreeD-spec behaviour at overflow, not a
+// GODO-invented policy. Callers in `udp::apply_offset_inplace` exploit
+// both uses. Keeping this helper domain-agnostic avoids duplicating the
+// fold logic; see SYSTEM_DESIGN.md §6.5.
 std::int32_t wrap_signed24(std::int64_t v) noexcept;
 
 }  // namespace godo::yaw

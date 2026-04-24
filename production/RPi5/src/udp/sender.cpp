@@ -57,20 +57,20 @@ void apply_offset_inplace(godo::rt::FreedPacket& p,
     std::byte* const bytes = p.bytes.data();
 
     // X, Y: signed 24-bit, 1/64 mm per lsb. off.dx/off.dy are metres.
-    // metres → mm is ×1000; mm → lsb is ×64. Combined: ×64000.
+    // See FREED_POS_LSB_PER_M in core/constants.hpp for the derived multiplier.
     const std::int32_t x_in = decode_signed24_be(bytes + FreeD::OFF_X);
     const std::int32_t y_in = decode_signed24_be(bytes + FreeD::OFF_Y);
     const std::int64_t x_out = static_cast<std::int64_t>(x_in) +
-        static_cast<std::int64_t>(std::llround(off.dx * 1000.0 * 64.0));
+        static_cast<std::int64_t>(std::llround(off.dx * FREED_POS_LSB_PER_M));
     const std::int64_t y_out = static_cast<std::int64_t>(y_in) +
-        static_cast<std::int64_t>(std::llround(off.dy * 1000.0 * 64.0));
+        static_cast<std::int64_t>(std::llround(off.dy * FREED_POS_LSB_PER_M));
     encode_signed24_be(bytes + FreeD::OFF_X, godo::yaw::wrap_signed24(x_out));
     encode_signed24_be(bytes + FreeD::OFF_Y, godo::yaw::wrap_signed24(y_out));
 
     // Pan: signed 24-bit, 1/32768 deg per lsb. off.dyaw is degrees.
     const std::int32_t pan_in = decode_signed24_be(bytes + FreeD::OFF_PAN);
     const std::int64_t pan_out = static_cast<std::int64_t>(pan_in) +
-        static_cast<std::int64_t>(std::llround(off.dyaw * 32768.0));
+        static_cast<std::int64_t>(std::llround(off.dyaw * FREED_PAN_LSB_PER_DEG));
     encode_signed24_be(bytes + FreeD::OFF_PAN, godo::yaw::wrap_signed24(pan_out));
 
     // Recompute checksum over bytes 0..27.

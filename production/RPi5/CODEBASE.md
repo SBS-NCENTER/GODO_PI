@@ -419,15 +419,27 @@ that will be compared against the 200 µs p99 design goal in Phase 5.
   under 128 MiB, skipping the mlockall call. Production behaviour
   (post setup-pi5-rt.sh) is unchanged.
 - **Serial reader is non-blocking with a nanosleep-based g_running
-  poll**. The plan used `VMIN = 1, VTIME = 1` for a 100 ms blocking
-  read. On PTY slaves Linux refuses the 8O1 cflags with EINVAL, so
-  `tcsetattr` is a warn-and-continue and VTIME is not installed. To
-  still poll `g_running` promptly the loop sets `O_NONBLOCK`
-  unconditionally and naps 10 ms on EAGAIN. Real PL011 ttys apply the
-  termios successfully; the nanosleep adds a negligible 10 ms ceiling
-  on g_running latency without affecting throughput (FreeD is 60 Hz).
+  poll — ONLY on the termios-fail (PTY) path**. The plan used
+  `VMIN = 1, VTIME = 1` for a 100 ms blocking read. On PTY slaves Linux
+  refuses the 8O1 cflags with EINVAL, so `tcsetattr` is a warn-and-
+  continue; for PTYs we then set `O_NONBLOCK` and nap 10 ms on EAGAIN.
+  Real PL011 ttys apply the termios successfully and **keep the
+  blocking read behaviour** (VTIME=1 wakes the kernel every ≤100 ms
+  to check `g_running`). Post-Mode-B fix: `O_NONBLOCK` is now gated on
+  the `tcsetattr` failure path instead of being set unconditionally,
+  so the production PL011 path no longer enters the 10 ms-nap loop on
+  idle.
 - **[rt-alloc-grep] surfaces one hit**: `src/udp/sender.cpp` error
   path inside the UdpSender **constructor** uses `std::string(...)` to
   build an exception message. The constructor is called once at startup,
   not on the hot path; this is acceptable per invariant (e), which
   scopes the no-alloc convention to Thread D's steady-state loop.
+- **`test_rt_replay` narrows the plan's "byte-for-byte" UDP assertion
+  to type-byte + cam_id + checksum validity**. The stub cold-path
+  writer emits a 1 Hz canned offset sequence; its phase at the moment
+  of UDP capture is timing-dependent, so asserting exact X/Y/Pan bytes
+  would make the test flaky. The invariant-layer assertions still pin
+  the binary's byte-level correctness on the parts that do not depend
+  on stub state. Phase 4-2 replaces the stub with AMCL (deterministic
+  pose-in → pose-out), at which point the test can be tightened to
+  full byte parity.

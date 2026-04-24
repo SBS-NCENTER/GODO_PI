@@ -142,6 +142,30 @@ tracker may call `setlocale`; doing so would corrupt decimal formatting
 in concurrent capture threads. Session-log byte identity with Python is
 **not** enforced (scope-out); only the CSV is.
 
+### (e) No heap allocation on the hot path (convention, code-review enforced)
+
+Functions transitively reachable from Thread D's main loop — namely
+anything under `src/rt`, `src/udp`, `src/smoother`, `src/yaw`, and the
+hot-path branch of `src/godo_tracker_rt/main.cpp` and
+`src/freed/serial_reader.cpp` — must not call `new`, `malloc`,
+`std::string(const char*)`, `std::vector::push_back/emplace_back/resize`,
+or any equivalent dynamic allocation. Per-run scratch buffers are
+allocated once at thread startup and reused.
+
+This is a **convention enforced by code review**, not a compile-time
+check. `scripts/build.sh` runs a best-effort `grep` smoke pass over the
+above paths and prints warnings under `[rt-alloc-grep]`; the warnings
+are reviewed manually — they are not authoritative and do not fail the
+build.
+
+### Known scaffolding
+
+- `src/godo_tracker_rt/main.cpp :: thread_stub_cold_writer` — a
+  1 Hz canned offset generator marked `// TODO(phase-4-2): replace with
+  AMCL writer thread from src/localization/`. Its sole purpose is to
+  exercise the seqlock + smoother cross-thread interaction end-to-end
+  before AMCL lands.
+
 ---
 
 ## Where do I look when…
@@ -219,3 +243,191 @@ is built but tagged `hardware-required` and not run by `scripts/build.sh`.
 - P3-2b gate exercised `ultra_simple` with no arguments; it printed
   usage and exited with rc=1. This is a graceful exit and satisfies the
   gate's "clean exit or graceful error" criterion.
+
+---
+
+## 2026-04-24 — Phase 4-1 RT hot path (P4-1-1 … P4-1-13)
+
+### Module map (additions)
+
+```text
+cmake/tomlplusplus.cmake             INTERFACE lib tomlplusplus::tomlplusplus
+                                     (v3.4.0, pinned SHA 30172438…ba9de)
+external/tomlplusplus/                git submodule
+
+src/core/
+├─ CMakeLists.txt                    target: godo_core (static)
+├─ constants.hpp                     Tier-1 invariants (FreeD / RPLIDAR / 59.94)
+├─ config_defaults.hpp               Tier-2 compile-time defaults
+├─ config.{hpp,cpp}                  CLI > env > TOML > defaults loader
+├─ rt_types.hpp                      Offset (24 B), FreedPacket (29 B)
+├─ seqlock.hpp                       single-writer / N-reader seqlock
+├─ time.hpp                          monotonic_ns() (header-only)
+└─ rt_flags.{hpp,cpp}                g_running, calibrate_requested
+
+src/yaw/
+├─ CMakeLists.txt                    target: godo_yaw
+└─ yaw.{hpp,cpp}                     lerp_angle, wrap_signed24
+
+src/smoother/
+├─ CMakeLists.txt                    target: godo_smoother
+└─ offset_smoother.{hpp,cpp}         linear ramp, gen-edge, snap at frac≥1
+
+src/freed/
+├─ CMakeLists.txt                    target: godo_freed
+├─ d1_parser.{hpp,cpp}               ParseResult, compute_checksum
+└─ serial_reader.{hpp,cpp}           Thread A body (termios 8O1 PL011)
+
+src/udp/
+├─ CMakeLists.txt                    target: godo_udp
+└─ sender.{hpp,cpp}                  UdpSender + apply_offset_inplace
+
+src/rt/
+├─ CMakeLists.txt                    target: godo_rt
+└─ rt_setup.{hpp,cpp}                mlockall / affinity / SCHED_FIFO /
+                                     block_all_signals helpers
+
+src/godo_jitter/
+├─ CMakeLists.txt                    target: godo_jitter (binary)
+└─ main.cpp                          CLOCK_MONOTONIC jitter harness
+
+src/godo_tracker_rt/
+├─ CMakeLists.txt                    target: godo_tracker_rt (binary)
+└─ main.cpp                          Thread A / D / stub writer / signal
+
+tests/ (additions — all hardware-free)
+├─ test_yaw.cpp                      12 §6.5 cases, exact equality
+├─ test_smoother.cpp                 6 §6.4.4 cases (test 3 rescoped)
+├─ test_freed_parser.cpp             8 cases, synth fixtures with L-refs
+├─ test_freed_serial_reader.cpp      PTY harness (8O1 termios on master)
+├─ test_udp_apply_offset.cpp         5 cases, decode/encode + pan wrap
+├─ test_udp_loopback.cpp             AF_INET loopback byte-identity
+├─ test_config.cpp                   8 cases, precedence chain + rejects
+├─ test_rt_setup.cpp                 4 cases, actionable-stderr checks
+├─ test_seqlock_roundtrip.cpp        4 cases, 1W/4R 10^6-iter stress
+└─ test_rt_replay.cpp                E2E: posix_spawn tracker + PTY + UDP
+
+scripts/
+├─ setup-pi5-rt.sh                   ONE-TIME ROOT: setcap + limits.conf
+├─ run-pi5-tracker-rt.sh             launch wrapper (no sudo)
+├─ run-pi5-jitter.sh                 jitter binary wrapper
+└─ build.sh (modified)               adds [rt-alloc-grep] smoke pass
+
+doc/
+└─ freed_wiring.md                   A) wiring, B) boot config, C) verify
+```
+
+### Dependency tree (new targets)
+
+```text
+godo_tracker_rt
+├─ godo_core ─ tomlplusplus
+├─ godo_rt   ─ pthread
+├─ godo_yaw
+├─ godo_freed ─ godo_core
+├─ godo_smoother ─ godo_yaw
+└─ godo_udp ─ godo_core + godo_yaw + godo_freed
+
+godo_jitter
+├─ godo_core
+└─ godo_rt
+```
+
+### Added
+
+- CMake wiring: `CMakeLists.txt` adds 8 new `add_subdirectory()` calls
+  under `src/` and `include(cmake/tomlplusplus.cmake)`.
+- `cmake/tomlplusplus.cmake` — submodule loader + SHA pin.
+- `external/tomlplusplus/` — submodule at v3.4.0
+  (SHA `30172438cee64926dc41fdd9c11fb3ba5b2ba9de`).
+- `src/core/*` (5 headers + 2 cpp) — Tier-1 constants, Tier-2 defaults,
+  Config loader, RT types, Seqlock, monotonic_ns, RT flags.
+- `src/yaw/yaw.{hpp,cpp}` — pure `lerp_angle` + `wrap_signed24`.
+- `src/smoother/offset_smoother.{hpp,cpp}` — linear ramp.
+- `src/freed/d1_parser.{hpp,cpp}` — ParseResult + checksum helpers.
+- `src/freed/serial_reader.{hpp,cpp}` — Thread A body; termios 8O1 +
+  non-blocking read loop with nanosleep backoff so `g_running` is polled
+  at ≤ 10 ms latency even when tcsetattr could not install VTIME.
+- `src/udp/sender.{hpp,cpp}` — UdpSender (connected SOCK_DGRAM,
+  non-blocking, EAGAIN-miss counter) + `apply_offset_inplace`.
+- `src/rt/rt_setup.{hpp,cpp}` — lifecycle helpers; `lock_all_memory`
+  gates on `RLIMIT_MEMLOCK` so a host without setup-pi5-rt.sh applied
+  still permits thread creation.
+- `src/godo_jitter/main.cpp` — CLOCK_MONOTONIC measurement harness
+  (mean / p50 / p95 / p99 / max, JSON trailer line).
+- `src/godo_tracker_rt/main.cpp` — main, signal thread (sigwait on
+  SIGTERM/SIGINT), Thread A, stub cold writer (with phase-4-2 TODO
+  breadcrumb), Thread D (smoother.tick → apply_offset → udp.send +
+  clock_nanosleep(TIMER_ABSTIME)).
+- `scripts/setup-pi5-rt.sh` — one-time root: setcap + limits.conf +
+  ttyAMA0 ownership check; idempotent.
+- `scripts/run-pi5-tracker-rt.sh`, `scripts/run-pi5-jitter.sh`.
+- `doc/freed_wiring.md` — §A wiring, §B boot config, §C verification.
+- 10 test targets as listed above, all labelled `hardware-free`.
+
+### Changed
+
+- `CMakeLists.txt` (top-level) — added 8 `add_subdirectory` lines and
+  the tomlplusplus include.
+- `tests/CMakeLists.txt` — added 10 new test target blocks; the
+  `test_rt_replay` target has a `GODO_TRACKER_RT_PATH` compile
+  definition from `$<TARGET_FILE:godo_tracker_rt>`.
+- `scripts/build.sh` — appends the `[rt-alloc-grep]` smoke pass. Hits
+  are printed to stderr; they do not fail the build.
+
+### Removed
+
+- (none)
+
+### Tests
+
+- 10 new hardware-free targets; all pass (`ctest -L hardware-free` = 16/16).
+- `test_rt_replay` end-to-end: posix_spawn the tracker binary, drive
+  canned bytes on a PTY master (8O1 termios installed on both ends),
+  capture UDP on 127.0.0.1, assert type byte, cam_id, and checksum
+  round-trip through the whole pipeline.
+- `test_seqlock_roundtrip` covers a 1-writer / 4-reader stress run at
+  10^6 writes; asserts no torn payload is observable.
+
+### Jitter numbers on news-pi01 (no RT privileges)
+
+```text
+godo_jitter --duration-sec 60 --cpu 3 --prio 1
+ticks=3596 period_ns=16683350
+mean=110171.0 ns   p50=57733.0 ns   p95=144556.0 ns
+p99=2028350.0 ns   max=5337530.0 ns
+```
+
+These numbers were captured without SCHED_FIFO or mlockall (the test
+host does not yet have setup-pi5-rt.sh applied; `lock_all_memory`
+correctly declined on RLIMIT_MEMLOCK = 8 MiB). They are a **baseline**
+for the ordinary-scheduler path; the post-setup numbers are the ones
+that will be compared against the 200 µs p99 design goal in Phase 5.
+
+### Deviations from the plan
+
+- **`std::span<const std::byte>` → `(const std::byte*, size_t)`**. The
+  top-level `CMakeLists.txt` pins C++17, so `std::span` is unavailable.
+  The parser and sender signatures use a pointer + length pair instead;
+  behaviour is identical.
+- **`lock_all_memory` gates on RLIMIT_MEMLOCK**. The plan said call
+  `mlockall(MCL_CURRENT | MCL_FUTURE)` unconditionally. Unconditional
+  calling on a host without raised memlock rlimit causes every
+  subsequent thread-stack `mmap()` to fail with EAGAIN (the tracker
+  cannot spawn Thread A). The helper now checks `RLIMIT_MEMLOCK` first
+  and returns false + an actionable stderr message if the rlimit is
+  under 128 MiB, skipping the mlockall call. Production behaviour
+  (post setup-pi5-rt.sh) is unchanged.
+- **Serial reader is non-blocking with a nanosleep-based g_running
+  poll**. The plan used `VMIN = 1, VTIME = 1` for a 100 ms blocking
+  read. On PTY slaves Linux refuses the 8O1 cflags with EINVAL, so
+  `tcsetattr` is a warn-and-continue and VTIME is not installed. To
+  still poll `g_running` promptly the loop sets `O_NONBLOCK`
+  unconditionally and naps 10 ms on EAGAIN. Real PL011 ttys apply the
+  termios successfully; the nanosleep adds a negligible 10 ms ceiling
+  on g_running latency without affecting throughput (FreeD is 60 Hz).
+- **[rt-alloc-grep] surfaces one hit**: `src/udp/sender.cpp` error
+  path inside the UdpSender **constructor** uses `std::string(...)` to
+  build an exception message. The constructor is called once at startup,
+  not on the hot path; this is acceptable per invariant (e), which
+  scopes the no-alloc convention to Thread D's steady-state loop.

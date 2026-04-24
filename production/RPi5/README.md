@@ -2,10 +2,16 @@
 
 Phase 3 C++ production scaffold for the GODO Raspberry Pi 5 host.
 
-**Status**: bring-up scaffold only. The binary shipped here is
-`godo_smoke` — a hardware-smoke / three-way-comparison tool, **not** the
-final `godo-tracker`. The tracker's integration (FreeD receive, AMCL,
-UDP send @ 59.94 fps) lands in Phase 4.
+**Status**: Phase 4-1 shipped. The RT hot path (`godo_tracker_rt`) is
+integrated; AMCL / LiDAR / full cold path land in Phase 4-2.
+
+Binaries in this tree:
+
+- `godo_smoke` (Phase 3) — hardware-smoke / three-way-comparison tool.
+- `godo_tracker_rt` (Phase 4-1) — 59.94 Hz UDP sender with FreeD serial
+  in and a stub cold-writer that emits canned offsets. See
+  [Phase 4-1: RT hot path](#phase-4-1-rt-hot-path) below.
+- `godo_jitter` (Phase 4-1) — CLOCK_MONOTONIC jitter measurement.
 
 See [`./doc/smoke.md`](./doc/smoke.md) for the bring-up workflow and
 [`CODEBASE.md`](./CODEBASE.md) for the invariants the tests pin.
@@ -170,3 +176,57 @@ Rollback card is the existing Arduino R4 WiFi firmware under
 the RPi back to the Arduino; no changes to the studio network are
 required. The firmware stays untouched for exactly this reason
 (see `CLAUDE.md §6 "Preserve existing assets"`).
+
+---
+
+## Phase 4-1: RT hot path
+
+### One-time host setup
+
+1. Wire the YL-128 MAX3232 converter to the Pi 5's PL011 UART0 and apply
+   the boot-config changes from [`doc/freed_wiring.md`](./doc/freed_wiring.md).
+   Reboot.
+2. Build the tracker: `scripts/build.sh`.
+3. As root, run `scripts/setup-pi5-rt.sh` once. This sets `cap_sys_nice`
+   + `cap_ipc_lock` on the tracker binary and appends the rtprio /
+   memlock rlimit entries to `/etc/security/limits.conf`.
+
+### Run the tracker
+
+```sh
+scripts/run-pi5-tracker-rt.sh \
+    --ue-host   10.1.2.3 \
+    --ue-port   6666 \
+    --freed-port /dev/ttyAMA0 \
+    --t-ramp-ms 500
+```
+
+No sudo needed after the one-time setup — capabilities live on the
+binary itself. All flags accepted by `Config::load` are available
+(`--lidar-port`, `--rt-cpu`, `--rt-priority`, ...); see
+[`src/core/config.hpp`](./src/core/config.hpp).
+
+Configuration precedence (highest first):
+
+1. CLI flags
+2. Environment (`GODO_UE_HOST`, `GODO_UE_PORT`, ...)
+3. TOML file at `GODO_CONFIG_PATH` or `/etc/godo/tracker.toml`
+4. Compile-time defaults in `src/core/config_defaults.hpp`
+
+### Measure jitter
+
+```sh
+scripts/run-pi5-jitter.sh --duration-sec 60 --cpu 3 --prio 50
+```
+
+Prints mean / p50 / p95 / p99 / max for `actual - scheduled_deadline`
+deltas across the run, plus a JSON trailer line for log scraping.
+
+### What Phase 4-1 does NOT do yet
+
+- No LiDAR ingestion, no AMCL, no map. The cold-path writer is a stub
+  that emits canned offsets at 1 Hz so the seqlock + smoother + UDP
+  pipeline can be exercised before Phase 4-2 lands.
+- No godo-webctl / UDS / HTTP API (Phase 4-3).
+- Deadband filter defaults are declared in `config_defaults.hpp` but
+  the filter itself arrives with AMCL in Phase 4-2.

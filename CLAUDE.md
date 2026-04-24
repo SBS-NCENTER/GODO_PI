@@ -177,6 +177,7 @@ These rules apply to the Parent orchestrator and all subagents. They are non-neg
 
 - **SSOT / DRY**: one concept, one location. No duplicate implementations.
 - **Minimal code**: implement exactly what is requested. No speculative abstractions, no "just in case" code, no drive-by refactoring.
+- **No magic numbers**: numeric literals in `src/` require one of (a) a `constexpr` in `core/constants.hpp`, (b) a field of `Config` with a default in `core/config_defaults.hpp`, or (c) a local iteration bound. Anything else is a code-review block. See [SYSTEM_DESIGN.md §11](./SYSTEM_DESIGN.md) for the two-tier scheme.
 - **Long-term stability**: follow `doc/Embedded_CheckPoint.md` for any code that will run for years in production.
 - **Preserve existing assets**: minimize changes to the production `XR_FreeD_to_UDP` firmware. If changes are unavoidable, prepare a rollback plan first.
 - **Keep CLAUDE.md short**: this file is a guide, not a data store. Push long analyses, specs, and reports into dedicated reference documents and link to them.
@@ -267,7 +268,7 @@ Planner ──► Reviewer (Mode-A) ──► (approve) Writer ──► Reviewe
 | --- | --- | --- | --- |
 | Q4 | How much do chroma-studio fixtures (walls, TV trolleys, chairs, speakers) affect ICP/AMCL accuracy | To be measured empirically in Phase 1 | Phase 2 |
 | Q5 | Final UE-side error bound (target ≤ 1–2 cm) | Determined by integration test | Phase 5 |
-| Q6 | Trigger UX (physical button vs. network command) | **Resolved (2026-04-24)**: both — GPIO button on RPi 5 + HTTP POST via `godo-webctl`, same command queue | — |
+| Q6 | Trigger UX (physical button vs. network command) | **Resolved (2026-04-24)**: both sources, single `std::atomic<bool>` primitive — details in [SYSTEM_DESIGN.md §6.1.3](./SYSTEM_DESIGN.md) | — |
 | Q7 | FreeD merge location | **Resolved (2026-04-21)**: unified inside the RPi 5 C++ binary | — |
 | B | Coordinate-setup method | **Resolved (Phase 0)**: pre-built map + AMCL, see [SYSTEM_DESIGN.md §5](./SYSTEM_DESIGN.md) | — |
 | C | Compute pipeline | **Resolved (Phase 0)**: RPi 5 native C++ | — |

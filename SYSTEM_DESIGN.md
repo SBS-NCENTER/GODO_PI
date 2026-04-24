@@ -70,12 +70,14 @@
 | Production runtime | Native C++, no ROS dependency |
 | FreeD merge | RPi 5 receives FreeD serial, merges the offset, sends UDP (replaces the legacy Arduino) |
 | FreeD Pan | **base-local** (pan-head encoder, relative to the dolly). Because the wheels-parallel rule keeps dolly yaw constant, the reading is effectively world-frame. LiDAR yaw serves only as a safety tripwire for accidental base rotation |
-| 59.94 fps RT | `SCHED_FIFO` + CPU pinning + `mlockall` + `clock_nanosleep(TIMER_ABSTIME)`, targeting p99 jitter < 200 µs — comparable to the Arduino |
-| RT / cold path split | Hot path (59.94 Hz, Thread D): FreeD recv → apply offset → UDP send, hard deadline ≈ 16.7 ms. Cold path (LiDAR+AMCL): up to 1 s latency acceptable. Crosses via `std::atomic<Offset>` — lock-free, no block on hot path. See §6.1 |
-| Offset smoother | Linear ramp (method A): when AMCL writes a new target, hot path drives `live_offset` → `target_offset` linearly over `T_ramp` (default 500 ms, configurable). Prevents step jumps visible in UE. See §6.4 |
-| Yaw wrap | Two named sites: (1) inside the smoother — shortest-arc delta; (2) at FreeD pan re-encode — signed-24-bit domain wrap. Legacy `XR_FreeD_to_UDP` got away without explicit wrap because it never added offsets. See §6.5 |
-| Trigger UX (Q6) | **Both** — physical GPIO button on the RPi 5 (studio-side) + HTTP POST on the control network (gallery-side). Both enqueue the same `calibrate_now` event in the tracker's command queue |
-| Web control plane | Separate FastAPI process `godo-webctl` (RPi 5 localhost + LAN). Never inside the RT binary. IPC via Unix domain socket (JSON-lines). Scope: health, map backup, map edit (remove moving fixtures), map update, calibration trigger |
+| 59.94 fps RT | `SCHED_FIFO` + CPU pinning + `mlockall` + `clock_nanosleep(TIMER_ABSTIME)`. The p99 jitter target is to be measured on the target host during Phase 4-1 (the "comparable to Arduino" phrasing in prior drafts was aspirational; see §7 Phase 4-1 for the jitter-measurement harness) |
+| RT / cold path split | Hot path (59.94 Hz, Thread D): FreeD recv → apply offset → UDP send, hard deadline ≈ 16.7 ms. Cold path (LiDAR+AMCL): up to 1 s latency acceptable. Cross via **seqlock** (single writer per slot, N readers) — `std::atomic<T>` for 24–29 byte payloads is not lock-free on aarch64. See §6.1 |
+| Offset smoother | Linear ramp (method A): when AMCL writes a new generation, the hot-path smoother drives `live_offset` → `target_offset` linearly over `T_ramp` (default 500 ms). Uses the seqlock's integer generation counter for edge detection (not float equality), and snaps value-copy at `frac ≥ 1.0` to eliminate float drift. See §6.4 |
+| AMCL noise deadband | Thread C filters AMCL outputs in the cold path: if `|Δpos| < DEADBAND_MM` AND `|Δyaw| < DEADBAND_DEG`, the seqlock is **not** written, so the hot-path smoother never sees sub-noise-floor updates. Forced-accept on explicit calibrate bypasses the filter. Defaults `10 mm` / `0.1°`. See §6.4.1 |
+| Yaw wrap | Two named sites, both **pure free functions**: (1) `lerp_angle` in the smoother — shortest-arc delta, precondition `|b-a| < 360`; (2) `wrap_signed24` at FreeD pan re-encode — `±2^23` lsb = encoded range (NOT a mechanical crane limit). See §6.5 |
+| Trigger UX (Q6) | **Both** — physical GPIO button on the RPi 5 (studio-side) + HTTP POST via `godo-webctl` (control-room-side). Single `std::atomic<bool> calibrate_requested` primitive (idempotent, two writers OK). Thread C polls + `exchange(false)` per scan. Queue upgrade planned if non-idempotent commands are added. See §6.1.3 |
+| Web control plane | Separate FastAPI process `godo-webctl`, never inside the RT binary. IPC via Unix domain socket (JSON-lines). **Phase 4-3 scope (minimal)**: `/health`, `/map/backup`, `/calibrate`. Map editor / config editor / full React frontend deferred to Phase 4.5+. See §7 |
+| Constants | Two tiers: `core/constants.hpp` for protocol/algorithmic invariants (Tier 1, `constexpr`); `Config` class + `core/config_defaults.hpp` for tunables (Tier 2, TOML-backed, env-override). Magic-number ban enforced by code review. See §11 (Runtime configuration) |
 | Languages | Python (UV) prototyping in Phases 1–2, C++ production from Phase 3 onward, FastAPI (Python) for `godo-webctl` from Phase 4+ |
 | Rollback card | Legacy Arduino firmware retained; swap the cable to revert on RPi 5 failure |
 
@@ -86,21 +88,24 @@
 ### Steady-state operation (59.94 Hz loop)
 
 ```text
-Crane ──FreeD──► Thread A ──► [latest_freed (atomic)] ──┐
+Crane ──FreeD──► Thread A ──► [latest_freed  Seqlock] ──┐
                                                         │
 LiDAR ──scan──► Thread B ──► [scan_buffer (mutex)] ◄──  Thread C (AMCL)
                                                         │
-                            [target_offset (atomic)] ◄──┘    cold path
+                                              deadband │ §6.4.1
+                                              filter   ▼
+                                          [target_offset Seqlock]
 ─────────────────────────────────── ▲ ───────────────────────────────
-                                    │ lock-free load, stale OK
+                                    │ seqlock reads; retry if writer in progress
             every 16.68 ms ──► Thread D (RT) ─────────────── hot path
                                     │
-                                    ├─ smoother.tick(now):
-                                    │    live_offset ← interpolate
-                                    │    (linear ramp toward target)
+                                    ├─ smoother.tick(target, gen, now):
+                                    │    if gen_new != target_g: restart ramp
+                                    │    if frac ≥ 1: live ← target (snap)
+                                    │    else:         linear interp
                                     ├─ read latest_freed
-                                    ├─ add live_offset (dx, dy, dyaw)
-                                    │  → FreeD X/Y + Pan (with wrap)
+                                    ├─ apply_offset_inplace (dx, dy, dyaw)
+                                    │   → FreeD X/Y + Pan (with wrap, §6.5)
                                     └─► send UDP to Unreal
 ```
 
@@ -304,186 +309,424 @@ them so AMCL jitter can never block the UDP send.
 │  FreeD recv ─► smoother.tick(now) ─► apply_offset ─► UDP send to UE   │
 │                      ▲                                                │
 └──────────────────────┼────────────────────────────────────────────────┘
-                       │  std::atomic<Offset>  (lock-free load)
+                       │  seqlock read (no blocking, retry on writer)
                        │  stale value is OK — hot path never blocks
 ┌──────────────────────┴──────── Cold path (AMCL, ≤ 1 s) ───────────────┐
 │                                                                       │
-│  LiDAR scan ─► AMCL ─► new target offset ─► atomic_store              │
-│                                                                       │
+│  LiDAR scan ─► AMCL ─► deadband filter ─► seqlock write               │
+│                                   ▲                                    │
+│                                   └─ see §6.4.1                       │
 └───────────────────────────────────────────────────────────────────────┘
 ```
 
-Consequences:
+#### 6.1.1 Shared data types — pinned
+
+```cpp
+namespace godo::rt {
+
+// Exchanged across the hot/cold boundary.
+struct Offset {
+    double dx;    // metres, world-frame
+    double dy;    // metres, world-frame
+    double dyaw;  // degrees, [0, 360) canonical (see §6.5 lerp_angle)
+};
+static_assert(sizeof(Offset) == 24, "Offset layout is ABI-visible");
+
+// Hot-path input from Thread A (FreeD serial reader).
+struct FreedPacket {
+    std::array<std::byte, 29> bytes;  // FreeD D1 packet len, per legacy §20
+};
+
+}  // namespace godo::rt
+```
+
+Both are **strictly larger than any lock-free `std::atomic<T>` on aarch64
+without `-march=armv8.4-a+lse2`**. We do not rely on wide atomics. The
+crossing is done with a **seqlock** for both `target_offset` and
+`latest_freed`:
+
+```cpp
+// One writer, N readers. Writer bumps `seq` before and after the payload
+// write; readers retry if the sequence changed during the read.
+template <typename T>
+class Seqlock {
+    alignas(64) std::atomic<std::uint64_t> seq_{0};
+    T payload_{};
+
+public:
+    void store(const T& v) noexcept {                // single writer
+        const auto s = seq_.load(std::memory_order_relaxed);
+        seq_.store(s + 1, std::memory_order_release);
+        payload_ = v;
+        seq_.store(s + 2, std::memory_order_release);
+    }
+    T load() const noexcept {                        // any reader
+        for (;;) {
+            const auto s1 = seq_.load(std::memory_order_acquire);
+            if (s1 & 1) continue;                    // writer in progress
+            const T copy = payload_;
+            const auto s2 = seq_.load(std::memory_order_acquire);
+            if (s1 == s2) return copy;
+        }
+    }
+    std::uint64_t generation() const noexcept {
+        return seq_.load(std::memory_order_acquire) & ~uint64_t{1};
+    }
+};
+```
+
+- `target_offset` is a `Seqlock<Offset>`: writer = Thread C (AMCL), readers
+  = Thread D (hot path) **and** the IPC server (godo-webctl reads it for
+  `/health`). Multi-reader is **allowed** by seqlock.
+- `latest_freed` is a `Seqlock<FreedPacket>`: writer = Thread A (serial
+  reader), reader = Thread D.
+- The seqlock `generation()` (always even on a consistent payload) doubles
+  as the **update counter** used by the smoother (see §6.4).
+
+#### 6.1.2 Time source — pinned
+
+**All** time measurements in the RT pipeline use `CLOCK_MONOTONIC`:
+
+```cpp
+inline std::int64_t monotonic_ns() noexcept {
+    timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1'000'000'000LL + ts.tv_nsec;
+}
+```
+
+`clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, ...)` in Thread D uses
+the same clock, so the smoother's elapsed-time arithmetic never crosses
+clock domains. `std::chrono::steady_clock` is **not** used — its epoch is
+implementation-defined and the mixing has historically caused bugs.
+
+#### 6.1.3 Trigger primitive — pinned
+
+The calibrate trigger is a single **idempotent** request: "re-localize
+from the latest scan". Multiple pending triggers collapse harmlessly.
+
+```cpp
+std::atomic<bool> calibrate_requested{false};
+```
+
+- Physical GPIO button and `godo-webctl` both call
+  `calibrate_requested.store(true, release)` (same primitive, two sources).
+- Thread C polls it once per scan and does `exchange(false)` to consume.
+- **Not a queue.** A queue is unnecessary today because there is one
+  command type and it is idempotent. If future work adds non-idempotent
+  commands (e.g., `map_reload`, `emergency_stop`), this primitive is
+  replaced by a bounded MPSC lock-free ring; mentioned here so the
+  upgrade path is explicit.
+
+#### 6.1.4 Consequences
 
 - AMCL may run at 1 Hz, 10 Hz, or stall for 500 ms — the hot path keeps
-  emitting UDP with the last-known `target_offset`, which the smoother is
-  still driving `live_offset` toward.
-- `sizeof(Offset)` must fit a lock-free atomic on both x86_64 and aarch64
-  (8 bytes = double, or 16-byte with `std::atomic<Offset>` + compiler
-  guarantee). If 16 bytes is not lock-free on our target toolchain, fall
-  back to seqlock (one writer, one reader — single reader is guaranteed
-  by the architecture).
-- Trigger events (physical button, HTTP POST) push into a separate
-  `std::atomic<bool> calibrate_requested` that Thread C polls.
+  emitting UDP with the last-known `target_offset`, driven toward by the
+  smoother's ramp.
+- Deadband at the cold path (§6.4.1) guarantees `target_offset` does not
+  oscillate from AMCL's sub-cm noise, so the smoother's ramp actually
+  completes.
+- No kernel object sits between Thread A/C and Thread D on the happy
+  path — seqlock reads are spin-free when the writer is idle.
 
 ### 6.2 Thread D skeleton
 
+Lifecycle invariants (set in `main()` **before** any thread spawns):
+
 ```cpp
-// Pseudo-code
-void udp_sender_thread() {
-    // Real-time scheduling
-    struct sched_param sp;
-    sp.sched_priority = 50;  // SCHED_FIFO, high priority
+int main(int argc, char** argv) {
+    // Process-wide. Must precede any std::thread / pthread_create so every
+    // future stack is eligible for locking. Calling from inside a thread
+    // only affects that thread's existing pages (bug in the v2 spec).
+    if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0) {
+        perror("mlockall"); return 1;
+    }
+
+    // Mask SIGCHLD / SIGPIPE at the process level; individual threads
+    // unmask only what they must handle. Thread D handles no signals.
+    sigset_t mask; sigfillset(&mask);
+    pthread_sigmask(SIG_BLOCK, &mask, nullptr);
+
+    setlocale(LC_ALL, "C");       // children inherit, see codebase invariant (d)
+    Config cfg = Config::load(argv, env);
+    ...
+    spawn_threads(cfg);
+    ...
+}
+```
+
+Thread D (59.94 Hz UDP sender):
+
+```cpp
+std::atomic<bool> g_running{true};  // flag set to false on SIGTERM
+
+void udp_sender_thread(Config cfg) {
+    // Real-time scheduling — this thread only.
+    sched_param sp{.sched_priority = 50};
     pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
 
-    // Pin to CPU 3 (CPUs 0–2 handle everything else)
-    cpu_set_t mask;
-    CPU_ZERO(&mask);
-    CPU_SET(3, &mask);
+    cpu_set_t mask; CPU_ZERO(&mask); CPU_SET(cfg.rt_cpu, &mask);
     pthread_setaffinity_np(pthread_self(), sizeof(mask), &mask);
 
-    // Lock all memory
-    mlockall(MCL_CURRENT | MCL_FUTURE);
-
-    // Absolute-time periodic timer
-    struct timespec next;
+    // Periodic deadline in CLOCK_MONOTONIC (§6.1.2).
+    timespec next;
     clock_gettime(CLOCK_MONOTONIC, &next);
+    const int64_t period_ns = godo::constants::FRAME_PERIOD_NS;  // 16_683_350
 
-    const long period_ns = 16683350;  // 1/59.94 * 1e9
+    OffsetSmoother smoother{cfg.t_ramp_ns};   // §6.4
 
-    while (running) {
-        const auto now = clock_now();
+    while (g_running.load(std::memory_order_acquire)) {
+        const int64_t now_ns = monotonic_ns();              // §6.1.2
 
-        // Lock-free read of shared state
-        FreedPacket p = latest_freed.load();
-        Offset target = target_offset.load();  // cold path writes this
+        // Seqlock reads — never block the hot path (§6.1.1).
+        const FreedPacket p      = latest_freed.load();
+        const uint64_t    gen    = target_offset.generation();
+        const Offset      target = target_offset.load();
 
-        // Smooth toward the latest target (see §6.4)
-        smoother.tick(target, now);
+        // Smooth toward the latest target; gen-based edge detection (§6.4).
+        smoother.tick(target, gen, now_ns);
         const Offset off = smoother.live();
 
-        // Merge offset into X, Y, and Pan (see §6.5 for yaw wrap)
-        p.x   += off.dx;
-        p.y   += off.dy;
-        p.pan  = wrap_signed24(p.pan + to_q15(off.dyaw));
+        FreedPacket out = p;
+        apply_offset_inplace(out, off);                     // §6.5
 
-        // Send
-        send_udp(p);
+        send_udp(out, cfg.ue_addr);
 
-        // Wait for the next period (absolute deadline, no drift)
+        // Absolute-time deadline; advance and sleep.
         next.tv_nsec += period_ns;
-        while (next.tv_nsec >= 1000000000) {
-            next.tv_nsec -= 1000000000;
+        while (next.tv_nsec >= 1'000'000'000) {
+            next.tv_nsec -= 1'000'000'000;
             next.tv_sec  += 1;
         }
-        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
+        int rc;
+        do {
+            rc = clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, nullptr);
+        } while (rc == EINTR);
+        if (rc != 0) { /* log + emergency exit, watchdog will reboot */ }
     }
 }
 ```
+
+Notes pinned by the skeleton:
+
+- `g_running` is a `std::atomic<bool>` — the compiler may not hoist the
+  load out of the loop (v2 spec was silent).
+- `clock_nanosleep` return value is checked; `EINTR` is looped. Signals
+  are blocked process-wide per the `main()` stanza above, but this guard
+  is cheap and guards against future signal-handling changes.
+- `apply_offset_inplace` contains the dx/dy/dyaw merge and pan re-encode
+  with wrap; see §6.5 for the exact arithmetic.
+- CPU affinity, rtprio, and RAM period all come from `Config`; no
+  magic numbers in the function body. See §11.
 
 ### 6.3 Operational checklist
 
 - [ ] `/etc/security/limits.conf`: `@godo - rtprio 99`.
 - [ ] systemd unit: `CPUAffinity=0-3`, `CPUSchedulingPolicy=fifo`, `CPUSchedulingPriority=50`.
-- [ ] IRQ isolation: `echo 0-2 > /proc/irq/<num>/smp_affinity_list` (keep CPU 3 free for Thread D).
+- [ ] **IRQ inventory + isolation** — produce in Phase 4-1, not assumed here.
+      On news-pi01, enumerate the USB xHCI IRQ (LiDAR + FreeD adapter) and
+      the Ethernet IRQ; steer them to CPUs 0–2 via
+      `/proc/irq/<n>/smp_affinity_list`. The `<n>` values must be measured
+      with `grep -E "xhci|eth" /proc/interrupts` on the target host — there
+      is no portable table. Record the findings in
+      `production/RPi5/doc/irq_inventory.md`.
 - [ ] `sudo systemctl disable ondemand`; `cpupower frequency-set -g performance`.
 - [ ] Hardware watchdog: `/etc/systemd/system.conf` → `RuntimeWatchdogSec=10s`.
 
 ### 6.4 Offset smoother — linear ramp (method A)
 
-Cold-path updates are **irregular**. AMCL may emit two updates 5 ms apart
-(refined estimates in a converging burst) and then none for 1 s. If Thread D
-just read `atomic_offset` directly, UE would see step changes on every
-update — visibly snappy.
-
-The smoother sits inside Thread D, state is private (no atomic), tick cost
+The smoother sits inside Thread D. State is private (no atomics). Tick cost
 is a handful of FLOPs.
 
+#### 6.4.1 Deadband filter — at the cold path, before seqlock write
+
+AMCL produces sub-cm jitter even when the true pose is static (SLAMTEC C1
+range noise + particle resampling variance). If every AMCL call wrote
+`target_offset`, the smoother would restart its ramp on every scan and
+`live` would hover a fraction of the way to a target that moved before the
+ramp could finish.
+
+The filter lives **in Thread C (AMCL writer)**, not the smoother, because
+AMCL knows its own noise floor and the filter should not burn hot-path
+FLOPs on data that is trivially rejectable.
+
 ```text
-State:
-    live      : Offset   current applied value
-    prev      : Offset   where the ramp started from
-    target    : Offset   latest AMCL-computed value
-    t_start   : time     when the current ramp began
-    T_ramp    : const    default 500 ms (configurable)
+Cold path, after AMCL produces pose estimate `new`:
 
-On each Thread D tick(now, target_new):
-    if target_new ≠ target:
-        prev    ← live          # restart ramp from wherever we are now
-        target  ← target_new
-        t_start ← now
+    if |new.dx  − last_written.dx|   < DEADBAND_MM  AND
+       |new.dy  − last_written.dy|   < DEADBAND_MM  AND
+       shortest_arc(new.dyaw, last_written.dyaw)
+                                     < DEADBAND_DEG:
+        return                                    # noise — do nothing
 
-    frac ← clamp((now − t_start) / T_ramp, 0.0, 1.0)
-    live.dx   ← prev.dx   + (target.dx   − prev.dx)   × frac
-    live.dy   ← prev.dy   + (target.dy   − prev.dy)   × frac
-    live.dyaw ← lerp_angle(prev.dyaw, target.dyaw, frac)   # see §6.5
+    target_offset.store(new)                      # seqlock write (§6.1.1)
+    last_written ← new                            # Thread-C-local, no atomic
 ```
 
-Why **linear ramp** over EMA / rate-limit:
+Constants (see §11):
+
+| Constant | Default | Rationale |
+| --- | --- | --- |
+| `DEADBAND_MM` | 10.0 mm (1 cm) | Matches CLAUDE.md §1 accuracy target floor; below the 1–2 cm UE-visible envelope. |
+| `DEADBAND_DEG` | 0.1° | ≈ 2× the tilt-survey threshold 0.057° at `R_max = 10 m`; wide enough that tilt micro-oscillation does not fight the smoother, narrow enough that a real base-rotation is still caught. |
+
+Forced-accept path: when `calibrate_requested` was consumed this scan
+(§6.1.3), the filter is **bypassed** — the operator explicitly asked for
+a new fix, so whatever AMCL produces is authoritative even if within the
+deadband. Implementation: pass `force=true` into the cold-path writer
+after `calibrate_requested.exchange(false) == true`.
+
+#### 6.4.2 Hot-path smoother tick — generation-based edge
+
+`target` equality on floats cannot be used to detect a new update
+(floating-point drift would fire every tick). The smoother uses the
+seqlock **generation counter** (§6.1.1), which is an integer, exact.
+
+```text
+State (Thread-D-local, no atomics):
+    live     : Offset   current applied value
+    prev     : Offset   where the current ramp started from
+    target   : Offset   copy of the target from the latest-seen generation
+    target_g : uint64   generation that 'target' was loaded at
+    t_start  : int64_t  CLOCK_MONOTONIC ns at which the current ramp began
+
+Initialization (before the first tick):
+    live = prev = target = {0, 0, 0}
+    target_g = 0            # any non-zero first-seen gen triggers ramp start
+    t_start  = -∞           # ensures first post-init gen bump starts a ramp
+
+On each Thread D tick(target_new, gen_new, now_ns):
+    if gen_new != target_g:                       # genuinely new write
+        prev      ← live                          # start from where we are
+        target    ← target_new
+        target_g  ← gen_new
+        t_start   ← now_ns
+
+    if (now_ns - t_start) >= T_ramp_ns:           # SNAP at frac >= 1.0
+        live ← target                             # value-copy, exact
+    else:
+        frac       ← (now_ns - t_start) / T_ramp_ns   # float ∈ [0, 1)
+        live.dx    ← prev.dx + (target.dx - prev.dx) × frac
+        live.dy    ← prev.dy + (target.dy - prev.dy) × frac
+        live.dyaw  ← lerp_angle(prev.dyaw, target.dyaw, frac)   # §6.5
+```
+
+Two things the v2 spec got wrong that this fixes:
+
+1. **Ramp completion**: `(now - t_start) >= T_ramp_ns` triggers an explicit
+   `live ← target` value-copy. No float round-off in the "done" path; the
+   acceptance test "no update for 10 s → `live == target` exact" now holds.
+2. **Edge detection**: Integer `gen_new != target_g` is exact. AMCL sub-cm
+   noise that was filtered by the deadband never reaches the hot path
+   anyway, but even if it did, the gen counter only increments on a
+   successful seqlock write — one per *accepted* target, not one per
+   AMCL call.
+
+#### 6.4.3 Why linear ramp over EMA / rate-limit
 
 | | Linear ramp (A, **chosen**) | First-order LPF (B) | Rate-limit slew (C) |
 | --- | --- | --- | --- |
 | Transition time | Fixed `T_ramp` — predictable | Exponential, never truly "done" | Varies with jump magnitude |
 | Tunable | 1 knob (`T_ramp`) | 1 knob (`τ`) | 1 knob (`v_max`) |
-| Behavior on rapid updates | Naturally re-targets from current live | Same | Same |
+| Rapid-update behaviour | Naturally re-targets from current live | Same | Same |
 | UE operator mental model | "changes take 0.5 s, deterministic" | Hard to reason about | Big jumps visibly slow |
 
-Rapid re-target is handled by the `prev ← live` assignment above: every new
-AMCL target starts a **fresh** ramp from the current interpolated position,
-so repeated small corrections blend cleanly into one continuous motion.
+Rapid re-target — two updates within `T_ramp` — is handled by the
+`prev ← live` assignment: each new generation starts a **fresh** ramp
+from the current interpolated position. Repeated small corrections blend
+cleanly.
 
-Acceptance tests (Phase 4):
+**What the smoother does NOT guarantee**: monotonicity under adversarial
+update sequences. If AMCL's deadband-filtered outputs genuinely
+non-monotone (true pose estimate overshoots then corrects), `live` will
+follow that non-monotone path. This is correct behaviour — the hot path
+should not second-guess what the localizer says is the best current
+estimate. The acceptance test previously listed as "monotonic toward
+final target" is dropped; see below.
 
-- [ ] Single step update: `live` reaches `target` within `T_ramp ± 1 frame`.
-- [ ] No update during 10 s: `live == target`, exact, no drift.
-- [ ] Rapid updates (5 within 50 ms): `live` path monotonic toward final
-      target, no oscillation, no overshoot.
-- [ ] Yaw wrap at 359° → 1°: `live` traverses the short arc (2° CW), not
-      the long arc (358° CCW).
+#### 6.4.4 Acceptance tests (Phase 4-1)
+
+- [ ] **Single step update**: one new generation with target = (1, 0, 0).
+      `live` reaches `target` within `T_ramp ± 1 frame`; final value
+      byte-identical via the snap path.
+- [ ] **No update during 10 s**: `live == target`, exact (value-copy),
+      no float drift.
+- [ ] **Sub-deadband AMCL noise (10 scans, |Δ| < 5 mm, < 0.05°)**: cold
+      path filters all; generation does not bump; `live` does not move.
+- [ ] **Rapid updates within T_ramp (3 distinct gens in 50 ms)**: `live`
+      smoothly interpolates; at the final gen, ramp starts fresh from
+      current `live`; reaches final `target` in `T_ramp` from that moment.
+      No overshoot, no oscillation beyond what AMCL itself emits.
+- [ ] **Yaw wrap 359° → 1°**: `live.dyaw` traverses 2° CW (short arc),
+      not 358° CCW.
+- [ ] **Forced accept under deadband**: `calibrate_requested = true` +
+      AMCL emits delta within deadband → filter bypassed, generation
+      bumps, smoother re-targets. Tests the recovery scenario in §8.
 
 ### 6.5 Yaw wrap — two named sites
 
-Legacy `XR_FreeD_to_UDP` is pure passthrough: raw 24-bit signed pan bytes
-go in one side and out the other. It never needed an explicit wrap because
-it never performed arithmetic on the angle. GODO **does** add an offset to
-pan, so we need explicit wrap in two places:
+Legacy `XR_FreeD_to_UDP` is pure passthrough (see `XR_FreeD_to_UDP/src/main.cpp:20`
+for the packet field comment; `readU24BE`/`writeU24BE` at L203–215 touch
+only zoom/focus, pan is byte-copied). That design never performs arithmetic
+on the pan value, so no wrap function was needed. GODO **does** add an
+offset to pan, so we need explicit wrap in two places:
 
-```text
-Site 1 — inside the smoother (float degrees):
-    Operates on Offset::dyaw, which is an angle difference in ℝ degrees.
+```cpp
+// Site 1 — inside the smoother (float degrees).
+// Operates on Offset::dyaw, an angle in ℝ degrees, canonical range [0, 360).
+// Precondition: |b - a| < 360 on the raw float difference. AMCL never
+// produces multi-turn deltas (it has no multi-turn concept), so this is
+// satisfied by construction. Violations are caught by the pinned test
+// `lerp_angle(0, 720, 0.5) == 0` which confirms the shortest-arc collapse.
+double lerp_angle(double a, double b, double frac) noexcept {
+    const double d = std::fmod(b - a + 540.0, 360.0) - 180.0;  // ∈ (−180, +180]
+    double y = a + d * frac;
+    y = std::fmod(y, 360.0);
+    if (y < 0.0) y += 360.0;
+    return y;  // [0, 360)
+}
 
-    double lerp_angle(double a, double b, double frac) {
-        // shortest-arc delta in (−180, +180]
-        double d = std::fmod(b - a + 540.0, 360.0) - 180.0;
-        double y = a + d * frac;
-        // normalize to [0, 360)
-        y = std::fmod(y, 360.0);
-        if (y < 0.0) y += 360.0;
-        return y;
-    }
-
-Site 2 — at FreeD pan re-encode (signed 24-bit 1/32768 deg):
-    int32_t wrap_signed24(int64_t v) {
-        // FreeD pan range: ±2^23 = ±256.0 deg (physical crane limit)
-        constexpr int64_t R = 1LL << 24;   // 16_777_216
-        constexpr int64_t H = 1LL << 23;   //  8_388_608
-        v = ((v % R) + R) % R;             // [0, R)
-        if (v >= H) v -= R;                // (−H, +H]
-        return static_cast<int32_t>(v);
-    }
+// Site 2 — at FreeD pan re-encode.
+// FreeD D1 pan field: signed 24-bit, 1/32768 deg per lsb (per FreeD D1
+// spec; legacy XR_FreeD_to_UDP comment at L20 confirms the wire format,
+// but the signedness claim is verified against the spec, NOT against the
+// legacy code which is pan-agnostic). The encoding range is ±2^23 = ±256°;
+// this is the *encoded* range, NOT a physical crane limit (SHOTOKU
+// Ti-04VR mechanical pan is typically ±170°).
+int32_t wrap_signed24(int64_t v) noexcept {
+    constexpr int64_t R = 1LL << 24;   // 16_777_216 (one full turn in lsb)
+    constexpr int64_t H = 1LL << 23;   //  8_388_608 (half turn)
+    v = ((v % R) + R) % R;             // reduce to [0, R)
+    if (v >= H) v -= R;                // fold to [−H, +H)
+    return static_cast<int32_t>(v);
+}
 ```
 
-Both are **pure functions**; both must have unit tests pinning:
+Both are **pure free functions** (not methods); this makes the unit tests
+trivial and prevents accidental re-wrapping if someone adds a
+transformation between the two sites.
 
-- [ ] `lerp_angle(359.0, 1.0, 0.5) == 0.0` (short arc, not 180.0).
-- [ ] `lerp_angle(10.0, 350.0, 0.5) == 0.0` (short arc on the other side).
-- [ ] `lerp_angle(0.0, 360.0, 0.5) == 0.0` (aliased).
-- [ ] `wrap_signed24(max_int + 1) == min_int` (rollover).
-- [ ] `wrap_signed24(x) == x` for `x ∈ [−H, H)` (identity in range).
+Pinned unit tests:
 
-Neither site mutates the underlying `Offset`; they produce the bytes that
-go out on the wire. Keeping them as free functions (not methods) makes the
-unit tests trivial and prevents accidental re-wrapping.
+`lerp_angle` (all must pass byte-identical, no `approx`):
+
+- [ ] `lerp_angle(a, a, frac) == a` for `a ∈ {0, 90, 180, 270}`, any `frac` — fixed-point identity.
+- [ ] `lerp_angle(359.0, 1.0, 0.0) == 359.0` — endpoint at `frac=0`.
+- [ ] `lerp_angle(359.0, 1.0, 1.0) == 1.0` — endpoint at `frac=1`.
+- [ ] `lerp_angle(359.0, 1.0, 0.5) == 0.0` — short arc, not 180.
+- [ ] `lerp_angle(10.0, 350.0, 0.5) == 0.0` — short arc on the other side.
+- [ ] `lerp_angle(0.0, 360.0, 0.5) == 0.0` — aliased endpoints.
+- [ ] `lerp_angle(0.0, 720.0, 0.5) == 0.0` — documents the `|b - a| < 360`
+      precondition: a 720° delta collapses to 0° shortest-arc.
+
+`wrap_signed24`:
+
+- [ ] Identity in range: `wrap_signed24(x) == x` for `x ∈ {−H, −1, 0, 1, H−1}`.
+- [ ] Upper edge: `wrap_signed24(H) == −H` (H is outside the canonical range).
+- [ ] Rollover: `wrap_signed24(H + 1) == −H + 1`.
+- [ ] Negative rollover: `wrap_signed24(−H − 1) == H − 1`.
+- [ ] Idempotence: `wrap_signed24(wrap_signed24(v)) == wrap_signed24(v)` for
+      any `v ∈ [−2^30, 2^30)`.
 
 ---
 
@@ -519,32 +762,71 @@ unit tests trivial and prevents accidental re-wrapping.
 
 **Phase 4-1 — RT hot path only** (no LiDAR dependency yet)
 
-- [ ] `freed_reader` (serial + parser).
-- [ ] `offset_smoother` (linear ramp, §6.4) + unit tests.
-- [ ] `yaw_wrap` utilities (`lerp_angle`, `wrap_signed24`, §6.5) + unit tests.
-- [ ] `udp_sender` (RT 59.94 fps, §6.2).
-- [ ] End-to-end replay test: canned FreeD + synthetic offset steps → UDP
-      capture on loopback → byte-identity vs. expected trajectory.
-- [ ] p99 jitter measurement (< 200 µs target).
+- [ ] `core/constants.hpp` + `core/config.{hpp,cpp}` (§11).
+- [ ] `core/rt.hpp` — `Offset`, `FreedPacket`, `Seqlock<T>` (§6.1.1).
+- [ ] `core/time.hpp` — `monotonic_ns()` (§6.1.2).
+- [ ] `freed/` — serial reader + D1 parser + tests (canned-packet fixture
+      committed under `tests/fixtures/freed_packets/`; byte sequences are
+      captured from the legacy Arduino once and frozen).
+- [ ] `smoother/` — linear ramp with gen-based edge + snap (§6.4) + tests
+      (all six acceptance tests from §6.4.4).
+- [ ] `yaw/` — `lerp_angle`, `wrap_signed24` (§6.5) + pinned tests.
+- [ ] `udp/` — RT sender (§6.2), `SCHED_FIFO`, CPU-pinned, `mlockall` in
+      `main()`.
+- [ ] End-to-end replay test: scripted fixture generator produces a
+      canned FreeD packet stream and a scripted offset-step sequence; a
+      loopback receiver captures UDP; expected trajectory is compared
+      byte-for-byte. Fixture definition lives in
+      `tests/fixtures/phase4_replay.toml`.
+- [ ] Jitter measurement harness — measures **actual** p99 on the target
+      host. The 200 µs target in CLAUDE.md is a design goal, not a
+      verified baseline; the harness's first job is to establish what
+      this RPi 5 + `godo-tracker` actually delivers so later regression
+      tests have a number to defend.
 
 **Phase 4-2 — Cold path + integration**
 
-- [ ] `lidar_source_rplidar` (reuse from `godo_smoke`).
-- [ ] `amcl_localizer` (port from Phase 2 Python reference).
-- [ ] Atomic `target_offset` wiring; hot path reads it.
-- [ ] Trigger wiring: GPIO button + `calibrate_now` HTTP endpoint (served
-      by the `godo-webctl` process below).
+- [ ] `lidar/` — reuse from `godo_smoke`, promoted out of the smoke
+      binary's source tree.
+- [ ] `localization/` — port AMCL from Phase 2 Python reference.
+- [ ] Cold-path deadband filter (§6.4.1) in the AMCL post-processor.
+- [ ] `seqlock` wiring: Thread C writes `target_offset`, Thread D reads.
+- [ ] Trigger wiring: GPIO button + UDS command `calibrate_now` from
+      `godo-webctl`, both `store(true)` into `calibrate_requested` (§6.1.3).
 - [ ] systemd unit + watchdog wiring.
 - [ ] Document the Arduino rollback procedure.
 
-**Phase 4-3 — Control plane (`godo-webctl`, separate process)**
+**Phase 4-3 — Control plane `godo-webctl` (MINIMAL viable)**
 
-- [ ] FastAPI app: `/health`, `/map/backup`, `/map/edit` (remove moving
-      fixtures), `/map/update`, `/calibrate`.
-- [ ] Unix domain socket IPC to `godo-tracker` (JSON-lines commands).
-- [ ] Static pages: status dashboard, map editor UI (OpenCV + numpy on
-      the Python side — the tracker binary is never involved in editing).
-- [ ] systemd unit, reverse-proxied behind nginx for LAN access.
+Scope cut deliberately: three endpoints needed for day-to-day operation.
+Everything else (map editing, config editing, richer UI) is Phase 4.5 or
+Phase 5.
+
+- [ ] `app/features/health/` — `GET /api/health` (tracker status snapshot
+      via UDS).
+- [ ] `app/features/calibration/` — `POST /api/calibrate` (sends
+      `calibrate_now` to tracker).
+- [ ] `app/features/backup/` — `POST /api/map/backup` (tarballs `map.pgm +
+      map.yaml` with a timestamp into `/var/lib/godo/backups/`).
+- [ ] `app/infra/tracker_client.py` — UDS JSON-lines client.
+- [ ] `app/core/config.py` — Pydantic Settings, reads `/etc/godo/tracker.toml`.
+- [ ] systemd unit `godo-webctl.service`; `After=godo-tracker.service`,
+      `Wants=godo-tracker.service`; `RuntimeDirectory=godo` so the UDS
+      socket path is cleaned on crash (see §8).
+- [ ] Static index page listing the three endpoints (no framework; a
+      single HTML file is sufficient for 4-3).
+
+**Phase 4.5 — Control plane extensions (defer until Phase 5 reveals need)**
+
+- [ ] `/api/config` GET/PATCH with reload-class classification (§11).
+- [ ] `/api/map/edit` — remove moving fixtures from the PGM (numpy/OpenCV
+      on the Python side). Requires a client-side editor; architecture to
+      be designed when the React frontend lands.
+- [ ] `/api/map/update` — rebuild the map after a studio change; likely
+      triggers a docker-based re-mapping workflow rather than inline
+      editing.
+- [ ] Frontend framework choice (React vs plain HTML + htmx); decided
+      when 4.5 starts.
 
 ### Phase 5 — field integration
 
@@ -567,8 +849,9 @@ unit tests trivial and prevents accidental re-wrapping.
 | Suspected base rotation | LiDAR yaw jumps | Set UDP warning flag + log | Realign wheels |
 | RPi 5 hard failure | System down | — | Cable-swap to Arduino rollback |
 | Map corruption | AMCL fails to start | Restore map from git | Rebuild map |
-| AMCL produces huge offset jump | Hot path smoother drives UE through a wide arc over `T_ramp` | Clamp `|target − live|` at a sanity limit (e.g., 2 m, 10°); refuse updates beyond that, log `amcl_divergence` | Re-trigger calibration |
-| `godo-webctl` crash | API unreachable; tracker unaffected | systemd restart | Check logs |
+| AMCL produces huge offset jump (non-triggered) | Hot path would ramp UE through a wide arc over `T_ramp` | Clamp **new AMCL delta vs. `last_written` target** (NOT vs. `live`) at a sanity limit (default 2 m / 10°, configurable). Refuse, log `amcl_divergence`, emit an SSE event to `godo-webctl`. Comparing against `last_written` means a smoothing lag does not trigger false rejections | Press Calibrate — this sets `calibrate_requested = true`, which **bypasses** the clamp (§6.4.1 forced-accept path) so kidnapped-recovery always works |
+| `godo-webctl` crash | API unreachable; tracker unaffected | systemd restart; UDS socket lives under `RuntimeDirectory=godo` so the stale socket file is cleaned automatically on service stop | Check logs |
+| `godo-tracker` crash before `godo-webctl` | HTTP endpoints return 503 (tracker_client UDS connect fails) | `godo-webctl` systemd unit has `After=godo-tracker.service` + `Wants=godo-tracker.service`; webctl retries connect on each request; health check shows `tracker_offline` | Investigate tracker logs |
 | FreeD pan wrap at ±256° | `wrap_signed24` must handle overflow cleanly | Covered by pinned unit tests (§6.5) | — |
 
 ---
@@ -707,8 +990,136 @@ Both directories are gitignored; only `.gitkeep` is committed.
 
 ---
 
-## 11. Change log
+## 11. Runtime configuration
 
+Constants live in two tiers; mixing them is the root cause of "magic
+number" bugs and cross-host drift.
+
+### 12.1 Tier 1 — compile-time invariants (`core/constants.hpp`)
+
+Values that can never change without a protocol or algorithmic
+reinterpretation. `constexpr` in a header, included anywhere.
+
+```cpp
+namespace godo::constants {
+
+// FreeD D1 protocol — pinned by the wire format, not tunable.
+inline constexpr int      FREED_PACKET_LEN = 29;
+inline constexpr double   FREED_PAN_Q      = 1.0 / 32768.0;   // deg per lsb
+
+// SLAMTEC C1 sample decoding — pinned by the SDK.
+inline constexpr double   RPLIDAR_Q14_DEG  = 90.0 / 16384.0;
+inline constexpr double   RPLIDAR_Q2_MM    = 1.0 / 4.0;
+
+// Hot-path cadence — pinned by UE's 59.94 fps project standard.
+inline constexpr double   FRAME_RATE_HZ    = 60000.0 / 1001.0;
+inline constexpr int64_t  FRAME_PERIOD_NS  = 16'683'350;
+
+}  // namespace godo::constants
+```
+
+Rule: any change requires a major version bump and coordinated downstream
+update (UE project file, legacy Arduino rollback etc.).
+
+### 12.2 Tier 2 — runtime-tunable (`Config`, TOML-backed)
+
+Values that operators change per-host or per-operating-condition. Defaults
+live in `core/config_defaults.hpp` as `constexpr`; effective values are
+loaded from `/etc/godo/tracker.toml` at tracker startup, with an env-var
+override layer underneath.
+
+```cpp
+namespace godo::config::defaults {
+
+// Network.
+inline constexpr std::string_view UE_HOST          = "192.168.0.0";  // TBD
+inline constexpr int              UE_PORT          = 6666;
+
+// Serial devices.
+inline constexpr std::string_view LIDAR_PORT       = "/dev/ttyUSB0";
+inline constexpr int              LIDAR_BAUD       = 460'800;
+inline constexpr std::string_view FREED_PORT       = "/dev/ttyACM0";
+inline constexpr int              FREED_BAUD       = 38'400;
+
+// Smoother & deadband (§6.4).
+inline constexpr int64_t          T_RAMP_NS        = 500'000'000;   // 500 ms
+inline constexpr double           DEADBAND_MM      = 10.0;          // 1 cm
+inline constexpr double           DEADBAND_DEG     = 0.1;
+inline constexpr double           DIVERGENCE_MM    = 2000.0;        // §8
+inline constexpr double           DIVERGENCE_DEG   = 10.0;
+
+// RT scheduling.
+inline constexpr int              RT_CPU           = 3;
+inline constexpr int              RT_PRIORITY      = 50;
+
+// IPC.
+inline constexpr std::string_view UDS_SOCKET       = "/run/godo/ctl.sock";
+
+}  // namespace godo::config::defaults
+```
+
+Example `/etc/godo/tracker.toml`:
+
+```toml
+[network]
+ue_host = "10.1.2.3"
+ue_port = 6666
+
+[serial]
+lidar_port = "/dev/ttyUSB0"
+freed_port = "/dev/ttyACM0"
+
+[smoother]
+t_ramp_ms   = 500
+deadband_mm = 10.0
+deadband_deg = 0.1
+
+[rt]
+cpu      = 3
+priority = 50
+
+[ipc]
+uds_socket = "/run/godo/ctl.sock"
+```
+
+### 12.3 Reload classes — frontend editability
+
+Every Tier-2 key is classified by **what it takes to apply a change**.
+The classification is surfaced through `GET /api/config` (Phase 4.5) so a
+future React settings page can show the right UX ("applied immediately"
+vs "restart required" vs "recalibration required").
+
+| Reload class | Meaning | Keys |
+| --- | --- | --- |
+| `hot` | Tracker applies on the next hot-path tick (≤ 16.7 ms). No restart. | `ue_host`, `ue_port`, `t_ramp_ms`, `deadband_mm`, `deadband_deg`, `divergence_mm`, `divergence_deg` |
+| `restart` | Requires `systemctl restart godo-tracker`. | `lidar_port`, `lidar_baud`, `freed_port`, `freed_baud`, `rt_cpu`, `rt_priority`, `uds_socket` |
+| `recalibrate` | Hot-reload + forced calibrate (sets `calibrate_requested`). | `map_path`, `origin_x`, `origin_y` |
+
+Implementation flow (deferred to Phase 4.5):
+
+1. Webctl `PATCH /api/config` writes the merged TOML to disk.
+2. Webctl sends `reload_config` over UDS.
+3. Tracker re-loads the TOML, bucketises the diff by class, applies what
+   it can, reports what it can't back over UDS.
+4. Response body lists `applied`, `needs_restart`, `needs_recalibrate`.
+5. Frontend surfaces this as coloured badges next to each field.
+
+### 12.4 Magic-number ban — code review rule
+
+Numeric literals in `src/` require one of:
+
+- (a) a `constexpr` in `core/constants.hpp` (Tier 1), or
+- (b) a field of `core::Config` (Tier 2) with a default in `core/config_defaults.hpp`, or
+- (c) a local iteration / indexing bound (`for (int i = 0; i < v.size(); ++i)`).
+
+Anything else is a code-review block. This is added to CLAUDE.md §6
+Golden Rules at the same commit that introduces `core/constants.hpp`.
+
+---
+
+## 12. Change log
+
+- **2026-04-24 (v3, post Mode-A review)**: five blocker-level findings addressed: (1) `std::atomic<T>` replaced with an explicit `Seqlock<T>` template (§6.1.1) — `Offset = {dx, dy, dyaw}` and `FreedPacket[29]` are both too wide for lock-free atomics on Cortex-A76 without LSE2. Multi-reader permitted (Thread D + webctl). (2) Smoother edge detection switched from float equality to seqlock **generation counter** (integer, exact), and ramp completion snaps `live ← target` by value-copy at `frac ≥ 1.0` (§6.4.2). (3) Phase 4-3 scope cut to three endpoints (`/health`, `/map/backup`, `/calibrate`); map editor + full React frontend moved to Phase 4.5 (§7). (4) Trigger IPC primitive unified across CLAUDE.md / §1 / §6.1.3 / §7 as `std::atomic<bool> calibrate_requested` (idempotent, queue upgrade path documented). (5) AMCL divergence clamp now compares `target_new` against `last_written` (not `live`), and explicit `calibrate_requested` bypasses the clamp — eliminates the kidnapped-recovery deadlock (§8). Additional: §6.1.2 time source pinned to `CLOCK_MONOTONIC`; §6.2 moves `mlockall` to `main()` before thread spawn, `g_running` is `std::atomic<bool>`, `clock_nanosleep` loops on `EINTR`, signals blocked process-wide; §6.3 IRQ list marked TBD-measure in Phase 4-1; §6.4.1 new cold-path deadband filter (10 mm / 0.1° default) suppresses sub-noise AMCL jitter; §6.5 removes the bogus "physical crane limit" comment, adds precondition docs + endpoint-identity / fixed-point unit tests; §11 new Runtime configuration section with two-tier constants (constexpr invariants + TOML-backed tunables) and reload classes (hot / restart / recalibrate) for future frontend editing; §12 renumbered from §11. Magic-number ban added as a code-review rule.
 - **2026-04-24**: §1 key-decisions table gains 5 rows (hot/cold split, smoother, yaw wrap, trigger UX, web plane). §6 restructured: §6.1 hot/cold boundary, §6.2 thread D skeleton (now reads target via smoother), §6.3 ops checklist, §6.4 linear-ramp smoother with A/B/C comparison and acceptance tests, §6.5 yaw wrap at two named sites with pinned unit tests. §7 Phase 4 split into 4-1/4-2/4-3. §8 gains 3 new failure rows (AMCL divergence, webctl crash, pan wrap). Q6 (trigger UX) resolved. RPi 5 hardware bring-up proven: 500-frame capture × 3 iterations, 10.02 Hz steady, byte-identical Python parity. Smoother method A chosen over EMA / rate-limit on predictability grounds. `godo-webctl` scoped as a separate FastAPI process, never inside the RT binary.
 - **2026-04-21 (later)**: added §10 — Phase 1 Python prototype tools, two-backend (SDK-wrapper vs Non-SDK) framework, library plan, dump format, and test sequence. SDK-wrapper uses `pyrplidar` with explicit caveat; official-SDK `ultra_simple` three-way comparison deferred as a Phase 1 follow-up. scikit-learn removed (threshold check suffices). CSV write path pinned to stdlib `csv.writer`. Session-txt log gains `csv_sha256` / `csv_byte_count`.
 - **2026-04-21**: initial version. Decisions locked: yaw Approach B, O3 → O4 hybrid, Docker-based map building, RPi 5 FreeD integration, C++ production.

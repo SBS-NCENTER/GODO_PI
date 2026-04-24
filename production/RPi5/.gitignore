@@ -3,6 +3,9 @@ build/
 compile_commands.json
 CMakeUserPresets.json
 
+# Editor tooling caches
+.cache/
+
 # Smoke-run outputs (data dumps + session logs)
 out/*/
 !out/.gitkeep

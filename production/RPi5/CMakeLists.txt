@@ -57,8 +57,23 @@ endif()
 # rplidar_sdk submodule — built with its own Makefile, imported as a static lib.
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/rplidar_sdk.cmake)
 
+# tomlplusplus submodule — header-only TOML parser (Phase 4-1 config loader).
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/tomlplusplus.cmake)
+
 # -----------------------------------------------------------------------------
 # Targets
 # -----------------------------------------------------------------------------
+# Phase 3 smoke binary (unchanged).
 add_subdirectory(src/godo_smoke)
+
+# Phase 4-1 RT hot-path modules.
+add_subdirectory(src/core)
+add_subdirectory(src/yaw)
+add_subdirectory(src/smoother)
+add_subdirectory(src/freed)
+add_subdirectory(src/udp)
+add_subdirectory(src/rt)
+add_subdirectory(src/godo_jitter)
+add_subdirectory(src/godo_tracker_rt)
+
 add_subdirectory(tests)

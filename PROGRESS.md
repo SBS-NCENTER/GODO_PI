@@ -13,9 +13,12 @@
 
 ## Current phase
 
-**Phase 1 — Data normalization (Python prototype)**: scaffold ready, awaiting empirical measurements.
+**Phase 4-1 — RT hot path closeout → Phase 4-2 entry**. The code landed 2026-04-24 (16/16 hardware-free tests green, Mode-B APPROVE-WITH-NOTES plus a follow-up cleanup commit `49f874d`). The remaining Phase 4-1 work is host-side: run `scripts/setup-pi5-rt.sh`, apply the FreeD wiring + boot-config per `production/RPi5/doc/freed_wiring.md`, re-measure `godo_jitter` with RT privileges, and verify an end-to-end run against a loopback UDP listener. After those pass, Phase 4-2 (LiDAR + AMCL + cold-path deadband) becomes the active phase.
 
-Previous phase: Phase 0 (RPLIDAR C1 deep dive) completed on 2026-04-20.
+Earlier phases:
+- Phase 0 (RPLIDAR C1 deep dive) completed 2026-04-20.
+- Phase 1 (Python prototype) scaffolded 2026-04-22; several empirical measurements are still open (see Next up). Hardware-free gates of `godo_smoke` indirectly cover the "is the C1 healthy on RPi 5" question through live bring-up 2026-04-24.
+- Phase 3 (RPi 5 C++ scaffold + `godo_smoke`) completed 2026-04-23.
 
 ---
 
@@ -65,33 +68,74 @@ See [RPLIDAR/RPLIDAR_C1.md](./doc/RPLIDAR/RPLIDAR_C1.md) for the supporting evid
 
 ## Next up
 
-### Phase 1 action items (empirical)
+### Phase 4-1 closeout (host-side, no further code needed)
 
-1. **SHOTOKU FreeD Pan semantics validation (optional)** — rotate the pedestal 90° and observe FreeD Pan. User testimony already resolves this, but a physical confirmation is cheap.
-2. ~~**Python project scaffolding**~~ — **done 2026-04-21**; see `/prototype/Python/` (SDK-wrapper + Non-SDK backends, CSV+TXT dump, two CLI scripts, 29 unit tests green).
-3. **Hardware smoke capture (1차 priority)** — plug the C1 in via the CP2102 adapter, run `uv run python scripts/capture.py --backend sdk --port COMn --frames 100 --tag smoke_sdk` and `--backend raw --tag smoke_raw` back-to-back at the same static position. Verify `data/*.csv` + `logs/*.txt` are produced. Then `uv run python scripts/analyze.py --mode compare --csv <sdk.csv> --other-csv <raw.csv> --out out/` for the side-by-side.
-4. **Noise characterization (2차 priority)** — `--mode noise` on a 100+ frame dump per backend; per-direction variance, √N verification.
-5. **Retro-reflector distinguishability test** — 3M retro-reflective tape (or bike reflectors) at distances 0.5 / 2 / 5 / 10 m, angles 0 / 30 / 45 / 60 / 75°. Thresholds to check: marker quality ≥ 200, background ≤ 100. Decides whether O4 is viable.
-6. **Chroma-wall NIR reflectivity measurement** — verify effective range of C1 against the green / blue walls.
-7. **Official C++ SDK three-way comparison (Phase 1 follow-up)** — scaffold landed 2026-04-23 at `/production/RPi5/` as the `godo_smoke` binary + three-way workflow doc. The RPLIDAR SDK submodule is pinned at SHA `99478e5f…36869`; `scripts/build.sh` builds + runs the hardware-free test gate including byte-identity CSV parity against the Python prototype (`test_csv_parity`, `uv run`). Remaining work is the physical capture: plug the C1 into the RPi 5, run `scripts/run-pi5-smoke.sh`, then run `ultra_simple` and the two Python backends at the same static position, and diff the four CSVs per `production/RPi5/doc/smoke.md`. Resolves the "`pyrplidar` is unofficial for C1" caveat documented in SYSTEM_DESIGN.md §10.1.
-8. **Floor tilt survey at TS5 (Phase 1 measurement)** — inclinometer sweep across the crane movable area on a hybrid 0.25 m (dense) / 0.5 m (coarse) grid; measure and record max_tilt, mean_tilt, and 2D heatmap; also record the "LiDAR to farthest AMCL-confident wall" distance as an empirical R_max. Decides which mount tier the leveling design must target. See `/doc/hardware/floor_tilt_survey_TS5.md`.
-9. **Leveling mount design review (Phase 1 decision gate)** — apply the budget-driven threshold table (R_max = 10 m default, ε_target = 10 mm, Tier 1 ≤ 0.06°, gray 0.06°–0.12°, Tier 2 > 0.12°) to item #8's result. Choose between (a) passive bubble-level + shim and (b) 2-axis active gimbal. Document yaw-lock risk, acceptance test, and reflect the outcome into `SYSTEM_DESIGN.md §1` and `§8`. See `/doc/hardware/leveling_mount.md`.
+1. **Run `scripts/setup-pi5-rt.sh` on the RPi 5 as root** — applies `setcap cap_sys_nice,cap_ipc_lock+ep` to `godo_tracker_rt` and `godo_jitter`, appends `@godo - rtprio 99` + `@godo - memlock unlimited` to `/etc/security/limits.conf` (idempotent), verifies `dialout` group membership on the user running the tracker.
+2. **Apply the FreeD wiring + boot config** per `production/RPi5/doc/freed_wiring.md`:
+   - YL-128 VCC → Pi 3V3 (pin 1), GND → pin 6, TXD → pin 10 (GPIO15 / UART0 RX); RXD unused.
+   - `/boot/firmware/config.txt`: `enable_uart=1`, `dtparam=uart0=on`.
+   - `/boot/firmware/cmdline.txt`: remove `console=serial0,115200`.
+   - Reboot; `stty -F /dev/ttyAMA0 38400 parenb parodd cs8 -cstopb` must succeed.
+3. **Re-measure `godo_jitter` with RT privileges** — `scripts/run-pi5-jitter.sh --duration-sec 60 --cpu 3 --prio 50`. Record p50/p95/p99/max in a new `test_sessions/TS<N>/jitter_summary.md` and amend PROGRESS.md. This is the baseline that will be compared against the SYSTEM_DESIGN.md p99 < 200 µs design goal in Phase 5.
+4. **End-to-end verification** — launch `godo_tracker_rt` and a loopback `tcpdump -i any -n udp port 6666 -X` listener; confirm FreeD packets flow at ~60 Hz with non-zero Pan/X/Y after the stub cold writer fires its canned offset.
+5. **IRQ inventory** — fill in `production/RPi5/doc/irq_inventory.md` by enumerating xHCI and eth IRQs on the target (`grep -E "xhci|eth" /proc/interrupts`) and proposing `smp_affinity_list` values that keep CPU 3 clean.
 
-### Phase 2 preparations (after Phase 1 results)
+### Phase 4-2 — cold path + integration (queued)
 
-- **Gated on item 9.2**: do not start map building until the leveling mount is selected and assembled.
-- Define the Docker image for map building (`Dockerfile.mapping`, optional `docker-compose.yml`).
-- Build the studio map once and commit it.
-- Start the C++ AMCL implementation.
+- Promote `src/godo_smoke/lidar_source_rplidar` to a reusable `src/lidar/` component (keep `godo_smoke` binary intact as a bring-up tool).
+- Port AMCL from the Phase 2 Python reference to `src/localization/`. Add `libeigen3-dev` to the apt prereqs.
+- Implement the **cold-path deadband filter** (SYSTEM_DESIGN.md §6.4.1) in Thread C: drop new poses within ±10 mm / ±0.1° of `last_written` unless `calibrate_requested` bypasses the filter.
+- Wire the real cold-path writer into `godo_tracker_rt/main.cpp`, replacing the `// TODO(phase-4-2)` stub thread.
+- systemd unit `godo-tracker.service` with `Type=simple`, `Restart=on-failure`, `CPUAffinity=0-3`, `CPUSchedulingPolicy=fifo`, `CPUSchedulingPriority=50`.
+- Hardware watchdog wiring: `/etc/systemd/system.conf` → `RuntimeWatchdogSec=10s`.
+- Document the Arduino rollback procedure (README + operator card).
+
+### Phase 4-3 — `godo-webctl` minimal (queued, separate process)
+
+- New top-level directory `/godo-webctl/` with `pyproject.toml` (UV).
+- Three endpoints: `/api/health`, `/api/calibrate`, `/api/map/backup`.
+- Unix-domain-socket JSON-lines client to the tracker (`/run/godo/ctl.sock`).
+- systemd unit `godo-webctl.service` with `After=godo-tracker.service`, `Wants=godo-tracker.service`, `RuntimeDirectory=godo` (auto-cleans the UDS on crash).
+- Single static `index.html` status page (no framework — React lands in Phase 4.5).
+
+### Phase 4.5 — control-plane extensions (deferred to after Phase 5 field pass)
+
+- `/api/config` GET/PATCH with the reload-class table (hot / restart / recalibrate) from SYSTEM_DESIGN.md §11.3.
+- `/api/map/edit` — numpy/OpenCV-based editor for removing moving fixtures from the PGM.
+- `/api/map/update` — trigger the Docker re-mapping workflow.
+- React frontend with a settings page that exposes the `hot`-class tunables live.
+- **Currently in Phase 4-1 state**: `test_rt_replay` narrows byte-for-byte assertion to type byte + cam_id + checksum because the stub cold writer is timing-non-deterministic. Phase 4-2's real AMCL writer makes the full-byte assertion practical — tighten the test there.
+
+### Phase 5 — field integration (queued)
+
+- In-studio integration with the crane + RPi 5 + Unreal Engine.
+- Long-run stability test (≥ 8 h).
+- Jitter comparison: post-`setup-pi5-rt.sh` RPi 5 numbers vs the legacy Arduino numbers (must measure the Arduino on the same bench).
+- Operator's manual (bring-up sequence, daily preflight, triggers, rollback).
+
+### Phase 1 items still pending (measurement, held)
+
+- **Retro-reflector distinguishability test** — 3M tape at 0.5/2/5/10 m, angles 0/30/45/60/75°; thresholds marker Q ≥ 200, background ≤ 100. Decides whether O4 marker layer is viable.
+- **Chroma-wall NIR reflectivity** — verify C1 effective range against the green / blue walls.
+- **Floor tilt survey at TS5** — held by user 2026-04-24 pending studio access. Methodology ready at `doc/hardware/floor_tilt_survey_TS5.md`; leveling-mount decision gate depends on the result (`doc/hardware/leveling_mount.md`).
+- **Noise characterization** — `uv run python scripts/analyze.py --mode noise` on 100+ static frames, per-direction variance, √N rule verification. Low priority now that the 3-way comparison (Phase 3 / 4-1 bring-up) has established the C1 behaves per spec on the RPi 5.
 
 ### Open questions (blockers)
 
-- **Q6**: trigger UX (physical button vs. network command) — resolved in Phase 3.
-- **Q7**: **resolved on 2026-04-21** — RPi 5 C++ binary receives FreeD, merges the offset, and sends UDP. The Arduino is kept as a rollback card.
+- **Q6**: **resolved 2026-04-24** — trigger UX is both physical GPIO button + HTTP POST via `godo-webctl`, converging on a single `std::atomic<bool> calibrate_requested` primitive. See SYSTEM_DESIGN.md §6.1.3.
+- **Q7**: **resolved 2026-04-21** — RPi 5 C++ binary receives FreeD, merges the offset, and sends UDP. Arduino retained as a rollback card.
+- None open.
 
 ---
 
 ## Session log
+
+### 2026-04-24 (close)
+
+- **Mode-B review of the Phase 4-1 implementation** (commits `f28abe7..72f4c28`) returned **APPROVE-WITH-NOTES**: no must-fixes, four bounded should-fix items. All four folded into follow-up commit `49f874d`: (S1) `yaw::wrap_signed24` header comment now documents the dual use at pan re-encode AND X/Y re-encode (both protocol-mandated ±2^23 lsb folds); (S2) `freed::SerialReader` gates `O_NONBLOCK` on the `tcsetattr`-failure (PTY) path only — real PL011 ttys keep the blocking `read()` + VTIME=1 profile so production jitter is not perturbed by a userspace 10 ms nap; (S3) new deviation #5 in `production/RPi5/CODEBASE.md` documents that `test_rt_replay` narrows the plan's byte-for-byte UDP assertion to type + cam_id + checksum (the stub cold writer's phase is timing-dependent; Phase 4-2's real AMCL writer will make full-byte parity practical); (S4) magic literals `1000.0`, `64.0`, `32768.0` in `apply_offset_inplace` replaced with new derived constants `FREED_POS_LSB_PER_M` and `FREED_PAN_LSB_PER_DEG` in `core/constants.hpp`.
+- **Nice-to-haves applied** in the same cleanup: `main.cpp` now uses the 3-arg POSIX `main(argc, argv, envp)` signature (drops the redundant `extern char** environ;`); startup stanza now matches SYSTEM_DESIGN.md §6.2 ordering (`mlockall` → `block_all_signals_process` → `setlocale`) so spec and code stay in lockstep.
+- **Push**: all eight commits of the day shipped to `origin/main` at `SBS-NCENTER/GODO_PI`: `8363465 .. 49f874d` (the final commit is the Mode-B cleanup; `origin/main` is at `49f874d`).
+- **New hardware reference directory** `/doc/hardware/RPi5/` with the official Raspberry Pi 5 product brief, mechanical drawing, RP1 peripherals manual, and the UART connector spec (all fetched from `pip.raspberrypi.com`). The full Pi 5 schematic is **not public** (unlike every prior Pi model); the product brief + RP1 peripherals cover every interface GODO touches. A condensed 40-pin pinout with GODO wiring notes lives in `doc/hardware/RPi5/README.md` for quick reference.
 
 ### 2026-04-24 (late)
 
@@ -170,5 +214,8 @@ See [RPLIDAR/RPLIDAR_C1.md](./doc/RPLIDAR/RPLIDAR_C1.md) for the supporting evid
 - Project guide: [CLAUDE.md](./CLAUDE.md)
 - **End-to-end design**: [SYSTEM_DESIGN.md](./SYSTEM_DESIGN.md)
 - RPLIDAR C1 specs & analysis: [RPLIDAR/RPLIDAR_C1.md](./doc/RPLIDAR/RPLIDAR_C1.md)
+- **Raspberry Pi 5 hardware reference**: [doc/hardware/RPi5/README.md](./doc/hardware/RPi5/README.md) — 40-pin pinout, GODO wiring (YL-128 → UART0), and the official Pi 5 PDFs in `sources/`.
+- **Phase 4-1 FreeD wiring**: [production/RPi5/doc/freed_wiring.md](./production/RPi5/doc/freed_wiring.md) — authoritative pin-by-pin + boot config + verification procedure.
+- **Session history (Korean)**: [doc/history.md](./doc/history.md) — date-organized session summaries for human readers.
 - Embedded reliability checklist: [Embedded_CheckPoint.md](./doc/Embedded_CheckPoint.md)
 - Legacy asset (now inside the repo): [/XR_FreeD_to_UDP/](./XR_FreeD_to_UDP/) — Arduino R4 WiFi FreeD→UDP converter. Serves as a FreeD D1 protocol reference and a rollback card. Its functionality is being absorbed by the RPi 5 binary.

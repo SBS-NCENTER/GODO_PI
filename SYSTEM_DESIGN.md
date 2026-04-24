@@ -532,6 +532,21 @@ Notes pinned by the skeleton:
       `production/RPi5/doc/irq_inventory.md`.
 - [ ] `sudo systemctl disable ondemand`; `cpupower frequency-set -g performance`.
 - [ ] Hardware watchdog: `/etc/systemd/system.conf` → `RuntimeWatchdogSec=10s`.
+- [ ] **FreeD serial wiring — PL011 UART0 on 40-pin header**. FreeD
+      arrives as RS-232 ±12 V from the SHOTOKU crane; a YL-128 (MAX3232)
+      converts it to 3.3 V TTL. The YL-128 **must** be powered from the
+      Pi's 3V3 rail (pin 1 or 17) — NOT 5 V — so both sides of the link
+      are 3.3 V CMOS with clean noise margins. Resistor dividers on the
+      RX line are NOT used; they erode the VIH/VIL margins and have
+      caused intermittent framing errors on prior Arduino R4 builds.
+      Wiring: YL-128 TXD → Pi GPIO 15 (pin 10, UART0 RX); GND common;
+      VCC from pin 1. FreeD is unidirectional, so Pi TX is unwired.
+- [ ] `/boot/firmware/config.txt`: `enable_uart=1` +
+      `dtparam=uart0=on`; in `/boot/firmware/cmdline.txt`, remove
+      `console=serial0,115200` (the kernel serial console would otherwise
+      own `/dev/ttyAMA0`). Verify with
+      `stty -F /dev/ttyAMA0 38400 parenb parodd cs8 -cstopb` after reboot.
+      Full procedure in `production/RPi5/doc/freed_wiring.md`.
 
 ### 6.4 Offset smoother — linear ramp (method A)
 
@@ -1038,7 +1053,7 @@ inline constexpr int              UE_PORT          = 6666;
 // Serial devices.
 inline constexpr std::string_view LIDAR_PORT       = "/dev/ttyUSB0";
 inline constexpr int              LIDAR_BAUD       = 460'800;
-inline constexpr std::string_view FREED_PORT       = "/dev/ttyACM0";
+inline constexpr std::string_view FREED_PORT       = "/dev/ttyAMA0";   // PL011 UART0 via YL-128 on the 40-pin header, see §6.3
 inline constexpr int              FREED_BAUD       = 38'400;
 
 // Smoother & deadband (§6.4).
@@ -1067,7 +1082,7 @@ ue_port = 6666
 
 [serial]
 lidar_port = "/dev/ttyUSB0"
-freed_port = "/dev/ttyACM0"
+freed_port = "/dev/ttyAMA0"   # PL011 UART0 + YL-128 per §6.3
 
 [smoother]
 t_ramp_ms   = 500
@@ -1119,6 +1134,7 @@ Golden Rules at the same commit that introduces `core/constants.hpp`.
 
 ## 12. Change log
 
+- **2026-04-24 (v3.1, FreeD transport pinned)**: FreeD transport is **hardware UART** on the RPi 5, not USB-CDC. Crane RS-232 → YL-128 (MAX3232) → PL011 UART0 (GPIO 14/15, 40-pin header). §6.3 gains two ops-checklist items: (a) YL-128 VCC MUST come from the Pi's 3V3 rail so both sides of the TTL link are 3.3 V — an Arduino R4 build previously suffered intermittent framing errors when resistor dividers were added "for safety"; the verified fix is identical 3.3 V rails with no divider; (b) `/boot/firmware/config.txt` needs `enable_uart=1` + `dtparam=uart0=on`, and `cmdline.txt` must drop `console=serial0,115200` so the kernel serial console does not own `/dev/ttyAMA0`. §11.2 default `FREED_PORT` updated from `/dev/ttyACM0` to `/dev/ttyAMA0`. A new Phase 4-1 doc deliverable `production/RPi5/doc/freed_wiring.md` captures the pin-by-pin wiring, config-file diff, and verification procedure.
 - **2026-04-24 (v3, post Mode-A review)**: five blocker-level findings addressed: (1) `std::atomic<T>` replaced with an explicit `Seqlock<T>` template (§6.1.1) — `Offset = {dx, dy, dyaw}` and `FreedPacket[29]` are both too wide for lock-free atomics on Cortex-A76 without LSE2. Multi-reader permitted (Thread D + webctl). (2) Smoother edge detection switched from float equality to seqlock **generation counter** (integer, exact), and ramp completion snaps `live ← target` by value-copy at `frac ≥ 1.0` (§6.4.2). (3) Phase 4-3 scope cut to three endpoints (`/health`, `/map/backup`, `/calibrate`); map editor + full React frontend moved to Phase 4.5 (§7). (4) Trigger IPC primitive unified across CLAUDE.md / §1 / §6.1.3 / §7 as `std::atomic<bool> calibrate_requested` (idempotent, queue upgrade path documented). (5) AMCL divergence clamp now compares `target_new` against `last_written` (not `live`), and explicit `calibrate_requested` bypasses the clamp — eliminates the kidnapped-recovery deadlock (§8). Additional: §6.1.2 time source pinned to `CLOCK_MONOTONIC`; §6.2 moves `mlockall` to `main()` before thread spawn, `g_running` is `std::atomic<bool>`, `clock_nanosleep` loops on `EINTR`, signals blocked process-wide; §6.3 IRQ list marked TBD-measure in Phase 4-1; §6.4.1 new cold-path deadband filter (10 mm / 0.1° default) suppresses sub-noise AMCL jitter; §6.5 removes the bogus "physical crane limit" comment, adds precondition docs + endpoint-identity / fixed-point unit tests; §11 new Runtime configuration section with two-tier constants (constexpr invariants + TOML-backed tunables) and reload classes (hot / restart / recalibrate) for future frontend editing; §12 renumbered from §11. Magic-number ban added as a code-review rule.
 - **2026-04-24**: §1 key-decisions table gains 5 rows (hot/cold split, smoother, yaw wrap, trigger UX, web plane). §6 restructured: §6.1 hot/cold boundary, §6.2 thread D skeleton (now reads target via smoother), §6.3 ops checklist, §6.4 linear-ramp smoother with A/B/C comparison and acceptance tests, §6.5 yaw wrap at two named sites with pinned unit tests. §7 Phase 4 split into 4-1/4-2/4-3. §8 gains 3 new failure rows (AMCL divergence, webctl crash, pan wrap). Q6 (trigger UX) resolved. RPi 5 hardware bring-up proven: 500-frame capture × 3 iterations, 10.02 Hz steady, byte-identical Python parity. Smoother method A chosen over EMA / rate-limit on predictability grounds. `godo-webctl` scoped as a separate FastAPI process, never inside the RT binary.
 - **2026-04-21 (later)**: added §10 — Phase 1 Python prototype tools, two-backend (SDK-wrapper vs Non-SDK) framework, library plan, dump format, and test sequence. SDK-wrapper uses `pyrplidar` with explicit caveat; official-SDK `ultra_simple` three-way comparison deferred as a Phase 1 follow-up. scikit-learn removed (threshold check suffices). CSV write path pinned to stdlib `csv.writer`. Session-txt log gains `csv_sha256` / `csv_byte_count`.

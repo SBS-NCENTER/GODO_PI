@@ -3,3 +3,4 @@
 - [Project overview](project_overview.md) — GODO = RPi 5 single binary (LiDAR localization + FreeD merge + 59.94 fps UDP). Map built once via Docker. Details in SYSTEM_DESIGN.md.
 - [Test-session naming](project_test_sessions.md) — TS4 = Windows bench (2026-04-21). TS5 = 부조정실 chroma studio (production environment). Archive at `/prototype/Python/out/TS<N>/`.
 - [Studio lens context](project_lens_context.md) — Wide-angle ENG zoom lenses; entrance pupil shift per zoom is significant. Isolate from LiDAR error in Phase 5 tests.
+- [CPU 3 isolation is the design baseline](project_cpu3_isolation.md) — Production reserves CPU 3 for RT hot path. Full stack (SCHED_FIFO + IRQ pin + isolcpus + nohz_full + rcu_nocbs) is the target, applied phased so each step's contribution is measurable.

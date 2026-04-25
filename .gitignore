@@ -47,3 +47,10 @@ credentials*.json
 # ---- LiDAR raw scan data (large, per-session, never share via git) ----
 # Analysis PNGs and logs under out/<session>/ are kept; only raw CSVs excluded.
 prototype/Python/out/*/data/
+
+# ---- Throwaway dev helpers (Claude Code agent scratchpad) ----
+# .claude/tmp/ holds short-lived utility scripts (UDP listeners, one-shot
+# IRQ pinning, cmdline editors) that get superseded by systemd units or
+# in-binary code in later phases. Their intent is documented in PROGRESS.md
+# session entries; the scripts themselves are not load-bearing.
+.claude/tmp/

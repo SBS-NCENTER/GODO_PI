@@ -13,7 +13,7 @@
 
 ## Current phase
 
-**Phase 4-1 — RT hot path closeout → Phase 4-2 entry**. The code landed 2026-04-24 (16/16 hardware-free tests green, Mode-B APPROVE-WITH-NOTES plus a follow-up cleanup commit `49f874d`). The remaining Phase 4-1 work is host-side: run `scripts/setup-pi5-rt.sh`, apply the FreeD wiring + boot-config per `production/RPi5/doc/freed_wiring.md`, re-measure `godo_jitter` with RT privileges, and verify an end-to-end run against a loopback UDP listener. After those pass, Phase 4-2 (LiDAR + AMCL + cold-path deadband) becomes the active phase.
+**Phase 4-1 — RT hot path closeout COMPLETE 2026-04-25 → Phase 4-2 entry**. The code landed 2026-04-24 (16/16 hardware-free tests green, Mode-B APPROVE-WITH-NOTES plus follow-up cleanup `49f874d`). Host-side bring-up complete on news-pi01: FreeD wiring + boot-config (live 60 PPS), `setup-pi5-rt.sh` + `ncenter` limits.conf, end-to-end `godo_tracker_rt` → 127.0.0.1:6666 loopback verified at 60 PPS, IRQ inventory + recommended pinning, and the **four-step CPU 3 isolation stack measured** (SCHED_FIFO 50 → +IRQ pin → +`isolcpus=3` → +`rcu_nocbs=3`). Final production-config jitter on this idle dev host: **p99 = 12.7 µs, max = 28.6 µs**, ~160× better than SCHED_OTHER baseline and ~16× under the 200 µs design goal. `nohz_full=3` is in cmdline as design-intent marker but ignored by the stock RPi Debian Trixie kernel (`CONFIG_NO_HZ_FULL=n`); custom kernel build not justified. See `test_sessions/TS5/jitter_summary.md` for the per-step contribution table. Phase 4-2 (LiDAR + AMCL + cold-path deadband + persisted IRQ pin) is now the active phase.
 
 Earlier phases:
 - Phase 0 (RPLIDAR C1 deep dive) completed 2026-04-20.
@@ -68,17 +68,13 @@ See [RPLIDAR/RPLIDAR_C1.md](./doc/RPLIDAR/RPLIDAR_C1.md) for the supporting evid
 
 ## Next up
 
-### Phase 4-1 closeout (host-side, no further code needed)
+### Phase 4-1 closeout — DONE 2026-04-25
 
-1. **Run `scripts/setup-pi5-rt.sh` on the RPi 5 as root** — applies `setcap cap_sys_nice,cap_ipc_lock+ep` to `godo_tracker_rt` and `godo_jitter`, appends `@godo - rtprio 99` + `@godo - memlock unlimited` to `/etc/security/limits.conf` (idempotent), verifies `dialout` group membership on the user running the tracker.
-2. **Apply the FreeD wiring + boot config** per `production/RPi5/doc/freed_wiring.md`:
-   - YL-128 VCC → Pi 3V3 (pin 1), GND → pin 6, TXD → pin 10 (GPIO15 / UART0 RX); RXD unused.
-   - `/boot/firmware/config.txt`: `enable_uart=1`, `dtparam=uart0=on`.
-   - `/boot/firmware/cmdline.txt`: remove `console=serial0,115200`.
-   - Reboot; `stty -F /dev/ttyAMA0 38400 parenb parodd cs8 -cstopb` must succeed.
-3. **Re-measure `godo_jitter` with RT privileges** — `scripts/run-pi5-jitter.sh --duration-sec 60 --cpu 3 --prio 50`. Record p50/p95/p99/max in a new `test_sessions/TS<N>/jitter_summary.md` and amend PROGRESS.md. This is the baseline that will be compared against the SYSTEM_DESIGN.md p99 < 200 µs design goal in Phase 5.
-4. **End-to-end verification** — launch `godo_tracker_rt` and a loopback `tcpdump -i any -n udp port 6666 -X` listener; confirm FreeD packets flow at ~60 Hz with non-zero Pan/X/Y after the stub cold writer fires its canned offset. *Optional preliminary check*: `scripts/run-pi5-freed-passthrough.sh` (added 2026-04-25) provides a no-RT, verbatim FreeD→UDP forwarder that validates only the wiring + parsing + UDP path — useful as a first plug-in test before steps #1 and #3 are applied. Defaults to `10.10.204.184:50002`.
-5. **IRQ inventory** — fill in `production/RPi5/doc/irq_inventory.md` by enumerating xHCI and eth IRQs on the target (`grep -E "xhci|eth" /proc/interrupts`) and proposing `smp_affinity_list` values that keep CPU 3 clean.
+All host-side bring-up steps complete. See per-step session log entry below. The remaining items below have moved to Phase 4-2 because they are code/systemd integration, not measurement.
+
+> Carried into Phase 4-2:
+> - **Persisted IRQ pinning** via systemd unit (currently runtime-only via `.claude/tmp/apply_irq_pin.sh`).
+> - **Tracker-startup IRQ pin** for ttyAMA0 (irq 125) — PL011 only registers after the first `open()`, so the pin must run AFTER `godo_tracker_rt` starts. Use `ExecStartPost=` or move the pin into the tracker binary.
 
 ### Phase 4-2 — cold path + integration (queued)
 
@@ -249,6 +245,93 @@ See [RPLIDAR/RPLIDAR_C1.md](./doc/RPLIDAR/RPLIDAR_C1.md) for the supporting evid
   in time. This is the same invariant `godo_tracker_rt` Thread D
   inherits, and is what makes the steady-cadence guarantee compose
   cleanly with serial-side burstiness.
+- **`setup-pi5-rt.sh` applied + dev-host `ncenter` limits added**.
+  The script's hardcoded `@godo` group lines went into
+  `/etc/security/limits.conf` for production parity (group does not
+  exist on news-pi01, so they are no-ops on this host). Added
+  `ncenter - rtprio 99` and `ncenter - memlock unlimited` for the
+  live dev user via a single `printf | sudo tee -a` (the heredoc
+  variant kept hitting indented-EOF traps). `setcap
+  cap_sys_nice,cap_ipc_lock+ep` applied to BOTH `godo_tracker_rt`
+  AND `godo_jitter` (the script only setcaps the tracker by
+  default; the jitter binary needs the same cap to take SCHED_FIFO).
+  Verified inside a fresh `sudo -i -u ncenter` PAM session:
+  `ulimit -l = unlimited`, `ulimit -r = 99`. `bash -l` does NOT
+  pick up the new rlimits — login shell mode is not the same as a
+  new PAM session, so `pam_limits.so` is not invoked. SSH
+  re-login or `sudo -i -u <user>` is required.
+- **`godo_jitter` RT baseline → TS5** at
+  `test_sessions/TS5/jitter_summary.md`. Command:
+  `sudo -i -u ncenter godo_jitter --duration-sec 60 --cpu 3 --prio 50`.
+  Result over 3596 ticks at 59.940 Hz (period 16683350 ns):
+  `mean=5.8 µs / p50=3.6 µs / p95=15.4 µs / p99=29.4 µs / max=56.8 µs`.
+  No `rt::lock_all_memory: skipped` line in stderr → mlockall
+  succeeded (the RLIMIT_MEMLOCK gate in `src/rt/rt_setup.cpp`
+  passed). p99 is **1/7 of the SYSTEM_DESIGN.md §6.2 design goal**
+  (200 µs); max is well inside one period (16683 µs). vs. the
+  2026-04-24 `SCHED_OTHER` baseline (`p99=2028 µs / max=5338 µs`),
+  every percentile improved 9×–94×. Caveats: no IRQ pinning yet
+  (Phase 4-1 #5), no `isolcpus`, no serial / network co-load — a
+  Phase 5 long-run measurement under the production thread mix is
+  still required.
+- **`godo_tracker_rt` end-to-end verification at 127.0.0.1:6666**.
+  Confirmed live UDP flow at 60.0 PPS (599 packets / 9.98 s window
+  via `python3 .claude/tmp/udp_listener.py`). Stub cold writer's 6 s
+  cyclic offset pattern visible in the X/Y/Pan field deltas. tracker
+  startup stderr shows the configured ue/freed/rt parameters and NO
+  `rt::lock_all_memory: skipped` line → mlockall succeeded under
+  the new `ncenter` PAM session. The expected `errno=111 Connection
+  refused` flood appears whenever no UDP listener is bound — that
+  is the `connected SOCK_DGRAM` reporting ICMP Port Unreachable;
+  flagged for Phase 4-2 to add a throttle similar to the EAGAIN
+  miss counter.
+- **IRQ inventory captured + recommended pinning landed** at
+  `production/RPi5/doc/irq_inventory.md`. Hot-path-relevant IRQs
+  (eth0=106, xhci-hcd=131/136, dw_axi_dmac=140, mailbox=158, PL011
+  ttyAMA0=125) → CPU 0-2; bursty mmc0/1=161/162, spi=183 → CPU 0-1.
+  arch_timer (irq 13) and arm-pmu (irq 34-37) intentionally NOT
+  touched (per-CPU). irqbalance not installed on news-pi01 → no
+  background re-shuffle to fight. Helper scripts at
+  `.claude/tmp/apply_irq_pin.sh` (runtime IRQ pin),
+  `.claude/tmp/apply_isolcpus.sh` (cmdline edit Step 2),
+  `.claude/tmp/apply_nohz_rcu.sh` (cmdline edit Step 3) — all
+  throwaway, will be promoted to a systemd unit in Phase 4-2.
+- **PL011 (irq 125) lazy-registration finding** (verified across
+  three reboots): the PL011 driver only registers irq 125 after the
+  first `open()` of `/dev/ttyAMA0`. Before any process opens the
+  device, `/proc/irq/125/smp_affinity_list` does not exist and the
+  pin script skips it. The earlier `irq_inventory.md` claim
+  ("registers at probe time") is corrected. Production startup
+  must therefore re-apply the pin AFTER `godo_tracker_rt` opens
+  the FreeD line — Phase 4-2 systemd unit will use
+  `ExecStartPost=` for this.
+- **Four-step CPU 3 isolation stack measured** → results table in
+  `test_sessions/TS5/jitter_summary.md`. Each step gets 1 (Step 0)
+  or 3 (Steps 1-3) `godo_jitter --duration-sec 60 --cpu 3 --prio 50`
+  runs; the per-step contribution is auditable.
+
+  | Step | Adds | mean | p99 | max(worst) |
+  | ---: | --- | ---: | ---: | ---: |
+  | 0 | SCHED_FIFO 50 only | 5.8 µs | 29.4 µs | 56.8 µs |
+  | 1 | + IRQ pinning | 7.0 µs | 35.2 µs | 111.3 µs |
+  | 2 | + `isolcpus=3` | 3.2 µs | **12.0 µs** | **22.2 µs** |
+  | 3 | + `rcu_nocbs=3` (nohz_full ignored) | 2.9 µs | 12.7 µs | 28.6 µs |
+
+  Findings: (a) **Step 2 (`isolcpus=3`) is the dominant gain** —
+  removed background CPU 3 work (kworker, migration, journald,
+  cache pollution); 4.3× max improvement, 2.9× p99. (b) Step 1 IRQ
+  pinning had no measurable effect on this idle host — its real
+  value will surface under Phase 5 production load. (c) Step 3:
+  `nohz_full=3` was IGNORED by the stock RPi Debian Trixie kernel
+  (`CONFIG_NO_HZ_FULL=n`, `/sys/devices/system/cpu/nohz_full` does
+  not exist); only `rcu_nocbs=3` activated, giving a small mean / p50
+  improvement. The cmdline marker is kept anyway for design intent.
+  (d) Production target = full stack (Step 3); p99 = 12.7 µs sits
+  at 1/16 of the SYSTEM_DESIGN.md §6.2 design goal (200 µs).
+- **`.claude/memory/project_cpu3_isolation.md` added** to the in-repo
+  memory: codifies "CPU 3 full isolation is the GODO production
+  baseline, applied phased so each layer's contribution stays
+  auditable". The MEMORY.md index is updated.
 
 ### 2026-04-24 (close)
 

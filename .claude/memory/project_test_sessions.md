@@ -27,9 +27,20 @@ bring-up; `prototype/Python/out/TS<N>/` and `<repo-root>/test_sessions/TS<N>/`
 
 ## Session ID map
 
-| ID | Date | Location | Setup | Purpose |
-| --- | --- | --- | --- | --- |
-| TS4 | 2026-04-21 | Windows dev bench (home/office) | C1 on bench, static | First hardware smoke + SDK/Non-SDK parity + reflector-tape baseline |
-| TS5 | (planned) | **부조정실 (sub-control-room / chroma studio)** — the production environment | Studio set with chroma walls, crane base area | Full reflector sweep (distance × angle) + chroma-wall NIR reflectivity measurement |
+## Broadcaster naming — TS vs ST
 
-The "부조정실" is the physical production studio where the SHOTOKU crane lives; TS5 is how we refer to any dataset captured there. This is the environment the whole system is being built for.
+In this broadcaster's terminology, two paired prefixes describe a production room set:
+
+- **TS<N>** = **부조정실 N** (Sub-Control Room N) — the room with the controllers, switchers, and (for GODO) the RPi 5 deployment.
+- **ST-<N>** = **스튜디오 N** (Studio N) — the physical studio where cameras and the SHOTOKU crane operate.
+
+A matching number means the rooms are paired: **TS5 ↔ ST-5** is a single SCR + Studio set. GODO's hardware lives in BOTH rooms — the RPi 5 sits in TS5, the LiDAR + crane sit in ST-5, connected by cable.
+
+## Session ID map
+
+| ID | Points to | Notes |
+| --- | --- | --- |
+| TS4 | Windows dev bench (home/office) — NOT a TV station location | First hardware smoke + SDK/Non-SDK parity + reflector-tape baseline (2026-04-21). The "TS" prefix here predates the broadcaster convention and is grandfathered |
+| TS5 | **부조정실 5** (Sub-Control Room 5). Paired with **ST-5** (Studio 5). RPi 5 `news-pi01` is deployed in TS5 | All GODO measurements collected at this site land here, regardless of whether the sensor sits in TS5 (RPi 5 itself, e.g. RT jitter) or in ST-5 (LiDAR + crane). Already populated 2026-04-25 with `jitter_summary.md`. Future: reflector sweep, chroma-wall NIR, post-IRQ-pinning re-measurement, Phase 5 long-run |
+
+The directory `<repo-root>/test_sessions/TS<N>/` is **the location's archive**, not "one dataset". It grows topic files (`jitter_summary.md`, `reflector_sweep.csv`, `chroma_nir.md`, ...) over time. Non-LiDAR measurements (RT jitter, etc.) go here too — `prototype/Python/out/` is reserved only for Phase 1 / 2 raw LiDAR data.

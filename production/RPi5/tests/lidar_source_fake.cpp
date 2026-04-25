@@ -2,7 +2,7 @@
 
 #include <stdexcept>
 
-namespace godo::smoke::test {
+namespace godo::lidar::test {
 
 LidarSourceFake::LidarSourceFake(std::string port, int baud,
                                  int samples_per_frame)
@@ -51,4 +51,4 @@ void LidarSourceFake::scan_frames(int n_frames, const FrameCallback& on_frame) {
     }
 }
 
-}  // namespace godo::smoke::test
+}  // namespace godo::lidar::test

@@ -15,11 +15,11 @@
 #include <vector>
 
 #include "csv_writer.hpp"
-#include "sample.hpp"
+#include "lidar/sample.hpp"
 
 using godo::smoke::CsvWriter;
-using godo::smoke::Frame;
-using godo::smoke::Sample;
+using godo::lidar::Frame;
+using godo::lidar::Sample;
 
 namespace {
 

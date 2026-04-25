@@ -13,12 +13,12 @@
 #include <cstdlib>
 #include <string>
 
-#include "lidar_source_rplidar.hpp"
-#include "sample.hpp"
+#include "lidar/lidar_source_rplidar.hpp"
+#include "lidar/sample.hpp"
 
-using godo::smoke::Frame;
-using godo::smoke::LidarSourceRplidar;
-using godo::smoke::validate;
+using godo::lidar::Frame;
+using godo::lidar::LidarSourceRplidar;
+using godo::lidar::validate;
 
 TEST_CASE("RPLIDAR C1 delivers a valid frame on the default port") {
     const char* port_env = std::getenv("GODO_SMOKE_PORT");

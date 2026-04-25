@@ -1,4 +1,4 @@
-#include "lidar_source_rplidar.hpp"
+#include "lidar/lidar_source_rplidar.hpp"
 
 #include <array>
 #include <chrono>
@@ -10,9 +10,9 @@
 #include "sl_lidar.h"
 #include "sl_lidar_driver.h"
 
-#include "timestamp.hpp"
+#include "core/time.hpp"
 
-namespace godo::smoke {
+namespace godo::lidar {
 
 namespace {
 
@@ -146,7 +146,7 @@ void LidarSourceRplidar::scan_frames(int n_frames,
         Frame frame;
         frame.index = delivered;
         frame.samples.reserve(count);
-        const std::int64_t t_ns = monotonic_ns();
+        const std::int64_t t_ns = godo::rt::monotonic_ns();
         for (std::size_t i = 0; i < count; ++i) {
             const auto& n = nodes[i];
             const double angle_deg =
@@ -185,4 +185,4 @@ void LidarSourceRplidar::scan_frames(int n_frames,
     }
 }
 
-}  // namespace godo::smoke
+}  // namespace godo::lidar

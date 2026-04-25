@@ -20,7 +20,7 @@
 #include <filesystem>
 #include <string>
 
-#include "sample.hpp"
+#include "lidar/sample.hpp"
 
 namespace godo::smoke {
 
@@ -41,7 +41,7 @@ public:
     void close();
 
     // Append one Frame as N rows. Requires open() has been called.
-    void write_frame(const Frame& frame);
+    void write_frame(const godo::lidar::Frame& frame);
 
     [[nodiscard]] const std::filesystem::path& path() const { return path_; }
     [[nodiscard]] std::int64_t frames_written() const { return frames_; }

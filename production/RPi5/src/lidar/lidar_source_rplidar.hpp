@@ -1,21 +1,25 @@
 #pragma once
 
-// RPLIDAR-backed LidarSource for godo_smoke.
+// RPLIDAR-backed LiDAR source.
 //
 // Intentionally CONCRETE — no `virtual`, no ABC. Duck-typed twin for tests
 // lives in tests/lidar_source_fake.hpp under a different class name. The
-// writer target compiles this file; the test targets compile the fake.
-// See CODEBASE.md invariant (a) — matches the Python prototype's
-// capture/sdk.py vs capture/raw.py precedent.
+// production target compiles this file; the test targets compile the fake.
+// See production/RPi5/CODEBASE.md invariant (a) — matches the Python
+// prototype's capture/sdk.py vs capture/raw.py precedent.
+//
+// Promoted from src/godo_smoke/lidar_source_rplidar.hpp (Phase 4-2
+// LiDAR component-isation, 2026-04-25). Phase 4-2 AMCL writer thread
+// will hold an instance via `godo::lidar::LidarSourceRplidar`.
 
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
 
-#include "sample.hpp"
+#include "lidar/sample.hpp"
 
-namespace godo::smoke {
+namespace godo::lidar {
 
 class LidarSourceRplidar {
 public:
@@ -44,4 +48,4 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace godo::smoke
+}  // namespace godo::lidar

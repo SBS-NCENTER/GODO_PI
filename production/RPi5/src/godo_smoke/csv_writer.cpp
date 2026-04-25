@@ -19,6 +19,9 @@ static_assert(sizeof(int) >= 4,
 
 namespace godo::smoke {
 
+using godo::lidar::Frame;
+using godo::lidar::Sample;
+
 namespace {
 
 constexpr const char* kHeader =

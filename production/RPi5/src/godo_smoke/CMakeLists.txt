@@ -1,9 +1,9 @@
 # godo_smoke executable target.
 #
-# Note: the test targets (../tests/) substitute lidar_source_rplidar.cpp
-# with tests/lidar_source_fake.cpp at link time. Each target has its own
-# source list; the classes are deliberately NOT related by inheritance
-# (see CODEBASE.md invariant (a)).
+# Phase 4-2: lidar_source_rplidar.cpp moved to src/lidar/ and linked here
+# via godo_lidar. The test targets (../tests/) still substitute the LiDAR
+# source via tests/lidar_source_fake.cpp; the classes remain duck-typed
+# twins, NOT related by inheritance (see CODEBASE.md invariant (a)).
 
 add_executable(godo_smoke
     main.cpp
@@ -11,7 +11,6 @@ add_executable(godo_smoke
     timestamp.cpp
     csv_writer.cpp
     session_log.cpp
-    lidar_source_rplidar.cpp
 )
 
 target_include_directories(godo_smoke PRIVATE
@@ -20,7 +19,7 @@ target_include_directories(godo_smoke PRIVATE
 
 target_link_libraries(godo_smoke PRIVATE
     OpenSSL::Crypto
-    rplidar_sdk::static
+    godo_lidar
 )
 
 # Disable assert() in optimised builds — runtime-critical checks are

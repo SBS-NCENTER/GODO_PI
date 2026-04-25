@@ -1,17 +1,21 @@
 #pragma once
 
-// Value types for the capture → dump pipeline.
+// Value types for LiDAR scan frames.
 //
 // Mirror of prototype/Python/src/godo_lidar/frame.py (Sample / Frame).
-// Invariants are enforced by `Sample::validate()` (explicit, not in a
-// constructor — we want plain aggregate init for tests).
+// Invariants are enforced by `validate()` (explicit, not in a constructor —
+// we want plain aggregate init for tests).
+//
+// Promoted from src/godo_smoke/sample.hpp (Phase 4-2 LiDAR component-isation,
+// 2026-04-25). The Phase 4-1/4-2 production code (AMCL, deadband filter)
+// also imports this header; do not narrow it back to godo_smoke scope.
 
 #include <cstdint>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
-namespace godo::smoke {
+namespace godo::lidar {
 
 struct Sample {
     double   angle_deg;     // [0, 360)
@@ -43,4 +47,4 @@ inline void validate(const Sample& s) {
     // quality and flag are uint8_t; their invariants are type-enforced.
 }
 
-}  // namespace godo::smoke
+}  // namespace godo::lidar

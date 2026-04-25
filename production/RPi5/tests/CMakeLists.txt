@@ -16,7 +16,7 @@ target_include_directories(test_csv_writer_writes PRIVATE
     "${GODO_SMOKE_SRC_DIR}"
     "${CMAKE_CURRENT_SOURCE_DIR}"
 )
-target_link_libraries(test_csv_writer_writes PRIVATE doctest::doctest)
+target_link_libraries(test_csv_writer_writes PRIVATE doctest::doctest godo_lidar)
 add_test(NAME test_csv_writer_writes COMMAND test_csv_writer_writes)
 set_tests_properties(test_csv_writer_writes PROPERTIES
     LABELS "hardware-free")
@@ -55,7 +55,7 @@ target_include_directories(test_sample_invariants PRIVATE
     "${GODO_SMOKE_SRC_DIR}"
     "${CMAKE_CURRENT_SOURCE_DIR}"
 )
-target_link_libraries(test_sample_invariants PRIVATE doctest::doctest)
+target_link_libraries(test_sample_invariants PRIVATE doctest::doctest godo_lidar)
 add_test(NAME test_sample_invariants COMMAND test_sample_invariants)
 set_tests_properties(test_sample_invariants PROPERTIES LABELS "hardware-free")
 
@@ -91,7 +91,7 @@ if(UV_EXE AND EXISTS "${GODO_PYTHON_DIR}/uv.lock")
     target_include_directories(test_csv_parity PRIVATE
         "${GODO_SMOKE_SRC_DIR}"
     )
-    target_link_libraries(test_csv_parity PRIVATE doctest::doctest)
+    target_link_libraries(test_csv_parity PRIVATE doctest::doctest godo_lidar)
     # CMake needs the raw absolute path in the compile-definition; use
     # get_filename_component to normalise.
     get_filename_component(GODO_PYTHON_DIR_ABS "${GODO_PYTHON_DIR}" ABSOLUTE)
@@ -113,15 +113,13 @@ endif()
 
 add_executable(test_lidar_live
     test_lidar_live.cpp
-    ${GODO_SMOKE_SRC_DIR}/lidar_source_rplidar.cpp
-    ${GODO_SMOKE_SRC_DIR}/timestamp.cpp
 )
 target_include_directories(test_lidar_live PRIVATE
     "${GODO_SMOKE_SRC_DIR}"
 )
 target_link_libraries(test_lidar_live PRIVATE
     doctest::doctest
-    rplidar_sdk::static
+    godo_lidar
 )
 add_test(NAME test_lidar_live COMMAND test_lidar_live)
 set_tests_properties(test_lidar_live PROPERTIES LABELS "hardware-required")

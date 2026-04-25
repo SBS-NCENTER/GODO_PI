@@ -63,18 +63,21 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/tomlplusplus.cmake)
 # -----------------------------------------------------------------------------
 # Targets
 # -----------------------------------------------------------------------------
-# Phase 3 smoke binary (unchanged).
-add_subdirectory(src/godo_smoke)
-
-# Phase 4-1 RT hot-path modules.
+# Phase 4-1 RT hot-path modules + Phase 4-2 LiDAR component (lidar must
+# precede godo_smoke because godo_smoke now links godo_lidar).
 add_subdirectory(src/core)
 add_subdirectory(src/yaw)
 add_subdirectory(src/smoother)
 add_subdirectory(src/freed)
 add_subdirectory(src/udp)
 add_subdirectory(src/rt)
+add_subdirectory(src/lidar)
 add_subdirectory(src/godo_jitter)
 add_subdirectory(src/godo_tracker_rt)
 add_subdirectory(src/godo_freed_passthrough)
+
+# Phase 3 smoke binary (now links godo_lidar instead of compiling
+# lidar_source_rplidar.cpp directly).
+add_subdirectory(src/godo_smoke)
 
 add_subdirectory(tests)

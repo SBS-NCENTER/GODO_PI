@@ -22,7 +22,7 @@
 #include <string>
 
 #include "csv_writer.hpp"
-#include "sample.hpp"
+#include "lidar/sample.hpp"
 
 namespace {
 
@@ -49,8 +49,8 @@ std::string run_capture_output(const std::string& cmd) {
 
 TEST_CASE("C++ and Python CSV writers produce byte-identical output") {
     using godo::smoke::CsvWriter;
-    using godo::smoke::Frame;
-    using godo::smoke::Sample;
+    using godo::lidar::Frame;
+    using godo::lidar::Sample;
 
     const auto tmp = std::filesystem::temp_directory_path() /
                      "godo_smoke_parity";

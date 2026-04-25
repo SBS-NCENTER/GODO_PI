@@ -11,12 +11,12 @@
 #include <vector>
 
 #include "lidar_source_fake.hpp"
-#include "sample.hpp"
+#include "lidar/sample.hpp"
 
-using godo::smoke::Frame;
-using godo::smoke::Sample;
-using godo::smoke::validate;
-using godo::smoke::test::LidarSourceFake;
+using godo::lidar::Frame;
+using godo::lidar::Sample;
+using godo::lidar::validate;
+using godo::lidar::test::LidarSourceFake;
 
 TEST_CASE("validate: angle boundaries") {
     Sample s{0.0, 0.0, 0, 0, 0};

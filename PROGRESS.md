@@ -73,12 +73,13 @@ See [RPLIDAR/RPLIDAR_C1.md](./doc/RPLIDAR/RPLIDAR_C1.md) for the supporting evid
 All host-side bring-up steps complete. See per-step session log entry below. The remaining items below have moved to Phase 4-2 because they are code/systemd integration, not measurement.
 
 > Carried into Phase 4-2:
-> - **Persisted IRQ pinning** via systemd unit (currently runtime-only via `.claude/tmp/apply_irq_pin.sh`).
+> - **Persisted IRQ pinning** via systemd unit (currently runtime-only via `.claude/tmp/apply_irq_pin.sh`). Design: a `/etc/godo/irq-pinning.conf` lists device patterns + target affinity, so adding new devices is a config edit (not a code change).
 > - **Tracker-startup IRQ pin** for ttyAMA0 (irq 125) — PL011 only registers after the first `open()`, so the pin must run AFTER `godo_tracker_rt` starts. Use `ExecStartPost=` or move the pin into the tracker binary.
+> - **GUI / 터치스크린 IRQ list extension** — production runs with monitor + keyboard + mouse + touchscreen (model TBD, ETA ~2 days from 2026-04-25). When the touchscreen is connected, identify its interface (USB-HID via xhci already pinned, or I²C via irq 163/164 needs pinning) and extend the IRQ list to include `v3d_core0/hub` (165/166), `vc4 hdmi/crtc/hvs` (167-181), `codec` (185), and any I²C touch IRQ. Mechanism is identical; only the device pattern list changes.
 
-### Phase 4-2 — cold path + integration (queued)
+### Phase 4-2 — cold path + integration (in progress)
 
-- Promote `src/godo_smoke/lidar_source_rplidar` to a reusable `src/lidar/` component (keep `godo_smoke` binary intact as a bring-up tool).
+- ✅ **A. LiDAR component-isation 완료 2026-04-25 (late)** — `src/godo_smoke/{sample.hpp, lidar_source_rplidar.{cpp,hpp}}` → `src/lidar/` (`godo_lidar` static lib, namespace `godo::lidar`). `godo_smoke` 바이너리는 새 lib에 link. `lidar_source_rplidar.cpp`는 `godo::rt::monotonic_ns` 사용으로 godo_smoke 의존성 제거. 16/16 hardware-free tests PASS. CODEBASE.md "2026-04-25 (late)" 섹션에 변경 기록 + invariant (a) duck-typed twin 룰은 그대로 유지 (이름만 `godo::lidar::test::LidarSourceFake`로 변경).
 - Port AMCL from the Phase 2 Python reference to `src/localization/`. Add `libeigen3-dev` to the apt prereqs.
 - Implement the **cold-path deadband filter** (SYSTEM_DESIGN.md §6.4.1) in Thread C: drop new poses within ±10 mm / ±0.1° of `last_written` unless `calibrate_requested` bypasses the filter.
 - Wire the real cold-path writer into `godo_tracker_rt/main.cpp`, replacing the `// TODO(phase-4-2)` stub thread.

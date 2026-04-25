@@ -446,7 +446,105 @@ that will be compared against the 200 µs p99 design goal in Phase 5.
 
 ---
 
-## 2026-04-25 — godo_freed_passthrough bring-up tool
+## 2026-04-25 (late) — Phase 4-2 A: LiDAR component-isation
+
+`src/godo_smoke/{sample.hpp, lidar_source_rplidar.{cpp,hpp}}` promoted to
+`src/lidar/` as a reusable component (`godo_lidar` static lib). `godo_smoke`
+binary now LINKS the lib instead of compiling those sources directly. Phase
+4-2 AMCL (`src/localization/`) and any future LiDAR consumer share the
+same component.
+
+### Module map (additions)
+
+```text
+src/lidar/
+├─ CMakeLists.txt                    target: godo_lidar (static lib)
+├─ sample.hpp                        Sample, Frame, validate()  — namespace godo::lidar
+├─ lidar_source_rplidar.hpp          concrete (no virtual)       — namespace godo::lidar
+└─ lidar_source_rplidar.cpp          uses godo::rt::monotonic_ns
+                                     (no longer pulls godo_smoke/timestamp.hpp)
+```
+
+### Dependency tree
+
+```text
+godo_lidar
+└─ rplidar_sdk::static
+
+godo_smoke           (was: compiled lidar_source_rplidar.cpp directly)
+├─ godo_lidar        (new link)
+└─ OpenSSL::Crypto
+
+test_lidar_live, test_csv_writer_writes, test_csv_parity, test_sample_invariants
+└─ godo_lidar        (new link; replaces direct .cpp compilation)
+```
+
+### Changed
+
+- `CMakeLists.txt` (top-level) — `add_subdirectory(src/lidar)` now precedes
+  `src/godo_smoke` so `godo_lidar` is available when `godo_smoke` links.
+- `src/godo_smoke/CMakeLists.txt` — `lidar_source_rplidar.cpp` removed
+  from the source list; `target_link_libraries` swaps `rplidar_sdk::static`
+  for `godo_lidar`.
+- `src/godo_smoke/main.cpp` — `#include "lidar/lidar_source_rplidar.hpp"`
+  + `using godo::lidar::Frame; using godo::lidar::LidarSourceRplidar;`
+  alongside the existing `using namespace godo::smoke;` (csv_writer,
+  session_log, args stay in `godo::smoke`).
+- `src/godo_smoke/csv_writer.{hpp,cpp}` — `#include "lidar/sample.hpp"`,
+  `write_frame(const godo::lidar::Frame&)`, file-level
+  `using godo::lidar::Frame; using godo::lidar::Sample;` in the .cpp.
+- `tests/CMakeLists.txt` — `test_lidar_live`, `test_csv_writer_writes`,
+  `test_csv_parity`, `test_sample_invariants` now link `godo_lidar`
+  instead of compiling `${GODO_SMOKE_SRC_DIR}/lidar_source_rplidar.cpp`
+  / `timestamp.cpp` directly.
+- `tests/lidar_source_fake.{hpp,cpp}` — namespace
+  `godo::smoke::test` → `godo::lidar::test`.
+- `tests/test_lidar_live.cpp`, `test_csv_writer_writes.cpp`,
+  `test_sample_invariants.cpp`, `test_csv_parity.cpp` — `using
+  godo::smoke::Sample/Frame/validate/LidarSourceRplidar/test::LidarSourceFake`
+  → `using godo::lidar::*` (CsvWriter remains `godo::smoke::CsvWriter`).
+
+### Removed
+
+- `src/godo_smoke/sample.hpp` (moved to `src/lidar/`)
+- `src/godo_smoke/lidar_source_rplidar.hpp` (moved to `src/lidar/`)
+- `src/godo_smoke/lidar_source_rplidar.cpp` (moved to `src/lidar/`)
+
+### Tests
+
+- `scripts/build.sh` clean rebuild: 16/16 hardware-free tests PASS.
+  `test_csv_parity` (Python parity) PASS at 0.83 s. `test_lidar_live`
+  builds (hardware-required, not run in default ctest).
+- `[rt-alloc-grep]` smoke pass: same single hit as before
+  (`UdpSender` constructor `std::string`, init-time, justified per
+  invariant (e)). No new hot-path allocations.
+
+### Invariant updates (no behaviour change)
+
+- Invariant (a) "no-ABC duck-typed twin" wording updated mentally to
+  reference `godo::lidar::LidarSourceRplidar` and
+  `godo::lidar::test::LidarSourceFake`. The structural rule (different
+  class names, no inheritance) is unchanged. The invariant text on this
+  page still says `src/godo_smoke/*.hpp`; future doc cleanup pass should
+  generalise to "any LiDAR source under `src/lidar/`".
+
+### Deviations from the plan
+
+- **`monotonic_ns` duplication intentionally retained**. `src/core/time.hpp`
+  defines `godo::rt::monotonic_ns()` (header-only, used by godo_jitter +
+  godo_tracker_rt + godo_freed_passthrough); `src/godo_smoke/timestamp.cpp`
+  defines `godo::smoke::monotonic_ns()` (also exposing
+  `utc_timestamp_compact/iso`). Phase 4-2 A migrated the LiDAR-side caller
+  (`lidar_source_rplidar.cpp`) onto `godo::rt::monotonic_ns` so the new
+  `godo_lidar` lib has zero dependency on `godo_smoke`. The remaining
+  godo_smoke-internal `godo::smoke::monotonic_ns` is one-line wrapper-
+  worth of duplication; cleanup is deferred until a non-cosmetic reason
+  appears (e.g. a third caller adopting the smoke variant).
+- **godo_smoke binary's own files keep `namespace godo::smoke`** rather
+  than renaming to `godo::lidar` wholesale. CsvWriter / SessionLog / Args
+  are all genuinely smoke-scoped (capture-tool-specific I/O); promoting
+  them to `godo::lidar` would over-commit. The split is: data types +
+  hardware driver = `godo::lidar`; capture-tool I/O = `godo::smoke`.
 
 ### Module map (additions)
 

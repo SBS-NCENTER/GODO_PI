@@ -2,7 +2,7 @@
 
 // Deterministic fake LiDAR source for hardware-free tests.
 //
-// Duck-typed twin of godo::smoke::LidarSourceRplidar; NOT a subclass. The
+// Duck-typed twin of godo::lidar::LidarSourceRplidar; NOT a subclass. The
 // class name is deliberately different so tests that use `LidarSourceFake`
 // directly cannot accidentally compile against the real type. See
 // CODEBASE.md invariant (a).
@@ -12,9 +12,9 @@
 #include <string>
 #include <vector>
 
-#include "sample.hpp"
+#include "lidar/sample.hpp"
 
-namespace godo::smoke::test {
+namespace godo::lidar::test {
 
 class LidarSourceFake {
 public:
@@ -41,4 +41,4 @@ private:
     bool        opened_{false};
 };
 
-}  // namespace godo::smoke::test
+}  // namespace godo::lidar::test

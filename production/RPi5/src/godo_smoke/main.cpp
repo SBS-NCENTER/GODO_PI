@@ -20,12 +20,14 @@
 
 #include "args.hpp"
 #include "csv_writer.hpp"
-#include "lidar_source_rplidar.hpp"
-#include "sample.hpp"
+#include "lidar/lidar_source_rplidar.hpp"
+#include "lidar/sample.hpp"
 #include "session_log.hpp"
 #include "timestamp.hpp"
 
 using namespace godo::smoke;
+using godo::lidar::Frame;
+using godo::lidar::LidarSourceRplidar;
 
 namespace {
 

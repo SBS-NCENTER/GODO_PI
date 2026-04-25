@@ -8,51 +8,128 @@ Structural / functional change log for `/production/RPi5`. See
 
 ## Scope
 
-Phase 3 bring-up scaffold. Ships one binary (`godo_smoke`) and the five
-test targets that pin the invariants below. **Does not** implement
-AMCL, FreeD receive, or 59.94 fps UDP send — those arrive in Phase 4.
+Phase 4-2 in progress. Currently ships **four binaries**:
+- `godo_smoke` — Phase 3 bring-up tool (LiDAR capture → CSV / session log).
+- `godo_jitter` — RT scheduling jitter measurement harness (Phase 4-1).
+- `godo_tracker_rt` — production hot path: FreeD receive + offset apply +
+  59.94 fps UDP send (Phase 4-1, AMCL writer is still a 1 Hz stub
+  pending Phase 4-2 B).
+- `godo_freed_passthrough` — wiring bring-up tool (FreeD serial → UDP
+  forwarder, no offset, no RT privileges) (Phase 4-1 follow-up).
+
+Does **not** yet implement AMCL or the cold-path deadband filter — those
+arrive in Phase 4-2 B / C at `src/localization/`.
 
 ---
 
-## Module map
+## Module map (current — as of 2026-04-25 late)
+
+The per-date entries below this section track the diffs that landed each
+day. This top-level map is the up-to-date snapshot.
 
 ```text
 CMakeLists.txt                       C++17, warnings-as-errors, doctest, OpenSSL::Crypto
 cmake/rplidar_sdk.cmake              ExternalProject wrapping the upstream SDK Makefile,
                                      pinned SHA 99478e5f…36869
+cmake/tomlplusplus.cmake             header-only INTERFACE lib at v3.4.0 (SHA 30172438…ba9de)
 
-src/godo_smoke/
-├─ CMakeLists.txt                    target: godo_smoke
-├─ main.cpp                          setlocale("C") → parse → open → scan → close
-├─ args.{hpp,cpp}                    variant<Args, ParseHelp, ParseError>; no external dep
+src/core/                            namespace godo::core, godo::rt
+├─ CMakeLists.txt                    target: godo_core (static)
+├─ constants.hpp                     Tier-1 invariants (FreeD / RPLIDAR / 59.94 Hz)
+├─ config_defaults.hpp               Tier-2 compile-time defaults
+├─ config.{hpp,cpp}                  CLI > env > TOML > defaults loader
+├─ rt_types.hpp                      Offset (24 B), FreedPacket (29 B)
+├─ seqlock.hpp                       single-writer / N-reader seqlock
+├─ time.hpp                          godo::rt::monotonic_ns (header-only)
+└─ rt_flags.{hpp,cpp}                g_running, calibrate_requested
+
+src/yaw/                             pure free functions, no state
+├─ CMakeLists.txt                    target: godo_yaw
+└─ yaw.{hpp,cpp}                     lerp_angle, wrap_signed24
+
+src/smoother/
+├─ CMakeLists.txt                    target: godo_smoother
+└─ offset_smoother.{hpp,cpp}         linear ramp, gen-edge, snap at frac≥1
+
+src/freed/
+├─ CMakeLists.txt                    target: godo_freed
+├─ d1_parser.{hpp,cpp}               ParseResult, compute_checksum
+└─ serial_reader.{hpp,cpp}           Thread A body (termios 8O1 PL011)
+
+src/udp/
+├─ CMakeLists.txt                    target: godo_udp
+└─ sender.{hpp,cpp}                  UdpSender + apply_offset_inplace
+
+src/rt/
+├─ CMakeLists.txt                    target: godo_rt
+└─ rt_setup.{hpp,cpp}                mlockall (RLIMIT_MEMLOCK gated) /
+                                     affinity / SCHED_FIFO / signal helpers
+
+src/lidar/                           namespace godo::lidar
+├─ CMakeLists.txt                    target: godo_lidar (static lib)
 ├─ sample.hpp                        Sample, Frame, validate() — Python frame.py parity
-├─ timestamp.{hpp,cpp}               monotonic_ns, utc_timestamp_{compact,iso}
-├─ csv_writer.{hpp,cpp}              snprintf-based, fopen("wb"), byte-identical to Python
-├─ session_log.{hpp,cpp}             chunked EVP SHA-256, log body matches Python schema
 └─ lidar_source_rplidar.{hpp,cpp}    concrete (NO virtual) RPLIDAR C1 driver wrapper
 
-tests/
-├─ CMakeLists.txt                    test target source lists are split per invariant (b)
-├─ lidar_source_fake.{hpp,cpp}       duck-typed twin; class name deliberately different
+src/godo_smoke/                      namespace godo::smoke (capture-tool I/O)
+├─ CMakeLists.txt                    target: godo_smoke (binary), links godo_lidar
+├─ main.cpp                          setlocale("C") → parse → open → scan → close
+├─ args.{hpp,cpp}                    variant<Args, ParseHelp, ParseError>; no external dep
+├─ timestamp.{hpp,cpp}               monotonic_ns, utc_timestamp_{compact,iso}
+├─ csv_writer.{hpp,cpp}              snprintf-based, fopen("wb"), byte-identical to Python
+└─ session_log.{hpp,cpp}             chunked EVP SHA-256, log body matches Python schema
+
+src/godo_jitter/
+├─ CMakeLists.txt                    target: godo_jitter (binary)
+└─ main.cpp                          CLOCK_MONOTONIC jitter harness
+
+src/godo_tracker_rt/
+├─ CMakeLists.txt                    target: godo_tracker_rt (binary)
+└─ main.cpp                          Thread A / D / stub cold writer / signal handler
+
+src/godo_freed_passthrough/
+├─ CMakeLists.txt                    target: godo_freed_passthrough (binary)
+└─ main.cpp                          single-thread FreeD-serial → UDP forwarder
+
+tests/                               (see invariant (b) for source-list splits)
+├─ CMakeLists.txt
+├─ lidar_source_fake.{hpp,cpp}       godo::lidar::test::LidarSourceFake (duck-typed twin)
 ├─ test_csv_writer_writes.cpp        production write path; includes csv_writer.hpp
 ├─ test_csv_writer_readback.cpp      stdlib-only parse; include path excludes ../src/godo_smoke
 ├─ test_csv_parity.cpp               cmp against Python prototype via `uv run`
 ├─ test_session_log.cpp              SHA-256 known-good vectors + full field coverage
 ├─ test_args.cpp                     CLI parsing boundaries
 ├─ test_sample_invariants.cpp        validate() + LidarSourceFake shape
-└─ test_lidar_live.cpp               hardware-required; LABELS "hardware-required"
+├─ test_lidar_live.cpp               hardware-required; LABELS "hardware-required"
+├─ test_yaw.cpp                      12 §6.5 cases, exact equality
+├─ test_smoother.cpp                 6 §6.4.4 cases
+├─ test_freed_parser.cpp             8 cases, synth fixtures
+├─ test_freed_serial_reader.cpp      PTY harness (8O1 termios on master)
+├─ test_udp_apply_offset.cpp         5 cases, decode/encode + pan wrap
+├─ test_udp_loopback.cpp             AF_INET loopback byte-identity
+├─ test_config.cpp                   8 cases, precedence chain + rejects
+├─ test_rt_setup.cpp                 4 cases, actionable-stderr checks
+├─ test_seqlock_roundtrip.cpp        4 cases, 1W/4R 10^6-iter stress
+└─ test_rt_replay.cpp                E2E: posix_spawn tracker + PTY + UDP
 
 scripts/
-├─ build.sh                          cmake config + build + hw-free ctest gate
-├─ run-pi5-smoke.sh                  wrapper for godo_smoke with sensible defaults
+├─ build.sh                          cmake config + build + hw-free ctest gate +
+│                                    [rt-alloc-grep] smoke pass
+├─ setup-pi5-rt.sh                   ONE-TIME ROOT: setcap + limits.conf
+├─ run-pi5-smoke.sh                  wrapper for godo_smoke
+├─ run-pi5-tracker-rt.sh             launch wrapper for godo_tracker_rt (no sudo)
+├─ run-pi5-jitter.sh                 jitter binary wrapper
+├─ run-pi5-freed-passthrough.sh      passthrough binary wrapper
 └─ promote_smoke_to_ts.sh            move out/<ts>_<tag>/ → test_sessions/TS<N>/
 
 doc/
-└─ smoke.md                          three-way comparison workflow
+├─ smoke.md                          three-way comparison workflow (godo_smoke)
+├─ freed_wiring.md                   YL-128 → PL011 wiring, boot config, verification
+└─ irq_inventory.md                  /proc/interrupts inventory + recommended pinning
 
 out/                                 runtime captures; contents gitignored
 external/
-└─ rplidar_sdk/                      git submodule, pinned SHA
+├─ rplidar_sdk/                      git submodule, pinned SHA 99478e5f…36869
+└─ tomlplusplus/                     git submodule, v3.4.0 SHA 30172438…ba9de
 ```
 
 ---
@@ -107,13 +184,14 @@ cannot economically assert.
 
 ### (a) No ABC — duck-typed implementations
 
-`LidarSourceRplidar` (production) and `LidarSourceFake` (tests) share no
-base class. Their APIs match structurally; class names differ
-deliberately so no test can silently substitute the wrong type. Per
+`godo::lidar::LidarSourceRplidar` (production, `src/lidar/`) and
+`godo::lidar::test::LidarSourceFake` (tests) share no base class. Their
+APIs match structurally; class names differ deliberately so no test can
+silently substitute the wrong type. Per
 `prototype/Python/src/godo_lidar/capture/sdk.py` lines 39–45 and
 `PROGRESS.md` "no ABC" rule: duck typing is the project standard when
 fewer than three implementations exist. Any `virtual` keyword in
-`src/godo_smoke/*.hpp` is a review-blocking defect.
+`src/lidar/*.hpp` or `src/godo_smoke/*.hpp` is a review-blocking defect.
 
 ### (b) Test-include split
 
@@ -172,7 +250,7 @@ build.
 
 | Need | Where |
 | --- | --- |
-| I want to add a second concrete LiDAR source (e.g. official UDP) | Create `lidar_source_udp.{hpp,cpp}` with a class called `LidarSourceUdp`; do NOT inherit from `LidarSourceRplidar`. Link it into the relevant target's source list. See invariant (a). |
+| I want to add a second concrete LiDAR source (e.g. official UDP) | Create `src/lidar/lidar_source_udp.{hpp,cpp}` (namespace `godo::lidar`) with a class called `LidarSourceUdp`; do NOT inherit from `LidarSourceRplidar`. Add the .cpp to `src/lidar/CMakeLists.txt`'s `godo_lidar` source list. See invariant (a). |
 | The CSV schema needs a field | Update `csv_writer.{hpp,cpp}`, update `test_csv_writer_writes.cpp` expected strings, update `test_csv_writer_readback.cpp` header literal, update `prototype/Python/src/godo_lidar/io/csv_dump.py` + its tests, run `test_csv_parity`. All four must change in the same commit. |
 | The session log needs a field | Update `session_log.{hpp,cpp}`, update `test_session_log.cpp` expected substrings. Python parity is NOT required; document the deviation in this file. |
 | I'm diagnosing a build failure around the SDK | `cmake/rplidar_sdk.cmake` wraps `external/rplidar_sdk/sdk/Makefile`. The SHA check is best-effort only — a divergent HEAD produces a warning, not an error. Run `make -C external/rplidar_sdk/sdk` by hand to isolate. |

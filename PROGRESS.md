@@ -77,7 +77,7 @@ See [RPLIDAR/RPLIDAR_C1.md](./doc/RPLIDAR/RPLIDAR_C1.md) for the supporting evid
    - `/boot/firmware/cmdline.txt`: remove `console=serial0,115200`.
    - Reboot; `stty -F /dev/ttyAMA0 38400 parenb parodd cs8 -cstopb` must succeed.
 3. **Re-measure `godo_jitter` with RT privileges** — `scripts/run-pi5-jitter.sh --duration-sec 60 --cpu 3 --prio 50`. Record p50/p95/p99/max in a new `test_sessions/TS<N>/jitter_summary.md` and amend PROGRESS.md. This is the baseline that will be compared against the SYSTEM_DESIGN.md p99 < 200 µs design goal in Phase 5.
-4. **End-to-end verification** — launch `godo_tracker_rt` and a loopback `tcpdump -i any -n udp port 6666 -X` listener; confirm FreeD packets flow at ~60 Hz with non-zero Pan/X/Y after the stub cold writer fires its canned offset.
+4. **End-to-end verification** — launch `godo_tracker_rt` and a loopback `tcpdump -i any -n udp port 6666 -X` listener; confirm FreeD packets flow at ~60 Hz with non-zero Pan/X/Y after the stub cold writer fires its canned offset. *Optional preliminary check*: `scripts/run-pi5-freed-passthrough.sh` (added 2026-04-25) provides a no-RT, verbatim FreeD→UDP forwarder that validates only the wiring + parsing + UDP path — useful as a first plug-in test before steps #1 and #3 are applied. Defaults to `10.10.204.184:50002`.
 5. **IRQ inventory** — fill in `production/RPi5/doc/irq_inventory.md` by enumerating xHCI and eth IRQs on the target (`grep -E "xhci|eth" /proc/interrupts`) and proposing `smp_affinity_list` values that keep CPU 3 clean.
 
 ### Phase 4-2 — cold path + integration (queued)
@@ -112,6 +112,37 @@ See [RPLIDAR/RPLIDAR_C1.md](./doc/RPLIDAR/RPLIDAR_C1.md) for the supporting evid
 - Long-run stability test (≥ 8 h).
 - Jitter comparison: post-`setup-pi5-rt.sh` RPi 5 numbers vs the legacy Arduino numbers (must measure the Arduino on the same bench).
 - Operator's manual (bring-up sequence, daily preflight, triggers, rollback).
+- **Rigorous tracker_rt cadence validation** (per user 2026-04-25). The
+  paced-mode passthrough proved the **seqlock-single-slot + clock_nanosleep**
+  pattern delivers UE-side "그대로 멈춰라" cadence with serial bursts
+  absorbed cleanly. `godo_tracker_rt` reuses the same pattern in
+  Thread D but **adds the offset-apply path + SCHED_FIFO + AMCL writer
+  feeding `target_offset`**. Validate that adding those layers does
+  NOT regress the steady-60-Hz property:
+    1. **Receiver-side cadence measurement** — capture UDP arrival
+       timestamps at the UE host (`tcpdump -ttt` or in-engine timestamps),
+       compute inter-arrival ms histogram. Target: p99 < 200 µs deviation
+       from 16.683 ms (matches SYSTEM_DESIGN.md design goal).
+    2. **Burst-absorption regression** — inject artificial source
+       bursts (e.g. via the legacy passthrough → tracker_rt comparison
+       on the same FreeD line). `skip` field on tracker_rt's stats
+       must rise but its receiver-side cadence must stay flat.
+    3. **Catch-up sanity** — preempt Thread D for >1 period
+       (e.g. via `SIGSTOP` momentary), observe whether
+       `clock_nanosleep(TIMER_ABSTIME)` snaps the next send to the
+       next absolute deadline (good) or queues several back-to-back
+       sends (bad — would arrive at UE as a burst).
+    4. **Smoother integration** — the offset smoother runs on Thread D
+       and could in principle stretch a tick. Time the
+       `smoother.tick → apply_offset_inplace → udp.send` block in
+       isolation and confirm worst-case execution stays < 50 µs even
+       at hot ramp moments.
+    5. **AMCL writer interference** — once Phase 4-2 lands the real
+       AMCL writer thread, re-run #1 with AMCL active to verify the
+       cold-path writer's seqlock writes do not stall Thread D
+       readers (they shouldn't — the seqlock is wait-free for the
+       reader; assert with a stress test similar to
+       `test_seqlock_roundtrip`).
 
 ### Phase 1 items still pending (measurement, held)
 
@@ -129,6 +160,95 @@ See [RPLIDAR/RPLIDAR_C1.md](./doc/RPLIDAR/RPLIDAR_C1.md) for the supporting evid
 ---
 
 ## Session log
+
+### 2026-04-25
+
+- **`godo_freed_passthrough` bring-up tool added** at
+  `production/RPi5/src/godo_freed_passthrough/`. Single-thread minimal
+  forwarder: opens the FreeD serial port, frames D1 packets via the
+  reused `freed::SerialReader` (worker thread writes a local
+  `Seqlock<FreedPacket>`), and the main thread polls + forwards each
+  new packet verbatim through `udp::UdpSender`. Defaults match the
+  user's wiring intent: `--port /dev/ttyAMA0 --baud 38400 --host
+  10.10.204.184 --udp-port 50002`. No RT privileges — runs as a normal
+  user, no setcap / mlockall / SCHED_FIFO. Per-second stats line on
+  stderr. Goal: validate the YL-128 → PL011 → UDP path before bringing
+  up the full `godo_tracker_rt` (which adds the offset + 59.94 fps
+  cadence).
+- **Latent SIGINT-stuck-in-read bug found and worked around in the
+  passthrough**: `freed::SerialReader`'s VMIN=1 + VTIME=1 only arms
+  the inter-byte timer AFTER the first byte; with no FreeD source
+  connected (the bring-up case) `read()` blocks indefinitely, so
+  `t_serial.join()` hangs. Fix: after main loop exits,
+  `pthread_kill(t_serial.native_handle(), SIGTERM)` to force EINTR;
+  worker observes `g_running=false` at top of loop and exits. Measured
+  shutdown latency on news-pi01 = 1 ms. The same race exists latently
+  in `godo_tracker_rt`'s Thread A (invisible in production because the
+  crane streams 60 Hz steady) — flagged in `production/RPi5/CODEBASE.md`
+  for future tracker hardening.
+- **Verification on news-pi01 (no FreeD hardware yet)**: socat PTY pair
+  → `godo_freed_passthrough --port /tmp/pty_a → 127.0.0.1:51234`;
+  one synthetic D1 packet (`d1 01 00*26 6e`, valid checksum) written to
+  the other PTY end was forwarded byte-identical to the UDP listener.
+  SIGINT exit clean (rc=0, ~1 ms). Existing 16/16 hardware-free tests
+  still green (`scripts/build.sh` clean other than the pre-existing
+  `[rt-alloc-grep]` warning on UdpSender's init-time error message).
+- **EBUSY observation when opening `/dev/serial0` on this Pi**:
+  `serial-getty@ttyAMA10.service` is enabled by default and owns the
+  PL011. `freed::SerialReader`'s open path correctly prints the
+  pointer to `production/RPi5/doc/freed_wiring.md §B` (the
+  `cmdline.txt` change that disables the kernel serial console). This
+  is the expected pre-boot-config error and another argument for
+  applying the boot config before the first hardware test rather than
+  trying to share the line with getty.
+- **Boot config applied + first live run on news-pi01**: edited
+  `/boot/firmware/config.txt` (added `enable_uart=1` + `dtparam=uart0=on`)
+  and `/boot/firmware/cmdline.txt` (removed `console=serial0,115200`),
+  reboot. After reboot `/dev/ttyAMA0` is the RP1 PL011 at
+  `0x1F00030000`, getty inactive, dialout group OK. First passthrough
+  run hit 60 PPS (matching FreeD 59.94 Hz) with `send_fail=0` and
+  `unknown_type=25` (one-shot framing lock-on at startup, stable
+  thereafter). UDP target `10.10.204.184:50002` confirmed by the
+  existing FreeD receiver on the production network.
+- **YL-128 silkscreen label caveat captured in `freed_wiring.md` §A**:
+  the YL-128 module in this build labels its TTL pins from the
+  *host's* perspective — the TTL output (data going to the host's RX)
+  is the pin labelled `RXD`, not `TXD`. Re-discovered today after a
+  loose cable retrigger, but this matches the same finding from the
+  legacy Arduino bring-up. Diagram and rules now reflect the as-wired
+  reality so future hardware swaps don't re-suffer the same trap.
+- **Two GPIO-level diagnostics that DO NOT work on Pi 5**, found
+  empirically and documented in `freed_wiring.md` §A "Why the obvious
+  GPIO probes don't work here": (i) `pinctrl get 15` always reports
+  `hi` when GPIO 15 is in alt 4 (UART mode) because RP1 routes the
+  alt-function signal directly to the PL011 peripheral, bypassing the
+  GPIO input register. (ii) `/proc/tty/driver/ttyAMA` shows `rx:0`
+  until someone has the device open — the kernel doesn't enable the
+  PL011 receiver path until `open()`. The PPS counter from
+  `godo_freed_passthrough` is the actual ground truth for "are bytes
+  flowing".
+- **Paced-send mode added to `godo_freed_passthrough`** (`--rate-hz`).
+  The default as-arrives mode forwarded packets with visible jitter on
+  the UE-side cadence (Linux scheduler + 1 ms poll noise leaking
+  through). `--rate-hz 59.94` switches to a `clock_nanosleep
+  (TIMER_ABSTIME)` send loop that is **independent of serial arrival
+  jitter**: each tick reads the latest `Seqlock<FreedPacket>` slot and
+  forwards (re-sending the previous packet if no new arrived,
+  dropping older packets when source bursts). New stat fields
+  `repeat` and `skip` make the source/sink rate mismatch visible.
+  Field test on news-pi01 with the live crane: 11,503 packets at
+  exactly 60 PPS over ~3 minutes; `skip` and `repeat` both spent
+  >95 % of seconds at zero, occasional 1/1 pairs from CFS preemption
+  catch-up (zero net cadence loss). UE operator confirmed the receive
+  cadence as "딱 59.94이다 — 그대로 멈춰라" — no perceptible jitter.
+- **Seqlock-as-single-slot pattern validated**: the writer (Thread A,
+  serial reader) overwrites; the reader (Thread D / passthrough main)
+  always sees the freshest packet. **Older packets are dropped on
+  purpose** — FreeD packets are pose snapshots, so a stale pose has
+  zero render value. Sending it would visually drag the camera back
+  in time. This is the same invariant `godo_tracker_rt` Thread D
+  inherits, and is what makes the steady-cadence guarantee compose
+  cleanly with serial-side burstiness.
 
 ### 2026-04-24 (close)
 

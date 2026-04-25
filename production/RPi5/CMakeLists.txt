@@ -75,5 +75,6 @@ add_subdirectory(src/udp)
 add_subdirectory(src/rt)
 add_subdirectory(src/godo_jitter)
 add_subdirectory(src/godo_tracker_rt)
+add_subdirectory(src/godo_freed_passthrough)
 
 add_subdirectory(tests)

@@ -34,8 +34,8 @@ reasoning lives in [`../../../SYSTEM_DESIGN.md` §6.3](../../../SYSTEM_DESIGN.md
 │   TTL side                         │
 │       VCC ──── 3V3 ◄── Pi pin 1 or 17    (NOT 5 V)
 │       GND ──── Pi pin 6 / 9 / 14 / etc.  (any GND)
-│       TXD ──── Pi pin 10 (GPIO 15, UART0 RX)
-│       RXD     unconnected  (crane is read-only)
+│       RXD ──── Pi pin 10 (GPIO 15, UART0 RX)  ← see "label caveat" below
+│       TXD     unconnected  (crane is read-only)
 └────────────────────────────────────┘
 ```
 
@@ -50,11 +50,64 @@ Rules, with field rationale:
   intermittent framing errors from eroded VIH/VIL margins. The verified
   fix is identical 3.3 V rails with no divider. Do not reintroduce the
   divider "just in case".
-- **YL-128 TXD → Pi GPIO 15 (pin 10)**. That is UART0 RX on the BCM2712.
-- **RXD unwired**. FreeD is unidirectional from the crane to the host.
-  Leaving the Pi's TX (GPIO 14 / pin 8) unconnected is the intended
-  configuration.
+- **YL-128 TTL output → Pi GPIO 15 (pin 10)**. That is UART0 RX on the
+  RP1 (40-pin header on Pi 5).
+- **The other TTL pin is unwired**. FreeD is unidirectional from the
+  crane to the host. Leaving the Pi's TX (GPIO 14 / pin 8) unconnected
+  is the intended configuration.
 - **Ground common**. Tie the module GND and the Pi GND together.
+
+### YL-128 pin label caveat (read this before wiring)
+
+YL-128 modules from different manufacturers do not agree on whose
+perspective the TTL pin labels take:
+
+- Some label from the **module's perspective** — `TXD` = module
+  transmits TTL = the line that goes to the host's RX.
+- Others label from the **host's perspective** — `RXD` = host receives
+  TTL = the line that goes to the host's RX.
+
+**The YL-128 used in this build (and historically with the legacy
+Arduino R4 firmware) follows the host-perspective convention**: the
+TTL output pin (the one carrying converted RS-232 data) is the pin
+labelled `RXD`, not `TXD`. This was confirmed empirically: connecting
+the pin labelled `TXD` produced zero data; connecting the pin labelled
+`RXD` produced the expected FreeD stream.
+
+The diagram above uses the as-wired label (`RXD`) for this specific
+module. If you ever swap in a different YL-128 (different vendor
+silkscreen), do **not** trust the silkscreen — verify by following the
+working signal:
+
+```sh
+# With everything wired and Pi booted, run the passthrough briefly:
+scripts/run-pi5-freed-passthrough.sh > /tmp/p.log 2>&1 &
+sleep 3 && kill -INT %1
+grep -E '\[stat\]|shutdown' /tmp/p.log | tail -5
+```
+
+`pps > 0` (typically 60) means the wire is on the right YL-128 pin and
+the crane is transmitting. `pps=0 unknown_type=0` for several seconds
+means **no bytes are reaching PL011** — try the OTHER TTL pin on the
+YL-128 first; if still zero, work outward (cable seating, crane FreeD
+output enabled, RS-232 cable to YL-128).
+
+#### Why the obvious GPIO probes don't work here
+
+These two checks **fail to detect a working signal** on Pi 5 even when
+data is flowing — do not rely on them:
+
+- `pinctrl get 15` always reports `hi` once GPIO 15 is in alt 4 (UART
+  mode). RP1 routes the alt-function signal directly to the PL011
+  peripheral, bypassing the GPIO input register, so the snapshot is
+  meaningless for diagnosing live UART traffic.
+- `/proc/tty/driver/ttyAMA` shows `rx:0` until **someone has the
+  device open**. The kernel only enables the PL011 receiver path on
+  `open()`; an unopened device never increments its byte counter even
+  when bits are arriving on the wire.
+
+The `run-pi5-freed-passthrough.sh` PPS counter is the ground truth —
+it actually opens PL011, programs termios, and counts framed packets.
 
 ---
 

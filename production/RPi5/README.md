@@ -12,6 +12,10 @@ Binaries in this tree:
   in and a stub cold-writer that emits canned offsets. See
   [Phase 4-1: RT hot path](#phase-4-1-rt-hot-path) below.
 - `godo_jitter` (Phase 4-1) — CLOCK_MONOTONIC jitter measurement.
+- `godo_freed_passthrough` — minimal FreeD serial → UDP forwarder
+  (no offset, no RT). First-plug wiring/UDP path verification before
+  bringing up `godo_tracker_rt`. See [godo_freed_passthrough
+  (bring-up)](#godo_freed_passthrough-bring-up) below.
 
 See [`./doc/smoke.md`](./doc/smoke.md) for the bring-up workflow and
 [`CODEBASE.md`](./CODEBASE.md) for the invariants the tests pin.
@@ -230,3 +234,41 @@ deltas across the run, plus a JSON trailer line for log scraping.
 - No godo-webctl / UDS / HTTP API (Phase 4-3).
 - Deadband filter defaults are declared in `config_defaults.hpp` but
   the filter itself arrives with AMCL in Phase 4-2.
+
+---
+
+## godo_freed_passthrough (bring-up)
+
+Minimal FreeD serial → UDP forwarder. Single-thread, no offset, no
+SCHED_FIFO / mlockall / cap_sys_nice. Use this for the first plug-in
+of the YL-128 to confirm bytes flow end-to-end before the full RT
+tracker is brought up.
+
+### Run
+
+```sh
+scripts/run-pi5-freed-passthrough.sh \
+    --port /dev/ttyAMA0 \
+    --host 10.10.204.184 \
+    --udp-port 50002
+```
+
+Defaults match the values shown above. Other flags: `--baud` (38400),
+`--stats-sec` (1, set to 0 to disable per-second stats), `--quiet`.
+On the stock Trixie image without the boot-config edits, the PL011
+shows up as `/dev/ttyAMA10`; pass `--port /dev/serial0` (a symlink to
+whichever ttyAMA<N> was assigned) to side-step the rename. The
+recommended bring-up path is still to apply
+[`doc/freed_wiring.md`](./doc/freed_wiring.md) §B and reboot, which
+both renames the device to `/dev/ttyAMA0` and disables the kernel
+serial console (otherwise getty owns the line and `open()` returns
+EBUSY).
+
+### What this binary does NOT do
+
+- It does **not** apply the (dx, dy, dyaw) offset. Each verified D1
+  packet is forwarded byte-identical. Use `godo_tracker_rt` for the
+  full hot path.
+- It does **not** maintain a 59.94 Hz cadence — packets are forwarded
+  as they arrive (≤ 1 ms latency).
+- It does **not** require `setup-pi5-rt.sh` or any RT capabilities.

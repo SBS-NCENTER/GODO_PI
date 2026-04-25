@@ -443,3 +443,109 @@ that will be compared against the 200 µs p99 design goal in Phase 5.
   on stub state. Phase 4-2 replaces the stub with AMCL (deterministic
   pose-in → pose-out), at which point the test can be tightened to
   full byte parity.
+
+---
+
+## 2026-04-25 — godo_freed_passthrough bring-up tool
+
+### Module map (additions)
+
+```text
+src/godo_freed_passthrough/
+├─ CMakeLists.txt                    target: godo_freed_passthrough (binary)
+└─ main.cpp                          single-thread forwarder; reuses
+                                     freed::SerialReader + udp::UdpSender
+
+scripts/
+└─ run-pi5-freed-passthrough.sh      launch wrapper (no sudo)
+```
+
+### Dependency tree
+
+```text
+godo_freed_passthrough
+├─ godo_core
+├─ godo_freed   ─ godo_core
+└─ godo_udp     ─ godo_core + godo_yaw + godo_freed
+```
+
+### Added
+
+- `src/godo_freed_passthrough/main.cpp` — minimal FreeD serial → UDP
+  forwarder. Defaults `--port /dev/ttyAMA0 --baud 38400 --host
+  10.10.204.184 --udp-port 50002 --rate-hz 0`. Spawns one worker thread
+  running `freed::SerialReader::run()` against a local
+  `Seqlock<FreedPacket>`. Main thread runs one of two send loops:
+  - **As-arrives** (`--rate-hz 0`, default): poll `latest.generation()`
+    at 1 ms, forward each new packet immediately. Lowest forward latency
+    but inherits serial + scheduler jitter on the UDP cadence.
+  - **Paced** (`--rate-hz <f>`, e.g. 59.94): `clock_nanosleep
+    (TIMER_ABSTIME)` at exactly 1/rate intervals; each tick reads
+    the latest seqlock slot and forwards (re-sending the previous
+    packet if no new arrived; older packets are dropped on purpose).
+    Cadence determined by the host clock, decoupled from serial
+    arrival jitter. Same pattern Thread D uses in `godo_tracker_rt`.
+  Per-second stats on stderr (pps / total / repeat / skip / send_fail /
+  `freed::unknown_type_count()`). `repeat` and `skip` are 0 in
+  as-arrives mode and meaningful only in paced mode (`repeat` = ticks
+  where no new source packet had arrived; `skip` = source packets
+  dropped because >1 arrived between ticks). SIGINT/SIGTERM handler
+  sets `godo::rt::g_running` and main additionally
+  `pthread_kill(t_serial.native_handle(), SIGTERM)`s the worker on
+  exit to interrupt a blocking `read()` when no FreeD source is
+  connected (VMIN=1 + VTIME=1 only arms the inter-byte timer AFTER
+  the first byte, so without this the worker would block forever on
+  an idle line).
+- `src/godo_freed_passthrough/CMakeLists.txt` — links `godo_core`,
+  `godo_freed`, `godo_udp`.
+- `scripts/run-pi5-freed-passthrough.sh` — launch wrapper. No
+  setcap / mlockall / SCHED_FIFO needed; binary uses no RT privileges.
+- `CMakeLists.txt` (top-level) — added one
+  `add_subdirectory(src/godo_freed_passthrough)` line.
+
+### Purpose vs. godo_tracker_rt
+
+| Concern | godo_tracker_rt | godo_freed_passthrough |
+| --- | --- | --- |
+| FreeD framing | freed::SerialReader | freed::SerialReader (reused) |
+| Offset apply | yes (smoother + apply_offset_inplace) | **no** (verbatim passthrough) |
+| Cadence | clock_nanosleep @ 59.94 Hz | as-arrives (≤1 ms latency) |
+| RT scheduling | SCHED_FIFO + pinned + mlockall | none |
+| Privileges | cap_sys_nice + cap_ipc_lock | none (just dialout) |
+| Goal | production hot path | wiring / UDP path bring-up |
+
+The passthrough is intended for the FIRST plug-in: confirm the YL-128
+delivers framed bytes, the Pi parses them, and packets reach the UE
+host. Once verified, switch to `godo_tracker_rt` (which adds the offset
+and the 59.94 fps cadence) for actual production use.
+
+### Tests
+
+- No new tests. The binary composes already-tested components:
+  `freed::SerialReader` (test_freed_serial_reader), `freed::parse_d1`
+  (test_freed_parser), `udp::UdpSender` (test_udp_loopback), and
+  `Seqlock` (test_seqlock_roundtrip). The full RT pipeline is covered
+  end-to-end by `test_rt_replay`. Adding a parallel passthrough test
+  would duplicate that coverage with no new bias-block. Documented per
+  CLAUDE.md §6 minimal-code rule.
+- Manual end-to-end verification on news-pi01 (2026-04-25): socat PTY
+  pair → passthrough → Python UDP listener; one synthetic D1 packet
+  (type=0xD1 cam_id=0x01 zeros checksum=0x6e) delivered byte-identical;
+  SIGINT shutdown latency = 1 ms (pthread_kill path).
+
+### Deviations from the plan
+
+- (none — direct Parent implementation, no separate planner/reviewer
+  pass since this is a 200-line bring-up tool composing already-reviewed
+  modules.)
+
+### Known caveat — surfaces an existing latent issue
+
+The pthread_kill workaround documented above also applies in principle
+to `godo_tracker_rt`'s Thread A: with no FreeD source connected, the
+production tracker's Thread A would also block forever in read() at
+shutdown. In production this is invisible because the crane streams at
+60 Hz so VTIME=1's inter-byte timer is always armed. If we ever ship
+the tracker as a generally-runnable binary that can be started before
+the crane is connected, mirror the same pthread_kill on Thread A's
+native_handle from `godo_tracker_rt::main()`'s shutdown stanza.

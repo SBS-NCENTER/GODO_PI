@@ -169,15 +169,21 @@ void Amcl::normalize_weights() {
     for (std::size_t i = 0; i < n_; ++i) front_[i].weight *= inv;
 }
 
-AmclResult Amcl::step(const std::vector<RangeBeam>& beams, Rng& rng) {
+AmclResult Amcl::step(const std::vector<RangeBeam>& beams,
+                      Rng&                          rng,
+                      double                        sigma_xy_m,
+                      double                        sigma_yaw_deg) {
     AmclResult res{};
     res.forced     = false;
     res.iterations = 1;
 
     // 1. Motion (Gaussian jitter on every particle).
+    //    σ pair comes from the caller — OneShot keeps the cfg-default pair
+    //    via the no-σ overload below; Live mode passes the wider Live pair
+    //    so a fast-moving base does not collapse the cloud.
     jitter_inplace(front_.data(), n_,
-                   cfg_.amcl_sigma_xy_jitter_m,
-                   cfg_.amcl_sigma_yaw_jitter_deg,
+                   sigma_xy_m,
+                   sigma_yaw_deg,
                    rng);
 
     // 2. Sensor — evaluate_scan returns a non-log likelihood per particle.
@@ -217,6 +223,12 @@ AmclResult Amcl::step(const std::vector<RangeBeam>& beams, Rng& rng) {
                        (res.yaw_std_deg < cfg_.amcl_converge_yaw_std_deg);
     res.offset       = godo::rt::Offset{};  // cold writer fills this in
     return res;
+}
+
+AmclResult Amcl::step(const std::vector<RangeBeam>& beams, Rng& rng) {
+    return step(beams, rng,
+                cfg_.amcl_sigma_xy_jitter_m,
+                cfg_.amcl_sigma_yaw_jitter_deg);
 }
 
 AmclResult Amcl::converge(const std::vector<RangeBeam>& beams, Rng& rng) {

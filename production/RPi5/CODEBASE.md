@@ -22,7 +22,7 @@ arrive in Phase 4-2 B / C at `src/localization/`.
 
 ---
 
-## Module map (current — as of 2026-04-26 Wave 2)
+## Module map (current — as of 2026-04-26 Phase 4-2 D Wave A)
 
 The per-date entries below this section track the diffs that landed each
 day. This top-level map is the up-to-date snapshot.
@@ -35,8 +35,11 @@ cmake/tomlplusplus.cmake             header-only INTERFACE lib at v3.4.0 (SHA 30
 
 src/core/                            namespace godo::core, godo::rt
 ├─ CMakeLists.txt                    target: godo_core (static)
-├─ constants.hpp                     Tier-1 invariants (FreeD / RPLIDAR / 59.94 Hz / AMCL bounds)
-├─ config_defaults.hpp               Tier-2 compile-time defaults (incl. 20 AMCL keys)
+├─ constants.hpp                     Tier-1 invariants (FreeD / RPLIDAR / 59.94 Hz / AMCL bounds
+│                                    + Phase 4-2 D: GPIO_DEBOUNCE_NS / UDS_REQUEST_MAX_BYTES
+│                                    / SHUTDOWN_POLL_TIMEOUT_MS / GPIO_MAX_BCM_PIN)
+├─ config_defaults.hpp               Tier-2 compile-time defaults (24 keys: 20 AMCL +
+│                                    Phase 4-2 D Live σ pair + GPIO pin pair)
 ├─ config.{hpp,cpp}                  CLI > env > TOML > defaults loader
 ├─ rt_types.hpp                      Offset (24 B), FreedPacket (29 B)
 ├─ seqlock.hpp                       single-writer / N-reader seqlock
@@ -78,10 +81,18 @@ src/localization/                    namespace godo::localization (Phase 4-2 B)
 │                                    + OCCUPIED_CUTOFF_U8 shared free/obstacle threshold
 ├─ likelihood_field.{hpp,cpp}        Felzenszwalb 2D EDT precompute + Gaussian conversion
 ├─ scan_ops.{hpp,cpp}                downsample / evaluate_scan / jitter_inplace / resample
-├─ amcl.{hpp,cpp}                    class Amcl: step()/converge() split (NO virtual, inv. f)
+├─ amcl.{hpp,cpp}                    class Amcl: step()/converge() split (NO virtual, inv. f);
+│                                    Phase 4-2 D — step() has σ-overload form
+│                                    (sigma_xy_m / sigma_yaw_deg) so Live can
+│                                    use a different jitter σ than OneShot
 ├─ amcl_result.{hpp,cpp}             AmclResult + compute_offset (M3 canonical-360 dyaw)
-└─ cold_writer.{hpp,cpp}             Idle/OneShot real, Live stubbed; M1 wait-free,
-                                     M8 SIGTERM watchdog via pthread_kill from main
+├─ deadband.hpp                      header-only deadband filter at the publish seam
+└─ cold_writer.{hpp,cpp}             Idle/OneShot/Live ALL real (Phase 4-2 D Wave A);
+                                     OneShot ALWAYS seeds globally (no warm-seed shortcut);
+                                     Live uses run_live_iteration with σ_live pair, publishes
+                                     through the deadband (forced=false); on_leave_live
+                                     re-arms the live-first-iter latch on every Live exit;
+                                     M1 wait-free, M8 SIGTERM watchdog
 
 src/godo_smoke/                      namespace godo::smoke (capture-tool I/O)
 ├─ CMakeLists.txt                    target: godo_smoke (binary), links godo_lidar
@@ -1255,5 +1266,294 @@ ctest -L python-required      1/1  PASS  (test_csv_parity)
 [m1-no-mutex]                 0 hits in cold_writer.cpp; unchanged.
                                deadband.hpp also clean (header-only,
                                not gated but trivially verified).
+```
+
+---
+
+## 2026-04-26 (Wave A) — Phase 4-2 D: Live mode body + OneShot seed change + Live σ + GPIO pin keys
+
+> Lands the Live mode body inside the cold writer, switches OneShot to
+> always-`seed_global` (no warm-seed shortcut so a calibrate after a base
+> move converges reliably), adds a σ-overload form to `Amcl::step` so Live
+> can use a wider per-scan jitter than OneShot, and plumbs 4 new Tier-2
+> Config keys (Live σ pair + GPIO pin pair) plus 4 new Tier-1 constants
+> (GPIO debounce, UDS request cap, shutdown poll cadence, GPIO BCM upper
+> bound) so Wave B (GPIO + UDS modules) can drop in without further
+> Config-touchpoint plumbing. Final test count: **26/26 PASS** (25 prior
+> + 1 new `test_cold_writer_live_iteration`).
+>
+> **Wave A is mergeable on its own.** Live mode is reachable via
+> `g_amcl_mode.store(AmclMode::Live)` from any code that has access to
+> the atomic; the GPIO + UDS source threads that drive that store from
+> operator input are Wave B (separate writer round). The 2 GPIO pin keys
+> land in Wave A because they go through the standard 8-touchpoint
+> plumbing alongside the σ pair; they are unconsumed in Wave A but
+> validation still runs (a bad TOML rejects at startup).
+
+### Added
+
+- `src/localization/cold_writer.hpp::run_live_iteration` — new exported
+  free function mirroring `run_one_iteration`'s shape. Runs a single
+  AMCL `step()` with the Live σ pair, publishes through the deadband
+  with `forced=false`, updates the live-first-iter latch. Visible for
+  tests so `test_cold_writer_live_iteration` can drive the kernel
+  without a thread spawn or LiDAR (SSOT-DRY: production loop calls this
+  helper, tests call it directly).
+- `src/localization/amcl.hpp/.cpp::Amcl::step(beams, rng, sigma_xy_m,
+  sigma_yaw_deg)` — explicit-σ overload. The pre-existing
+  `step(beams, rng)` is now a thin one-line forward to this overload
+  using `cfg.amcl_sigma_xy_jitter_m / amcl_sigma_yaw_jitter_deg`, so
+  `converge()` semantics (which still calls the no-σ form) are
+  preserved.
+- `src/core/constants.hpp` — 4 new Tier-1 constants:
+    - `GPIO_DEBOUNCE_NS = 50'000'000` (50 ms; future Wave B GPIO source
+      uses this as the bounce-filter window).
+    - `UDS_REQUEST_MAX_BYTES = 4096` (4 KiB; future Wave B UDS server
+      caps the JSON line read at this size to bound stack + heap).
+    - `SHUTDOWN_POLL_TIMEOUT_MS = 100` (GPIO + UDS threads poll at this
+      cadence so `g_running.store(false)` reaches them within ~200 ms).
+    - `GPIO_MAX_BCM_PIN = 27` (Pi 5 40-pin header BCM upper bound;
+      `validate_gpio` rejects pins outside `[0, 27]`).
+- `src/core/config_defaults.hpp` — 4 new Tier-2 defaults:
+    - `AMCL_SIGMA_XY_JITTER_LIVE_M = 0.015` (15 mm; ~2σ coverage of the
+      expected 30 cm/s × 100 ms motion-per-scan).
+    - `AMCL_SIGMA_YAW_JITTER_LIVE_DEG = 1.5` (3× OneShot σ; harmless on
+      a static base, generous on a jolt-recovery).
+    - `GPIO_CALIBRATE_PIN = 16` (BCM, calibrate button).
+    - `GPIO_LIVE_TOGGLE_PIN = 20` (BCM, live-toggle button).
+- `src/core/config.hpp/.cpp` — 4 new fields + 8-touchpoint plumbing
+  (TOML key under new `[gpio]` section + `[amcl]` extension; env vars
+  `GODO_AMCL_SIGMA_XY_JITTER_LIVE_M` / `_LIVE_DEG`,
+  `GODO_GPIO_CALIBRATE_PIN` / `_LIVE_TOGGLE_PIN`; CLI flags
+  `--amcl-sigma-xy-jitter-live-m` / `-deg`, `--gpio-calibrate-pin` /
+  `--gpio-live-toggle-pin`; `validate_amcl` extends to the σ pair via
+  the existing `require_positive_double` lambda; new `validate_gpio`
+  function calls `require_pin_in_range` against
+  `constants::GPIO_MAX_BCM_PIN`; `Config::make_default` wires the four
+  defaults; `Config::load` calls `validate_amcl` then `validate_gpio`).
+- `tests/test_cold_writer_live_iteration.cpp` — new hardware-free test
+  target. 5 cases:
+    1. Live result has `forced == false` (deadband applies).
+    2. `live_first_iter_inout` flips to false after the first call.
+    3. Two near-identical frames in sequence: second publish suppressed
+       by deadband; `target_offset.generation()` does NOT advance.
+    4. Two clearly-different frames in sequence: second publish accepted;
+       generation advances.
+    5. **σ-override propagation pin (amendment S4)**: with a fixed
+       `Rng` seed and identical synthetic frame, two `Amcl::step` calls
+       at σ_xy = 0.001 vs σ_xy = 0.100 produce `xy_std_m` that differ by
+       > 1e-6. Pins that the σ argument actually feeds the motion model
+       rather than being silently dropped (a regression that swallows
+       the σ would produce identical `xy_std_m`).
+
+### Changed
+
+- `src/localization/cold_writer.cpp::run_one_iteration` — Phase 4-2 D
+  removes the `if (first_run_inout) seed_global else seed_around`
+  branch. OneShot now ALWAYS calls `amcl.seed_global(grid, rng)` so an
+  operator-triggered calibrate after a base move is not biased toward
+  the pre-move pose. The in-out parameter is renamed (see "Rename"
+  below) and is left for state hygiene only — OneShot does not consult
+  it for its own seed branch but clearing it on exit prevents misleading
+  state for a subsequent Live entry.
+- `src/localization/cold_writer.cpp::run_cold_writer` — `case
+  AmclMode::Live` body replaced. Per-scan: `lidar->scan_frames(1)`
+  (rate-limited by the LiDAR's natural ~10 Hz spin, no nanosleep
+  needed); re-check `g_amcl_mode` after the blocking scan so a mid-scan
+  toggle reaches the new mode without first publishing a stale Live
+  update; `run_live_iteration(...)` with the same M8 SIGTERM try/catch
+  pattern OneShot uses; on exception or `!got_frame`, transition to
+  Idle and break. Stays in Live across iterations — no implicit fall-
+  back to Idle (Phase 4-2 B's stub did `bounce-to-Idle` which is now
+  removed). Each transition out of Live (Idle path, OneShot path,
+  exception path, mid-scan toggle path) calls a new file-private
+  `on_leave_live(live_first_iter)` helper that re-arms the
+  `live_first_iter` latch — so the next Live entry seeds globally and
+  can recover from a base move that happened while Idle.
+- `src/localization/cold_writer.{hpp,cpp}` — removed the file-private
+  `log_live_stub_once` helper (its callers are gone).
+
+### Rename
+
+- `bool& first_run_inout` → `bool& live_first_iter_inout` everywhere it
+  appears in `cold_writer.{hpp,cpp}` and `tests/test_cold_writer_offset_invariant.cpp`
+  (≥ 17 textual sites; rename audit per amendment M5 expected ≥ 14,
+  actual count 17). The new name makes the latch's Live-mode-only role
+  explicit. After the rename, `git grep -nw first_run production/RPi5/{src,tests}/`
+  returns zero hits.
+
+### Tests modified
+
+- `tests/test_cold_writer_offset_invariant.cpp`:
+  - "second call uses seed_around (not seed_global)" → renamed and
+    rewritten as **"second call still uses seed_global (no warm-seed
+    shortcut)"** per Phase 4-2 D's OneShot seed change. Per amendment
+    S8, the assertion is strengthened from the original `iterations >=
+    1` (true under any path) to a ±20% bound between two back-to-back
+    OneShot iteration counts (`delta <= max(2, r1.iterations / 5)`).
+    A warm-seed regression would let `r2.iterations` collapse and this
+    CHECK would fail.
+  - All `bool first_run = true;` → `bool live_first_iter = true;`
+  - All `CHECK(first_run == false)` → `CHECK(live_first_iter == false)`.
+  - The first test still asserts `live_first_iter == false` after a
+    OneShot call — pinning the state-hygiene cleanup, not the seed
+    branch (which is unconditional `seed_global`).
+- `tests/test_config.cpp`:
+  - +7 new test cases (12 + boundary-acceptance case = total 8 σ + GPIO
+    cases + 1 unknown gpio.* TOML rejection):
+    - defaults wired (1 case, 4 CHECKs);
+    - TOML round-trip (1 case, 4 CHECKs);
+    - env round-trip (1 case, 4 CHECKs);
+    - CLI round-trip (1 case, 4 CHECKs);
+    - σ pair non-positive rejection (1 case, 4 sub-blocks);
+    - GPIO pin out-of-range rejection (1 case, 4 sub-blocks: -1 / 28 ×
+      both pins);
+    - GPIO pin boundary acceptance (1 case, 0 and 27);
+    - unknown `gpio.*` TOML key rejection (1 case).
+
+### Files added
+
+```text
+production/RPi5/tests/test_cold_writer_live_iteration.cpp   5 cases
+```
+
+### Files modified
+
+```text
+production/RPi5/src/core/constants.hpp                +4 Tier-1 constants
+production/RPi5/src/core/config_defaults.hpp          +4 defaults
+production/RPi5/src/core/config.hpp                   +4 fields
+production/RPi5/src/core/config.cpp                   8-touchpoint × 4 keys
+                                                      + new validate_gpio
+production/RPi5/src/localization/amcl.hpp             +1 step overload
+production/RPi5/src/localization/amcl.cpp             σ pair extracted to
+                                                      overload; no-σ form
+                                                      thin-forwards
+production/RPi5/src/localization/cold_writer.hpp      rename in-out param;
+                                                      +run_live_iteration decl
+production/RPi5/src/localization/cold_writer.cpp      OneShot always seed_global;
+                                                      Live body real;
+                                                      run_live_iteration body;
+                                                      on_leave_live helper
+production/RPi5/tests/test_cold_writer_offset_invariant.cpp
+                                                      rename + S8 assertion
+production/RPi5/tests/test_config.cpp                 +7 test cases (Phase 4-2 D)
+production/RPi5/tests/CMakeLists.txt                  +1 test target
+production/RPi5/scripts/build.sh                      doc-only; label inventory
+                                                      + Wave A no-new-alloc note
+production/RPi5/CODEBASE.md                           this entry +
+                                                      module map refresh
+```
+
+### Invariants
+
+- **M1 (wait-free contract)** — unaffected. The Live mode body uses
+  exactly the same primitives the OneShot body uses
+  (`apply_deadband_publish`, atomic loads/stores on `g_amcl_mode`).
+  `[m1-no-mutex]` build gate stays clean.
+- **M2 (publish seam stable)** — strengthened. Live mode publishes
+  through the same one-line `apply_deadband_publish(...)` call OneShot
+  uses; no separate seam.
+- **M3 (canonical-360 dyaw)** — unaffected. `compute_offset` is shared
+  by OneShot and Live.
+- **M8 (SIGTERM watchdog)** — extended to Live. The Live `case` uses
+  the same `try { lidar->scan_frames(1, ...) } catch ...` pattern
+  OneShot uses, and on `!got_frame` or exception transitions to Idle
+  and breaks (so the loop top sees `g_running == false` if SIGTERM
+  fired). `pthread_kill(t_cold, SIGTERM)` from `main` continues to
+  unblock the SDK's grabScanDataHq path.
+- **8-touchpoint plumbing** — extended cleanly. The 4 new keys touch
+  exactly the same 8 sites Phase 4-2 B Wave 1 documented; no shortcut.
+- **Invariant (a) — no ABC** — preserved. The σ-overload on
+  `Amcl::step` is a function overload, not a virtual dispatch.
+- **Wave B carry**: `src/gpio/` and `src/uds/` modules + GPIO/UDS test
+  doubles + `godo_tracker_rt::main` thread spawning + `gpio_wiring.md`
+  and `uds_protocol.md` — all deferred to Wave B. The new Tier-1
+  constants and pin Config keys land here so Wave B can drop in cleanly.
+
+### Deviations from the plan
+
+1. **Wave A scope honoured strictly**: tasks P4-2-D-6 through P4-2-D-13
+   (GPIO + UDS + main wiring + docs) are deferred to Wave B as the
+   plan body specifies. Wave A delivers tasks P4-2-D-1, -2, -3, -4, -5,
+   -14 only. The 2 GPIO pin Config keys are the one Wave A inclusion
+   from the GPIO surface — they go through the standard plumbing
+   alongside the σ pair so Wave B does not have to extend the
+   8-touchpoint table separately.
+2. **`on_leave_live` placement**: kept as a file-private helper in
+   `cold_writer.cpp`'s anonymous namespace rather than promoting to the
+   header. It has exactly four call sites (all inside `run_cold_writer`'s
+   four Live-exit paths), no test coverage need, and exposing it to the
+   header would suggest it is reusable cold-path infrastructure (it is
+   not — it is implementation detail of the Live state machine).
+3. **OneShot's `live_first_iter_inout = false` epilogue**: the plan
+   body §"OneShot seed change" notes "leaving it `true` would be
+   misleading state". The implementation honours this with a single
+   write at end-of-OneShot. OneShot does NOT consult the latch for its
+   own seed branch (which is unconditionally `seed_global`); this is a
+   state-hygiene write, not a behaviour write.
+4. **σ-override test fresh-Amcl design**: amendment S4 specifies
+   "fixed RNG seed; identical synthetic frame; two `step()` calls at
+   σ=0.001 vs σ=0.100; assert `xy_std_m` differs by > 1e-6". The
+   implementation creates two FRESH `Amcl` instances + two FRESH `Rng`
+   instances seeded identically. This is necessary because `step()`
+   mutates particle state in place; running both σ calls on the same
+   `Amcl` would compound the σ differences across runs. Fresh-Amcl /
+   fresh-Rng with identical seed isolates the σ argument's effect.
+5. **`run_live_iteration` updates `last_pose_inout` after the publish**:
+   parallels `run_one_iteration`'s pattern (§6.4.1 — rejected publish ≠
+   rejected pose estimate). The next Live iteration reads `last_pose`
+   from the kernel's freshly-refined estimate even when the deadband
+   filter dropped the publish.
+
+### What Phase 4-2 D Wave A explicitly does NOT do
+
+- Does NOT add `src/gpio/` or `src/uds/` directories. Those are Wave B.
+- Does NOT modify `src/godo_tracker_rt/main.cpp`. Spawning the GPIO +
+  UDS threads is Wave B's main wiring.
+- Does NOT create `production/RPi5/doc/gpio_wiring.md` or
+  `production/RPi5/doc/uds_protocol.md`. Docs land with the modules.
+- Does NOT add new test labels. `hardware-required-gpio` is documented
+  in the build script's label inventory comment (so the slot is
+  reserved) but no test consumes it yet — `test_gpio_source_libgpiod`
+  is Wave B.
+- Does NOT change `cfg.divergence_mm` / `cfg.divergence_deg` plumbing.
+  Divergence clamp at the publish seam remains §8 territory, deferred
+  per plan §"Out of scope".
+- Does NOT measure OneShot wall-clock on news-pi01. That is a separate
+  follow-up task per plan §"Follow-up issues" — gated on Wave A merge.
+
+### Future considerations (장래 검토)
+
+- **Hybrid mode (adaptive σ from velocity)** — once Live mode runs in
+  production, the velocity between successive `last_pose` values is
+  computable cheaply at the cold writer. Map velocity → σ_xy
+  adaptively. Avoids the all-or-nothing 0.005 vs 0.015 split. Needs
+  production motion data to tune. Tentative Phase 4-2 E. Tracked in
+  PROGRESS.md "장래 검토".
+- **Map staleness recovery** — `seed_global` on a moved/edited map can
+  fail to converge if the calibration origin's environment changed.
+  Mitigation belongs to "map editing" Phase 4.5 + the deferred
+  divergence clamp. The operator manual will mention "re-do mapping
+  when fixtures move" once Phase 4.5 lands.
+- **GPIO debounce field tuning** — `GPIO_DEBOUNCE_NS = 50 ms` is the
+  textbook minimum. If field testing shows bounce, raise to 100 ms in
+  `core/constants.hpp` (Tier-1 — no Config exposure needed).
+
+### Final test counts
+
+```text
+ctest -L hardware-free       26/26 PASS  (25 prior + 1 new
+                                          test_cold_writer_live_iteration
+                                          with 5 cases)
+ctest -L python-required      1/1  PASS  (test_csv_parity)
+[rt-alloc-grep]               1 hit only (UdpSender ctor std::string,
+                               init-time, justified per invariant (e)) —
+                               unchanged from Phase 4-2 C.
+[m1-no-mutex]                 0 hits in cold_writer.cpp; unchanged.
+                               Live mode body adds zero std::mutex /
+                               std::condition_variable references.
+git grep -nw first_run         0 hits (rename complete; expected ≥ 14
+production/RPi5/{src,tests}/   per amendment M5, actual rename count 17)
 ```
 

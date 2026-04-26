@@ -63,6 +63,19 @@ struct Config {
     int           amcl_trigger_poll_ms{};
     std::uint64_t amcl_seed{};
 
+    // Phase 4-2 D — Live mode motion-model σ pair. OneShot uses the
+    // amcl_sigma_xy_jitter_m / _yaw_jitter_deg pair above (5 mm / 0.5°);
+    // Live mode uses these wider values (15 mm / 1.5°) to track a base
+    // that may move at ~30 cm/s while still letting the particle cloud
+    // refine on each scan.
+    double        amcl_sigma_xy_jitter_live_m{};
+    double        amcl_sigma_yaw_jitter_live_deg{};
+
+    // Phase 4-2 D — GPIO BCM pin assignments (Wave A lands these so Wave B
+    // can read them; consumers in src/gpio/ arrive in Wave B).
+    int           gpio_calibrate_pin{};
+    int           gpio_live_toggle_pin{};
+
     // Build a Config with defaults applied from core/config_defaults.hpp.
     static Config make_default();
 

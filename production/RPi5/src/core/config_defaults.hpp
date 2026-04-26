@@ -57,4 +57,18 @@ inline constexpr double           AMCL_YAW_TRIPWIRE_DEG    = 5.0;     // vs orig
 inline constexpr int              AMCL_TRIGGER_POLL_MS     = 50;      // idle wake cadence for cold writer
 inline constexpr std::uint64_t    AMCL_SEED                = 0;       // 0 = time-derived; non-zero = deterministic
 
+// Phase 4-2 D — Live-mode motion-model σ pair. The OneShot σ pair
+// (AMCL_SIGMA_XY_JITTER_M / _YAW_JITTER_DEG above) was tuned for a static
+// crane; Live mode tracks a base that may move at up to ~30 cm/s, so the
+// per-scan jitter must be wider. 0.015 m / 1.5° gives ~2σ coverage of the
+// expected 100 ms inter-scan motion. See plan §"Deviations" rationale.
+inline constexpr double           AMCL_SIGMA_XY_JITTER_LIVE_M    = 0.015;  // 15 mm
+inline constexpr double           AMCL_SIGMA_YAW_JITTER_LIVE_DEG = 1.5;    // 3× OneShot
+
+// Phase 4-2 D — GPIO BCM pin assignments. BCM 16 (calibrate button) and
+// BCM 20 (live-toggle button); active-low against PULL_UP. See
+// production/RPi5/doc/gpio_wiring.md (Wave B).
+inline constexpr int              GPIO_CALIBRATE_PIN       = 16;
+inline constexpr int              GPIO_LIVE_TOGGLE_PIN     = 20;
+
 }  // namespace godo::config::defaults

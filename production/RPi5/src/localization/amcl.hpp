@@ -37,6 +37,17 @@ public:
     // normalize → conditional resample (only if N_eff < neff_frac * N).
     // Sets `result.iterations = 1`, `result.converged = (xy_std + yaw_std
     // both inside cfg thresholds)`, `result.forced = false`.
+    //
+    // Two overloads:
+    //   - explicit-σ form: callers pick the per-call motion-model jitter
+    //     (Phase 4-2 D Live mode passes the wider Live σ pair).
+    //   - default form: forwards to the explicit form using
+    //     cfg.amcl_sigma_xy_jitter_m / amcl_sigma_yaw_jitter_deg
+    //     (OneShot semantics; converge() builds on this).
+    AmclResult step(const std::vector<RangeBeam>& beams,
+                    Rng&                          rng,
+                    double                        sigma_xy_m,
+                    double                        sigma_yaw_deg);
     AmclResult step(const std::vector<RangeBeam>& beams, Rng& rng);
 
     // Loop on top of step() up to `cfg.amcl_max_iters`. Early-exits when

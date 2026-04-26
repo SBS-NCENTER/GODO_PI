@@ -7,9 +7,16 @@
 //   OneShot — capture one frame, run Amcl::converge, publish Offset, return
 //             to Idle. Sets `result.forced = true` so Phase 4-2 C deadband
 //             can pass operator-driven calibrates through unconditionally.
-//   Live    — Phase 4-2 D body. Wave 2 implementation: log-once and bounce
-//             back to Idle. The branch lives in the state machine so 4-2 D
-//             becomes "fill the body", not "rewrite the cold path".
+//             Phase 4-2 D: ALWAYS seeds globally (no warm-seed shortcut),
+//             so a calibrate after a base move converges reliably.
+//   Live    — Phase 4-2 D body. Per-scan single Amcl::step() with the wider
+//             Live σ pair (cfg.amcl_sigma_xy_jitter_live_m /
+//             _yaw_jitter_live_deg), publishing through the deadband
+//             (forced=false). Stays in Live until g_amcl_mode is toggled
+//             elsewhere (GPIO/UDS in Wave B). On Live entry the
+//             `live_first_iter_inout` latch forces a `seed_global` for the
+//             first iteration so Live can always pick up after a base
+//             move; subsequent iterations re-seed around `last_pose`.
 //
 // Wait-free contract (M1): no std::mutex / std::shared_mutex /
 // std::condition_variable inside this module. The seqlock store is the
@@ -21,7 +28,8 @@
 // `last_written` and skips the seqlock store + the `last_written` update
 // when every component is strictly inside its per-axis threshold.
 // `result.forced == true` (operator-driven OneShot) bypasses the deadband
-// unconditionally.
+// unconditionally; Live mode publishes with `forced=false` so noise is
+// suppressed and the smoother stays on its current ramp.
 //
 // SIGTERM watchdog (M8): EINTR returns from any blocking SDK call inside
 // `scan_frames` are treated as clean cancellation. `godo_tracker_rt::main`
@@ -59,13 +67,19 @@ using LidarFactory =
 // (`run_cold_writer`) calls this on every OneShot transition (SSOT-DRY).
 //
 // Side effects:
-//   - mutates `amcl` (re-seeds, runs converge)
+//   - mutates `amcl` (re-seeds globally, runs converge)
 //   - mutates `last_pose_inout`    (set to the result.pose, regardless of
 //                                   whether the deadband filter accepts —
 //                                   the AMCL particle seed for the next
 //                                   iteration is independent of the
 //                                   publish state per §6.4.1)
-//   - mutates `first_run_inout`    (sets to false on first invocation)
+//   - mutates `live_first_iter_inout` (sets to false; OneShot does not
+//                                   consult it for its own seed branch —
+//                                   OneShot is unconditionally
+//                                   `seed_global` per Phase 4-2 D — but
+//                                   leaving the latch true after a OneShot
+//                                   would be misleading state for a
+//                                   subsequent Live entry)
 //   - mutates `beams_buf`          (downsample output target)
 //   - sets `result.forced = true`  (operator-driven OneShot)
 //   - mutates `last_written_inout` ONLY when the deadband filter accepts
@@ -83,9 +97,38 @@ AmclResult run_one_iteration(const godo::core::Config&         cfg,
                              Rng&                              rng,
                              std::vector<RangeBeam>&           beams_buf,
                              Pose2D&                           last_pose_inout,
-                             bool&                             first_run_inout,
+                             bool&                             live_first_iter_inout,
                              godo::rt::Offset&                 last_written_inout,
                              godo::rt::Seqlock<godo::rt::Offset>& target_offset);
+
+// Per-Live-iteration kernel. Visible for tests so they can drive a
+// deterministic synthetic Frame through the Live AMCL pipeline without
+// spawning the cold writer thread. The production loop
+// (`run_cold_writer`) calls this on every scan while `g_amcl_mode == Live`.
+//
+// Differences from `run_one_iteration`:
+//   - seeds with `seed_global` only when `live_first_iter_inout == true`,
+//     otherwise re-seeds with `seed_around(last_pose, …)`;
+//   - calls `Amcl::step(beams, rng, σ_live_xy, σ_live_yaw)` (single
+//     iteration with the wider Live motion-model σ pair) instead of
+//     `converge()`;
+//   - sets `result.forced = false` so the deadband filter applies;
+//   - `live_first_iter_inout` is always reset to false at the end of the
+//     call (next Live iteration uses `seed_around`).
+//
+// Other side effects mirror `run_one_iteration`. Returns the AmclResult
+// produced by `Amcl::step` (with `result.offset` and `result.forced`
+// filled in by this function before publishing).
+AmclResult run_live_iteration(const godo::core::Config&         cfg,
+                              const godo::lidar::Frame&         frame,
+                              const OccupancyGrid&              grid,
+                              Amcl&                             amcl,
+                              Rng&                              rng,
+                              std::vector<RangeBeam>&           beams_buf,
+                              Pose2D&                           last_pose_inout,
+                              bool&                             live_first_iter_inout,
+                              godo::rt::Offset&                 last_written_inout,
+                              godo::rt::Seqlock<godo::rt::Offset>& target_offset);
 
 // Run the cold writer until godo::rt::g_running is false. Idempotent on
 // repeated trigger; safe to call once per process lifetime.

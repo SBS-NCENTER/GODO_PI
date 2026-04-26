@@ -45,7 +45,22 @@ Earlier phases:
 - **Yaw handling**: Approach B — **AMCL outputs (x, y, yaw) 3-DOF simultaneously**. The LiDAR's yaw is inferred from how walls/features line up against the pre-built map. No separate yaw-correction step.
 - **Localization**: O3 first (pre-built map + AMCL), then O4 extension (retro-reflector markers). The marker layer is gated on the Phase 1 measurement of C1 marker distinguishability.
 - **SHOTOKU FreeD Pan semantics**: **base-local** (the pan-head encoder, relative to the dolly). Because the wheels-parallel rule keeps dolly yaw constant, the base-local reading is effectively world-frame in practice. We only merge (dx, dy); Pan is not touched.
-- **Uses of LiDAR yaw**: (1) as the 3-DOF state variable inside AMCL, (2) as a safety tripwire — if yaw drifts more than 2° from the last known baseline, set a UDP warning flag and raise an operator alert.
+- **Uses of LiDAR yaw**: (1) as the 3-DOF state variable inside AMCL, (2) as a safety tripwire — if yaw drifts more than `cfg.amcl_yaw_tripwire_deg` from `cfg.amcl_origin_yaw_deg`, log a warning (Phase 4-3 wires a UDP warning bit).
+
+### Operating modes (clarified 2026-04-26)
+
+CLAUDE.md §1 prior wording — *"user-triggered 1-shot, not continuous tracking"* — was incomplete. There are **4 user-triggered actions**, all on-demand (no autonomous mode):
+
+| # | Action | Trigger | Implementation phase |
+| --- | --- | --- | --- |
+| 1 | Initial / re-do mapping | Operator (Docker) | SYSTEM_DESIGN.md §4 |
+| 2 | Map editing (remove moved fixtures) | Operator (webctl) | Phase 4.5 |
+| 3 | **1-shot calibrate** (high-accuracy) | GPIO button / HTTP `/api/calibrate` | **Phase 4-2 B (current)** |
+| 4 | **Live tracking** (low-accuracy, toggle) | GPIO button / HTTP `/api/live` | **Phase 4-2 D** |
+
+The smoother + 60 Hz hot path (Phase 4-1) was designed primarily around mode (4): Live mode publishes new `Offset`s at ~10 Hz from the cold writer; the smoother interpolates so UE renders at a steady 59.94 fps. **Mode (3) inherits the smoother as a side-benefit** — operator-triggered jumps become smooth ~500 ms ramps. If only mode (3) existed, the smoother would be optional. The architecture exists because mode (4) needs it, mode (3) gets it for free.
+
+Trigger primitive: `std::atomic<godo::rt::AmclMode> g_amcl_mode` (replaces the Phase 4-1 `std::atomic<bool> calibrate_requested` per Phase 4-2 B). Three-state machine: `Idle` ↔ `OneShot` ↔ `Live` (mode 4 body deferred to Phase 4-2 D; current build stubs the `Live` branch).
 
 ### Software stack (confirmed 2026-04-21)
 
@@ -80,9 +95,10 @@ All host-side bring-up steps complete. See per-step session log entry below. The
 ### Phase 4-2 — cold path + integration (in progress)
 
 - ✅ **A. LiDAR component-isation 완료 2026-04-25 (late)** — `src/godo_smoke/{sample.hpp, lidar_source_rplidar.{cpp,hpp}}` → `src/lidar/` (`godo_lidar` static lib, namespace `godo::lidar`). `godo_smoke` 바이너리는 새 lib에 link. `lidar_source_rplidar.cpp`는 `godo::rt::monotonic_ns` 사용으로 godo_smoke 의존성 제거. 16/16 hardware-free tests PASS. CODEBASE.md "2026-04-25 (late)" 섹션에 변경 기록 + invariant (a) duck-typed twin 룰은 그대로 유지 (이름만 `godo::lidar::test::LidarSourceFake`로 변경).
-- Port AMCL from the Phase 2 Python reference to `src/localization/`. Add `libeigen3-dev` to the apt prereqs.
-- Implement the **cold-path deadband filter** (SYSTEM_DESIGN.md §6.4.1) in Thread C: drop new poses within ±10 mm / ±0.1° of `last_written` unless `calibrate_requested` bypasses the filter.
-- Wire the real cold-path writer into `godo_tracker_rt/main.cpp`, replacing the `// TODO(phase-4-2)` stub thread.
+- ✅ **B. AMCL C++ port — OneShot mode 완료 2026-04-26** — `src/localization/` 새 모듈 (godo_localization static lib): `OccupancyGrid` + `load_map` (slam_toolbox PGM/YAML), `LikelihoodField` (Felzenszwalb 2D EDT), `Pose2D` + circular stats, `Rng`, `class Amcl` (step()/converge() split), `AmclResult`, `cold_writer` state machine (Idle/OneShot real, Live stubbed). `godo_tracker_rt/main.cpp` stub 제거 + `run_cold_writer` wired + SIGTERM watchdog. `core::AmclMode` enum이 `calibrate_requested` 대체. 24/24 hardware-free tests PASS (5 신규: circular_stats, pose, amcl_components, cold_writer_offset_invariant, amcl_scenarios). 새 invariant (f) 추가 (AMCL no-virtual). `[m1-no-mutex]` build-gate 추가 (cold_writer.cpp wait-free contract). 풀 파이프라인 (planner → reviewer-A → writer → reviewer-B + Mode-B follow-ups). 상세는 `production/RPi5/CODEBASE.md` Wave 1 + Wave 2 섹션, 계획서는 `.claude/tmp/plan_phase4_2_b.md` (post-merge 삭제 가능).
+- **C. Cold-path deadband filter** (SYSTEM_DESIGN.md §6.4.1): seam은 `cold_writer.cpp` publish 경로에 이미 박혀 있음 (`AmclResult::forced` flag forwarded). 4-2 C가 식별자 변경 없이 drop in. `forced=true` (OneShot) bypass deadband; `forced=false` (Live) apply deadband.
+- **D. Live mode body** (mode 4 in CLAUDE.md §1) — `cold_writer.cpp::case Live`의 stub을 실제 step() loop으로 교체. Motion model σ_xy를 5 mm static에서 ~5–15 mm/scan으로 bump (베이스 ~30 cm/s 대응). Toggle source: 두 번째 GPIO + HTTP endpoint. Live → Idle toggle 시 SIGTERM 워치독으로 blocking scan_frames 인터럽트.
+- Persisted IRQ-pinning systemd unit (Phase 4-1 carry).
 - systemd unit `godo-tracker.service` with `Type=simple`, `Restart=on-failure`, `CPUAffinity=0-3`, `CPUSchedulingPolicy=fifo`, `CPUSchedulingPriority=50`.
 - Hardware watchdog wiring: `/etc/systemd/system.conf` → `RuntimeWatchdogSec=10s`.
 - Document the Arduino rollback procedure (README + operator card).
@@ -157,6 +173,20 @@ All host-side bring-up steps complete. See per-step session log entry below. The
 ---
 
 ## Session log
+
+### 2026-04-26
+
+- **Phase 4-2 B AMCL implementation landed** at `production/RPi5/src/localization/`. New static lib `godo_localization` with `OccupancyGrid` + `load_map` (slam_toolbox PGM/YAML, hand-rolled parser, `EDT_MAX_CELLS = 4'000'000` cell-count cap), `LikelihoodField` (Felzenszwalb 2D EDT separable 1D passes + Gaussian conversion), `Pose2D` + `Particle` + circular-stats helpers (`circular_mean_yaw_deg`, `circular_std_yaw_deg` — atan2-based; the `[359°, 1°)` cluster reads as ~0.6° std, not ~180°), `Rng` (mt19937_64; seed=0 → time-derived, !=0 → deterministic), free functions `downsample` / `evaluate_scan` / `jitter_inplace` / `resample` (low-variance, conditional on N_eff < neff_frac·N), `class Amcl` with **step()/converge() split** (converge implemented in terms of step → SSOT-DRY → mode 4 Live drops in step() per scan), `AmclResult` + `compute_offset` (M3 canonical-360 dyaw matching `apply_offset_inplace`'s wire convention) + `apply_yaw_tripwire` (anchor = `cfg.amcl_origin_yaw_deg`), `cold_writer` state machine (Idle / OneShot real / Live stubbed-and-bounces-to-Idle).
+- **`godo_tracker_rt/main.cpp` integration**: `thread_stub_cold_writer` deleted; `run_cold_writer` spawned with an injected `lidar_factory` (testable seam — production passes a closure that `open()`s a real `LidarSourceRplidar`; tests bypass via `run_one_iteration` direct call). M8 SIGTERM watchdog: `pthread_kill(cold_native, SIGTERM)` before `t_cold.join()` so a blocking `scan_frames(1)` cannot delay shutdown indefinitely.
+- **`core::AmclMode` enum + `g_amcl_mode` atomic** in `core/rt_flags.{hpp,cpp}` replaces the Phase 4-1 `std::atomic<bool> calibrate_requested`. Three states: `Idle`, `OneShot`, `Live`. Two writers (button, HTTP via godo-webctl) store `OneShot` or `Live`; cold writer consumes with acquire-load and stores `Idle` on completion. `calibrate_requested` removed repo-wide (zero hits in `production/RPi5/src/` and `tests/` other than a single migration breadcrumb comment in `rt_flags.hpp`).
+- **20 new AMCL Tier-2 keys** plumbed through `Config` (CLI/env/TOML/defaults), each with positive + negative test cases in `test_config.cpp` (cases 8 → 22). 4 new Tier-1 in `core/constants.hpp`: `PARTICLE_BUFFER_MAX = 10000`, `SCAN_BEAMS_MAX = 720`, `EDT_TABLE_SIZE = 1024`, `EDT_MAX_CELLS = 4'000'000`, plus `EVAL_SCAN_LIKELIHOOD_FLOOR = 1e-6`. Single source of truth for `OCCUPIED_CUTOFF_U8 = 100` in `occupancy_grid.hpp` (consumed by both `likelihood_field.cpp`'s EDT seeding and `amcl.cpp`'s `seed_global` free-cell test — they cannot drift out of sync).
+- **24/24 hardware-free tests PASS** (Wave 1 5 new + Wave 2 5 new = 10 added on top of the 14-test Phase 4-1 baseline). Bias-block discipline preserved: `test_likelihood_field.cpp` validates EDT against an independent brute-force O(N²) reference (no Bresenham); `test_amcl_scenarios.cpp` validates `class Amcl` against a Bresenham synthetic ray-caster (no EDT). Two implementations sharing zero code is the SSOT-violation-on-purpose that makes a passing test meaningful. `[m1-no-mutex] clean` build-gate added to `scripts/build.sh` — enforces zero `std::mutex` / `std::shared_mutex` / `std::condition_variable` / `std::lock_guard` / `std::unique_lock` references in `cold_writer.cpp` (M1 wait-free contract). `[rt-alloc-grep]` reports the same single pre-existing UdpSender ctor hit; no new hot-path allocations.
+- **CODEBASE.md gains invariant (f)**: *"AMCL has no virtual methods. Particle-filter component swap-out is by `Amcl` template parameter, NOT by ABC. Reuses invariant (a)'s no-ABC philosophy across the localization module."* The top-of-file Module map snapshot is refreshed to current state (was "as of 2026-04-25 late"; now "as of 2026-04-26 Wave 2").
+- **Operating-modes clarification (CLAUDE.md §1)**: prior "user-triggered 1-shot, not continuous tracking" wording was incomplete. There are 4 user-triggered actions (all on-demand): mapping, map editing, 1-shot calibrate (Phase 4-2 B, current), Live tracking (Phase 4-2 D). Smoother + 60 Hz hot path was designed primarily around Live mode; 1-shot inherits it as a side-benefit. SYSTEM_DESIGN.md §1 / §5 / §6.1.3 / §6.4 all updated to reflect this: trigger primitive is `std::atomic<AmclMode>`, not `std::atomic<bool>`; smoother docstring documents the Live-driven design intent; AMCL §5 documents the step()/converge() split with a per-mode pseudocode.
+- **Reviewer Mode-A** APPROVE-WITH-NOTES (9 MUST-FIX + 7 SHOULD-FIX + 5 NIT folded inline by Planner before Writer entered). **Reviewer Mode-B** APPROVE-WITH-NOTES (no MUST FIX, 10 SHOULD FIX, 5 NIT). All 10 SHOULD + 3 NIT applied as a follow-up housekeeping pass (the 2 skipped NITs were N1 — comment already accurate — and N5 — Eigen3 PUBLIC linkage retained per Wave 1 self-disclosed deviation).
+- **Carried into Phase 4-2 C**: cold-path deadband filter. The seam already exists in `cold_writer.cpp`'s publish path (`AmclResult::forced` is forwarded); 4-2 C drops in `if (result.forced || !within_deadband(...)) target_offset.store(...)` with no `cold_writer.cpp` rewrite needed.
+- **Carried into Phase 4-2 D**: Live mode body. The `case Live` stub bounces to `Idle` today; 4-2 D fills it with a per-scan `step()` loop, bumps motion-model σ_xy from 5 mm static to ~5–15 mm/scan for ~30 cm/s base motion, adds the toggle source, and uses the same SIGTERM watchdog pattern to interrupt blocking `scan_frames` on Live → Idle.
+- **Plan file** at `.claude/tmp/plan_phase4_2_b.md` (gitignored, throwaway). Safe to delete after this session — CODEBASE.md Wave 1 + Wave 2 sections + this PROGRESS.md entry capture the durable record.
 
 ### 2026-04-25
 

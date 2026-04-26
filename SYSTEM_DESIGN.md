@@ -47,8 +47,8 @@
 │                       │  [shared state: offset, FreeD]       │       │
 │                       │  [map files: map.pgm + map.yaml]     │       │
 │                       │                                      │       │
-│                       │  trigger → recalibrate()             │       │
-│                       │  (user: button / UDP command)        │       │
+│                       │  g_amcl_mode ∈ {Idle, OneShot, Live} │       │
+│                       │  (user: button / HTTP via godo-webctl)│       │
 │                       └──────────────────────────────────────┘       │
 │                                        │                             │
 │                                    UDP │ 59.94 fps                   │
@@ -75,7 +75,8 @@
 | Offset smoother | Linear ramp (method A): when AMCL writes a new generation, the hot-path smoother drives `live_offset` → `target_offset` linearly over `T_ramp` (default 500 ms). Uses the seqlock's integer generation counter for edge detection (not float equality), and snaps value-copy at `frac ≥ 1.0` to eliminate float drift. See §6.4 |
 | AMCL noise deadband | Thread C filters AMCL outputs in the cold path: if `|Δpos| < DEADBAND_MM` AND `|Δyaw| < DEADBAND_DEG`, the seqlock is **not** written, so the hot-path smoother never sees sub-noise-floor updates. Forced-accept on explicit calibrate bypasses the filter. Defaults `10 mm` / `0.1°`. See §6.4.1 |
 | Yaw wrap | Two named sites, both **pure free functions**: (1) `lerp_angle` in the smoother — shortest-arc delta, precondition `|b-a| < 360`; (2) `wrap_signed24` at FreeD pan re-encode — `±2^23` lsb = encoded range (NOT a mechanical crane limit). See §6.5 |
-| Trigger UX (Q6) | **Both** — physical GPIO button on the RPi 5 (studio-side) + HTTP POST via `godo-webctl` (control-room-side). Single `std::atomic<bool> calibrate_requested` primitive (idempotent, two writers OK). Thread C polls + `exchange(false)` per scan. Queue upgrade planned if non-idempotent commands are added. See §6.1.3 |
+| Trigger UX (Q6) | **Both** — physical GPIO button on the RPi 5 (studio-side) + HTTP POST via `godo-webctl` (control-room-side). Single `std::atomic<godo::rt::AmclMode> g_amcl_mode` primitive in `core/rt_flags.hpp` (replaces the Phase 4-1 boolean `calibrate_requested`). Two writers (button, HTTP) write `OneShot` or `Live`; cold writer transitions back to `Idle` on completion. See §6.1.3 |
+| Operating modes | **4 user-triggered actions** (per CLAUDE.md §1): (1) initial / re-do mapping (Docker), (2) map editing (Phase 4.5 webctl), (3) **1-shot calibrate** (high-accuracy, runs `Amcl::converge()` to convergence, deadband-bypassed via `forced=true`), (4) **Live tracking** (toggle-on continuous, runs `Amcl::step()` per scan, deadband applied). Modes (3) and (4) share the same `Amcl` kernel via the `step()`/`converge()` split. Mode (4) body deferred to Phase 4-2 D |
 | Web control plane | Separate FastAPI process `godo-webctl`, never inside the RT binary. IPC via Unix domain socket (JSON-lines). **Phase 4-3 scope (minimal)**: `/health`, `/map/backup`, `/calibrate`. Map editor / config editor / full React frontend deferred to Phase 4.5+. See §7 |
 | Constants | Two tiers: `core/constants.hpp` for protocol/algorithmic invariants (Tier 1, `constexpr`); `Config` class + `core/config_defaults.hpp` for tunables (Tier 2, TOML-backed, env-override). Magic-number ban enforced by code review. See §11 (Runtime configuration) |
 | Languages | Python (UV) prototyping in Phases 1–2, C++ production from Phase 3 onward, FastAPI (Python) for `godo-webctl` from Phase 4+ |
@@ -251,37 +252,72 @@ WORKDIR /work
 
 ### Inputs
 
-- 2D occupancy grid (`OccupancyGrid`).
-- LiDAR scan (array of distances and angles).
-- Previous estimate + uncertainty (covariance).
+- 2D occupancy grid (`OccupancyGrid`) — slam_toolbox-shaped PGM + YAML.
+- LiDAR scan (`godo::lidar::Frame` from the C1 driver).
+- Per-mode entry: `Amcl::seed_global(grid, rng)` for first run, `Amcl::seed_around(last_pose, σ_xy, σ_yaw, rng)` thereafter.
 
 ### Outputs
 
-- Pose estimate `(x, y, yaw)` + covariance matrix.
+- `AmclResult { Pose2D pose; godo::rt::Offset offset; bool forced; bool converged; int iterations; double xy_std_m; double yaw_std_deg; }` (see `src/localization/amcl_result.hpp`).
+- The `forced` flag is set by the cold writer for `OneShot` runs so the Phase 4-2 C deadband filter can pass operator-initiated calibrates through unconditionally.
 
 ### Algorithm outline
 
+The `Amcl` class exposes a **split API** so the same kernel serves both 1-shot and Live modes (SSOT-DRY):
+
 ```text
-Init:
-    create N particles (N = 100–10,000, adaptive on uncertainty)
-    each particle: (x, y, yaw, weight)
-    global init: uniformly scatter across the map
+class Amcl {
+    AmclResult step(beams, rng);      // single iteration: motion → sensor → resample
+    AmclResult converge(beams, rng);  // loop step() up to amcl_max_iters with early-exit
+    void seed_global(grid, rng);      // uniform over free cells; n = amcl_particles_global_n
+    void seed_around(pose, σ_xy, σ_yaw, rng);  // Gaussian cloud; n = amcl_particles_local_n
+    Pose2D weighted_mean();           // circular mean for yaw (atan2)
+    double xy_std_m();                // sqrt(weighted_var_x + weighted_var_y)
+    double circular_std_yaw_deg();    // shortest-arc std (NOT linear)
+};
 
-Loop (per scan):
-    1. Motion update (prediction)
-       - in a 1-shot setting, add small jitter (stationary assumption)
-    2. Measurement update (correction)
-       for each particle:
-           expected_scan = ray_cast(map, particle.pose, scan_angles)
-           likelihood = beam_model(expected_scan, actual_scan)
-           particle.weight *= likelihood
-    3. Normalize weights
-    4. Resample (low-variance sampler)
-    5. Extract the weighted mean pose
+OneShot mode (mode 3 in CLAUDE.md §1):
+    capture one frame
+    seed_around(last_pose, σ_seed) (or seed_global on first run)
+    converge():
+        for iter in [0, amcl_max_iters):
+            step(beams, rng)
+            if iter ≥ 3 AND xy_std < th_xy AND circular_std_yaw < th_yaw:
+                early-exit
+    publish AmclResult (forced=true) → cold writer publish seam → seqlock
 
-Kidnapped-robot detection:
-    if total weight before normalization falls below a threshold:
-        → global redistribution (scatter particles, converge again)
+Live mode (mode 4, Phase 4-2 D):
+    on each LiDAR scan (~10 Hz):
+        step(beams, rng)             # one iteration only
+        publish AmclResult (forced=false) → deadband → seqlock
+    base may move at up to ~30 cm/s; motion-model σ_xy is bumped from
+    static (5 mm) to ~5–15 mm/scan for Live.
+```
+
+`converge()` is implemented in terms of `step()` so the inner kernel is single-source. Phase 4-2 B ships only the `OneShot` branch real; the `Live` branch is stubbed in the cold writer (logs once and bounces back to `Idle`).
+
+### Internals
+
+- **Sensor model**: pre-built EDT (`LikelihoodField` via Felzenszwalb 2D distance transform) + beam-endpoint Gaussian (`evaluate_scan` returns `exp(Σ log_p_i)`). One bilinear-equivalent lookup per beam, no per-evaluation ray-casting. The likelihood floor (`EVAL_SCAN_LIKELIHOOD_FLOOR`) is Tier-1 in `core/constants.hpp`.
+- **Motion model**: per-particle Gaussian jitter (`jitter_inplace`). Static σ in 1-shot mode; bumped for Live.
+- **Resampler**: low-variance / systematic, conditional on `N_eff < neff_frac · N`. Pre-allocated ping-pong buffers + cumsum scratch — no heap traffic per iteration.
+- **Yaw stats**: `circular_mean_yaw_deg` and `circular_std_yaw_deg` (atan2-based) so the `[359°, 1°)` cluster reads as ~0.6° std, NOT ~180°.
+
+### Convergence criterion (1-shot)
+
+```
+converged ⇔ (xy_std_m < amcl_converge_xy_std_m) AND
+            (circular_std_yaw_deg < amcl_converge_yaw_std_deg) AND
+            iters ≥ 3        # min iterations to avoid converging on the seed
+```
+
+### Yaw safety tripwire
+
+Lives in the cold-writer wrapper, NOT in `Amcl` itself. Anchor is `cfg.amcl_origin_yaw_deg` (the calibration origin), not the previous AMCL output:
+
+```
+if shortest_arc(pose.yaw_deg, cfg.amcl_origin_yaw_deg) > amcl_yaw_tripwire_deg:
+    log("yaw_drift", ...)   # Phase 4-3 wires a UDP warning bit
 ```
 
 ### Performance targets (RPi 5)
@@ -402,21 +438,35 @@ implementation-defined and the mixing has historically caused bugs.
 
 #### 6.1.3 Trigger primitive — pinned
 
-The calibrate trigger is a single **idempotent** request: "re-localize
-from the latest scan". Multiple pending triggers collapse harmlessly.
+The trigger primitive is a single **atomic enum** in `core/rt_flags.hpp`:
 
 ```cpp
-std::atomic<bool> calibrate_requested{false};
+enum class AmclMode : std::uint8_t {
+    Idle    = 0,    // cold writer parked; smoother holds the last published Offset
+    OneShot = 1,    // run converge() once, publish, return to Idle
+    Live    = 2,    // run step() per scan until toggled off (Phase 4-2 D body)
+};
+
+extern std::atomic<AmclMode> g_amcl_mode;  // initial value: Idle
 ```
 
 - Physical GPIO button and `godo-webctl` both call
-  `calibrate_requested.store(true, release)` (same primitive, two sources).
-- Thread C polls it once per scan and does `exchange(false)` to consume.
-- **Not a queue.** A queue is unnecessary today because there is one
-  command type and it is idempotent. If future work adds non-idempotent
-  commands (e.g., `map_reload`, `emergency_stop`), this primitive is
-  replaced by a bounded MPSC lock-free ring; mentioned here so the
-  upgrade path is explicit.
+  `g_amcl_mode.store(AmclMode::OneShot, release)` for a 1-shot calibrate
+  or `g_amcl_mode.store(AmclMode::Live, release)` to enter Live tracking.
+  Two writers, idempotent stores — multiple presses collapse harmlessly.
+- Cold writer (`src/localization/cold_writer.cpp`) consumes with
+  `g_amcl_mode.load(acquire)` per loop tick. After a `OneShot` run completes
+  it stores `AmclMode::Idle` to return the state machine to its parked state.
+  `Live` mode runs continuously until the operator stores `Idle` (toggle off).
+- **Not a queue.** Idempotent stores + the three-state machine cover every
+  user action defined in CLAUDE.md §1. If future work adds non-idempotent
+  commands (e.g., `map_reload`, `emergency_stop`), an MPSC lock-free ring
+  would slot in beside the mode atomic; mentioned here so the upgrade
+  path is explicit.
+- **Migration note (2026-04-26)**: replaced the Phase 4-1 boolean
+  `std::atomic<bool> calibrate_requested`. The atomic-enum form is needed
+  because `OneShot` and `Live` are distinguishable states, not two writes
+  to the same flag. See `production/RPi5/CODEBASE.md` Wave 2 section.
 
 #### 6.1.4 Consequences
 
@@ -552,6 +602,16 @@ Notes pinned by the skeleton:
 
 The smoother sits inside Thread D. State is private (no atomics). Tick cost
 is a handful of FLOPs.
+
+**Design intent (clarified 2026-04-26)**: the smoother + 60 Hz hot path
+was designed primarily around **Live mode** (CLAUDE.md §1 mode 4). Live
+mode publishes new `Offset`s at ~10 Hz from the cold writer; the smoother
+interpolates between those updates so UE renders at a steady 59.94 fps
+without visible "tick-tick" jumps. **1-shot calibrate (mode 3) inherits
+the smoother as a side-benefit** — the operator-triggered re-localization
+becomes a smooth ~500 ms ramp instead of a step change. If only mode 3
+existed, the smoother would be optional. The full architecture exists
+because mode 4 needs it, so mode 3 gets it for free.
 
 #### 6.4.1 Deadband filter — at the cold path, before seqlock write
 

@@ -22,7 +22,7 @@ arrive in Phase 4-2 B / C at `src/localization/`.
 
 ---
 
-## Module map (current — as of 2026-04-26 Phase 4-2 D Wave A)
+## Module map (current — as of 2026-04-26 Phase 4-2 D Wave B)
 
 The per-date entries below this section track the diffs that landed each
 day. This top-level map is the up-to-date snapshot.
@@ -94,6 +94,31 @@ src/localization/                    namespace godo::localization (Phase 4-2 B)
                                      re-arms the live-first-iter latch on every Live exit;
                                      M1 wait-free, M8 SIGTERM watchdog
 
+src/gpio/                            namespace godo::gpio (Phase 4-2 D Wave B)
+├─ CMakeLists.txt                    target: godo_gpio (static lib; links libgpiodcxx + libgpiod)
+├─ gpio_source.hpp                   GpioCallbacks + LineIndex (header-only public API contract;
+│                                    duck-typed twin spec for production + fake — invariant (a))
+├─ gpio_source_libgpiod.hpp          GpioSourceLibgpiod (production driver)
+└─ gpio_source_libgpiod.cpp          libgpiod v2 chip open + line request + edge wait_events
+                                     loop with SHUTDOWN_POLL_TIMEOUT_MS poll; CLOCK_MONOTONIC
+                                     event clock (M2); last-accepted debounce (M2); INT64_MIN
+                                     sentinel so the first press is always accepted; exception
+                                     wrap on open(); RAII close()
+
+src/uds/                             namespace godo::uds (Phase 4-2 D Wave B)
+├─ CMakeLists.txt                    target: godo_uds (static lib; godo_core only)
+├─ json_mini.{hpp,cpp}               hand-rolled minimal JSON parser/serializer for the four
+│                                    canonical message shapes (no nlohmann/json dependency);
+│                                    rejects backslash escapes, unknown keys, duplicate keys,
+│                                    trailing tokens
+├─ uds_server.hpp                    UdsServer + ModeGetter / ModeSetter typedefs
+└─ uds_server.cpp                    bind / listen(backlog=4) / chmod 0660 (M3) / poll(2)
+                                     accept loop with SHUTDOWN_POLL_TIMEOUT_MS (M1: NO
+                                     SO_RCVTIMEO on listen, NO pthread_kill from main);
+                                     per-connection SO_RCVTIMEO 1 s; UDS_REQUEST_MAX_BYTES
+                                     buffer cap; one client at a time, request → response →
+                                     close
+
 src/godo_smoke/                      namespace godo::smoke (capture-tool I/O)
 ├─ CMakeLists.txt                    target: godo_smoke (binary), links godo_lidar
 ├─ main.cpp                          setlocale("C") → parse → open → scan → close
@@ -107,10 +132,15 @@ src/godo_jitter/
 └─ main.cpp                          CLOCK_MONOTONIC jitter harness
 
 src/godo_tracker_rt/
-├─ CMakeLists.txt                    target: godo_tracker_rt (binary; links godo_localization)
-└─ main.cpp                          Thread A / Thread D / cold writer
-                                     (godo::localization::run_cold_writer) / signal handler;
-                                     pthread_kill(SIGTERM) cold-writer kick before join (M8)
+├─ CMakeLists.txt                    target: godo_tracker_rt (binary; links godo_localization,
+│                                    godo_gpio, godo_uds — Wave B)
+└─ main.cpp                          Thread A (FreeD) / Thread D (UDP RT) / cold writer
+                                     (godo::localization::run_cold_writer) / GPIO thread
+                                     (Wave B) / UDS thread (Wave B) / signal handler;
+                                     pthread_kill(SIGTERM) cold-writer kick before join (M8);
+                                     NO pthread_kill for GPIO / UDS — both poll with
+                                     SHUTDOWN_POLL_TIMEOUT_MS and self-exit on
+                                     g_running.store(false) per Mode-A amendment M1
 
 src/godo_freed_passthrough/
 ├─ CMakeLists.txt                    target: godo_freed_passthrough (binary)
@@ -135,6 +165,16 @@ tests/                               (see invariant (b) for source-list splits)
 ├─ test_config.cpp                   8 cases, precedence chain + rejects
 ├─ test_rt_setup.cpp                 4 cases, actionable-stderr checks
 ├─ test_seqlock_roundtrip.cpp        4 cases, 1W/4R 10^6-iter stress
+├─ gpio_source_fake.hpp              godo::gpio::test::GpioSourceFake (duck-typed twin per
+│                                    invariant (a); shared debounce-rule pin with production)
+├─ test_gpio_source_fake.cpp         hardware-free; 6 cases — calibrate/live-toggle dispatch,
+│                                    50 ms debounce, last-accepted bounce-burst, S5
+│                                    OneShot-drop, per-line independence
+├─ test_gpio_source_libgpiod.cpp     LABELS "hardware-required-gpio"; 2 cases — chip open +
+│                                    line request + RAII close
+├─ test_uds_server.cpp               hardware-free; 11 cases — set/get/ping round-trip,
+│                                    parse_error / bad_mode / unknown_cmd, oversized close,
+│                                    SIGTERM-via-g_running unblock < 200 ms, json_mini direct
 └─ test_rt_replay.cpp                E2E: posix_spawn tracker + PTY + UDP
 
 scripts/
@@ -150,7 +190,11 @@ scripts/
 doc/
 ├─ smoke.md                          three-way comparison workflow (godo_smoke)
 ├─ freed_wiring.md                   YL-128 → PL011 wiring, boot config, verification
-└─ irq_inventory.md                  /proc/interrupts inventory + recommended pinning
+├─ irq_inventory.md                  /proc/interrupts inventory + recommended pinning
+├─ gpio_wiring.md                    Phase 4-2 D Wave B: BCM 16/20 pinout + libgpiod install
+│                                    + permissions + debounce policy + UX notes (S5)
+└─ uds_protocol.md                   Phase 4-2 D Wave B: socket / wire format / commands /
+                                     errors / examples / same-uid caveat (M3)
 
 out/                                 runtime captures; contents gitignored
 external/
@@ -1557,3 +1601,265 @@ git grep -nw first_run         0 hits (rename complete; expected ≥ 14
 production/RPi5/{src,tests}/   per amendment M5, actual rename count 17)
 ```
 
+
+---
+
+## 2026-04-26 (Wave B) — Phase 4-2 D
+
+### Added
+
+- **`src/gpio/`** new module (godo_gpio static lib; links `libgpiodcxx`
+  + `libgpiod`).
+  - `gpio_source.hpp` — public API contract: `GpioCallbacks` (function
+    objects for the two press handlers) + `LineIndex` enum (Calibrate=0
+    / LiveToggle=1). Header-only; no ABC. Production
+    (`GpioSourceLibgpiod`) and test fake (`GpioSourceFake`) are
+    duck-typed twins per invariant (a) — distinct class names, no
+    shared base.
+  - `gpio_source_libgpiod.{hpp,cpp}` — production driver. Opens
+    `/dev/gpiochip0`, requests both lines as
+    `direction=INPUT / edge=FALLING / bias=PULL_UP / event_clock=MONOTONIC`,
+    runs an event loop with `request_->wait_edge_events(100 ms)` so
+    SIGTERM / `g_running` shutdown is observed within one poll cycle.
+    Software debounce: last-accepted semantics (rejected events do NOT
+    advance `last_event_ns_[]`), CLOCK_MONOTONIC time domain (M2),
+    `INT64_MIN` sentinel so the first press on each line is always
+    accepted regardless of boot-uptime monotonic clock value.
+- **`src/uds/`** new module (godo_uds static lib; godo_core only — no
+  external JSON dep).
+  - `json_mini.{hpp,cpp}` — hand-rolled JSON parser/serializer for the
+    four canonical message shapes. Rejects backslash escapes, unknown
+    keys, duplicate keys, trailing tokens. `format_ok()` /
+    `format_ok_mode()` / `format_err()` always succeed and return a
+    newline-terminated response.
+  - `uds_server.{hpp,cpp}` — `UdsServer` class. `open()` creates an
+    `AF_UNIX SOCK_STREAM` socket, unlinks any stale path, binds,
+    chmods 0660 (M3), and listens with backlog 4. `run()` poll-based
+    accept loop: `pollfd{listen_fd, POLLIN}` with
+    `SHUTDOWN_POLL_TIMEOUT_MS` timeout (NO `SO_RCVTIMEO` on the listen
+    socket, NO `pthread_kill` from main — M1). Per-connection
+    `SO_RCVTIMEO=1 s` so a stalled client cannot block accept.
+    Request size capped at `UDS_REQUEST_MAX_BYTES`; oversized requests
+    without a newline get the connection closed with no response.
+- **GPIO + UDS thread bodies in `godo_tracker_rt::main.cpp`**.
+  `thread_gpio` constructs callbacks that drive `g_amcl_mode`:
+  calibrate → store(OneShot); live-toggle → CAS-toggle Idle ↔ Live with
+  the OneShot branch dropping the press (S5). `thread_uds` injects
+  `g_amcl_mode` setter/getter into `UdsServer`. Both threads
+  `try { src.open(); } catch (std::exception&) { log; return; }` —
+  graceful degradation: the rest of the system stays up if libgpiod
+  cannot open the chip or UDS bind fails.
+- **Tests**.
+  - `tests/gpio_source_fake.{hpp}` — header-only `GpioSourceFake` test
+    twin. Mirrors production's accept-event semantics exactly. New
+    `simulate_press(LineIndex, monotonic_ns)` method drives the
+    debounce + dispatch path for unit tests; `last_event_ns(idx)`
+    inspector exposes the post-press timestamp so tests can pin the
+    last-accepted invariant directly.
+  - `tests/test_gpio_source_fake.cpp` — 6 doctest cases, hardware-free.
+    Pins: calibrate dispatch → OneShot, live-toggle dispatch toggle,
+    50 ms debounce window (30 ms gap rejected, 80 ms accepted),
+    last-accepted bounce-burst (5 spurious events at 10/20/30/40/49 ms
+    all rejected, `last_event_ns` unchanged from the first accept,
+    next press at exactly 50 ms accepted because boundary is strict-`<`),
+    OneShot-drop (S5), per-line independence (calibrate + live-toggle
+    have separate windows).
+  - `tests/test_gpio_source_libgpiod.cpp` — 2 doctest cases,
+    LABELS=`hardware-required-gpio` (NEW label). Skips with a MESSAGE
+    if `/dev/gpiochip0` is missing. Asserts: chip open, both line
+    request, idempotent close, RAII clean destruction. Does NOT press
+    buttons (would require a hardware harness; the press path is
+    pinned by the hardware-free fake test).
+  - `tests/test_uds_server.cpp` — 11 doctest cases, hardware-free.
+    `TempUdsPath` RAII guard (S7) unlinks the temp socket on every
+    test scope exit, including failure. Pins: set/get round-trip for
+    all three modes, ping, parse_error (4 malformed inputs), bad_mode,
+    unknown_cmd, oversized request closed without response (accepts
+    either `recv == 0` or `recv == -1 / errno=ECONNRESET` since the
+    server's `close()` while client is still sending may RST),
+    g_running=false unblocks the server within
+    `2 × SHUTDOWN_POLL_TIMEOUT_MS`, json_mini direct (parse / format /
+    parse_mode_arg round-trips). Each test creates a fresh
+    `UdsServer` + spawn thread + connect + send_recv → close cycle;
+    `g_running` is reset at the top of each test scope so the global
+    state survives parallel test execution.
+
+### Changed
+
+- **`src/godo_tracker_rt/main.cpp`** — added `thread_gpio` and
+  `thread_uds` thread bodies; spawn both after `t_cold` and before
+  `t_d`. Join order: `t_d → t_cold → t_gpio → t_uds → t_a → t_signal`.
+  GPIO + UDS threads receive NO `pthread_kill` (M1); both poll with
+  `SHUTDOWN_POLL_TIMEOUT_MS` and self-exit on the next wake-up after
+  `g_running.store(false)`. Worst-case shutdown latency for the two
+  new threads: `2 × SHUTDOWN_POLL_TIMEOUT_MS = 200 ms`. The header
+  comment block is updated to document the GPIO/UDS surfaces and the
+  M1 shutdown discipline.
+- **`src/godo_tracker_rt/CMakeLists.txt`** — `target_link_libraries`
+  now includes `godo_gpio` and `godo_uds`.
+- **`CMakeLists.txt`** — `add_subdirectory(src/gpio)` and
+  `add_subdirectory(src/uds)` after `src/localization` and before
+  `src/godo_tracker_rt` (build-order: tracker depends on both).
+- **`tests/CMakeLists.txt`** — registers the four new test targets:
+  `test_gpio_source_fake` (hardware-free, links `godo_gpio`),
+  `test_gpio_source_libgpiod` (`hardware-required-gpio`, links
+  `godo_gpio`), `test_uds_server` (hardware-free, links `godo_uds`).
+- **`scripts/build.sh`** — label inventory comment expanded to
+  document `hardware-required-gpio` (manual; not part of the
+  hardware-free gate). `[rt-alloc-grep]` scope unchanged. `[m1-no-mutex]`
+  scope unchanged (still cold_writer.cpp only — Wave B's GPIO and UDS
+  files use no `std::mutex` either, but the gate is intentionally
+  narrow to the load-bearing seqlock-publish file).
+
+### Removed
+
+None.
+
+### Tests
+
+```text
+ctest -L hardware-free                28/28 PASS  (was 26 → +2 new
+                                                 = test_gpio_source_fake
+                                                   + test_uds_server)
+ctest -L hardware-required-gpio        1/1  PASS  (test_gpio_source_libgpiod
+                                                 — measured live on
+                                                 news-pi01 with
+                                                 /dev/gpiochip0 present)
+ctest -L python-required               1/1  PASS  (test_csv_parity)
+[rt-alloc-grep]                        1 hit only (UdpSender ctor
+                                       std::string, init-time, unchanged
+                                       from prior phases) — Wave B
+                                       added zero hot-path allocations
+[m1-no-mutex]                          0 hits in cold_writer.cpp;
+                                       unchanged. GPIO and UDS source
+                                       files use no std::mutex either.
+```
+
+### Build verification
+
+`bash production/RPi5/scripts/build.sh` exits 0 on news-pi01 (Debian 13
+Trixie, gcc 14.2). `godo_tracker_rt` and all 28 hardware-free test
+binaries built without warnings. `test_gpio_source_libgpiod` succeeds
+on the live host (chip open + line request + close). The
+`test_uds_server` `TempUdsPath` guard ensures clean re-runs even after
+forced test failures.
+
+### Decisions / deviations
+
+1. **`libgpiodcxx` link order**. The package ships
+   `libgpiod-dev 2.2.1-2+deb13u1` with both the C wrapper
+   (`libgpiod.so`) and the C++ wrapper (`libgpiodcxx.so`). The C++
+   driver implementation requires both, in this link order:
+   `gpiodcxx → gpiod`. The CMakeLists comment notes the dependency
+   so a future packaging change cannot silently regress.
+2. **`INT64_MIN` sentinel for `last_event_ns_`**. The cold-start brief's
+   debounce description used `0` as the implicit default. Testing
+   revealed this rejects a press at `monotonic_ns = 0` (the test fake's
+   first call) and would also reject the very first press in
+   production at boot (when CLOCK_MONOTONIC ticks from 0 too). Both
+   the production driver and the fake now use `INT64_MIN` as a
+   "never fired" sentinel; the accept_event guard treats this case as
+   "always accept the first event". The test
+   `test_gpio_source_fake.cpp` opens with `simulate_press(idx, 0)`
+   and asserts the first press is accepted, pinning the sentinel
+   behaviour.
+3. **UDS oversized test recv semantics**. When the server reads >
+   `UDS_REQUEST_MAX_BYTES` without a newline, it closes the
+   connection silently. On the client side, `recv` may return either
+   0 (orderly shutdown if no unread data is buffered) or
+   -1 with `errno=ECONNRESET` (RST if data remained in the kernel's
+   receive queue when the server closed). Both prove the server did
+   not respond to the oversized payload; the test accepts either.
+4. **CAS loop in live-toggle handler**. The plan's pseudocode showed
+   "load → switch → store". The implementation is a standard
+   `compare_exchange_weak` loop so a concurrent OneShot store from
+   the GPIO thread (calibrate press during a live-toggle CAS retry)
+   cannot be clobbered. The OneShot branch returns early without
+   storing, dropping the press (S5). The same loop pattern is
+   reproduced in `test_gpio_source_fake.cpp`'s `make_cbs` helper so
+   the test exercises the same dispatch path the production driver
+   uses.
+5. **No `cfg.gpio_chip_path`**. The chip path is hard-coded to
+   `/dev/gpiochip0` in `thread_gpio`'s `GpioSourceLibgpiod`
+   construction. Pi 5 has only one main GPIO chip; multi-chip
+   environments are out of scope. If a future Pi ever exposes a
+   second chip and we need to address it, add a Tier-2 key then.
+6. **Hand-rolled JSON, not `nlohmann/json`**. Schema is exactly four
+   message shapes. A general parser would add ~20 KLOC of header to
+   every TU that includes `uds_server.hpp`. The hand-rolled parser
+   is ~100 LOC and has 4 dedicated test cases (well-formed shapes,
+   error cases, format_*, mode_arg round-trips). If Phase 4-3 / 4.5
+   grows the schema (e.g. `/api/config` introspection), revisit.
+7. **`set_mode` honoured during OneShot**. Unlike the GPIO live-toggle
+   (which drops the press during OneShot per S5), the UDS `set_mode`
+   command always overwrites `g_amcl_mode`. Operator-intent: GPIO
+   is the safety guard, UDS is the automation escape hatch (Phase
+   4-3 webctl may legitimately want to abort a hung OneShot).
+   Documented in `doc/uds_protocol.md` §F.
+8. **`hardware-required-gpio` ran successfully on news-pi01** even
+   though the spec said it was "manually invoked". The label still
+   excludes it from the default `ctest -L hardware-free` gate; the
+   bring-up verification on this host is just a sanity check.
+
+### Known caveats
+
+- **UDS same-uid client requirement**. Until `godo-tracker.service`
+  introduces `SocketGroup=` (Phase 4-2 follow-up), any UDS client
+  must run under the same uid as `godo_tracker_rt`. On news-pi01
+  this means launching `godo-webctl` as `ncenter`. Documented in
+  `doc/uds_protocol.md` §F.
+- **GPIO press-during-OneShot UX**. Live-toggle presses during a
+  OneShot run are dropped (NOT queued). Wait for the
+  `cold_writer: OneShot complete` log line before toggling Live.
+  Documented in `doc/gpio_wiring.md` §F.
+
+### Operator bring-up checklist (for news-pi01 — post-merge)
+
+1. Verify libgpiod is installed: `pkg-config --modversion libgpiod`
+   should print `2.x.y`. `ls /dev/gpiochip0` should show the chip.
+2. Verify `ncenter` is in the `gpio` group:
+   `id ncenter | tr ',' '\n' | grep gpio`. If missing,
+   `sudo usermod -aG gpio ncenter` and re-login.
+3. Wire BCM 16 (calibrate) and BCM 20 (live-toggle) per
+   `doc/gpio_wiring.md` §A — momentary tactile buttons to GND.
+4. Start `godo_tracker_rt`. Confirm Idle in stderr.
+5. Press calibrate → expect ~1-2 s OneShot run, log line
+   `cold_writer: OneShot complete, offset=...`.
+6. Press live-toggle → expect "entering Live" log; AMCL publishes
+   at ~10 Hz (visible via `target_offset.generation()` advancing).
+7. Press live-toggle again → cold writer goes back to Idle.
+8. UDS smoke test:
+   `echo '{"cmd":"set_mode","mode":"OneShot"}' | nc -U /run/godo/ctl.sock`
+   should respond with `{"ok":true}` and trigger a OneShot run.
+9. SIGTERM the tracker while in Live → expect process exits within
+   200 ms.
+
+### What Phase 4-2 D Wave B explicitly does NOT do
+
+- Does NOT implement HTTP endpoints. `godo-webctl` is Phase 4-3.
+- Does NOT touch the AMCL kernel or the deadband filter (Wave A
+  closed the OneShot/Live algorithmic surface).
+- Does NOT add `cfg.uds_socket_mode` or `cfg.gpio_chip_path` Tier-2
+  keys. Both are revisit-when-needed (multi-user dev workflow,
+  multi-chip Pi).
+- Does NOT promote `on_leave_live` from `cold_writer.cpp`'s anonymous
+  namespace. Wave A's decision stands — it is a Live state-machine
+  implementation detail.
+- Does NOT introduce a `cfg.divergence_*` clamp at the publish seam.
+  Same status as Wave A — deferred to §8 territory.
+
+### Future considerations
+
+- **systemd `SocketGroup=`** would let multiple users in a `godo`
+  group connect to the UDS without same-uid restriction. Defer
+  until either the operator workflow demands it or the
+  `godo-tracker.service` unit lands.
+- **GPIO thread CPU pinning** — currently inherits the default
+  cpuset `0-2` (CPU 3 is `isolcpus`'d for `t_d`). If field testing
+  shows GPIO/UDS activity correlated with FreeD frame loss, pin to
+  a subset like `0-1` via a Tier-2 key. Not measured to be a
+  problem on news-pi01.
+- **Multi-line GPIO debounce per-burst tuning** — current `50 ms`
+  window is uniform for both lines. Tactile switches with
+  different bounce profiles could justify per-line tuning. Not
+  expected to be needed; punted to operator field tuning.

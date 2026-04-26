@@ -10,4 +10,6 @@ target_link_libraries(godo_tracker_rt PRIVATE
     godo_smoother
     godo_udp
     godo_localization
+    godo_gpio
+    godo_uds
 )

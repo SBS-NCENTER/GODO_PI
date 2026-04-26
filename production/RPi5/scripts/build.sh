@@ -65,7 +65,14 @@ fi
 # Test label inventory:
 #   - hardware-free          — runs in CI / local without LiDAR or GPIO
 #   - hardware-required      — runs only with RPLIDAR C1 attached
-#   - hardware-required-gpio — (Wave B) runs only with /dev/gpiochip0
+#                              (ctest -L hardware-required)
+#   - hardware-required-gpio — runs only with /dev/gpiochip0 + gpio group
+#                              perms (ctest -L hardware-required-gpio).
+#                              Manually invoked; not part of the default
+#                              hardware-free gate. Asserts libgpiod can
+#                              open the chip and request the configured
+#                              pins; press path is exercised by the
+#                              hardware-free test_gpio_source_fake target.
 #   - python-required        — runs only when uv + Python prototype present
 # -----------------------------------------------------------------------
 M1_TARGET="${ROOT_DIR}/src/localization/cold_writer.cpp"

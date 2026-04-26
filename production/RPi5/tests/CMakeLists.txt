@@ -282,6 +282,40 @@ add_test(NAME test_cold_writer_live_iteration
 set_tests_properties(test_cold_writer_live_iteration PROPERTIES
     LABELS "hardware-free")
 
+# ----------------------------------------------------------------------------
+# Phase 4-2 D Wave B — GPIO + UDS modules.
+# - test_gpio_source_fake: hardware-free; exercises the duck-typed twin
+#   `GpioSourceFake` to pin debounce + dispatch + S5 OneShot-drop semantics.
+# - test_gpio_source_libgpiod: hardware-required-gpio; opens
+#   /dev/gpiochip0 and verifies the libgpiod request shape. Not run by
+#   default ctest.
+# - test_uds_server: hardware-free; spawns the UDS server on a temp path
+#   and exercises set_mode / get_mode / ping + parse / unknown / oversized
+#   error paths. Uses TempUdsPath RAII guard for cleanup (S7).
+# ----------------------------------------------------------------------------
+
+add_executable(test_gpio_source_fake test_gpio_source_fake.cpp)
+target_include_directories(test_gpio_source_fake PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+)
+target_link_libraries(test_gpio_source_fake PRIVATE
+    doctest::doctest godo_core godo_gpio)
+add_test(NAME test_gpio_source_fake COMMAND test_gpio_source_fake)
+set_tests_properties(test_gpio_source_fake PROPERTIES LABELS "hardware-free")
+
+add_executable(test_gpio_source_libgpiod test_gpio_source_libgpiod.cpp)
+target_link_libraries(test_gpio_source_libgpiod PRIVATE
+    doctest::doctest godo_core godo_gpio)
+add_test(NAME test_gpio_source_libgpiod COMMAND test_gpio_source_libgpiod)
+set_tests_properties(test_gpio_source_libgpiod PROPERTIES
+    LABELS "hardware-required-gpio")
+
+add_executable(test_uds_server test_uds_server.cpp)
+target_link_libraries(test_uds_server PRIVATE
+    doctest::doctest godo_core godo_uds)
+add_test(NAME test_uds_server COMMAND test_uds_server)
+set_tests_properties(test_uds_server PROPERTIES LABELS "hardware-free")
+
 # End-to-end replay: spawns the real godo_tracker_rt binary, so it
 # depends on that target being built first.
 add_executable(test_rt_replay test_rt_replay.cpp)

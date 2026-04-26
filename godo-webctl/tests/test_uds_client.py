@@ -59,12 +59,16 @@ def test_server_replies_non_json_raises_protocol(fake_uds_server) -> None:
         c.ping(timeout=2.0)
 
 
-def test_server_replies_ok_false_raises_protocol(fake_uds_server) -> None:
+def test_server_replies_ok_false_raises_server_rejected(fake_uds_server) -> None:
+    """Mode-B SHOULD-FIX S3 — server-rejection is a distinct exception class
+    so ``app.py`` can dispatch by ``except`` clause, not by string scraping."""
+    from godo_webctl.uds_client import UdsServerRejected
+
     fake_uds_server.reply(b'{"ok":false,"err":"bad_mode"}')
     c = UdsClient(fake_uds_server.path)
-    with pytest.raises(UdsProtocolError) as ei:
+    with pytest.raises(UdsServerRejected) as ei:
         c.set_mode("OneShot", timeout=2.0)
-    assert "bad_mode" in str(ei.value)
+    assert ei.value.err == "bad_mode"
 
 
 def test_buffer_full_no_newline_raises_protocol(fake_uds_server) -> None:

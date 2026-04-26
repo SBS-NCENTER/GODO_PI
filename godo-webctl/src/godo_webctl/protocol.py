@@ -26,15 +26,15 @@ UDS_REQUEST_MAX_BYTES: Final[int] = 4096
 # read loop has a single ceiling.
 UDS_RESPONSE_READ_BUFSIZE: Final[int] = 4096
 
-# --- Command names (mirrors json_mini.cpp::parse_request) -----------------
-CMD_PING: Final[str] = "ping"  # json_mini.cpp parse_request L46-50
-CMD_GET_MODE: Final[str] = "get_mode"  # json_mini.cpp parse_request L51-55
-CMD_SET_MODE: Final[str] = "set_mode"  # json_mini.cpp parse_request L56-72
+# --- Command names (mirrors uds_server.cpp:201,206,212 — req.cmd compares) -
+CMD_PING: Final[str] = "ping"  # uds_server.cpp:201
+CMD_GET_MODE: Final[str] = "get_mode"  # uds_server.cpp:206
+CMD_SET_MODE: Final[str] = "set_mode"  # uds_server.cpp:212
 
-# --- Mode names (mirrors rt_flags.hpp::AmclMode) --------------------------
-MODE_IDLE: Final[str] = "Idle"
-MODE_ONESHOT: Final[str] = "OneShot"
-MODE_LIVE: Final[str] = "Live"
+# --- Mode names (mirrors json_mini.cpp:119-121 mode_to_string + :127-129) -
+MODE_IDLE: Final[str] = "Idle"  # json_mini.cpp:119, :127
+MODE_ONESHOT: Final[str] = "OneShot"  # json_mini.cpp:120, :128
+MODE_LIVE: Final[str] = "Live"  # json_mini.cpp:121, :129
 
 VALID_MODES: Final[frozenset[str]] = frozenset({MODE_IDLE, MODE_ONESHOT, MODE_LIVE})
 

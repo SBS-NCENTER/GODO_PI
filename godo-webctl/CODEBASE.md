@@ -32,7 +32,7 @@ godo-webctl/
 │   ├─ conftest.py                    # fake_uds_server, tmp_socket_path, tmp_map_pair
 │   ├─ test_protocol.py               # SSOT pinning
 │   ├─ test_config.py                 # defaults + overrides + drift catch
-│   ├─ test_uds_client.py             # 9 cases incl. M3 buffer-full
+│   ├─ test_uds_client.py             # 10 cases incl. M3 buffer-full
 │   ├─ test_backup.py                 # atomicity + collision retry
 │   ├─ test_app_integration.py        # FastAPI in-process, 9 cases
 │   └─ test_app_hardware_tracker.py   # @pytest.mark.hardware_tracker (S9)
@@ -78,15 +78,16 @@ mechanism requires a planner-led design change.
 constants and their C++ origins:
 
 ```text
-Python (protocol.py)              C++ origin
+Python (protocol.py)              C++ origin (wire-string site)
 ──────────────────────────        ─────────────────────────────────────
 UDS_REQUEST_MAX_BYTES = 4096      constants.hpp:54
-MODE_IDLE     = "Idle"            rt_flags.hpp::AmclMode::Idle
-MODE_ONESHOT  = "OneShot"         rt_flags.hpp::AmclMode::OneShot
-MODE_LIVE     = "Live"            rt_flags.hpp::AmclMode::Live
-CMD_PING      = "ping"            json_mini.cpp::parse_request L46-50
-CMD_GET_MODE  = "get_mode"        json_mini.cpp::parse_request L51-55
-CMD_SET_MODE  = "set_mode"        json_mini.cpp::parse_request L56-72
+MODE_IDLE     = "Idle"            json_mini.cpp:119 (mode_to_string),
+                                  json_mini.cpp:127 (parse_mode_arg)
+MODE_ONESHOT  = "OneShot"         json_mini.cpp:120 + :128
+MODE_LIVE     = "Live"            json_mini.cpp:121 + :129
+CMD_PING      = "ping"            uds_server.cpp:201 (req.cmd compare)
+CMD_GET_MODE  = "get_mode"        uds_server.cpp:206
+CMD_SET_MODE  = "set_mode"        uds_server.cpp:212
 ERR_PARSE_ERROR = "parse_error"   uds_server.cpp:189,196
 ERR_UNKNOWN_CMD = "unknown_cmd"   uds_server.cpp:225
 ERR_BAD_MODE    = "bad_mode"      uds_server.cpp:215

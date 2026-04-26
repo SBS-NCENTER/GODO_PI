@@ -95,18 +95,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 {"ok": False, "err": "tracker_unreachable"},
                 status_code=HTTPStatus.SERVICE_UNAVAILABLE,
             )
-        except uds_mod.UdsProtocolError as e:
-            # Tracker replied ok=false → propagate err code with HTTP 400;
-            # malformed reply → HTTP 502.
-            msg = str(e)
-            if msg.startswith(("malformed_json", "missing_ok_field", "response_too_large")):
-                return JSONResponse(
-                    {"ok": False, "err": "protocol_error"},
-                    status_code=HTTPStatus.BAD_GATEWAY,
-                )
+        except uds_mod.UdsServerRejected as e:
+            # Tracker replied ok=false → propagate err code with HTTP 400.
             return JSONResponse(
-                {"ok": False, "err": msg},
+                {"ok": False, "err": e.err},
                 status_code=HTTPStatus.BAD_REQUEST,
+            )
+        except uds_mod.UdsProtocolError:
+            # Wire-level fault (malformed JSON / missing ok / oversized) →
+            # HTTP 502 (Mode-B SHOULD-FIX S3 — exception class drives the
+            # split, not string-prefix dispatch).
+            return JSONResponse(
+                {"ok": False, "err": "protocol_error"},
+                status_code=HTTPStatus.BAD_GATEWAY,
             )
         return JSONResponse({"ok": True}, status_code=HTTPStatus.OK)
 

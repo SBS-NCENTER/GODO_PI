@@ -55,7 +55,22 @@ class UdsTimeout(UdsError):
 
 
 class UdsProtocolError(UdsError):
-    """The server replied with malformed JSON, missing ``ok``, or ``ok=false``."""
+    """The server replied with malformed JSON or missing ``ok`` (wire-level fault)."""
+
+
+class UdsServerRejected(UdsError):
+    """The server replied ``{"ok": false, "err": "<code>"}`` — protocol-valid
+    rejection that the application layer (e.g. the calibrate handler in
+    ``app.py``) should propagate as the operator-facing error code.
+
+    Carries ``err`` as an attribute (not just stringified) so callers can
+    dispatch on the value without scraping ``str(exc)`` (Mode-B SHOULD-FIX
+    S3 — was previously folded into ``UdsProtocolError`` and required
+    string-startswith dispatch in ``app.py``)."""
+
+    def __init__(self, err: str) -> None:
+        super().__init__(err)
+        self.err = err
 
 
 class UdsClient:
@@ -103,7 +118,7 @@ class UdsClient:
             raise UdsProtocolError("missing_ok_field")
         if obj["ok"] is not True:
             err = obj.get("err", "unspecified")
-            raise UdsProtocolError(str(err))
+            raise UdsServerRejected(str(err))
         return obj
 
     @staticmethod

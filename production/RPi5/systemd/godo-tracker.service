@@ -1,0 +1,61 @@
+[Unit]
+Description=GODO real-time camera tracker (FreeD + AMCL + UDP)
+After=godo-irq-pin.service network.target time-sync.target
+Wants=godo-irq-pin.service
+Documentation=file:///opt/godo-tracker/README.md
+
+[Service]
+Type=simple
+User=ncenter
+Group=ncenter
+WorkingDirectory=/opt/godo-tracker
+EnvironmentFile=-/etc/godo/tracker.env
+
+# /run/godo/ — UDS socket directory, owned exclusively by this unit per
+# Phase 4-2 D Mode-A amendment S8. webctl's unit OMITS RuntimeDirectory=
+# and depends on us via After=/Wants=godo-tracker.service.
+RuntimeDirectory=godo
+RuntimeDirectoryMode=0750
+
+ExecStart=/opt/godo-tracker/godo_tracker_rt
+# Re-pin IRQs that lazy-register only after the tracker opens its
+# devices (ttyAMA0 PL011 = irq 125). The leading `+` disables sandboxing
+# for this command so it can write /proc/irq/*/smp_affinity_list as root,
+# even though the main service runs as ncenter.
+ExecStartPost=+/opt/godo-tracker/godo-irq-pin.sh --quiet
+
+Restart=on-failure
+RestartSec=2s
+
+# Real-time scheduling. NoNewPrivileges=yes (below) makes the binary's
+# file caps (cap_sys_nice, cap_ipc_lock — set by setup-pi5-rt.sh for
+# manual dev launches) inert. Under systemd we grant the same two caps
+# directly via Ambient + Bounding so the binary can call mlockall(2)
+# and sched_setscheduler(SCHED_FIFO, 50) without root.
+AmbientCapabilities=CAP_SYS_NICE CAP_IPC_LOCK
+CapabilityBoundingSet=CAP_SYS_NICE CAP_IPC_LOCK
+LimitMEMLOCK=infinity
+LimitRTPRIO=99
+
+# CPU mask — internal pthread_setaffinity_np pins t_d to CPU 3.
+# isolcpus=3 in cmdline makes 0-2 the effective default cpuset for the
+# other (OTHER-scheduled) threads, so this directive is conservative
+# rather than restrictive.
+CPUAffinity=0-3
+
+# Hardening (conservative — RT process, no secrets, studio LAN only).
+# RestrictRealtime is INTENTIONALLY omitted: SCHED_FIFO is required.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/etc/godo
+ReadWritePaths=/run/godo
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

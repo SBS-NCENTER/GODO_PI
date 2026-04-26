@@ -1,0 +1,15 @@
+[Unit]
+Description=GODO IRQ pinning (CPU 3 isolation for RT)
+DefaultDependencies=no
+Before=basic.target
+After=local-fs.target sysinit.target
+Documentation=file:///opt/godo-tracker/README.md
+
+[Service]
+Type=oneshot
+ExecStart=/opt/godo-tracker/godo-irq-pin.sh
+RemainAfterExit=yes
+User=root
+
+[Install]
+WantedBy=multi-user.target

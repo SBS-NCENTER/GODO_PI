@@ -1868,3 +1868,193 @@ forced test failures.
   window is uniform for both lines. Tactile switches with
   different bounce profiles could justify per-line tuning. Not
   expected to be needed; punted to operator field tuning.
+
+---
+
+## 2026-04-26 — Phase 4-2 systemd carry-over
+
+> Persists the Phase 4-2 carry-over items into systemd units:
+> IRQ pinning, the RT tracker process, and the hardware watchdog.
+> Closes the three open items in `PROGRESS.md` ("Persisted IRQ-pinning
+> systemd unit", "systemd unit `godo-tracker.service`", "Hardware
+> watchdog wiring"). No source change — config / install only.
+
+### Module map (additions, production/RPi5/systemd/)
+
+```text
+production/RPi5/systemd/
+├─ godo-irq-pin.sh                    Idempotent IRQ-pinning helper.
+│                                     --quiet flag suppresses stderr for
+│                                     the per-tracker-start re-pin path.
+│                                     IRQ list (HOT_IRQS / BURSTY_IRQS)
+│                                     is a /proc/interrupts snapshot
+│                                     from news-pi01; verbatim from
+│                                     .claude/tmp/apply_irq_pin.sh.
+├─ godo-irq-pin.service               Boot-time oneshot. Type=oneshot,
+│                                     RemainAfterExit=yes, runs as root,
+│                                     orders Before=basic.target so it
+│                                     completes before any production
+│                                     daemon starts.
+├─ godo-tracker.service               RT main process. User=ncenter,
+│                                     RuntimeDirectory=godo (canonical
+│                                     /run/godo/ owner per Phase 4-2 D
+│                                     Mode-A amendment S8),
+│                                     AmbientCapabilities=CAP_SYS_NICE
+│                                     CAP_IPC_LOCK + LimitMEMLOCK=infinity
+│                                     + LimitRTPRIO=99 to satisfy
+│                                     mlockall(2) and SCHED_FIFO without
+│                                     root, ExecStartPost=+godo-irq-pin.sh
+│                                     --quiet to catch the lazy ttyAMA0
+│                                     IRQ. RestrictRealtime= deliberately
+│                                     omitted; remaining hardening flags
+│                                     match godo-webctl.service style.
+├─ system.conf.d/godo-watchdog.conf   PID-1 hardware watchdog drop-in
+│                                     (RuntimeWatchdogSec=10s). Operator
+│                                     install copies it to
+│                                     /etc/systemd/system.conf.d/.
+│                                     Requires systemctl daemon-reexec
+│                                     (NOT daemon-reload) to apply.
+├─ install.sh                         Idempotent operator installer.
+│                                     Copies binary + helper to
+│                                     /opt/godo-tracker/, units to
+│                                     /etc/systemd/system/, drop-in to
+│                                     /etc/systemd/system.conf.d/, then
+│                                     daemon-reload. Does NOT enable
+│                                     the units (operator decides;
+│                                     instructions printed at the end).
+└─ README.md                          7-section operator doc — install /
+                                      enable / verify / capability model
+                                      / IRQ design / watchdog / uninstall.
+```
+
+### Decisions / deviations
+
+1. **Capability model: Ambient over file caps under systemd.**
+   `scripts/setup-pi5-rt.sh` sets `cap_sys_nice,cap_ipc_lock+ep` on
+   the binary so manual dev launches via
+   `scripts/run-pi5-tracker-rt.sh` work without sudo. Under systemd
+   those file caps would be silently dropped because
+   `NoNewPrivileges=yes` (set for hardening) blocks file-cap
+   inheritance. The unit therefore grants the same two caps directly
+   via `AmbientCapabilities=CAP_SYS_NICE CAP_IPC_LOCK` +
+   `CapabilityBoundingSet=CAP_SYS_NICE CAP_IPC_LOCK`. Documented in
+   `README.md §4` and inline in the unit comment so a future operator
+   does not "fix" the redundancy by removing one of them.
+2. **IRQ-pinning two-pass design.** Eight of the nine IRQs that need
+   to be off CPU 3 are present at boot; ttyAMA0 PL011 (irq 125) only
+   registers when something opens `/dev/ttyAMA0`. Solution:
+   `godo-irq-pin.service` (oneshot) at boot pins what is already
+   registered, and `godo-tracker.service` re-runs the same script in
+   `--quiet` mode via `ExecStartPost=+...` to catch the lazy IRQ. The
+   `+` prefix runs the post hook as root regardless of the unit's
+   `User=ncenter`, since `/proc/irq/*/smp_affinity_list` requires
+   write capability the unprivileged user does not have. Idempotency
+   makes the double-write at boot (oneshot + post hook within seconds
+   of each other) harmless.
+3. **`/run/godo/` ownership pinned to godo-tracker.service.** Per the
+   Phase 4-2 D Mode-A amendment S8 decision, the tracker unit is the
+   canonical owner of `/run/godo/`: it sets
+   `RuntimeDirectory=godo` + `RuntimeDirectoryMode=0750`, while
+   `godo-webctl.service` deliberately OMITS `RuntimeDirectory=` and
+   only declares `After=godo-tracker.service` /
+   `Wants=godo-tracker.service`. Two units both owning the same
+   runtime dir would race on cleanup ordering at stop time; this
+   asymmetric arrangement keeps the dir alive as long as the tracker
+   is up and lets webctl piggyback on its lifetime.
+4. **Watchdog drop-in over editing /etc/systemd/system.conf.**
+   `RuntimeWatchdogSec=10s` lives in
+   `system.conf.d/godo-watchdog.conf` rather than as an in-line edit
+   to the distro-shipped `/etc/systemd/system.conf`, so packaging
+   upgrades (`apt-get dist-upgrade` of `systemd`) cannot clobber the
+   GODO setting. README documents the `daemon-reexec` requirement
+   (a plain `daemon-reload` does NOT pick up `[Manager]` changes).
+5. **`RestrictRealtime=` deliberately ABSENT from godo-tracker.service.**
+   The unit needs `sched_setscheduler(SCHED_FIFO, 50)`;
+   `RestrictRealtime=yes` would block it. webctl's unit sets the
+   flag because webctl never schedules RT. Inline comment in the
+   tracker unit explains the asymmetry so a future hardening sweep
+   does not "tighten" both units uniformly and break the RT thread.
+6. **`CPUAffinity=0-3` is conservative, not restrictive.** `t_d` is
+   pinned to CPU 3 internally via `pthread_setaffinity_np`; the
+   other tracker threads land on 0-2 (because `isolcpus=3` in the
+   kernel cmdline excludes CPU 3 from the default cpuset for
+   non-RT threads). Setting `CPUAffinity=0-3` documents the full
+   allowed mask without changing scheduler behaviour. Inline comment
+   in the unit captures this.
+7. **`install.sh` does NOT enable the units.** The installer's job
+   is to make the units installable; flipping them to `enable --now`
+   is the operator's call (e.g. they may want to test `systemctl
+   start` once before committing to boot autostart). Instructions
+   are printed at the end of the install run.
+
+### Known caveats
+
+- **Build artefact path.** `install.sh` reads from
+  `production/RPi5/build/src/godo_tracker_rt/godo_tracker_rt`. If
+  the operator runs `scripts/build.sh` with a non-default build
+  dir, they need to copy the binary manually or pass `--build-dir`
+  to a future revision of the installer (not in scope for 4-2
+  carry-over).
+- **`/etc/godo/tracker.env` is optional.** The unit's
+  `EnvironmentFile=-/etc/godo/tracker.env` line treats the file as
+  optional (leading `-`). If the operator wants to override the
+  Tier-2 keys baked into `core/config_defaults.hpp`, they create
+  the file by hand; there is no `tracker.env.example` in this
+  commit (Tier-2 keys are documented in `SYSTEM_DESIGN.md §11.2`
+  and operators usually pass overrides via CLI flags from the env
+  file, e.g. `GODO_AMCL_MAP_PATH=/etc/godo/maps/studio_v2.pgm`).
+  Add a `.env.example` if Phase 5 field-test feedback wants it.
+- **systemd-analyze verify runtime check.** Verifying
+  `godo-tracker.service` from the repo working tree fails with
+  `Command /opt/godo-tracker/godo_tracker_rt is not executable`
+  because the install target does not yet exist on a fresh dev
+  host. After install (or in a tmpdir staging fixture with stub
+  binaries), `systemd-analyze verify` is clean (exit 0).
+
+### Operator bring-up checklist (for news-pi01 — post-merge)
+
+1. Build the binary: `bash production/RPi5/scripts/build.sh`.
+2. Run the installer: `sudo bash production/RPi5/systemd/install.sh`.
+3. Re-exec PID 1 to pick up the watchdog drop-in:
+   `sudo systemctl daemon-reexec`.
+4. Enable + start the units:
+   `sudo systemctl enable --now godo-irq-pin.service godo-tracker.service`.
+5. Verify per `production/RPi5/systemd/README.md §3`.
+   - `systemctl status godo-tracker` → active (running).
+   - `cat /proc/irq/106/smp_affinity_list` → `0-2`.
+   - `cat /proc/irq/125/smp_affinity_list` → `0-2` (ttyAMA0 lazy).
+   - `ps -L -o tid,comm,policy,rtprio -p $(pidof godo_tracker_rt)`
+     → t_d shows policy=FF rtprio=50.
+   - `journalctl -b 0 | grep -i watchdog` → "Using hardware
+     watchdog 'Broadcom BCM2835 Watchdog timer'".
+6. Smoke the operator path (calibrate button, UDS):
+   - Press calibrate (BCM 16) → expect `OneShot complete` log line.
+   - `echo '{"cmd":"set_mode","mode":"Idle"}' | nc -U /run/godo/ctl.sock`
+     → `{"ok":true}`.
+
+### Carry items for Parent
+
+- **Legacy `.claude/tmp/apply_irq_pin.sh` is now superseded** by
+  `production/RPi5/systemd/godo-irq-pin.sh`. The scratch copy in
+  `.claude/tmp/` was a Phase 4-1 measurement throwaway; safe to
+  delete in a follow-up commit. Not deleted in this commit so the
+  diff stays scoped to "add the systemd carry artefacts".
+- `PROGRESS.md` carry-over items "Persisted IRQ-pinning systemd
+  unit", "systemd unit `godo-tracker.service`", and "Hardware
+  watchdog wiring" can move to Done (Parent owns SSOT closeout).
+- `SYSTEM_DESIGN.md §6` (RT design) may want a one-line
+  cross-reference to `production/RPi5/systemd/README.md` once
+  field-tested; not required for merge.
+
+### What this commit explicitly does NOT do
+
+- Does NOT modify `production/RPi5/src/` — config / install only.
+- Does NOT delete the legacy `.claude/tmp/apply_irq_pin.sh`
+  (separate cleanup commit).
+- Does NOT modify `scripts/setup-pi5-rt.sh` — its setcap and
+  /etc/security/limits.conf entries are still useful for non-systemd
+  dev launches; the systemd unit just bypasses them.
+- Does NOT add a `tracker.env.example` template — defer to Phase 5
+  if operator feedback wants one.
+- Does NOT touch `CLAUDE.md`, `PROGRESS.md`, or `SYSTEM_DESIGN.md` —
+  Parent handles SSOT closeout.

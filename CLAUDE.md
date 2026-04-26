@@ -21,13 +21,25 @@
 ### Goal
 
 - Use the RPLIDAR C1 to measure the crane base's **world (x, y) position** so we can re-register after a base move by simply adding a computed **(dx, dy) offset** to the FreeD X/Y.
-- The measurement is **user-triggered 1-shot**, not continuous tracking. This avoids sustained LiDAR noise.
-- Accuracy target: **1–2 cm**. Tighter is better.
+- The measurement is **user-triggered**, never autonomous. The studio operator chooses the mode each time.
+- Accuracy target: **1–2 cm** (1-shot mode); Live mode is intentionally looser.
+
+### Operating modes (4 user-triggered actions, all on-demand)
+
+| # | Action | Trigger | Accuracy | Cadence | Notes |
+| --- | --- | --- | --- | --- | --- |
+| 1 | **Initial / re-do mapping** | Operator (Docker session) | n/a | Once per studio change | Builds `.pgm` + `.yaml`. See [SYSTEM_DESIGN.md §4](./SYSTEM_DESIGN.md). |
+| 2 | **Map editing** | Operator (webctl, Phase 4.5) | n/a | Rare | Paint over moved fixtures, etc. |
+| 3 | **1-shot calibrate** (high accuracy) | GPIO button / HTTP `/api/calibrate` | ≤ 1–2 cm | Once per session, when base moves | AMCL `converge()` runs to convergence; result is forced through deadband. **This is the production path.** |
+| 4 | **Live tracking** (low accuracy, toggle) | GPIO button / HTTP `/api/live` | Coarser (depends on motion) | ~10 Hz while toggled on | AMCL `step()` per scan; deadband filters noise. Base may move at up to ~30 cm/s. Implementation deferred to Phase 4-2 D. |
+
+The smoother + 60 Hz hot path was designed around mode (4) — its 60 Hz interpolation between cold-path updates is what makes Live mode renderable to UE. 1-shot mode (3) inherits the smoother as a side-benefit (the operator-triggered jump becomes a smooth ~500 ms ramp instead of a step change).
 
 ### Out of scope
 
 - Correction of Z, Pan, Tilt, Roll, Zoom, Focus (trust the crane's own sensors).
 - Camera-head position correction (we only deal with the base).
+- Autonomous (non-user-triggered) recalibration. Every cold-path update is operator-initiated.
 
 ---
 

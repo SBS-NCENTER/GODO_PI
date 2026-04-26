@@ -41,6 +41,28 @@ struct Config {
     // IPC.
     std::string uds_socket;
 
+    // AMCL — Phase 4-2 B Tier-2 tunables (see config_defaults.hpp).
+    std::string   amcl_map_path;
+    double        amcl_origin_x_m{};
+    double        amcl_origin_y_m{};
+    double        amcl_origin_yaw_deg{};
+    int           amcl_particles_global_n{};
+    int           amcl_particles_local_n{};
+    int           amcl_max_iters{};
+    double        amcl_sigma_hit_m{};
+    double        amcl_sigma_xy_jitter_m{};
+    double        amcl_sigma_yaw_jitter_deg{};
+    double        amcl_sigma_seed_xy_m{};
+    double        amcl_sigma_seed_yaw_deg{};
+    int           amcl_downsample_stride{};
+    double        amcl_range_min_m{};
+    double        amcl_range_max_m{};
+    double        amcl_converge_xy_std_m{};
+    double        amcl_converge_yaw_std_deg{};
+    double        amcl_yaw_tripwire_deg{};
+    int           amcl_trigger_poll_ms{};
+    std::uint64_t amcl_seed{};
+
     // Build a Config with defaults applied from core/config_defaults.hpp.
     static Config make_default();
 

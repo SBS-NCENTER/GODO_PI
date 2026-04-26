@@ -132,6 +132,12 @@ TEST_CASE("E2E: tracker_rt forwards FreeD-in to UDP-out with offset applied") {
         "--t-ramp-ms",    "0",
         "--rt-cpu",       "0",
         "--rt-priority",  "1",
+        // Phase 4-2 B: cold writer fail-fasts on map-load error. Point at the
+        // synthetic fixture so tracker boots; the LiDAR factory will fail
+        // open() (no hardware in CI/test) which the cold writer treats as
+        // non-fatal — OneShot triggers are ignored, hot path keeps running.
+        "--amcl-map-path",
+            std::string(GODO_FIXTURES_MAPS_DIR) + "/synthetic_4x4.pgm",
     };
     std::vector<char*> argv;
     for (auto& s : args_store) argv.push_back(const_cast<char*>(s.c_str()));

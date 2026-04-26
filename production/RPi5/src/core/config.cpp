@@ -16,6 +16,7 @@
 #include <toml++/toml.hpp>
 
 #include "config_defaults.hpp"
+#include "constants.hpp"
 
 namespace godo::core {
 
@@ -40,6 +41,26 @@ const std::set<std::string>& allowed_keys() {
         "rt.cpu",
         "rt.priority",
         "ipc.uds_socket",
+        "amcl.map_path",
+        "amcl.origin_x_m",
+        "amcl.origin_y_m",
+        "amcl.origin_yaw_deg",
+        "amcl.particles_global_n",
+        "amcl.particles_local_n",
+        "amcl.max_iters",
+        "amcl.sigma_hit_m",
+        "amcl.sigma_xy_jitter_m",
+        "amcl.sigma_yaw_jitter_deg",
+        "amcl.sigma_seed_xy_m",
+        "amcl.sigma_seed_yaw_deg",
+        "amcl.downsample_stride",
+        "amcl.range_min_m",
+        "amcl.range_max_m",
+        "amcl.converge_xy_std_m",
+        "amcl.converge_yaw_std_deg",
+        "amcl.yaw_tripwire_deg",
+        "amcl.trigger_poll_ms",
+        "amcl.seed",
     };
     return k;
 }
@@ -98,6 +119,33 @@ void apply_toml_file(Config& c, const std::filesystem::path& path) {
     if (auto v = tbl["rt"]["priority"].value<int64_t>();           v) c.rt_priority = static_cast<int>(*v);
 
     if (auto v = tbl["ipc"]["uds_socket"].value<std::string>();    v) c.uds_socket  = *v;
+
+    if (auto v = tbl["amcl"]["map_path"].value<std::string>();        v) c.amcl_map_path           = *v;
+    if (auto v = tbl["amcl"]["origin_x_m"].value<double>();           v) c.amcl_origin_x_m         = *v;
+    if (auto v = tbl["amcl"]["origin_y_m"].value<double>();           v) c.amcl_origin_y_m         = *v;
+    if (auto v = tbl["amcl"]["origin_yaw_deg"].value<double>();       v) c.amcl_origin_yaw_deg     = *v;
+    if (auto v = tbl["amcl"]["particles_global_n"].value<int64_t>();  v) c.amcl_particles_global_n = static_cast<int>(*v);
+    if (auto v = tbl["amcl"]["particles_local_n"].value<int64_t>();   v) c.amcl_particles_local_n  = static_cast<int>(*v);
+    if (auto v = tbl["amcl"]["max_iters"].value<int64_t>();           v) c.amcl_max_iters          = static_cast<int>(*v);
+    if (auto v = tbl["amcl"]["sigma_hit_m"].value<double>();          v) c.amcl_sigma_hit_m        = *v;
+    if (auto v = tbl["amcl"]["sigma_xy_jitter_m"].value<double>();    v) c.amcl_sigma_xy_jitter_m  = *v;
+    if (auto v = tbl["amcl"]["sigma_yaw_jitter_deg"].value<double>(); v) c.amcl_sigma_yaw_jitter_deg = *v;
+    if (auto v = tbl["amcl"]["sigma_seed_xy_m"].value<double>();      v) c.amcl_sigma_seed_xy_m    = *v;
+    if (auto v = tbl["amcl"]["sigma_seed_yaw_deg"].value<double>();   v) c.amcl_sigma_seed_yaw_deg = *v;
+    if (auto v = tbl["amcl"]["downsample_stride"].value<int64_t>();   v) c.amcl_downsample_stride  = static_cast<int>(*v);
+    if (auto v = tbl["amcl"]["range_min_m"].value<double>();          v) c.amcl_range_min_m        = *v;
+    if (auto v = tbl["amcl"]["range_max_m"].value<double>();          v) c.amcl_range_max_m        = *v;
+    if (auto v = tbl["amcl"]["converge_xy_std_m"].value<double>();    v) c.amcl_converge_xy_std_m  = *v;
+    if (auto v = tbl["amcl"]["converge_yaw_std_deg"].value<double>(); v) c.amcl_converge_yaw_std_deg = *v;
+    if (auto v = tbl["amcl"]["yaw_tripwire_deg"].value<double>();     v) c.amcl_yaw_tripwire_deg   = *v;
+    if (auto v = tbl["amcl"]["trigger_poll_ms"].value<int64_t>();     v) c.amcl_trigger_poll_ms    = static_cast<int>(*v);
+    if (auto v = tbl["amcl"]["seed"].value<int64_t>();                v) {
+        if (*v < 0) {
+            throw std::runtime_error(
+                "config: amcl.seed must be non-negative (0 = time-derived)");
+        }
+        c.amcl_seed = static_cast<std::uint64_t>(*v);
+    }
 }
 
 // Linear search over the envp array.
@@ -129,6 +177,31 @@ int parse_int_or_throw(std::string_view src, std::string_view key) {
         throw std::runtime_error(
             std::string("config: ") + std::string(key) +
             " = '" + std::string(src) + "' is not a valid integer");
+    }
+}
+
+std::uint64_t parse_u64_or_throw(std::string_view src, std::string_view key) {
+    try {
+        size_t pos = 0;
+        const std::string s(src);
+        if (!s.empty() && s[0] == '-') {
+            throw std::runtime_error(
+                std::string("config: ") + std::string(key) +
+                " = '" + s + "' must be a non-negative integer");
+        }
+        const unsigned long long v = std::stoull(s, &pos, 10);
+        if (pos != s.size()) {
+            throw std::runtime_error(
+                std::string("config: ") + std::string(key) +
+                " = '" + s + "' is not a valid unsigned integer");
+        }
+        return static_cast<std::uint64_t>(v);
+    } catch (const std::runtime_error&) {
+        throw;
+    } catch (const std::exception&) {
+        throw std::runtime_error(
+            std::string("config: ") + std::string(key) +
+            " = '" + std::string(src) + "' is not a valid unsigned integer");
     }
 }
 
@@ -165,6 +238,27 @@ void apply_env(Config& c, char** envp) {
     if (auto v = env_get(envp, "GODO_RT_CPU"))        c.rt_cpu      = parse_int_or_throw(*v, "GODO_RT_CPU");
     if (auto v = env_get(envp, "GODO_RT_PRIORITY"))   c.rt_priority = parse_int_or_throw(*v, "GODO_RT_PRIORITY");
     if (auto v = env_get(envp, "GODO_UDS_SOCKET"))    c.uds_socket  = *v;
+
+    if (auto v = env_get(envp, "GODO_AMCL_MAP_PATH"))             c.amcl_map_path           = *v;
+    if (auto v = env_get(envp, "GODO_AMCL_ORIGIN_X_M"))           c.amcl_origin_x_m         = parse_double_or_throw(*v, "GODO_AMCL_ORIGIN_X_M");
+    if (auto v = env_get(envp, "GODO_AMCL_ORIGIN_Y_M"))           c.amcl_origin_y_m         = parse_double_or_throw(*v, "GODO_AMCL_ORIGIN_Y_M");
+    if (auto v = env_get(envp, "GODO_AMCL_ORIGIN_YAW_DEG"))       c.amcl_origin_yaw_deg     = parse_double_or_throw(*v, "GODO_AMCL_ORIGIN_YAW_DEG");
+    if (auto v = env_get(envp, "GODO_AMCL_PARTICLES_GLOBAL_N"))   c.amcl_particles_global_n = parse_int_or_throw(*v, "GODO_AMCL_PARTICLES_GLOBAL_N");
+    if (auto v = env_get(envp, "GODO_AMCL_PARTICLES_LOCAL_N"))    c.amcl_particles_local_n  = parse_int_or_throw(*v, "GODO_AMCL_PARTICLES_LOCAL_N");
+    if (auto v = env_get(envp, "GODO_AMCL_MAX_ITERS"))            c.amcl_max_iters          = parse_int_or_throw(*v, "GODO_AMCL_MAX_ITERS");
+    if (auto v = env_get(envp, "GODO_AMCL_SIGMA_HIT_M"))          c.amcl_sigma_hit_m        = parse_double_or_throw(*v, "GODO_AMCL_SIGMA_HIT_M");
+    if (auto v = env_get(envp, "GODO_AMCL_SIGMA_XY_JITTER_M"))    c.amcl_sigma_xy_jitter_m  = parse_double_or_throw(*v, "GODO_AMCL_SIGMA_XY_JITTER_M");
+    if (auto v = env_get(envp, "GODO_AMCL_SIGMA_YAW_JITTER_DEG")) c.amcl_sigma_yaw_jitter_deg = parse_double_or_throw(*v, "GODO_AMCL_SIGMA_YAW_JITTER_DEG");
+    if (auto v = env_get(envp, "GODO_AMCL_SIGMA_SEED_XY_M"))      c.amcl_sigma_seed_xy_m    = parse_double_or_throw(*v, "GODO_AMCL_SIGMA_SEED_XY_M");
+    if (auto v = env_get(envp, "GODO_AMCL_SIGMA_SEED_YAW_DEG"))   c.amcl_sigma_seed_yaw_deg = parse_double_or_throw(*v, "GODO_AMCL_SIGMA_SEED_YAW_DEG");
+    if (auto v = env_get(envp, "GODO_AMCL_DOWNSAMPLE_STRIDE"))    c.amcl_downsample_stride  = parse_int_or_throw(*v, "GODO_AMCL_DOWNSAMPLE_STRIDE");
+    if (auto v = env_get(envp, "GODO_AMCL_RANGE_MIN_M"))          c.amcl_range_min_m        = parse_double_or_throw(*v, "GODO_AMCL_RANGE_MIN_M");
+    if (auto v = env_get(envp, "GODO_AMCL_RANGE_MAX_M"))          c.amcl_range_max_m        = parse_double_or_throw(*v, "GODO_AMCL_RANGE_MAX_M");
+    if (auto v = env_get(envp, "GODO_AMCL_CONVERGE_XY_STD_M"))    c.amcl_converge_xy_std_m  = parse_double_or_throw(*v, "GODO_AMCL_CONVERGE_XY_STD_M");
+    if (auto v = env_get(envp, "GODO_AMCL_CONVERGE_YAW_STD_DEG")) c.amcl_converge_yaw_std_deg = parse_double_or_throw(*v, "GODO_AMCL_CONVERGE_YAW_STD_DEG");
+    if (auto v = env_get(envp, "GODO_AMCL_YAW_TRIPWIRE_DEG"))     c.amcl_yaw_tripwire_deg   = parse_double_or_throw(*v, "GODO_AMCL_YAW_TRIPWIRE_DEG");
+    if (auto v = env_get(envp, "GODO_AMCL_TRIGGER_POLL_MS"))      c.amcl_trigger_poll_ms    = parse_int_or_throw(*v, "GODO_AMCL_TRIGGER_POLL_MS");
+    if (auto v = env_get(envp, "GODO_AMCL_SEED"))                 c.amcl_seed               = parse_u64_or_throw(*v, "GODO_AMCL_SEED");
 }
 
 // CLI parser — tiny, explicit. `--key=value` or `--key value`.
@@ -218,6 +312,26 @@ void apply_cli(Config& c, int argc, char** argv) {
         {"rt-cpu",         [](Config& cc, const std::string& v){ cc.rt_cpu = parse_int_or_throw(v, "--rt-cpu"); }},
         {"rt-priority",    [](Config& cc, const std::string& v){ cc.rt_priority = parse_int_or_throw(v, "--rt-priority"); }},
         {"uds-socket",     [](Config& cc, const std::string& v){ cc.uds_socket = v; }},
+        {"amcl-map-path",            [](Config& cc, const std::string& v){ cc.amcl_map_path           = v; }},
+        {"amcl-origin-x-m",          [](Config& cc, const std::string& v){ cc.amcl_origin_x_m         = parse_double_or_throw(v, "--amcl-origin-x-m"); }},
+        {"amcl-origin-y-m",          [](Config& cc, const std::string& v){ cc.amcl_origin_y_m         = parse_double_or_throw(v, "--amcl-origin-y-m"); }},
+        {"amcl-origin-yaw-deg",      [](Config& cc, const std::string& v){ cc.amcl_origin_yaw_deg     = parse_double_or_throw(v, "--amcl-origin-yaw-deg"); }},
+        {"amcl-particles-global-n",  [](Config& cc, const std::string& v){ cc.amcl_particles_global_n = parse_int_or_throw(v, "--amcl-particles-global-n"); }},
+        {"amcl-particles-local-n",   [](Config& cc, const std::string& v){ cc.amcl_particles_local_n  = parse_int_or_throw(v, "--amcl-particles-local-n"); }},
+        {"amcl-max-iters",           [](Config& cc, const std::string& v){ cc.amcl_max_iters          = parse_int_or_throw(v, "--amcl-max-iters"); }},
+        {"amcl-sigma-hit-m",         [](Config& cc, const std::string& v){ cc.amcl_sigma_hit_m        = parse_double_or_throw(v, "--amcl-sigma-hit-m"); }},
+        {"amcl-sigma-xy-jitter-m",   [](Config& cc, const std::string& v){ cc.amcl_sigma_xy_jitter_m  = parse_double_or_throw(v, "--amcl-sigma-xy-jitter-m"); }},
+        {"amcl-sigma-yaw-jitter-deg",[](Config& cc, const std::string& v){ cc.amcl_sigma_yaw_jitter_deg = parse_double_or_throw(v, "--amcl-sigma-yaw-jitter-deg"); }},
+        {"amcl-sigma-seed-xy-m",     [](Config& cc, const std::string& v){ cc.amcl_sigma_seed_xy_m    = parse_double_or_throw(v, "--amcl-sigma-seed-xy-m"); }},
+        {"amcl-sigma-seed-yaw-deg",  [](Config& cc, const std::string& v){ cc.amcl_sigma_seed_yaw_deg = parse_double_or_throw(v, "--amcl-sigma-seed-yaw-deg"); }},
+        {"amcl-downsample-stride",   [](Config& cc, const std::string& v){ cc.amcl_downsample_stride  = parse_int_or_throw(v, "--amcl-downsample-stride"); }},
+        {"amcl-range-min-m",         [](Config& cc, const std::string& v){ cc.amcl_range_min_m        = parse_double_or_throw(v, "--amcl-range-min-m"); }},
+        {"amcl-range-max-m",         [](Config& cc, const std::string& v){ cc.amcl_range_max_m        = parse_double_or_throw(v, "--amcl-range-max-m"); }},
+        {"amcl-converge-xy-std-m",   [](Config& cc, const std::string& v){ cc.amcl_converge_xy_std_m  = parse_double_or_throw(v, "--amcl-converge-xy-std-m"); }},
+        {"amcl-converge-yaw-std-deg",[](Config& cc, const std::string& v){ cc.amcl_converge_yaw_std_deg = parse_double_or_throw(v, "--amcl-converge-yaw-std-deg"); }},
+        {"amcl-yaw-tripwire-deg",    [](Config& cc, const std::string& v){ cc.amcl_yaw_tripwire_deg   = parse_double_or_throw(v, "--amcl-yaw-tripwire-deg"); }},
+        {"amcl-trigger-poll-ms",     [](Config& cc, const std::string& v){ cc.amcl_trigger_poll_ms    = parse_int_or_throw(v, "--amcl-trigger-poll-ms"); }},
+        {"amcl-seed",                [](Config& cc, const std::string& v){ cc.amcl_seed               = parse_u64_or_throw(v, "--amcl-seed"); }},
     };
     for (const auto& kv : parse_cli(argc, argv)) {
         auto it = handlers.find(kv.key);
@@ -227,6 +341,72 @@ void apply_cli(Config& c, int argc, char** argv) {
         }
         it->second(c, kv.value);
     }
+}
+
+// Range / sign checks for AMCL keys. Run after the precedence chain
+// settles so any layer (defaults, TOML, env, CLI) that pushes an
+// invalid value gets a single, consistent error message naming the key.
+void validate_amcl(const Config& c) {
+    auto require_positive_int = [](int v, const char* name) {
+        if (v <= 0) {
+            throw std::runtime_error(
+                std::string("config: ") + name +
+                " must be > 0 (got " + std::to_string(v) + ")");
+        }
+    };
+    auto require_positive_double = [](double v, const char* name) {
+        if (!(v > 0.0)) {
+            throw std::runtime_error(
+                std::string("config: ") + name +
+                " must be > 0.0 (got " + std::to_string(v) + ")");
+        }
+    };
+    auto require_nonneg_double = [](double v, const char* name) {
+        if (!(v >= 0.0)) {
+            throw std::runtime_error(
+                std::string("config: ") + name +
+                " must be >= 0.0 (got " + std::to_string(v) + ")");
+        }
+    };
+
+    if (c.amcl_map_path.empty()) {
+        throw std::runtime_error("config: amcl_map_path must not be empty");
+    }
+    require_positive_int(c.amcl_particles_global_n, "amcl_particles_global_n");
+    require_positive_int(c.amcl_particles_local_n,  "amcl_particles_local_n");
+    if (c.amcl_particles_global_n > godo::constants::PARTICLE_BUFFER_MAX) {
+        throw std::runtime_error(
+            "config: amcl_particles_global_n exceeds PARTICLE_BUFFER_MAX (" +
+            std::to_string(godo::constants::PARTICLE_BUFFER_MAX) +
+            "); raise the constant in core/constants.hpp or shrink the value");
+    }
+    if (c.amcl_particles_local_n > godo::constants::PARTICLE_BUFFER_MAX) {
+        throw std::runtime_error(
+            "config: amcl_particles_local_n exceeds PARTICLE_BUFFER_MAX (" +
+            std::to_string(godo::constants::PARTICLE_BUFFER_MAX) +
+            "); raise the constant in core/constants.hpp or shrink the value");
+    }
+    require_positive_int(c.amcl_max_iters,         "amcl_max_iters");
+    require_positive_int(c.amcl_downsample_stride, "amcl_downsample_stride");
+    require_positive_int(c.amcl_trigger_poll_ms,   "amcl_trigger_poll_ms");
+
+    require_positive_double(c.amcl_sigma_hit_m,          "amcl_sigma_hit_m");
+    require_positive_double(c.amcl_sigma_xy_jitter_m,    "amcl_sigma_xy_jitter_m");
+    require_positive_double(c.amcl_sigma_yaw_jitter_deg, "amcl_sigma_yaw_jitter_deg");
+    require_positive_double(c.amcl_sigma_seed_xy_m,      "amcl_sigma_seed_xy_m");
+    require_positive_double(c.amcl_sigma_seed_yaw_deg,   "amcl_sigma_seed_yaw_deg");
+    require_positive_double(c.amcl_converge_xy_std_m,    "amcl_converge_xy_std_m");
+    require_positive_double(c.amcl_converge_yaw_std_deg, "amcl_converge_yaw_std_deg");
+
+    require_nonneg_double(c.amcl_range_min_m,    "amcl_range_min_m");
+    require_positive_double(c.amcl_range_max_m,  "amcl_range_max_m");
+    if (!(c.amcl_range_max_m > c.amcl_range_min_m)) {
+        throw std::runtime_error(
+            "config: amcl_range_max_m (" + std::to_string(c.amcl_range_max_m) +
+            ") must exceed amcl_range_min_m (" +
+            std::to_string(c.amcl_range_min_m) + ")");
+    }
+    require_nonneg_double(c.amcl_yaw_tripwire_deg, "amcl_yaw_tripwire_deg");
 }
 
 }  // namespace
@@ -247,6 +427,28 @@ Config Config::make_default() {
     c.rt_cpu         = cfg_defaults::RT_CPU;
     c.rt_priority    = cfg_defaults::RT_PRIORITY;
     c.uds_socket     = std::string(cfg_defaults::UDS_SOCKET);
+
+    c.amcl_map_path             = std::string(cfg_defaults::AMCL_MAP_PATH);
+    c.amcl_origin_x_m           = cfg_defaults::AMCL_ORIGIN_X_M;
+    c.amcl_origin_y_m           = cfg_defaults::AMCL_ORIGIN_Y_M;
+    c.amcl_origin_yaw_deg       = cfg_defaults::AMCL_ORIGIN_YAW_DEG;
+    c.amcl_particles_global_n   = cfg_defaults::AMCL_PARTICLES_GLOBAL_N;
+    c.amcl_particles_local_n    = cfg_defaults::AMCL_PARTICLES_LOCAL_N;
+    c.amcl_max_iters            = cfg_defaults::AMCL_MAX_ITERS;
+    c.amcl_sigma_hit_m          = cfg_defaults::AMCL_SIGMA_HIT_M;
+    c.amcl_sigma_xy_jitter_m    = cfg_defaults::AMCL_SIGMA_XY_JITTER_M;
+    c.amcl_sigma_yaw_jitter_deg = cfg_defaults::AMCL_SIGMA_YAW_JITTER_DEG;
+    c.amcl_sigma_seed_xy_m      = cfg_defaults::AMCL_SIGMA_SEED_XY_M;
+    c.amcl_sigma_seed_yaw_deg   = cfg_defaults::AMCL_SIGMA_SEED_YAW_DEG;
+    c.amcl_downsample_stride    = cfg_defaults::AMCL_DOWNSAMPLE_STRIDE;
+    c.amcl_range_min_m          = cfg_defaults::AMCL_RANGE_MIN_M;
+    c.amcl_range_max_m          = cfg_defaults::AMCL_RANGE_MAX_M;
+    c.amcl_converge_xy_std_m    = cfg_defaults::AMCL_CONVERGE_XY_STD_M;
+    c.amcl_converge_yaw_std_deg = cfg_defaults::AMCL_CONVERGE_YAW_STD_DEG;
+    c.amcl_yaw_tripwire_deg     = cfg_defaults::AMCL_YAW_TRIPWIRE_DEG;
+    c.amcl_trigger_poll_ms      = cfg_defaults::AMCL_TRIGGER_POLL_MS;
+    c.amcl_seed                 = cfg_defaults::AMCL_SEED;
+
     return c;
 }
 
@@ -272,6 +474,7 @@ Config Config::load(int argc, char** argv, char** envp) {
 
     apply_env(c, envp);
     apply_cli(c, argc, argv);
+    validate_amcl(c);
     return c;
 }
 

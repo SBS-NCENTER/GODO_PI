@@ -39,3 +39,23 @@ if [[ -n "${ALLOC_HITS}" ]]; then
 else
     echo "[rt-alloc-grep] clean (no heap-allocating calls detected on RT paths)"
 fi
+
+# -----------------------------------------------------------------------
+# [m1-no-mutex] — wait-free contract on the AMCL → Thread D publish seam.
+# CODEBASE.md invariant (f) + plan §M1: cold_writer.cpp must contain ZERO
+# std::mutex / std::shared_mutex / std::condition_variable / lock_guard /
+# unique_lock references. The seqlock store is the sole synchronization
+# primitive on the cold-writer publish path. Hits FAIL the build (this is
+# load-bearing for invariant compliance, not a soft warning).
+# -----------------------------------------------------------------------
+M1_TARGET="${ROOT_DIR}/src/localization/cold_writer.cpp"
+M1_PATTERN='\bstd::(mutex|shared_mutex|condition_variable|lock_guard|unique_lock)\b'
+if [[ -f "${M1_TARGET}" ]]; then
+    M1_HITS="$(grep -nE "${M1_PATTERN}" "${M1_TARGET}" 2>/dev/null || true)"
+    if [[ -n "${M1_HITS}" ]]; then
+        echo "[m1-no-mutex] FAIL — wait-free contract violated in cold_writer.cpp:" >&2
+        echo "${M1_HITS}" | sed 's/^/[m1-no-mutex]   /' >&2
+        exit 1
+    fi
+    echo "[m1-no-mutex] clean (no mutex / cv references in cold_writer.cpp)"
+fi

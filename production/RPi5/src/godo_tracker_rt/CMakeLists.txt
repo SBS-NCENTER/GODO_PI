@@ -9,4 +9,5 @@ target_link_libraries(godo_tracker_rt PRIVATE
     godo_freed
     godo_smoother
     godo_udp
+    godo_localization
 )

@@ -33,4 +33,28 @@ inline constexpr int              RT_PRIORITY    = 50;
 // IPC.
 inline constexpr std::string_view UDS_SOCKET     = "/run/godo/ctl.sock";
 
+// AMCL Tier-2 tunables. Operators override these via TOML / env / CLI;
+// see SYSTEM_DESIGN.md §11.2 and the per-key 8-touchpoint table in
+// .claude/tmp/plan_phase4_2_b.md.
+inline constexpr std::string_view AMCL_MAP_PATH            = "/etc/godo/maps/studio_v1.pgm";  // map files installed by ops
+inline constexpr double           AMCL_ORIGIN_X_M          = 0.0;     // calibration origin, X
+inline constexpr double           AMCL_ORIGIN_Y_M          = 0.0;     // calibration origin, Y
+inline constexpr double           AMCL_ORIGIN_YAW_DEG      = 0.0;     // calibration origin yaw; tripwire anchor
+inline constexpr int              AMCL_PARTICLES_GLOBAL_N  = 5000;    // first-run global localization
+inline constexpr int              AMCL_PARTICLES_LOCAL_N   = 500;     // subsequent runs around last_pose
+inline constexpr int              AMCL_MAX_ITERS           = 25;      // converge() upper bound for OneShot
+inline constexpr double           AMCL_SIGMA_HIT_M         = 0.050;   // C1 ±30 mm spec inflated for long range
+inline constexpr double           AMCL_SIGMA_XY_JITTER_M   = 0.005;   // motion-model σ for static crane (5 mm)
+inline constexpr double           AMCL_SIGMA_YAW_JITTER_DEG = 0.5;    // motion-model yaw σ
+inline constexpr double           AMCL_SIGMA_SEED_XY_M     = 0.10;    // seed cloud spread for seed_around
+inline constexpr double           AMCL_SIGMA_SEED_YAW_DEG  = 5.0;     // seed cloud yaw spread for seed_around
+inline constexpr int              AMCL_DOWNSAMPLE_STRIDE   = 2;       // even-sample LiDAR decimation (≥360 beams kept)
+inline constexpr double           AMCL_RANGE_MIN_M         = 0.15;    // discard sub-15 cm returns (LiDAR housing)
+inline constexpr double           AMCL_RANGE_MAX_M         = 12.0;    // C1 quality-degraded beyond ~12 m
+inline constexpr double           AMCL_CONVERGE_XY_STD_M   = 0.015;   // 1.5 cm; tighter than 1-2 cm UE budget
+inline constexpr double           AMCL_CONVERGE_YAW_STD_DEG = 0.3;    // circular std
+inline constexpr double           AMCL_YAW_TRIPWIRE_DEG    = 5.0;     // vs origin_yaw_deg; flags suspected base rotation
+inline constexpr int              AMCL_TRIGGER_POLL_MS     = 50;      // idle wake cadence for cold writer
+inline constexpr std::uint64_t    AMCL_SEED                = 0;       // 0 = time-derived; non-zero = deterministic
+
 }  // namespace godo::config::defaults

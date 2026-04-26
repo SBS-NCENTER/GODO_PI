@@ -28,6 +28,21 @@ inline constexpr double   RPLIDAR_Q2_MM    = 1.0 / 4.0;
 inline constexpr double   FRAME_RATE_HZ    = 60000.0 / 1001.0;
 inline constexpr int64_t  FRAME_PERIOD_NS  = 16'683'350;
 
+// AMCL / EDT bounds — Tier-1 because changing them requires re-deriving
+// the EDT scratch buffer math or the seeded particle buffer footprint.
+inline constexpr int      PARTICLE_BUFFER_MAX = 10000;
+inline constexpr int      SCAN_BEAMS_MAX      = 720;
+inline constexpr int      EDT_TABLE_SIZE      = 1024;
+inline constexpr std::int64_t EDT_MAX_CELLS   = 4'000'000;
+
+// Floor for off-map / very-low-likelihood beam contributions in
+// evaluate_scan(). Bumping this changes AMCL math: too small lets a
+// single off-map beam dominate the log-sum; too large erodes
+// discrimination between near-truth and far-truth poses. Tier-1 because
+// re-validating the convergence test fixtures is required after any
+// change. (S4 mitigation, Mode-B follow-up.)
+inline constexpr double   EVAL_SCAN_LIKELIHOOD_FLOOR = 1e-6;
+
 // FreeD D1 field offsets within the 29-byte packet.
 // Source of truth: XR_FreeD_to_UDP/src/main.cpp L67-85.
 namespace FreeD {

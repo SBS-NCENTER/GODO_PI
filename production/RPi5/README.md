@@ -58,7 +58,7 @@ production/RPi5/
 ## Prerequisites (Debian 13 Trixie / RPi 5)
 
 ```sh
-sudo apt install doctest-dev libssl-dev cmake git make g++
+sudo apt install doctest-dev libssl-dev libeigen3-dev cmake git make g++
 ```
 
 Versions known to build:
@@ -67,6 +67,7 @@ Versions known to build:
 - CMake 3.31.6
 - doctest 2.4.11-1 (apt)
 - libssl3 / libssl-dev 3.5.5
+- libeigen3-dev 3.4.0-5 (Phase 4-2 B AMCL substrate; header-only template lib)
 - OpenSSL EVP API — chunked SHA-256 (64 KiB chunks) for session-log integrity
 
 Serial access:

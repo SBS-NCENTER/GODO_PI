@@ -21,6 +21,12 @@ ctest --test-dir "${BUILD_DIR}" -L hardware-free --output-on-failure
 # [rt-alloc-grep] — best-effort check that the RT hot path does not
 # contain obvious heap-allocating calls. See CODEBASE.md invariant (e).
 # Warnings here do NOT fail the build; they are reviewed manually.
+#
+# Phase 4-2 D Wave A note: Live mode in cold_writer.cpp re-uses the
+# pre-reserved `beams_buf` (PARTICLE_BUFFER_MAX-sized) on every scan —
+# no new allocation surface introduced. Cold writer remains OFF this
+# scan list intentionally: it is a cold-path thread (OTHER, not FIFO),
+# so its allocation footprint is judged at code review, not by this gate.
 # -----------------------------------------------------------------------
 RT_PATHS=(
     "${ROOT_DIR}/src/rt"
@@ -47,6 +53,20 @@ fi
 # unique_lock references. The seqlock store is the sole synchronization
 # primitive on the cold-writer publish path. Hits FAIL the build (this is
 # load-bearing for invariant compliance, not a soft warning).
+#
+# Phase 4-2 D Wave A note: Live mode body adds zero std::mutex references.
+# The gate stays narrow to cold_writer.cpp by design — Wave B's GPIO and
+# UDS source files (src/gpio/, src/uds/) live in their own translation
+# units and are NOT gated here. Both Wave B modules use single-thread
+# accept/wait loops with no shared mutable state, so no mutex is required
+# there either, but the gate's load-bearing target is the cold publish
+# path on the AMCL → smoother seam.
+#
+# Test label inventory:
+#   - hardware-free          — runs in CI / local without LiDAR or GPIO
+#   - hardware-required      — runs only with RPLIDAR C1 attached
+#   - hardware-required-gpio — (Wave B) runs only with /dev/gpiochip0
+#   - python-required        — runs only when uv + Python prototype present
 # -----------------------------------------------------------------------
 M1_TARGET="${ROOT_DIR}/src/localization/cold_writer.cpp"
 M1_PATTERN='\bstd::(mutex|shared_mutex|condition_variable|lock_guard|unique_lock)\b'

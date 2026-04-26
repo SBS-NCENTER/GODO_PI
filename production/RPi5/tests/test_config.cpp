@@ -424,3 +424,140 @@ TEST_CASE("Config::load — unknown amcl.* TOML key is rejected") {
     CHECK_THROWS_AS(Config::load(argv.argc, argv.argv.data(), env.ptr()),
                     std::runtime_error);
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4-2 D Wave A — Live σ pair + GPIO pin pair (4 new Tier-2 keys).
+// 8-touchpoint coverage: defaults wired, TOML round-trip, env round-trip,
+// CLI round-trip, validation rejects out-of-range. GPIO pin range [0, 27]
+// uses the new `validate_gpio` path; σ pair reuses `require_positive_double`.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Config::make_default — wires Phase 4-2 D Live σ + GPIO pin defaults") {
+    Config c = Config::make_default();
+    CHECK(c.amcl_sigma_xy_jitter_live_m    == godo::config::defaults::AMCL_SIGMA_XY_JITTER_LIVE_M);
+    CHECK(c.amcl_sigma_yaw_jitter_live_deg == godo::config::defaults::AMCL_SIGMA_YAW_JITTER_LIVE_DEG);
+    CHECK(c.gpio_calibrate_pin             == godo::config::defaults::GPIO_CALIBRATE_PIN);
+    CHECK(c.gpio_live_toggle_pin           == godo::config::defaults::GPIO_LIVE_TOGGLE_PIN);
+}
+
+TEST_CASE("Config::load — Phase 4-2 D keys TOML round-trip (positive)") {
+    auto tmp = write_temp_toml(
+        "[amcl]\n"
+        "sigma_xy_jitter_live_m = 0.020\n"
+        "sigma_yaw_jitter_live_deg = 2.5\n"
+        "[gpio]\n"
+        "calibrate_pin = 17\n"
+        "live_toggle_pin = 22\n"
+    );
+    Argv argv({});
+    Env  env({"GODO_CONFIG_PATH=" + tmp.path.string()});
+    Config c = Config::load(argv.argc, argv.argv.data(), env.ptr());
+    CHECK(c.amcl_sigma_xy_jitter_live_m    == 0.020);
+    CHECK(c.amcl_sigma_yaw_jitter_live_deg == 2.5);
+    CHECK(c.gpio_calibrate_pin             == 17);
+    CHECK(c.gpio_live_toggle_pin           == 22);
+}
+
+TEST_CASE("Config::load — Phase 4-2 D keys env round-trip (positive)") {
+    Argv argv({});
+    Env  env({
+        "GODO_AMCL_SIGMA_XY_JITTER_LIVE_M=0.025",
+        "GODO_AMCL_SIGMA_YAW_JITTER_LIVE_DEG=3.0",
+        "GODO_GPIO_CALIBRATE_PIN=5",
+        "GODO_GPIO_LIVE_TOGGLE_PIN=6",
+    });
+    Config c = Config::load(argv.argc, argv.argv.data(), env.ptr());
+    CHECK(c.amcl_sigma_xy_jitter_live_m    == 0.025);
+    CHECK(c.amcl_sigma_yaw_jitter_live_deg == 3.0);
+    CHECK(c.gpio_calibrate_pin             == 5);
+    CHECK(c.gpio_live_toggle_pin           == 6);
+}
+
+TEST_CASE("Config::load — Phase 4-2 D keys CLI round-trip (positive)") {
+    Argv argv({
+        "--amcl-sigma-xy-jitter-live-m=0.030",
+        "--amcl-sigma-yaw-jitter-live-deg", "1.75",
+        "--gpio-calibrate-pin=12",
+        "--gpio-live-toggle-pin=13",
+    });
+    Env  env({});
+    Config c = Config::load(argv.argc, argv.argv.data(), env.ptr());
+    CHECK(c.amcl_sigma_xy_jitter_live_m    == 0.030);
+    CHECK(c.amcl_sigma_yaw_jitter_live_deg == 1.75);
+    CHECK(c.gpio_calibrate_pin             == 12);
+    CHECK(c.gpio_live_toggle_pin           == 13);
+}
+
+TEST_CASE("Config::load — non-positive Live σ values are rejected") {
+    {
+        Argv argv({"--amcl-sigma-xy-jitter-live-m=0"});
+        Env  env({});
+        CHECK_THROWS_AS(Config::load(argv.argc, argv.argv.data(), env.ptr()),
+                        std::runtime_error);
+    }
+    {
+        Argv argv({"--amcl-sigma-xy-jitter-live-m=-0.001"});
+        Env  env({});
+        CHECK_THROWS_AS(Config::load(argv.argc, argv.argv.data(), env.ptr()),
+                        std::runtime_error);
+    }
+    {
+        Argv argv({"--amcl-sigma-yaw-jitter-live-deg=0"});
+        Env  env({});
+        CHECK_THROWS_AS(Config::load(argv.argc, argv.argv.data(), env.ptr()),
+                        std::runtime_error);
+    }
+    {
+        Argv argv({"--amcl-sigma-yaw-jitter-live-deg=-1"});
+        Env  env({});
+        CHECK_THROWS_AS(Config::load(argv.argc, argv.argv.data(), env.ptr()),
+                        std::runtime_error);
+    }
+}
+
+TEST_CASE("Config::load — out-of-range GPIO pins are rejected") {
+    // Pi 5 BCM range is [0, 27] (GPIO_MAX_BCM_PIN). Cover both bounds.
+    {
+        Argv argv({"--gpio-calibrate-pin=-1"});
+        Env  env({});
+        CHECK_THROWS_AS(Config::load(argv.argc, argv.argv.data(), env.ptr()),
+                        std::runtime_error);
+    }
+    {
+        Argv argv({"--gpio-calibrate-pin=28"});
+        Env  env({});
+        CHECK_THROWS_AS(Config::load(argv.argc, argv.argv.data(), env.ptr()),
+                        std::runtime_error);
+    }
+    {
+        Argv argv({"--gpio-live-toggle-pin=-1"});
+        Env  env({});
+        CHECK_THROWS_AS(Config::load(argv.argc, argv.argv.data(), env.ptr()),
+                        std::runtime_error);
+    }
+    {
+        Argv argv({"--gpio-live-toggle-pin=28"});
+        Env  env({});
+        CHECK_THROWS_AS(Config::load(argv.argc, argv.argv.data(), env.ptr()),
+                        std::runtime_error);
+    }
+}
+
+TEST_CASE("Config::load — GPIO pin boundary values 0 and 27 are accepted") {
+    Argv argv({"--gpio-calibrate-pin=0", "--gpio-live-toggle-pin=27"});
+    Env  env({});
+    Config c = Config::load(argv.argc, argv.argv.data(), env.ptr());
+    CHECK(c.gpio_calibrate_pin   == 0);
+    CHECK(c.gpio_live_toggle_pin == 27);
+}
+
+TEST_CASE("Config::load — unknown gpio.* TOML key is rejected") {
+    auto tmp = write_temp_toml(
+        "[gpio]\n"
+        "phantom_pin = 9\n"
+    );
+    Argv argv({});
+    Env  env({"GODO_CONFIG_PATH=" + tmp.path.string()});
+    CHECK_THROWS_AS(Config::load(argv.argc, argv.argv.data(), env.ptr()),
+                    std::runtime_error);
+}

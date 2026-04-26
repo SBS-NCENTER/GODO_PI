@@ -1,4 +1,9 @@
 // Phase 4-2 B Wave 2 — cold-writer Offset shape invariants (M3 + S6).
+// Phase 4-2 D — second-call test now pins OneShot's always-`seed_global`
+// behaviour: the iteration count of two back-to-back OneShot runs must
+// stay within ±20% (with a small absolute floor for stochastic drift).
+// If a warm-seed shortcut sneaks back in, r2.iterations would drop
+// sharply on the second call and the bound would fail.
 //
 // Drives `run_one_iteration` directly (the testable seam in cold_writer.hpp)
 // with a synthetic LiDAR Frame. We do NOT spawn a thread, do NOT touch
@@ -19,8 +24,10 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -105,14 +112,14 @@ TEST_CASE("run_one_iteration — published Offset is NaN/Inf-free with canonical
 
     std::vector<RangeBeam> beams_buf;
     Pose2D last_pose{};
-    bool   first_run = true;
+    bool   live_first_iter = true;
     Offset last_written{0.0, 0.0, 0.0};
     Seqlock<Offset> target_offset;
 
     const Frame frame = make_synthetic_frame(360);
     const auto result = run_one_iteration(cfg, frame, grid, amcl, rng,
                                           beams_buf, last_pose,
-                                          first_run, last_written,
+                                          live_first_iter, last_written,
                                           target_offset);
 
     // forced=true because run_one_iteration is the OneShot kernel.
@@ -138,8 +145,9 @@ TEST_CASE("run_one_iteration — published Offset is NaN/Inf-free with canonical
     CHECK(published.dy   == result.offset.dy);
     CHECK(published.dyaw == result.offset.dyaw);
 
-    // first_run flipped to false; last_pose updated.
-    CHECK(first_run == false);
+    // live_first_iter cleared by the OneShot kernel (state hygiene); the
+    // OneShot seed branch did NOT consult it.
+    CHECK(live_first_iter == false);
     CHECK(std::isfinite(last_pose.x));
     CHECK(std::isfinite(last_pose.y));
     CHECK(std::isfinite(last_pose.yaw_deg));
@@ -147,11 +155,16 @@ TEST_CASE("run_one_iteration — published Offset is NaN/Inf-free with canonical
     CHECK(last_pose.yaw_deg <  360.0);
 }
 
-TEST_CASE("run_one_iteration — second call uses seed_around (not seed_global)") {
-    // This pins the first_run latch behaviour: after the first call,
-    // subsequent calls re-seed around `last_pose` and the result.iterations
-    // remains within bounds (i.e. the kernel does not silently restart from
-    // global-seed every time).
+TEST_CASE("run_one_iteration — second call still uses seed_global (no warm-seed shortcut)") {
+    // Phase 4-2 D pin: OneShot is unconditionally seed_global. The
+    // pre-Phase-4-2-D behaviour was first call seed_global, subsequent
+    // seed_around — which let r2.iterations drop sharply on the second
+    // call. Now both runs start from the same global seed cloud, so the
+    // iteration counts must stay within ±20% (or ±2 iters, whichever is
+    // larger — covers the small-iter floor where 20% rounds to zero).
+    //
+    // If a warm-seed regression silently re-introduces seed_around for
+    // OneShot, r2.iterations would collapse and this CHECK would fail.
     Config cfg = Config::make_default();
     cfg.amcl_seed              = 7;
     cfg.amcl_max_iters         = 5;
@@ -167,22 +180,24 @@ TEST_CASE("run_one_iteration — second call uses seed_around (not seed_global)"
 
     std::vector<RangeBeam> beams_buf;
     Pose2D last_pose{};
-    bool   first_run = true;
+    bool   live_first_iter = true;
     Offset last_written{0.0, 0.0, 0.0};
     Seqlock<Offset> target_offset;
     const Frame    frame = make_synthetic_frame(360);
 
     const auto r1 = run_one_iteration(cfg, frame, grid, amcl, rng,
-                                      beams_buf, last_pose, first_run,
+                                      beams_buf, last_pose, live_first_iter,
                                       last_written, target_offset);
-    CHECK(first_run == false);
+    CHECK(live_first_iter == false);
     CHECK(r1.iterations >= 1);
+    CHECK(r1.iterations <= cfg.amcl_max_iters);
 
-    // Second call: seed_around path. Offset still well-formed.
+    // Second call: still seed_global per Phase 4-2 D. Iteration count
+    // should be within ±20% of r1 (or ±2, whichever is larger).
     const auto r2 = run_one_iteration(cfg, frame, grid, amcl, rng,
-                                      beams_buf, last_pose, first_run,
+                                      beams_buf, last_pose, live_first_iter,
                                       last_written, target_offset);
-    CHECK(first_run == false);
+    CHECK(live_first_iter == false);
     CHECK(r2.iterations >= 1);
     CHECK(r2.iterations <= cfg.amcl_max_iters);
     CHECK(std::isfinite(r2.offset.dx));
@@ -190,4 +205,8 @@ TEST_CASE("run_one_iteration — second call uses seed_around (not seed_global)"
     CHECK(std::isfinite(r2.offset.dyaw));
     CHECK(r2.offset.dyaw >= 0.0);
     CHECK(r2.offset.dyaw <  360.0);
+
+    const int delta  = std::abs(r2.iterations - r1.iterations);
+    const int budget = std::max(2, r1.iterations / 5);    // ±20% or ±2
+    CHECK(delta <= budget);
 }

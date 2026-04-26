@@ -61,6 +61,10 @@ const std::set<std::string>& allowed_keys() {
         "amcl.yaw_tripwire_deg",
         "amcl.trigger_poll_ms",
         "amcl.seed",
+        "amcl.sigma_xy_jitter_live_m",
+        "amcl.sigma_yaw_jitter_live_deg",
+        "gpio.calibrate_pin",
+        "gpio.live_toggle_pin",
     };
     return k;
 }
@@ -146,6 +150,11 @@ void apply_toml_file(Config& c, const std::filesystem::path& path) {
         }
         c.amcl_seed = static_cast<std::uint64_t>(*v);
     }
+    if (auto v = tbl["amcl"]["sigma_xy_jitter_live_m"].value<double>();    v) c.amcl_sigma_xy_jitter_live_m    = *v;
+    if (auto v = tbl["amcl"]["sigma_yaw_jitter_live_deg"].value<double>(); v) c.amcl_sigma_yaw_jitter_live_deg = *v;
+
+    if (auto v = tbl["gpio"]["calibrate_pin"].value<int64_t>();    v) c.gpio_calibrate_pin   = static_cast<int>(*v);
+    if (auto v = tbl["gpio"]["live_toggle_pin"].value<int64_t>();  v) c.gpio_live_toggle_pin = static_cast<int>(*v);
 }
 
 // Linear search over the envp array.
@@ -259,6 +268,10 @@ void apply_env(Config& c, char** envp) {
     if (auto v = env_get(envp, "GODO_AMCL_YAW_TRIPWIRE_DEG"))     c.amcl_yaw_tripwire_deg   = parse_double_or_throw(*v, "GODO_AMCL_YAW_TRIPWIRE_DEG");
     if (auto v = env_get(envp, "GODO_AMCL_TRIGGER_POLL_MS"))      c.amcl_trigger_poll_ms    = parse_int_or_throw(*v, "GODO_AMCL_TRIGGER_POLL_MS");
     if (auto v = env_get(envp, "GODO_AMCL_SEED"))                 c.amcl_seed               = parse_u64_or_throw(*v, "GODO_AMCL_SEED");
+    if (auto v = env_get(envp, "GODO_AMCL_SIGMA_XY_JITTER_LIVE_M"))    c.amcl_sigma_xy_jitter_live_m    = parse_double_or_throw(*v, "GODO_AMCL_SIGMA_XY_JITTER_LIVE_M");
+    if (auto v = env_get(envp, "GODO_AMCL_SIGMA_YAW_JITTER_LIVE_DEG")) c.amcl_sigma_yaw_jitter_live_deg = parse_double_or_throw(*v, "GODO_AMCL_SIGMA_YAW_JITTER_LIVE_DEG");
+    if (auto v = env_get(envp, "GODO_GPIO_CALIBRATE_PIN"))             c.gpio_calibrate_pin             = parse_int_or_throw(*v, "GODO_GPIO_CALIBRATE_PIN");
+    if (auto v = env_get(envp, "GODO_GPIO_LIVE_TOGGLE_PIN"))           c.gpio_live_toggle_pin           = parse_int_or_throw(*v, "GODO_GPIO_LIVE_TOGGLE_PIN");
 }
 
 // CLI parser — tiny, explicit. `--key=value` or `--key value`.
@@ -332,6 +345,10 @@ void apply_cli(Config& c, int argc, char** argv) {
         {"amcl-yaw-tripwire-deg",    [](Config& cc, const std::string& v){ cc.amcl_yaw_tripwire_deg   = parse_double_or_throw(v, "--amcl-yaw-tripwire-deg"); }},
         {"amcl-trigger-poll-ms",     [](Config& cc, const std::string& v){ cc.amcl_trigger_poll_ms    = parse_int_or_throw(v, "--amcl-trigger-poll-ms"); }},
         {"amcl-seed",                [](Config& cc, const std::string& v){ cc.amcl_seed               = parse_u64_or_throw(v, "--amcl-seed"); }},
+        {"amcl-sigma-xy-jitter-live-m",    [](Config& cc, const std::string& v){ cc.amcl_sigma_xy_jitter_live_m    = parse_double_or_throw(v, "--amcl-sigma-xy-jitter-live-m"); }},
+        {"amcl-sigma-yaw-jitter-live-deg", [](Config& cc, const std::string& v){ cc.amcl_sigma_yaw_jitter_live_deg = parse_double_or_throw(v, "--amcl-sigma-yaw-jitter-live-deg"); }},
+        {"gpio-calibrate-pin",             [](Config& cc, const std::string& v){ cc.gpio_calibrate_pin             = parse_int_or_throw(v, "--gpio-calibrate-pin"); }},
+        {"gpio-live-toggle-pin",           [](Config& cc, const std::string& v){ cc.gpio_live_toggle_pin           = parse_int_or_throw(v, "--gpio-live-toggle-pin"); }},
     };
     for (const auto& kv : parse_cli(argc, argv)) {
         auto it = handlers.find(kv.key);
@@ -390,13 +407,15 @@ void validate_amcl(const Config& c) {
     require_positive_int(c.amcl_downsample_stride, "amcl_downsample_stride");
     require_positive_int(c.amcl_trigger_poll_ms,   "amcl_trigger_poll_ms");
 
-    require_positive_double(c.amcl_sigma_hit_m,          "amcl_sigma_hit_m");
-    require_positive_double(c.amcl_sigma_xy_jitter_m,    "amcl_sigma_xy_jitter_m");
-    require_positive_double(c.amcl_sigma_yaw_jitter_deg, "amcl_sigma_yaw_jitter_deg");
-    require_positive_double(c.amcl_sigma_seed_xy_m,      "amcl_sigma_seed_xy_m");
-    require_positive_double(c.amcl_sigma_seed_yaw_deg,   "amcl_sigma_seed_yaw_deg");
-    require_positive_double(c.amcl_converge_xy_std_m,    "amcl_converge_xy_std_m");
-    require_positive_double(c.amcl_converge_yaw_std_deg, "amcl_converge_yaw_std_deg");
+    require_positive_double(c.amcl_sigma_hit_m,               "amcl_sigma_hit_m");
+    require_positive_double(c.amcl_sigma_xy_jitter_m,         "amcl_sigma_xy_jitter_m");
+    require_positive_double(c.amcl_sigma_yaw_jitter_deg,      "amcl_sigma_yaw_jitter_deg");
+    require_positive_double(c.amcl_sigma_xy_jitter_live_m,    "amcl_sigma_xy_jitter_live_m");
+    require_positive_double(c.amcl_sigma_yaw_jitter_live_deg, "amcl_sigma_yaw_jitter_live_deg");
+    require_positive_double(c.amcl_sigma_seed_xy_m,           "amcl_sigma_seed_xy_m");
+    require_positive_double(c.amcl_sigma_seed_yaw_deg,        "amcl_sigma_seed_yaw_deg");
+    require_positive_double(c.amcl_converge_xy_std_m,         "amcl_converge_xy_std_m");
+    require_positive_double(c.amcl_converge_yaw_std_deg,      "amcl_converge_yaw_std_deg");
 
     require_nonneg_double(c.amcl_range_min_m,    "amcl_range_min_m");
     require_positive_double(c.amcl_range_max_m,  "amcl_range_max_m");
@@ -407,6 +426,24 @@ void validate_amcl(const Config& c) {
             std::to_string(c.amcl_range_min_m) + ")");
     }
     require_nonneg_double(c.amcl_yaw_tripwire_deg, "amcl_yaw_tripwire_deg");
+}
+
+// Phase 4-2 D — GPIO pin range check. Pi 5 40-pin header BCM line range
+// is [0, 27]; values outside that are either not exposed or reserved by
+// the camera/I2C/SPI peripherals. Wave A wires this so a malformed TOML
+// rejects at startup instead of failing inside libgpiod at Wave B.
+void validate_gpio(const Config& c) {
+    auto require_pin_in_range = [](int pin, const char* name) {
+        if (pin < 0 || pin > godo::constants::GPIO_MAX_BCM_PIN) {
+            throw std::runtime_error(
+                std::string("config: ") + name +
+                " must be in [0, " +
+                std::to_string(godo::constants::GPIO_MAX_BCM_PIN) +
+                "] (got " + std::to_string(pin) + ")");
+        }
+    };
+    require_pin_in_range(c.gpio_calibrate_pin,   "gpio_calibrate_pin");
+    require_pin_in_range(c.gpio_live_toggle_pin, "gpio_live_toggle_pin");
 }
 
 }  // namespace
@@ -449,6 +486,12 @@ Config Config::make_default() {
     c.amcl_trigger_poll_ms      = cfg_defaults::AMCL_TRIGGER_POLL_MS;
     c.amcl_seed                 = cfg_defaults::AMCL_SEED;
 
+    c.amcl_sigma_xy_jitter_live_m    = cfg_defaults::AMCL_SIGMA_XY_JITTER_LIVE_M;
+    c.amcl_sigma_yaw_jitter_live_deg = cfg_defaults::AMCL_SIGMA_YAW_JITTER_LIVE_DEG;
+
+    c.gpio_calibrate_pin        = cfg_defaults::GPIO_CALIBRATE_PIN;
+    c.gpio_live_toggle_pin      = cfg_defaults::GPIO_LIVE_TOGGLE_PIN;
+
     return c;
 }
 
@@ -475,6 +518,7 @@ Config Config::load(int argc, char** argv, char** envp) {
     apply_env(c, envp);
     apply_cli(c, argc, argv);
     validate_amcl(c);
+    validate_gpio(c);
     return c;
 }
 

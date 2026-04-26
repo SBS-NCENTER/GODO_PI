@@ -19,7 +19,7 @@ AmclResult run_one_iteration(const godo::core::Config&         cfg,
                              Rng&                              rng,
                              std::vector<RangeBeam>&           beams_buf,
                              Pose2D&                           last_pose_inout,
-                             bool&                             first_run_inout,
+                             bool&                             live_first_iter_inout,
                              godo::rt::Offset&                 last_written_inout,
                              godo::rt::Seqlock<godo::rt::Offset>& target_offset) {
     // 1. Decimate the scan into AMCL beams.
@@ -29,15 +29,13 @@ AmclResult run_one_iteration(const godo::core::Config&         cfg,
                cfg.amcl_range_max_m,
                beams_buf);
 
-    // 2. Seed: global on first run, Gaussian-around-last_pose on subsequent.
-    if (first_run_inout) {
-        amcl.seed_global(grid, rng);
-    } else {
-        amcl.seed_around(last_pose_inout,
-                         cfg.amcl_sigma_seed_xy_m,
-                         cfg.amcl_sigma_seed_yaw_deg,
-                         rng);
-    }
+    // 2. Phase 4-2 D — OneShot ALWAYS seeds globally. The Phase 4-2 B
+    //    "warm-seed on subsequent calls" branch is removed: an operator-
+    //    triggered calibrate after a base move must not be biased toward
+    //    the pre-move pose. `live_first_iter_inout` is left to its caller-
+    //    set value here and only the Live kernel consults it for its own
+    //    seed branch.
+    amcl.seed_global(grid, rng);
 
     // 3. Iterate to convergence.
     AmclResult result = amcl.converge(beams_buf, rng);
@@ -78,9 +76,87 @@ AmclResult run_one_iteration(const godo::core::Config&         cfg,
 
     // `last_pose_inout` (the AMCL particle-cloud seed for the next
     // iteration) is updated unconditionally — a rejected publish is not
-    // a rejected pose estimate (§6.4.1).
+    // a rejected pose estimate (§6.4.1). `live_first_iter_inout` is
+    // cleared so the operator-visible "OneShot then Live" sequence does
+    // not double-seed-global on Live entry — but Live's `on_leave_live`
+    // re-arms the latch on every Live exit, so this is mainly for state
+    // hygiene (OneShot does not consult the latch for its own seed).
     last_pose_inout = result.pose;
-    first_run_inout = false;
+    live_first_iter_inout = false;
+    return result;
+}
+
+AmclResult run_live_iteration(const godo::core::Config&         cfg,
+                              const godo::lidar::Frame&         frame,
+                              const OccupancyGrid&              grid,
+                              Amcl&                             amcl,
+                              Rng&                              rng,
+                              std::vector<RangeBeam>&           beams_buf,
+                              Pose2D&                           last_pose_inout,
+                              bool&                             live_first_iter_inout,
+                              godo::rt::Offset&                 last_written_inout,
+                              godo::rt::Seqlock<godo::rt::Offset>& target_offset) {
+    // 1. Decimate the scan into AMCL beams (same shape as OneShot).
+    downsample(frame,
+               cfg.amcl_downsample_stride,
+               cfg.amcl_range_min_m,
+               cfg.amcl_range_max_m,
+               beams_buf);
+
+    // 2. Seed branch. First Live iteration since (re-)entering Live mode
+    //    seeds globally — the OneShot cloud may be tightly converged
+    //    (xy_std < 15 mm), too tight for σ_live_xy = 15 mm to track a
+    //    base moving at ~30 cm/s. A wide cloud at Live entry lets the
+    //    sensor model refine on iteration 1; subsequent iterations re-
+    //    seed around `last_pose` so the tracker does not throw away the
+    //    pose it just refined.
+    if (live_first_iter_inout) {
+        amcl.seed_global(grid, rng);
+    } else {
+        amcl.seed_around(last_pose_inout,
+                         cfg.amcl_sigma_seed_xy_m,
+                         cfg.amcl_sigma_seed_yaw_deg,
+                         rng);
+    }
+
+    // 3. Single AMCL iteration with the Live σ pair.
+    AmclResult result = amcl.step(beams_buf, rng,
+                                  cfg.amcl_sigma_xy_jitter_live_m,
+                                  cfg.amcl_sigma_yaw_jitter_live_deg);
+
+    // 4. Tripwire — informational only (same as OneShot).
+    if (apply_yaw_tripwire(result.pose,
+                           cfg.amcl_origin_yaw_deg,
+                           cfg.amcl_yaw_tripwire_deg)) {
+        std::fprintf(stderr,
+            "cold_writer: yaw tripwire fired (Live) — pose.yaw=%.3f deg "
+            "vs origin.yaw=%.3f deg (tripwire=%.3f deg). Studio base "
+            "may have rotated; re-run calibration when convenient.\n",
+            result.pose.yaw_deg, cfg.amcl_origin_yaw_deg,
+            cfg.amcl_yaw_tripwire_deg);
+    }
+
+    // 5. Compute Offset against calibration origin (M3 canonical-360 dyaw).
+    Pose2D origin{};
+    origin.x       = cfg.amcl_origin_x_m;
+    origin.y       = cfg.amcl_origin_y_m;
+    origin.yaw_deg = cfg.amcl_origin_yaw_deg;
+    result.offset = compute_offset(result.pose, origin);
+    result.forced = false;            // Live publishes through the deadband
+
+    // 6. Publish — deadband filter at the seqlock seam (§6.4.1).
+    (void)apply_deadband_publish(result.offset,
+                                 result.forced,
+                                 cfg.deadband_mm / 1000.0,
+                                 cfg.deadband_deg,
+                                 last_written_inout,
+                                 target_offset);
+
+    // 7. Update Live state. `last_pose` is updated unconditionally;
+    //    `live_first_iter` flips to false so the next iteration re-seeds
+    //    around the freshly refined pose.
+    last_pose_inout = result.pose;
+    live_first_iter_inout = false;
     return result;
 }
 
@@ -95,12 +171,14 @@ timespec poll_period_ts(int poll_ms) noexcept {
     return ts;
 }
 
-void log_live_stub_once(bool& already_logged) {
-    if (already_logged) return;
-    std::fprintf(stderr,
-        "cold_writer: AmclMode::Live requested but not yet implemented "
-        "(Phase 4-2 D); dropping back to Idle.\n");
-    already_logged = true;
+// Re-arm the live-first-iter latch on every Live → {Idle, OneShot} exit.
+// Rationale: the next Live entry must seed_global so it can recover from
+// a base move that happened while we were Idle. Without this reset, a
+// tight OneShot/Live cloud would not have the spread to discover the new
+// pose under motion, and σ_live_xy = 15 mm jitter alone would not pull
+// the cloud across a multi-cm shift on the first scan after re-entry.
+void on_leave_live(bool& live_first_iter_inout) noexcept {
+    live_first_iter_inout = true;
 }
 
 }  // namespace
@@ -125,8 +203,7 @@ void run_cold_writer(const godo::core::Config&            cfg,
     Amcl amcl(cfg, lf);
     Rng  rng(cfg.amcl_seed);
     Pose2D last_pose{};
-    bool first_run     = true;
-    bool live_logged   = false;
+    bool live_first_iter = true;
 
     // Thread-C-local reference for the deadband filter (§6.4.1).
     // Initialised to {0, 0, 0} to match the seqlock's default-constructed
@@ -173,6 +250,7 @@ void run_cold_writer(const godo::core::Config&            cfg,
                         "available (factory returned nullptr); ignoring.\n");
                     godo::rt::g_amcl_mode.store(godo::rt::AmclMode::Idle,
                                                 std::memory_order_release);
+                    on_leave_live(live_first_iter);
                     break;
                 }
                 godo::lidar::Frame captured{};
@@ -199,6 +277,7 @@ void run_cold_writer(const godo::core::Config&            cfg,
                         "returning to Idle.\n", e.what());
                     godo::rt::g_amcl_mode.store(godo::rt::AmclMode::Idle,
                                                 std::memory_order_release);
+                    on_leave_live(live_first_iter);
                     break;
                 }
                 if (!got_frame) {
@@ -207,11 +286,13 @@ void run_cold_writer(const godo::core::Config&            cfg,
                     // will exit.
                     godo::rt::g_amcl_mode.store(godo::rt::AmclMode::Idle,
                                                 std::memory_order_release);
+                    on_leave_live(live_first_iter);
                     break;
                 }
                 try {
                     (void)run_one_iteration(cfg, captured, grid, amcl, rng,
-                                            beams_buf, last_pose, first_run,
+                                            beams_buf, last_pose,
+                                            live_first_iter,
                                             last_written, target_offset);
                 } catch (const std::exception& e) {
                     std::fprintf(stderr,
@@ -220,13 +301,76 @@ void run_cold_writer(const godo::core::Config&            cfg,
                 }
                 godo::rt::g_amcl_mode.store(godo::rt::AmclMode::Idle,
                                             std::memory_order_release);
+                // OneShot → Idle is a Live exit too — re-arm so the next
+                // operator Live toggle starts with seed_global.
+                on_leave_live(live_first_iter);
                 break;
             }
 
             case godo::rt::AmclMode::Live: {
-                log_live_stub_once(live_logged);
-                godo::rt::g_amcl_mode.store(godo::rt::AmclMode::Idle,
-                                            std::memory_order_release);
+                if (!lidar) {
+                    std::fprintf(stderr,
+                        "cold_writer: Live requested but no LiDAR source "
+                        "available; returning to Idle.\n");
+                    godo::rt::g_amcl_mode.store(godo::rt::AmclMode::Idle,
+                                                std::memory_order_release);
+                    on_leave_live(live_first_iter);
+                    break;
+                }
+                godo::lidar::Frame captured{};
+                bool got_frame = false;
+                try {
+                    // scan_frames(1) blocks at the LiDAR's natural ~10 Hz
+                    // spin rate, so the Live loop is rate-limited by the
+                    // sensor itself — no nanosleep needed. (Audit: see
+                    // LidarSourceRplidar::scan_frames; grabScanDataHq is
+                    // SDK-blocking.) Plan §"Risks" tracks the spin-loop
+                    // defence as a follow-up if the assumption breaks.
+                    lidar->scan_frames(1, [&](int /*idx*/,
+                                              const godo::lidar::Frame& f) {
+                        captured  = f;
+                        got_frame = true;
+                    });
+                } catch (const std::exception& e) {
+                    // Same M8 SIGTERM pattern as OneShot.
+                    std::fprintf(stderr,
+                        "cold_writer: scan_frames(1) threw in Live: %s — "
+                        "returning to Idle.\n", e.what());
+                    godo::rt::g_amcl_mode.store(godo::rt::AmclMode::Idle,
+                                                std::memory_order_release);
+                    on_leave_live(live_first_iter);
+                    break;
+                }
+                if (!got_frame) {
+                    godo::rt::g_amcl_mode.store(godo::rt::AmclMode::Idle,
+                                                std::memory_order_release);
+                    on_leave_live(live_first_iter);
+                    break;
+                }
+                // Re-check g_amcl_mode AFTER the blocking scan so a
+                // Live → {Idle, OneShot} toggle mid-scan reaches the new
+                // mode on the next iteration without first publishing a
+                // stale Live update.
+                if (godo::rt::g_amcl_mode.load(std::memory_order_acquire) !=
+                    godo::rt::AmclMode::Live) {
+                    on_leave_live(live_first_iter);
+                    break;
+                }
+                try {
+                    (void)run_live_iteration(cfg, captured, grid, amcl, rng,
+                                             beams_buf, last_pose,
+                                             live_first_iter,
+                                             last_written, target_offset);
+                } catch (const std::exception& e) {
+                    std::fprintf(stderr,
+                        "cold_writer: run_live_iteration threw: %s — "
+                        "returning to Idle.\n", e.what());
+                    godo::rt::g_amcl_mode.store(godo::rt::AmclMode::Idle,
+                                                std::memory_order_release);
+                    on_leave_live(live_first_iter);
+                    break;
+                }
+                // Stay in Live; scan_frames(1) is the natural rate limiter.
                 break;
             }
         }

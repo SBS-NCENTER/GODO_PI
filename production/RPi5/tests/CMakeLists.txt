@@ -264,6 +264,24 @@ target_link_libraries(test_deadband PRIVATE
 add_test(NAME test_deadband COMMAND test_deadband)
 set_tests_properties(test_deadband PROPERTIES LABELS "hardware-free")
 
+# ----------------------------------------------------------------------------
+# Phase 4-2 D Wave A — Live iteration kernel + σ-overload propagation.
+# Drives run_live_iteration directly with synthetic frames; mirrors the
+# test_cold_writer_offset_invariant fixture pattern, no LiDAR.
+# ----------------------------------------------------------------------------
+
+add_executable(test_cold_writer_live_iteration
+    test_cold_writer_live_iteration.cpp)
+target_link_libraries(test_cold_writer_live_iteration PRIVATE
+    doctest::doctest godo_localization godo_core godo_lidar)
+target_compile_definitions(test_cold_writer_live_iteration PRIVATE
+    GODO_FIXTURES_MAPS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/maps"
+)
+add_test(NAME test_cold_writer_live_iteration
+    COMMAND test_cold_writer_live_iteration)
+set_tests_properties(test_cold_writer_live_iteration PROPERTIES
+    LABELS "hardware-free")
+
 # End-to-end replay: spawns the real godo_tracker_rt binary, so it
 # depends on that target being built first.
 add_executable(test_rt_replay test_rt_replay.cpp)

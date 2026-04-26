@@ -43,6 +43,18 @@ inline constexpr std::int64_t EDT_MAX_CELLS   = 4'000'000;
 // change. (S4 mitigation, Mode-B follow-up.)
 inline constexpr double   EVAL_SCAN_LIKELIHOOD_FLOOR = 1e-6;
 
+// Phase 4-2 D — GPIO + UDS Tier-1 constants. None of these is operator-
+// tunable: changing GPIO_DEBOUNCE_NS would invalidate the bounce-filter
+// reasoning; UDS_REQUEST_MAX_BYTES caps the hand-rolled JSON parser's
+// scratch buffer; SHUTDOWN_POLL_TIMEOUT_MS bounds the worst-case
+// shutdown latency for the GPIO + UDS threads (200 ms total budget at
+// two 100 ms polls); GPIO_MAX_BCM_PIN reflects the Pi 5 40-pin header
+// upper BCM bound. Wave A lands these so Wave B can drop in cleanly.
+inline constexpr std::int64_t GPIO_DEBOUNCE_NS         = 50'000'000;  // 50 ms
+inline constexpr int          UDS_REQUEST_MAX_BYTES    = 4096;        // 4 KiB
+inline constexpr int          SHUTDOWN_POLL_TIMEOUT_MS = 100;
+inline constexpr int          GPIO_MAX_BCM_PIN         = 27;
+
 // FreeD D1 field offsets within the 29-byte packet.
 // Source of truth: XR_FreeD_to_UDP/src/main.cpp L67-85.
 namespace FreeD {

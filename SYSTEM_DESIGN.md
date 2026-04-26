@@ -871,25 +871,52 @@ Pinned unit tests:
 - [ ] systemd unit + watchdog wiring.
 - [ ] Document the Arduino rollback procedure.
 
-**Phase 4-3 — Control plane `godo-webctl` (MINIMAL viable)**
+**Phase 4-3 — Control plane `godo-webctl` (LANDED 2026-04-26)**
 
 Scope cut deliberately: three endpoints needed for day-to-day operation.
 Everything else (map editing, config editing, richer UI) is Phase 4.5 or
-Phase 5.
+Phase 5. Top-level project at `/godo-webctl/` (UV-managed Python).
 
-- [ ] `app/features/health/` — `GET /api/health` (tracker status snapshot
-      via UDS).
-- [ ] `app/features/calibration/` — `POST /api/calibrate` (sends
-      `calibrate_now` to tracker).
-- [ ] `app/features/backup/` — `POST /api/map/backup` (tarballs `map.pgm +
-      map.yaml` with a timestamp into `/var/lib/godo/backups/`).
-- [ ] `app/infra/tracker_client.py` — UDS JSON-lines client.
-- [ ] `app/core/config.py` — Pydantic Settings, reads `/etc/godo/tracker.toml`.
-- [ ] systemd unit `godo-webctl.service`; `After=godo-tracker.service`,
-      `Wants=godo-tracker.service`; `RuntimeDirectory=godo` so the UDS
-      socket path is cleaned on crash (see §8).
-- [ ] Static index page listing the three endpoints (no framework; a
-      single HTML file is sufficient for 4-3).
+- [x] `src/godo_webctl/app.py` — FastAPI app factory, three handlers:
+      `GET /api/health` (UDS `get_mode` round-trip), `POST /api/calibrate`
+      (UDS `set_mode {OneShot}`), `POST /api/map/backup` (atomic two-phase
+      copy of `<map>.pgm + <map>.yaml` into
+      `/var/lib/godo/map-backups/<UTC ts>/`).
+- [x] `src/godo_webctl/uds_client.py` — pure-stdlib `socket(AF_UNIX,
+      SOCK_STREAM)` JSON-lines client; sync surface wrapped via
+      `asyncio.to_thread`. Three terminal cases on read: newline /
+      EOF-before-newline / buffer-full → distinct exception classes
+      (`UdsTimeout`, `UdsUnreachable`, `UdsProtocolError`,
+      `UdsServerRejected`).
+- [x] `src/godo_webctl/protocol.py` — Tier-1 wire constants mirrored from
+      `production/RPi5/src/uds/{uds_server.cpp, json_mini.cpp}` and
+      `production/RPi5/src/core/constants.hpp`. Canonical request encoders
+      (`encode_ping`, `encode_get_mode`, `encode_set_mode`) — clients
+      MUST emit the canonical byte form `b'{"cmd":"set_mode","mode":"OneShot"}\n'`
+      so the cross-language SSOT pin (drift-detected by `test_protocol.py`)
+      stays meaningful. Wire schema is the post-Phase-4-2-D
+      `set_mode/get_mode/ping` over `g_amcl_mode = {Idle, OneShot, Live}`,
+      NOT the pre-4-2-D `calibrate_now/calibrate_requested` boolean.
+- [x] `src/godo_webctl/config.py` — stdlib `dataclass` + `_DEFAULTS` /
+      `_PARSERS` / `_ENV_TO_FIELD` paired tables. Env-only config (no
+      TOML) — surface is 7 keys, paired tables are SSOT. NOT
+      Pydantic-Settings. NOT `/etc/godo/tracker.toml`-parsing on the
+      webctl side; webctl never reads the tracker's TOML.
+- [x] `src/godo_webctl/backup.py` — mirrors
+      `production/RPi5/src/localization/occupancy_grid.cpp::yaml_path_for`
+      (strip `.pgm`, append `.yaml`). Two-phase atomic rename with
+      bounded `MAX_RENAME_ATTEMPTS = 9` retry on `EEXIST`/`ENOTEMPTY`.
+- [x] systemd unit `godo-webctl.service`; `After=godo-tracker.service`,
+      `Wants=godo-tracker.service`. **`StateDirectory=godo`** for
+      `/var/lib/godo/`; `RuntimeDirectory=godo` deliberately OMITTED
+      (godo-tracker.service is the canonical owner of `/run/godo/`).
+      `User=ncenter` — same uid as godo_tracker_rt (UDS perm caveat).
+- [x] `src/godo_webctl/static/index.html` — vanilla HTML + JS; 1 Hz
+      poll of `/api/health`, two operator buttons. Page Visibility API
+      handbrake pauses polling when the tab is hidden.
+- [x] 52/52 hardware-free pytest cases + 1 hardware-required-tracker
+      sequence test (`test_app_hardware_tracker.py`) deferred to news-pi01
+      bring-up. ruff + format clean.
 
 **Phase 4.5 — Control plane extensions (defer until Phase 5 reveals need)**
 

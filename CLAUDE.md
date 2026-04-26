@@ -165,6 +165,10 @@ The smoother + 60 Hz hot path was designed around mode (4) — its 60 Hz interpo
 │    └─ /RPi5                    ← C++ application on Raspberry Pi 5 (Phase 3~)
 │         ├─ README.md
 │         └─ CODEBASE.md
+├─ /godo-webctl                  ← Operator web control plane (Python FastAPI, Phase 4-3~)
+│    ├─ README.md                  drives godo-tracker via UDS at /run/godo/ctl.sock
+│    ├─ CODEBASE.md
+│    └─ pyproject.toml             UV-managed; 3 endpoints: /health, /calibrate, /map/backup
 └─ /XR_FreeD_to_UDP              ← Legacy Arduino firmware (rollback card, reference)
      ├─ README.md
      ├─ platformio.ini

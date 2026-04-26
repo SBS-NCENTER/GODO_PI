@@ -19,10 +19,8 @@
 //     wake-up after `g_running.store(false)`. Worst-case latency is
 //     2 × SHUTDOWN_POLL_TIMEOUT_MS = 200 ms.
 
-#include <algorithm>
 #include <atomic>
 #include <cerrno>
-#include <chrono>
 #include <clocale>
 #include <csignal>
 #include <cstdint>

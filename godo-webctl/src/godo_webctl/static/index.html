@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>godo-webctl</title>
+  <style>
+    body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+           max-width: 720px; margin: 2em auto; padding: 0 1em; color: #222; }
+    h1 { font-size: 1.2em; }
+    .row { display: flex; gap: 1em; align-items: baseline; margin: 0.4em 0; }
+    .label { width: 8em; color: #666; }
+    .val { font-weight: 600; }
+    .ok { color: #0a7d1f; }
+    .bad { color: #b00020; }
+    button { font: inherit; padding: 0.5em 1em; margin-right: 0.5em;
+             cursor: pointer; }
+    pre { background: #f4f4f4; padding: 0.6em; border-radius: 4px;
+          white-space: pre-wrap; word-break: break-all; }
+  </style>
+</head>
+<body>
+  <h1>godo-webctl</h1>
+
+  <div class="row"><span class="label">webctl</span>
+    <span id="webctl-status" class="val">…</span></div>
+  <div class="row"><span class="label">tracker</span>
+    <span id="tracker-status" class="val">…</span></div>
+  <div class="row"><span class="label">mode</span>
+    <span id="mode" class="val">…</span></div>
+
+  <div style="margin-top: 1.2em;">
+    <button id="btn-calibrate">Calibrate (OneShot)</button>
+    <button id="btn-backup">Backup map</button>
+  </div>
+
+  <h2 style="font-size: 1em; margin-top: 1.5em;">Last action</h2>
+  <pre id="last-action">(none yet)</pre>
+
+  <script>
+    // 1 s polling cadence per plan D5; pauses while the tab is hidden (S7).
+    const POLL_MS = 1000;
+    let pollHandle = null;
+
+    async function refreshHealth() {
+      try {
+        const r = await fetch("/api/health");
+        const j = await r.json();
+        document.getElementById("webctl-status").textContent = j.webctl;
+        document.getElementById("webctl-status").className =
+          "val " + (j.webctl === "ok" ? "ok" : "bad");
+        document.getElementById("tracker-status").textContent = j.tracker;
+        document.getElementById("tracker-status").className =
+          "val " + (j.tracker === "ok" ? "ok" : "bad");
+        document.getElementById("mode").textContent = j.mode ?? "—";
+      } catch (e) {
+        document.getElementById("webctl-status").textContent = "fetch_failed";
+        document.getElementById("webctl-status").className = "val bad";
+      }
+    }
+
+    async function postAction(url) {
+      const out = document.getElementById("last-action");
+      out.textContent = "POST " + url + " …";
+      try {
+        const r = await fetch(url, { method: "POST" });
+        const j = await r.json();
+        out.textContent = "POST " + url + "\nHTTP " + r.status + "\n" +
+                          JSON.stringify(j, null, 2);
+      } catch (e) {
+        out.textContent = "POST " + url + "\nERROR " + e;
+      }
+      refreshHealth();
+    }
+
+    document.getElementById("btn-calibrate").addEventListener("click",
+      () => postAction("/api/calibrate"));
+    document.getElementById("btn-backup").addEventListener("click",
+      () => postAction("/api/map/backup"));
+
+    function startPolling() {
+      if (pollHandle === null) {
+        pollHandle = setInterval(refreshHealth, POLL_MS);
+      }
+    }
+    function stopPolling() {
+      if (pollHandle !== null) { clearInterval(pollHandle); pollHandle = null; }
+    }
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) {
+        stopPolling();
+      } else {
+        refreshHealth();
+        startPolling();
+      }
+    });
+
+    refreshHealth();
+    startPolling();
+  </script>
+</body>
+</html>

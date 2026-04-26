@@ -1,0 +1,39 @@
+[Unit]
+Description=GODO web control plane (operator HTTP for godo-tracker)
+After=godo-tracker.service network.target
+Wants=godo-tracker.service
+Documentation=file:///opt/godo-webctl/README.md
+
+[Service]
+Type=simple
+User=ncenter
+Group=ncenter
+WorkingDirectory=/opt/godo-webctl
+EnvironmentFile=-/etc/godo/webctl.env
+
+# /var/lib/godo (managed by systemd; defence-in-depth mkdir in backup.py).
+StateDirectory=godo
+StateDirectoryMode=0750
+
+# /run/godo is owned by godo-tracker.service (RuntimeDirectory=godo there).
+# After=/Wants= guarantee the dir exists before webctl tries to open the UDS.
+
+ExecStart=/opt/godo-webctl/.venv/bin/python -m godo_webctl
+Restart=on-failure
+RestartSec=2s
+
+# Hardening (conservative — operator-LAN only, no secrets handled).
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/godo /run/godo
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

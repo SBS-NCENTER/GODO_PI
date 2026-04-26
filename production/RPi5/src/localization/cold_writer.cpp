@@ -1,12 +1,9 @@
 #include "cold_writer.hpp"
 
 #include <atomic>
-#include <chrono>
 #include <cerrno>
 #include <cstdio>
 #include <exception>
-#include <thread>
-#include <utility>
 
 #include "core/constants.hpp"
 #include "core/rt_flags.hpp"

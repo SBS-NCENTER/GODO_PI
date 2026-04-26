@@ -55,6 +55,21 @@ inline constexpr int          UDS_REQUEST_MAX_BYTES    = 4096;        // 4 KiB
 inline constexpr int          SHUTDOWN_POLL_TIMEOUT_MS = 100;
 inline constexpr int          GPIO_MAX_BCM_PIN         = 27;
 
+// UDS server protocol-shape invariants (Mode-B SHOULD-FIX S1):
+// - LISTEN_BACKLOG: kernel SOMAXCONN ceiling for unaccepted clients;
+//   single-client serial server, so 4 is generous.
+// - CONN_READ_TIMEOUT_SEC: a stalled client must not block the accept
+//   loop forever (M1). One second is well above any honest webctl
+//   round-trip yet bounds the lockout cleanly.
+inline constexpr int          UDS_LISTEN_BACKLOG       = 4;
+inline constexpr int          UDS_CONN_READ_TIMEOUT_SEC = 1;
+
+// libgpiod edge-event drain depth (Mode-B SHOULD-FIX S2). One real button
+// press emits at most a handful of bounce events before the debounce
+// window closes; 16 is a generous ceiling that keeps wait_edge_events
+// from re-entering on the same press.
+inline constexpr int          GPIO_EDGE_EVENT_BUFFER_DEPTH = 16;
+
 // FreeD D1 field offsets within the 29-byte packet.
 // Source of truth: XR_FreeD_to_UDP/src/main.cpp L67-85.
 namespace FreeD {

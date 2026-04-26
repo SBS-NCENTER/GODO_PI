@@ -123,14 +123,25 @@ listen socket itself is poll-based per Mode-A amendment M1).
 
 ### Mid-OneShot set_mode behaviour
 
-`set_mode` is honoured even during a OneShot run (unlike the GPIO
-live-toggle, which drops). Operator intent: the GPIO physical button is
-the safety guard; UDS is the automation escape hatch (Phase 4-3 webctl
-may legitimately want to abort a hung OneShot).
+`set_mode` while the cold writer is in `case OneShot` (mid-`converge()`)
+**does NOT abort the in-flight converge**. The cold writer's loop only
+re-reads `g_amcl_mode` at the top of each iteration; the OneShot kernel
+runs to completion (~1 s at 5000 particles × 25 iters), then stores
+`Idle` itself at the case-OneShot exit. A second store of `OneShot`
+that arrived during this window is silently absorbed by the terminal
+`store(Idle)` (race resolved by ordering — the cold writer's terminal
+store happens after the kernel returns, so it wins against an earlier
+UDS store of the same value).
 
-If this becomes a footgun in field testing, add a `force=true` field to
-`set_mode` and reject mid-OneShot transitions without it. Not required
-for Wave B.
+Practical implication for clients: `set_mode("OneShot")` is idempotent
+in spirit but NOT a "queue an additional OneShot" call. If the operator
+wants two consecutive calibrates, wait for the first to complete (poll
+`get_mode` until it returns `Idle`) before issuing the second.
+
+If true mid-OneShot abort becomes a real workflow (kidnapped recovery,
+operator panic-cancel), add a `force=true` field to `set_mode` and have
+the cold writer re-check `g_amcl_mode` between converge() iterations.
+Not required for Wave B.
 
 ## G. Phase 4-3 client expectations
 

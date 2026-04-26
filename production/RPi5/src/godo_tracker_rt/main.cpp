@@ -1,14 +1,23 @@
-// godo_tracker_rt — Phase 4-1 RT hot path + Phase 4-2 B AMCL cold writer.
+// godo_tracker_rt — Phase 4-1 RT hot path + Phase 4-2 B AMCL cold writer +
+// Phase 4-2 D Wave B operator input surfaces (GPIO + UDS).
 //
 // Lifecycle (per SYSTEM_DESIGN.md §6.2):
 //   main(): setlocale C → block signals → mlockall → load Config
 //     → spawn Thread A (FreeD serial reader)
 //     → spawn cold writer (AMCL OneShot state machine; src/localization/)
+//     → spawn GPIO thread     (button → g_amcl_mode; src/gpio/)
+//     → spawn UDS thread      (UDS JSON-lines → g_amcl_mode; src/uds/)
 //     → spawn Thread D (UDP sender @ 59.94 Hz, SCHED_FIFO + pinned)
 //     → spawn signal thread (waits for SIGTERM/SIGINT → g_running=false)
-//     → join D, A, cold writer, signal thread in order. The cold writer
-//       can be blocked inside scan_frames(1); main pthread_kill's SIGTERM
-//       to its native_handle before joining (M8 SIGTERM watchdog).
+//     → join D, cold writer, GPIO, UDS, A, signal thread.
+//
+// Shutdown signalling (per plan §M1 amendment):
+//   - cold writer: pthread_kill(SIGTERM) before join — its blocking
+//     scan_frames(1) does not observe g_running on its own (M8).
+//   - GPIO + UDS threads: NO pthread_kill. Both poll with
+//     constants::SHUTDOWN_POLL_TIMEOUT_MS and self-exit on the next
+//     wake-up after `g_running.store(false)`. Worst-case latency is
+//     2 × SHUTDOWN_POLL_TIMEOUT_MS = 200 ms.
 
 #include <algorithm>
 #include <atomic>
@@ -37,11 +46,14 @@
 #include "core/seqlock.hpp"
 #include "core/time.hpp"
 #include "freed/serial_reader.hpp"
+#include "gpio/gpio_source.hpp"
+#include "gpio/gpio_source_libgpiod.hpp"
 #include "lidar/lidar_source_rplidar.hpp"
 #include "localization/cold_writer.hpp"
 #include "rt/rt_setup.hpp"
 #include "smoother/offset_smoother.hpp"
 #include "udp/sender.hpp"
+#include "uds/uds_server.hpp"
 
 using godo::rt::FreedPacket;
 using godo::rt::Offset;
@@ -112,6 +124,81 @@ void thread_d_rt(const godo::core::Config& cfg,
     }
 }
 
+// GPIO-thread body. Wires the two button presses to g_amcl_mode:
+//   - calibrate press → store(OneShot)
+//   - live-toggle press → toggle Idle ↔ Live (drop if currently OneShot
+//     so a running calibrate cannot be interrupted; press is dropped, NOT
+//     queued — see doc/gpio_wiring.md UX notes / amendment S5)
+// On open() failure (no chip / permission denied / pin already requested
+// elsewhere) the thread logs and exits cleanly without affecting g_running;
+// the rest of the system stays up so HTTP / UDS triggers still work.
+void thread_gpio(const godo::core::Config& cfg) {
+    godo::gpio::GpioCallbacks cbs;
+    cbs.on_calibrate_press = []() {
+        godo::rt::g_amcl_mode.store(godo::rt::AmclMode::OneShot,
+                                    std::memory_order_release);
+    };
+    cbs.on_live_toggle_press = []() {
+        // Compare-and-swap so we never overwrite an in-flight OneShot.
+        // If the current mode is OneShot we drop the press (S5).
+        auto cur = godo::rt::g_amcl_mode.load(std::memory_order_acquire);
+        for (;;) {
+            godo::rt::AmclMode next = godo::rt::AmclMode::Idle;
+            switch (cur) {
+                case godo::rt::AmclMode::Idle: next = godo::rt::AmclMode::Live; break;
+                case godo::rt::AmclMode::Live: next = godo::rt::AmclMode::Idle; break;
+                case godo::rt::AmclMode::OneShot: return;  // drop, do not queue
+            }
+            if (godo::rt::g_amcl_mode.compare_exchange_weak(
+                    cur, next,
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire)) {
+                return;
+            }
+        }
+    };
+
+    godo::gpio::GpioSourceLibgpiod src(
+        "/dev/gpiochip0",
+        cfg.gpio_calibrate_pin,
+        cfg.gpio_live_toggle_pin,
+        godo::constants::GPIO_DEBOUNCE_NS,
+        std::move(cbs));
+    try {
+        src.open();
+    } catch (const std::exception& e) {
+        std::fprintf(stderr,
+            "godo_tracker_rt: thread_gpio: open failed: %s — GPIO "
+            "triggers disabled, UDS / future HTTP triggers still work.\n",
+            e.what());
+        return;
+    }
+    src.run();
+    // RAII close on scope exit.
+}
+
+// UDS-thread body. Wires set_mode → g_amcl_mode store and get_mode →
+// g_amcl_mode load. Same callback shape as the GPIO live-toggle path:
+// a set_mode("Live") during a OneShot is honoured (overrides) — the UDS
+// is the operator's escape hatch, distinct from the GPIO's safety guard.
+void thread_uds(const godo::core::Config& cfg) {
+    godo::uds::UdsServer server(
+        cfg.uds_socket,
+        []() { return godo::rt::g_amcl_mode.load(std::memory_order_acquire); },
+        [](godo::rt::AmclMode m) {
+            godo::rt::g_amcl_mode.store(m, std::memory_order_release);
+        });
+    try {
+        server.open();
+    } catch (const std::exception& e) {
+        std::fprintf(stderr,
+            "godo_tracker_rt: thread_uds: open failed: %s — UDS "
+            "triggers disabled.\n", e.what());
+        return;
+    }
+    server.run();
+}
+
 void thread_signal_handler() {
     sigset_t mask;
     sigemptyset(&mask);
@@ -173,7 +260,7 @@ int main(int argc, char** argv, char** envp) {
             return src;
         };
 
-    std::thread t_signal, t_a, t_cold, t_d;
+    std::thread t_signal, t_a, t_cold, t_gpio, t_uds, t_d;
     pthread_t   cold_native = 0;
     try {
         t_signal = std::thread(thread_signal_handler);
@@ -184,6 +271,8 @@ int main(int argc, char** argv, char** envp) {
                                std::ref(target_offset),
                                lidar_factory);
         cold_native = t_cold.native_handle();
+        t_gpio   = std::thread(thread_gpio, std::cref(cfg));
+        t_uds    = std::thread(thread_uds,  std::cref(cfg));
         t_d      = std::thread(thread_d_rt, std::cref(cfg),
                                std::ref(latest_freed), std::ref(target_offset));
     } catch (const std::exception& e) {
@@ -195,13 +284,17 @@ int main(int argc, char** argv, char** envp) {
             if (cold_native != 0) ::pthread_kill(cold_native, SIGTERM);
             t_cold.join();
         }
+        if (t_gpio.joinable()) t_gpio.join();
+        if (t_uds.joinable())  t_uds.join();
         if (t_a.joinable())    t_a.join();
         if (t_signal.joinable()) { ::kill(::getpid(), SIGTERM); t_signal.join(); }
         return 1;
     }
 
     // Join order: RT first (fastest exit), then cold writer (may need a
-    // SIGTERM kick to interrupt scan_frames), then Thread A, then signal.
+    // SIGTERM kick to interrupt scan_frames), then GPIO + UDS (poll-based
+    // self-exit on g_running=false; M1 amendment forbids pthread_kill
+    // here), then Thread A, then signal.
     t_d.join();
 
     // M8: kick the cold writer in case it's blocked in scan_frames(1)
@@ -212,6 +305,13 @@ int main(int argc, char** argv, char** envp) {
         ::pthread_kill(cold_native, SIGTERM);
     }
     t_cold.join();
+
+    // GPIO + UDS: NO pthread_kill (M1). Both poll with
+    // SHUTDOWN_POLL_TIMEOUT_MS and observe g_running on every wake-up;
+    // worst-case shutdown latency is one poll period each.
+    t_gpio.join();
+    t_uds.join();
+
     t_a.join();
 
     // Kick the signal thread if no external signal arrived — raising

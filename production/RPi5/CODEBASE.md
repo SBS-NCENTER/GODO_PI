@@ -8,17 +8,22 @@ Structural / functional change log for `/production/RPi5`. See
 
 ## Scope
 
-Phase 4-2 in progress. Currently ships **four binaries**:
+Phase 4-2 D landed. Currently ships **four binaries**:
 - `godo_smoke` — Phase 3 bring-up tool (LiDAR capture → CSV / session log).
 - `godo_jitter` — RT scheduling jitter measurement harness (Phase 4-1).
 - `godo_tracker_rt` — production hot path: FreeD receive + offset apply +
-  59.94 fps UDP send (Phase 4-1, AMCL writer is still a 1 Hz stub
-  pending Phase 4-2 B).
+  59.94 fps UDP send + AMCL cold writer with three-state machine (Idle /
+  OneShot / Live) + GPIO + UDS operator-trigger surfaces.
 - `godo_freed_passthrough` — wiring bring-up tool (FreeD serial → UDP
   forwarder, no offset, no RT privileges) (Phase 4-1 follow-up).
 
-Does **not** yet implement AMCL or the cold-path deadband filter — those
-arrive in Phase 4-2 B / C at `src/localization/`.
+AMCL with EDT-based likelihood field, low-variance resampling, the
+step()/converge() split, the cold-path deadband filter (§6.4.1), and the
+operator GPIO/UDS trigger surfaces all live under `src/localization/`,
+`src/gpio/`, and `src/uds/`. Live mode publishes through the deadband at
+~10 Hz; OneShot is operator-triggered and bypasses the deadband
+(`forced=true`). Phase 4-3 (`godo-webctl` HTTP/api endpoints) is the
+natural follow-up — it will connect to the UDS server landed in 4-2 D.
 
 ---
 

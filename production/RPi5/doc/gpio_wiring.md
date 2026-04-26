@@ -20,9 +20,9 @@ via TOML, env, or CLI; allowed range is `[0, 27]` (Pi 5 40-pin BCM header).
 ```text
    3V3 ────┐               ┌──── 3V3
            │               │
-           ║ (internal     ║ (internal
-           ║  PULL_UP set  ║  PULL_UP set
-           ║  by libgpiod) ║  by libgpiod)
+           │ ← internal    │ ← internal
+           │   PULL_UP     │   PULL_UP
+           │   (libgpiod)  │   (libgpiod)
            │               │
    BCM 16 ─┴────[BTN1]──┐  BCM 20 ─┴────[BTN2]──┐
                         │                       │

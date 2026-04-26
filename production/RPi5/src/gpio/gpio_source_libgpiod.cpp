@@ -100,7 +100,7 @@ void GpioSourceLibgpiod::run() {
 
     // Buffer capacity is small — bursty bounce events should be at most
     // a handful per real press; debounce drops them.
-    gpiod::edge_event_buffer buffer(16);
+    gpiod::edge_event_buffer buffer(godo::constants::GPIO_EDGE_EVENT_BUFFER_DEPTH);
 
     const auto poll_timeout = std::chrono::milliseconds(
         godo::constants::SHUTDOWN_POLL_TIMEOUT_MS);

@@ -23,12 +23,6 @@ namespace godo::uds {
 
 namespace {
 
-constexpr int LISTEN_BACKLOG = 4;
-
-// Per-connection read timeout. A stalled client must not block the accept
-// loop forever (M1).
-constexpr int CONN_READ_TIMEOUT_SEC = 1;
-
 // errno-safe perror-style helper.
 std::string strerror_safe(int e) {
     char buf[128];
@@ -94,7 +88,7 @@ void UdsServer::open() {
             strerror_safe(errno).c_str());
     }
 
-    if (::listen(listen_fd_, LISTEN_BACKLOG) < 0) {
+    if (::listen(listen_fd_, godo::constants::UDS_LISTEN_BACKLOG) < 0) {
         const int e = errno;
         close();
         throw std::runtime_error(
@@ -142,7 +136,7 @@ void UdsServer::handle_one_request(int conn_fd) noexcept {
     // Per-connection read timeout — protects accept loop if the client
     // never sends a newline.
     timeval tv{};
-    tv.tv_sec  = CONN_READ_TIMEOUT_SEC;
+    tv.tv_sec  = godo::constants::UDS_CONN_READ_TIMEOUT_SEC;
     tv.tv_usec = 0;
     if (::setsockopt(conn_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
         std::fprintf(stderr,

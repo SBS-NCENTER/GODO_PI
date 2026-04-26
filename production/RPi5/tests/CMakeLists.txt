@@ -252,6 +252,18 @@ target_compile_definitions(test_amcl_scenarios PRIVATE
 add_test(NAME test_amcl_scenarios COMMAND test_amcl_scenarios)
 set_tests_properties(test_amcl_scenarios PROPERTIES LABELS "hardware-free")
 
+# ----------------------------------------------------------------------------
+# Phase 4-2 C — cold-path deadband filter at the publish seam.
+# Pure predicate tests + Seqlock-driven seam composition tests; no AMCL
+# fixture dependency, no LiDAR.
+# ----------------------------------------------------------------------------
+
+add_executable(test_deadband test_deadband.cpp)
+target_link_libraries(test_deadband PRIVATE
+    doctest::doctest godo_localization godo_core)
+add_test(NAME test_deadband COMMAND test_deadband)
+set_tests_properties(test_deadband PROPERTIES LABELS "hardware-free")
+
 # End-to-end replay: spawns the real godo_tracker_rt binary, so it
 # depends on that target being built first.
 add_executable(test_rt_replay test_rt_replay.cpp)

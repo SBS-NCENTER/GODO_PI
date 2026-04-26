@@ -1098,3 +1098,162 @@ ctest -L python-required      1/1  PASS  (test_csv_parity)
                                (load-bearing for M1 wait-free contract).
 ```
 
+## 2026-04-26 (late) — Phase 4-2 C: cold-path deadband filter at the publish seam
+
+> Replaces the identity-passthrough seqlock store from Wave 2 with the
+> §6.4.1 deadband filter. AMCL output that is sub-threshold against the
+> last published value is now dropped at the cold writer instead of
+> restarting the smoother's ramp. Forced OneShot bypasses the deadband.
+> Final test count: **25/25 PASS** (24 prior + 1 new `test_deadband`).
+
+### Module map (additions, src/localization/)
+
+```text
+src/localization/
+└─ deadband.hpp                      Header-only, pure (no .cpp). Three
+                                     inline helpers:
+                                       - deadband_shortest_arc_deg(from,to)
+                                         → signed shortest arc on the
+                                         circle, (-180, +180]. Mirrors the
+                                         anonymous-namespace helper in
+                                         amcl_result.cpp; kept inline here
+                                         so deadband-only test targets do
+                                         not pull amcl_result.cpp.
+                                       - within_deadband(a, b, dxy_m,
+                                         dyaw_deg) — strict per-axis check
+                                         on dx, dy (metres) and shortest-
+                                         arc dyaw (degrees).
+                                       - apply_deadband_publish(new,
+                                         forced, dxy_m, dyaw_deg,
+                                         last_written_inout, target_offset)
+                                         — composes the §6.4.1 seam:
+                                         publishes + updates last_written
+                                         iff forced==true OR
+                                         !within_deadband(...). Returns
+                                         whether the seqlock advanced.
+```
+
+### Changed
+
+- `src/localization/cold_writer.hpp::run_one_iteration` — new in-out
+  parameter `godo::rt::Offset& last_written_inout` between
+  `first_run_inout` and `target_offset`. Header docstring updated:
+  `last_pose_inout` is now explicitly noted as updated unconditionally
+  (§6.4.1: rejected publish ≠ rejected pose estimate); `last_written_inout`
+  is updated only on accept; `target_offset` is published only on accept.
+  The "Publish seam (M2)" comment now describes the deadband filter
+  (no longer "identity passthrough").
+- `src/localization/cold_writer.cpp::run_one_iteration` — calls
+  `apply_deadband_publish(result.offset, result.forced,
+  cfg.deadband_mm/1000.0, cfg.deadband_deg, last_written_inout,
+  target_offset)` at step 6. Pre-existing `last_pose_inout = result.pose`
+  and `first_run_inout = false` updates remain unconditional below the
+  publish call.
+- `src/localization/cold_writer.cpp::run_cold_writer` — declares a
+  Thread-C-local `godo::rt::Offset last_written{0.0, 0.0, 0.0}` next to
+  `last_pose` / `first_run` / `live_logged`, threaded into the OneShot
+  branch's `run_one_iteration` call. Initialiser matches the seqlock's
+  default-constructed payload and the smoother's initial
+  `live = prev = target = {0, 0, 0}` (§6.4.2), so the first non-zero AMCL
+  fix is always supra-deadband.
+- `tests/test_cold_writer_offset_invariant.cpp` — both test cases now
+  declare `Offset last_written{0.0, 0.0, 0.0}` and pass it through to
+  `run_one_iteration`. Pre-existing offset-shape and seqlock round-trip
+  invariants remain unchanged.
+
+### Tests
+
+- New: `tests/test_deadband.cpp` — 14 cases / 140 assertions:
+  - Predicate (9 cases): sub-deadband on each axis returns true; supra-
+    deadband on dx, dy, dyaw individually returns false; yaw wrap forward
+    (359.95° → 0.02° = +0.07° short arc) and backward (0.02° → 359.95° =
+    -0.07°) both inside deadband; strict-`<` boundary at exactly 10 mm dx
+    and exactly 0.1° dyaw is supra; per-axis (NOT Euclidean hypot) — 8 mm
+    dx + 8 mm dy (Euclidean 11.31 mm) is sub-deadband.
+  - Seam composition (5 cases) using a real `Seqlock<Offset>`: sub-
+    deadband + forced=false → no publish, generation unchanged,
+    last_written unchanged; supra-deadband + forced=false → publish,
+    generation advances, last_written tracks; sub-deadband + forced=true
+    → publish anyway (OneShot bypass); 100 sub-deadband calls in a row
+    → zero writes (filter compares against last WRITTEN, not last seen,
+    so cumulative pseudo-drift cannot defeat the threshold);
+    alternating accept/reject sequence advances generation correctly.
+- Test target registered in `tests/CMakeLists.txt` under the new "Phase
+  4-2 C" comment block; labelled `hardware-free`; links against
+  `doctest::doctest godo_localization godo_core`.
+
+### Invariant updates (no behaviour change)
+
+- **M1 (wait-free contract)** — unaffected. `deadband.hpp` is pure
+  header-only, no `std::mutex` / `std::shared_mutex` /
+  `std::condition_variable`. `[m1-no-mutex]` build gate stays clean.
+- **M2 (publish seam stable for 4-2 D)** — strengthened, not changed.
+  Live mode (Phase 4-2 D) will compose `apply_deadband_publish` from the
+  same seam with `forced=false`; no further cold_writer.cpp restructuring
+  needed.
+- **M3 (canonical-360 dyaw)** — unaffected. `deadband_shortest_arc_deg`
+  consumes `Offset::dyaw` in [0, 360) and produces a signed shortest arc;
+  it does NOT mutate the canonical-360 invariant on either input.
+- **M8 (SIGTERM watchdog)** — unaffected. The deadband filter sits below
+  `scan_frames` in the call stack; no new blocking calls.
+- No new architectural invariant. The deadband is implementation detail
+  of §6.4.1 already on the books from Phase 4-1.
+
+### `[rt-alloc-grep]` smoke pass
+
+Unchanged from Wave 2 — single legacy hit on `udp/sender.cpp:103`
+(UdpSender ctor `std::string`, init-time, justified per invariant (e)).
+The cold path's new helper is `noexcept`, stack-only, three doubles of
+arithmetic plus a `Seqlock::store` (already on the path); no new heap
+allocations introduced.
+
+### Deviations from the plan
+
+1. **Helper placement** — opted for the brief's preferred option (b):
+   `localization/deadband.hpp` header-only, with both `within_deadband`
+   (pure predicate) AND `apply_deadband_publish` (Seqlock-aware seam
+   composition) co-located. This lets the test exercise the seam without
+   duplicating the §6.4.1 logic in test code (SSOT-DRY) and lets
+   `cold_writer.cpp` shrink to a single one-line call at step 6. The
+   alternative — anon-namespace helper inside `cold_writer.cpp` —
+   would have forced the test to either (i) reach into TU-private
+   internals, or (ii) re-implement the seam in test code, both worse.
+2. **`shortest_arc_deg` not deduplicated with `amcl_result.cpp`** —
+   the existing helper there lives in an anonymous namespace. Promoting
+   it would have required either a new public-API surface in
+   `amcl_result.hpp` or moving it to a shared header, which is out of
+   scope for §6.4.1. The deadband.hpp version (`deadband_shortest_arc_deg`)
+   is a 4-line numerical mirror that is independently test-pinned by
+   the wrap-edge cases (`359.95°→0.02°` = +0.07°, symmetric reverse =
+   -0.07°). If/when a third site needs shortest-arc, a follow-up
+   refactor can merge them — flagged for Parent.
+
+### What Phase 4-2 C explicitly does NOT do
+
+- Does NOT touch the `case AmclMode::Live` body — that's Phase 4-2 D.
+  The Live branch still log-once-bounces back to Idle.
+- Does NOT add new `amcl_deadband_*` Config keys. Reuses the existing
+  `cfg.deadband_mm` / `cfg.deadband_deg` (already plumbed across the 8
+  Config touchpoints since Phase 4-1).
+- Does NOT change `result.forced = true` in OneShot. Forced bypass is
+  the design intent (operator-driven calibrate must always publish).
+- Does NOT introduce a divergence clamp. `cfg.divergence_mm` /
+  `cfg.divergence_deg` exist but are §8 territory, not §6.4.1.
+- Does NOT update SYSTEM_DESIGN.md / PROGRESS.md / CLAUDE.md. The §6.4.1
+  spec was already in the doc; this CODEBASE.md entry is the
+  implementation log.
+
+### Final test counts
+
+```text
+ctest -L hardware-free       25/25 PASS  (24 prior + 1 new test_deadband
+                                          with 14 cases / 140 assertions)
+ctest -L python-required      1/1  PASS  (test_csv_parity)
+[rt-alloc-grep]               1 hit only (UdpSender ctor std::string,
+                               init-time, justified per invariant (e)) —
+                               unchanged from Wave 2.
+[m1-no-mutex]                 0 hits in cold_writer.cpp; unchanged.
+                               deadband.hpp also clean (header-only,
+                               not gated but trivially verified).
+```
+

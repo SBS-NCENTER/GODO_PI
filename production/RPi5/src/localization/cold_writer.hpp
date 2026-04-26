@@ -16,9 +16,12 @@
 // sole synchronization primitive on the AMCL → Thread D path. Pinned by
 // scripts/build.sh's no-mutex grep on cold_writer.cpp.
 //
-// Publish seam (M2): `target_offset.store(result.offset)` is an identity
-// passthrough this phase. Phase 4-2 C drops the deadband filter in here
-// without rewriting cold_writer.cpp.
+// Publish seam (M2): the deadband filter (SYSTEM_DESIGN.md §6.4.1) lives at
+// this seam. The cold writer compares `result.offset` against the local
+// `last_written` and skips the seqlock store + the `last_written` update
+// when every component is strictly inside its per-axis threshold.
+// `result.forced == true` (operator-driven OneShot) bypasses the deadband
+// unconditionally.
 //
 // SIGTERM watchdog (M8): EINTR returns from any blocking SDK call inside
 // `scan_frames` are treated as clean cancellation. `godo_tracker_rt::main`
@@ -57,11 +60,22 @@ using LidarFactory =
 //
 // Side effects:
 //   - mutates `amcl` (re-seeds, runs converge)
-//   - mutates `last_pose_inout` (set to the result.pose)
-//   - mutates `first_run_inout` (sets to false on first invocation)
-//   - mutates `beams_buf`     (downsample output target)
-//   - publishes the resulting Offset to `target_offset`
-//   - sets `result.forced = true` (operator-driven OneShot)
+//   - mutates `last_pose_inout`    (set to the result.pose, regardless of
+//                                   whether the deadband filter accepts —
+//                                   the AMCL particle seed for the next
+//                                   iteration is independent of the
+//                                   publish state per §6.4.1)
+//   - mutates `first_run_inout`    (sets to false on first invocation)
+//   - mutates `beams_buf`          (downsample output target)
+//   - sets `result.forced = true`  (operator-driven OneShot)
+//   - mutates `last_written_inout` ONLY when the deadband filter accepts
+//     (or `result.forced` is true) — kept in lock-step with the published
+//     seqlock value so a sequence of sub-deadband updates cannot slow-drift
+//     the reference past the threshold (§6.4.1)
+//   - publishes the resulting Offset to `target_offset` ONLY when the
+//     deadband filter accepts or `result.forced` is true; otherwise the
+//     seqlock generation is unchanged and the smoother stays on its
+//     current ramp
 AmclResult run_one_iteration(const godo::core::Config&         cfg,
                              const godo::lidar::Frame&         frame,
                              const OccupancyGrid&              grid,
@@ -70,6 +84,7 @@ AmclResult run_one_iteration(const godo::core::Config&         cfg,
                              std::vector<RangeBeam>&           beams_buf,
                              Pose2D&                           last_pose_inout,
                              bool&                             first_run_inout,
+                             godo::rt::Offset&                 last_written_inout,
                              godo::rt::Seqlock<godo::rt::Offset>& target_offset);
 
 // Run the cold writer until godo::rt::g_running is false. Idempotent on

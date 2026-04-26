@@ -10,6 +10,7 @@
 
 #include "core/constants.hpp"
 #include "core/rt_flags.hpp"
+#include "deadband.hpp"
 #include "likelihood_field.hpp"
 
 namespace godo::localization {
@@ -22,6 +23,7 @@ AmclResult run_one_iteration(const godo::core::Config&         cfg,
                              std::vector<RangeBeam>&           beams_buf,
                              Pose2D&                           last_pose_inout,
                              bool&                             first_run_inout,
+                             godo::rt::Offset&                 last_written_inout,
                              godo::rt::Seqlock<godo::rt::Offset>& target_offset) {
     // 1. Decimate the scan into AMCL beams.
     downsample(frame,
@@ -63,14 +65,23 @@ AmclResult run_one_iteration(const godo::core::Config&         cfg,
     result.offset = compute_offset(result.pose, origin);
     result.forced = true;
 
-    // 6. Publish — identity passthrough this phase. Phase 4-2 C deadband
-    // drops in here:
-    //   if (result.forced || !within_deadband(result.offset, last_written)) {
-    //       target_offset.store(result.offset);
-    //       last_written = result.offset;
-    //   }
-    target_offset.store(result.offset);
+    // 6. Publish — deadband filter at the seqlock seam (§6.4.1). Forced
+    //    OneShot bypasses the deadband; sub-threshold noise is dropped so
+    //    the smoother keeps its current ramp instead of restarting.
+    //    `last_written_inout` is the local reference only the cold writer
+    //    sees (§6.4.1: "Thread-C-local, no atomic"); it stays in lock-step
+    //    with the published seqlock value so a long sequence of sub-
+    //    deadband updates cannot slow-drift past the threshold.
+    (void)apply_deadband_publish(result.offset,
+                                 result.forced,
+                                 cfg.deadband_mm / 1000.0,
+                                 cfg.deadband_deg,
+                                 last_written_inout,
+                                 target_offset);
 
+    // `last_pose_inout` (the AMCL particle-cloud seed for the next
+    // iteration) is updated unconditionally — a rejected publish is not
+    // a rejected pose estimate (§6.4.1).
     last_pose_inout = result.pose;
     first_run_inout = false;
     return result;
@@ -119,6 +130,14 @@ void run_cold_writer(const godo::core::Config&            cfg,
     Pose2D last_pose{};
     bool first_run     = true;
     bool live_logged   = false;
+
+    // Thread-C-local reference for the deadband filter (§6.4.1).
+    // Initialised to {0, 0, 0} to match the seqlock's default-constructed
+    // payload and the smoother's `live = prev = target = {0, 0, 0}` start
+    // state (§6.4.2) — the very first AMCL fix should always publish (any
+    // non-zero Offset is supra-deadband against a zero baseline; an
+    // exactly-zero first fix would be a no-op publish either way).
+    godo::rt::Offset last_written{0.0, 0.0, 0.0};
 
     std::vector<RangeBeam> beams_buf;
     beams_buf.reserve(godo::constants::SCAN_BEAMS_MAX);
@@ -196,7 +215,7 @@ void run_cold_writer(const godo::core::Config&            cfg,
                 try {
                     (void)run_one_iteration(cfg, captured, grid, amcl, rng,
                                             beams_buf, last_pose, first_run,
-                                            target_offset);
+                                            last_written, target_offset);
                 } catch (const std::exception& e) {
                     std::fprintf(stderr,
                         "cold_writer: run_one_iteration threw: %s — "

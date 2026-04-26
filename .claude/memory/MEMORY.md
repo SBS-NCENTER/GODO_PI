@@ -4,3 +4,5 @@
 - [Test-session naming](project_test_sessions.md) — TS4 = Windows bench (2026-04-21). TS5 = 부조정실 chroma studio (production environment). Archive at `/prototype/Python/out/TS<N>/`.
 - [Studio lens context](project_lens_context.md) — Wide-angle ENG zoom lenses; entrance pupil shift per zoom is significant. Isolate from LiDAR error in Phase 5 tests.
 - [CPU 3 isolation is the design baseline](project_cpu3_isolation.md) — Production reserves CPU 3 for RT hot path. Full stack (SCHED_FIFO + IRQ pin + isolcpus + nohz_full + rcu_nocbs) is the target, applied phased so each step's contribution is measurable.
+- [Frontend stack — Vite + Svelte](frontend_stack_decision.md) — Phase 4.5 webctl frontend is Vite + Svelte (decided 2026-04-26). Map editor + AMCL pose viz + config editor justify a reactive framework; lighter than React, gentler than Vue, canvas-friendlier than HTMX.
+- [Pipeline short-circuit for small/well-specified work](feedback_pipeline_short_circuit.md) — For ≤200 LOC fully-SSOT-specified work, skip planner AND Mode-B; direct writer → Parent self-verify → commit. Confirmed twice this session (Phase 4-2 C, Phase 4-2 systemd).

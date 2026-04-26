@@ -103,13 +103,9 @@ All host-side bring-up steps complete. See per-step session log entry below. The
 - Hardware watchdog wiring: `/etc/systemd/system.conf` → `RuntimeWatchdogSec=10s`.
 - Document the Arduino rollback procedure (README + operator card).
 
-### Phase 4-3 — `godo-webctl` minimal (queued, separate process)
+### Phase 4-3 — `godo-webctl` minimal (LANDED 2026-04-26)
 
-- New top-level directory `/godo-webctl/` with `pyproject.toml` (UV).
-- Three endpoints: `/api/health`, `/api/calibrate`, `/api/map/backup`.
-- Unix-domain-socket JSON-lines client to the tracker (`/run/godo/ctl.sock`).
-- systemd unit `godo-webctl.service` with `After=godo-tracker.service`, `Wants=godo-tracker.service`, `RuntimeDirectory=godo` (auto-cleans the UDS on crash).
-- Single static `index.html` status page (no framework — React lands in Phase 4.5).
+- ✅ **Phase 4-3 완료 2026-04-26** — 새 top-level 디렉토리 `/godo-webctl/` (UV-managed Python). FastAPI app + uvicorn(workers=1). 3개 엔드포인트 (`GET /api/health` UDS get_mode round-trip, `POST /api/calibrate` UDS set_mode {OneShot}, `POST /api/map/backup` 원자적 두-단계 copy). 순수-stdlib UDS JSON-lines 클라이언트 + asyncio.to_thread 래핑. 7개 env-var-only Tier-2 설정 (TOML 안 씀). `protocol.py`가 C++ Tier-1을 미러링 (UDS 와이어 상수만 — file:line citation으로 SSOT pin, drift는 `test_protocol.py`로 catch). systemd unit (`User=ncenter` same-uid, `StateDirectory=godo`, `RuntimeDirectory=godo`는 deliberately 생략 — godo-tracker가 owner). Page Visibility API handbrake로 1Hz polling을 hidden tab에서 정지. 52/52 hardware-free pytest PASS, 1/1 hardware-required-tracker (news-pi01 bring-up까지 deferred). 풀 파이프라인 (planner → reviewer-A APPROVE-WITH-NOTES (5 MUST + 10 SHOULD + 10 NIT, amendments fold) → writer single-wave → reviewer-B APPROVE-WITH-NOTES (0 MUST + 3 SHOULD + 6 NIT, S1/S2/S3/N5 fold). Mode-A의 진짜 발견: D10 `MAP_PATH` stem convention이 tracker `.pgm`-with-suffix와 SSOT 불일치 (수정됨). Mode-B의 진짜 발견: app.py가 `UdsProtocolError` 메시지 string-startswith로 HTTP status 결정 → `UdsServerRejected` 서브클래스 분리 (수정됨). 상세는 `/godo-webctl/CODEBASE.md` + `/godo-webctl/README.md`, plan은 `.claude/tmp/plan_phase4_3.md` (Mode-A amendments 부록 포함, post-merge 삭제 가능).
 
 ### Phase 4.5 — control-plane extensions (deferred to after Phase 5 field pass)
 
@@ -179,6 +175,19 @@ All host-side bring-up steps complete. See per-step session log entry below. The
 ---
 
 ## Session log
+
+### 2026-04-26 (Phase 4-3 webctl)
+
+- **Phase 4-3 landed** on branch `phase-4-3-webctl` (2 commits: feat + Mode-B housekeeping). New top-level Python project `/godo-webctl/` runs as a separate FastAPI process and drives the C++ tracker exclusively through the UDS server landed in Phase 4-2 D. Operator UX surfaces: 3 HTTP endpoints (`/api/health`, `/api/calibrate`, `/api/map/backup`) + a vanilla-HTML status page with two buttons. 24 new files, 2661 lines insertion, zero edits to `production/RPi5/`.
+- **`Amcl::step` σ-overload, OneShot always seed_global, GPIO + UDS surfaces** (Phase 4-2 D) are all consumed end-to-end now: webctl `POST /api/calibrate` → UDS `set_mode {OneShot}` → tracker latches `g_amcl_mode = OneShot` → cold writer's `case AmclMode::OneShot` runs `seed_global` + converge → publishes through Phase 4-2 C deadband (forced=true bypass) → seqlock → 60 fps hot-path UDP send. The whole pipeline can now be exercised by an operator in their browser.
+- **Cross-language SSOT** — `protocol.py` mirrors a SUBSET of C++ Tier-1 (UDS wire constants only: `UDS_REQUEST_MAX_BYTES`, mode names, command names, error codes). Tracker-internal Tier-1 (FreeD layout, RT cadence, AMCL sizes) stays C++-only. CODEBASE.md invariant (b) names each pinned constant with file:line citation; `test_protocol.py` pins literal Python values; `test_uds_client.py` pins byte-exact wire (`b'{"cmd":"set_mode","mode":"OneShot"}\n'`). No auto-sync — manual two-side update discipline.
+- **Reviewer Mode-A** found a real SSOT bug: planner's D10 said `GODO_WEBCTL_MAP_PATH` is a stem (no `.pgm`) and falsely claimed symmetry with tracker's `cfg.amcl_map_path`. Tracker's actual default is `/etc/godo/maps/studio_v1.pgm` (`.pgm` included); operator using same env value would have webctl looking for `studio_v1.pgm.pgm`. Fixed in plan amendments before Writer entered. Also restructured: paired `_DEFAULTS` + `_PARSERS` + `_ENV_TO_FIELD` tables in `config.py`; three terminal cases on UDS read (newline / EOF / buffer-full → distinct exception classes); HTTPStatus enum (no integer literals); StateDirectory=godo + drop RuntimeDirectory=godo (single-owner /run/godo/); Page Visibility API handbrake; sequence-assertion hardware test.
+- **Reviewer Mode-B** found 0 MUST-FIX. Three actionable SHOULD-FIX: S1+S2 wrong C++ file:line citations in CODEBASE.md (commands actually live in `uds_server.cpp:201,206,212`, modes in `json_mini.cpp:119-121, 127-129` — not where the writer cited), S3 `app.py` was string-sniffing `UdsProtocolError` message to distinguish "tracker rejected" (400) from "wire malformed" (502). Folded as a single chore commit: split `UdsServerRejected(UdsError)` subclass carrying `err` attribute; calibrate handler now does `except UdsServerRejected → 400; except UdsProtocolError → 502` with no string scrape. Remaining 5 NITs (logger config, comment polish, button-disable UX, factory unit test) deferred — polish, not correctness.
+- **CLAUDE.md §5 directory tree** updated with `/godo-webctl/` entry (P4-3-14, Parent task per Mode-A amendment).
+- **SYSTEM_DESIGN.md §7** rewritten — was stale (referenced pre-4-2-D `calibrate_now`/`calibrate_requested` boolean, Pydantic-Settings, TOML on webctl side). Now describes the post-4-2-D `set_mode/get_mode/ping` schema, stdlib dataclass, env-only config, paired SSOT tables, the RuntimeDirectory ownership decision (Mode-A amendment S1, Parent task).
+- **`libgpiod-dev` install** lesson from Phase 4-2 D carried forward: when webctl gets a `libsystemd-dev` dep (Phase 4.5+ if it grows native deps), confirm runtime/dev split, name both packages in CODEBASE.md.
+- **News-pi01 hardware-required-tracker test** deferred to bring-up: requires a live `godo_tracker_rt` with the UDS server running. Test sequence-asserts post-calibrate `mode == OneShot` then `mode == Idle` within 5 s.
+- **Plan file** at `.claude/tmp/plan_phase4_3.md` (gitignored, throwaway) — body + Mode-A amendments fold-back. Safe to delete after this session — `/godo-webctl/CODEBASE.md` + `/godo-webctl/README.md` + this PROGRESS.md entry capture the durable record.
 
 ### 2026-04-26 (Phase 4-2 D)
 

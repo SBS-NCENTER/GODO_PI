@@ -13,7 +13,6 @@
 // philosophy across the localization module.
 
 #include <cstddef>
-#include <cstdint>
 #include <vector>
 
 #include "amcl_result.hpp"

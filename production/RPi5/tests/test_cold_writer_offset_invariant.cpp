@@ -106,12 +106,14 @@ TEST_CASE("run_one_iteration — published Offset is NaN/Inf-free with canonical
     std::vector<RangeBeam> beams_buf;
     Pose2D last_pose{};
     bool   first_run = true;
+    Offset last_written{0.0, 0.0, 0.0};
     Seqlock<Offset> target_offset;
 
     const Frame frame = make_synthetic_frame(360);
     const auto result = run_one_iteration(cfg, frame, grid, amcl, rng,
                                           beams_buf, last_pose,
-                                          first_run, target_offset);
+                                          first_run, last_written,
+                                          target_offset);
 
     // forced=true because run_one_iteration is the OneShot kernel.
     CHECK(result.forced == true);
@@ -166,19 +168,20 @@ TEST_CASE("run_one_iteration — second call uses seed_around (not seed_global)"
     std::vector<RangeBeam> beams_buf;
     Pose2D last_pose{};
     bool   first_run = true;
+    Offset last_written{0.0, 0.0, 0.0};
     Seqlock<Offset> target_offset;
     const Frame    frame = make_synthetic_frame(360);
 
     const auto r1 = run_one_iteration(cfg, frame, grid, amcl, rng,
                                       beams_buf, last_pose, first_run,
-                                      target_offset);
+                                      last_written, target_offset);
     CHECK(first_run == false);
     CHECK(r1.iterations >= 1);
 
     // Second call: seed_around path. Offset still well-formed.
     const auto r2 = run_one_iteration(cfg, frame, grid, amcl, rng,
                                       beams_buf, last_pose, first_run,
-                                      target_offset);
+                                      last_written, target_offset);
     CHECK(first_run == false);
     CHECK(r2.iterations >= 1);
     CHECK(r2.iterations <= cfg.amcl_max_iters);

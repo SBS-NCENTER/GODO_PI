@@ -1,12 +1,14 @@
-// godo_tracker_rt — Phase 4-1 RT hot-path binary.
+// godo_tracker_rt — Phase 4-1 RT hot path + Phase 4-2 B AMCL cold writer.
 //
 // Lifecycle (per SYSTEM_DESIGN.md §6.2):
 //   main(): setlocale C → block signals → mlockall → load Config
 //     → spawn Thread A (FreeD serial reader)
-//     → spawn stub cold writer (Phase 4-2: replaced by AMCL thread)
+//     → spawn cold writer (AMCL OneShot state machine; src/localization/)
 //     → spawn Thread D (UDP sender @ 59.94 Hz, SCHED_FIFO + pinned)
 //     → spawn signal thread (waits for SIGTERM/SIGINT → g_running=false)
-//     → join D, A, stub-writer, signal thread in order.
+//     → join D, A, cold writer, signal thread in order. The cold writer
+//       can be blocked inside scan_frames(1); main pthread_kill's SIGTERM
+//       to its native_handle before joining (M8 SIGTERM watchdog).
 
 #include <algorithm>
 #include <atomic>
@@ -19,6 +21,7 @@
 #include <cstring>
 #include <ctime>
 #include <exception>
+#include <memory>
 #include <string>
 #include <thread>
 
@@ -34,6 +37,8 @@
 #include "core/seqlock.hpp"
 #include "core/time.hpp"
 #include "freed/serial_reader.hpp"
+#include "lidar/lidar_source_rplidar.hpp"
+#include "localization/cold_writer.hpp"
 #include "rt/rt_setup.hpp"
 #include "smoother/offset_smoother.hpp"
 #include "udp/sender.hpp"
@@ -61,29 +66,6 @@ void thread_a_serial(const godo::core::Config& cfg,
         std::fprintf(stderr,
             "godo_tracker_rt: thread_a_serial fatal: %s\n", e.what());
         godo::rt::g_running.store(false, std::memory_order_release);
-    }
-}
-
-// TODO(phase-4-2): replace with AMCL writer thread from src/localization/.
-// This stub emits a canned offset sequence at 1 Hz so the hot path can be
-// integration-tested without LiDAR + map + AMCL.
-void thread_stub_cold_writer(Seqlock<Offset>& out) {
-    const Offset steps[] = {
-        {0.0, 0.0, 0.0},
-        {0.1, 0.0, 0.0},
-        {0.1, 0.1, 1.0},
-        {0.2, 0.1, 2.0},
-        {0.0, 0.0, 0.0},
-    };
-    std::size_t idx = 0;
-    while (godo::rt::g_running.load(std::memory_order_acquire)) {
-        out.store(steps[idx % (sizeof(steps) / sizeof(steps[0]))]);
-        ++idx;
-        // Sleep 1 s in 100 ms slices so SIGTERM exit is responsive.
-        for (int i = 0; i < 10; ++i) {
-            if (!godo::rt::g_running.load(std::memory_order_acquire)) return;
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
     }
 }
 
@@ -180,27 +162,56 @@ int main(int argc, char** argv, char** envp) {
     Seqlock<FreedPacket> latest_freed;
     Seqlock<Offset>      target_offset;
 
-    std::thread t_signal, t_a, t_stub, t_d;
+    // Cold-writer LiDAR factory: lazily build a LidarSourceRplidar bound
+    // to the configured port/baud. The factory is invoked once inside
+    // run_cold_writer at startup.
+    godo::localization::LidarFactory lidar_factory =
+        [&cfg]() -> std::unique_ptr<godo::lidar::LidarSourceRplidar> {
+            auto src = std::make_unique<godo::lidar::LidarSourceRplidar>(
+                cfg.lidar_port, cfg.lidar_baud);
+            src->open();
+            return src;
+        };
+
+    std::thread t_signal, t_a, t_cold, t_d;
+    pthread_t   cold_native = 0;
     try {
         t_signal = std::thread(thread_signal_handler);
-        t_a     = std::thread(thread_a_serial, std::cref(cfg), std::ref(latest_freed));
-        t_stub  = std::thread(thread_stub_cold_writer, std::ref(target_offset));
-        t_d     = std::thread(thread_d_rt, std::cref(cfg),
-                              std::ref(latest_freed), std::ref(target_offset));
+        t_a      = std::thread(thread_a_serial, std::cref(cfg),
+                               std::ref(latest_freed));
+        t_cold   = std::thread(godo::localization::run_cold_writer,
+                               std::cref(cfg),
+                               std::ref(target_offset),
+                               lidar_factory);
+        cold_native = t_cold.native_handle();
+        t_d      = std::thread(thread_d_rt, std::cref(cfg),
+                               std::ref(latest_freed), std::ref(target_offset));
     } catch (const std::exception& e) {
         std::fprintf(stderr,
             "godo_tracker_rt: thread spawn failed: %s\n", e.what());
         godo::rt::g_running.store(false, std::memory_order_release);
         if (t_d.joinable())    t_d.join();
-        if (t_stub.joinable()) t_stub.join();
+        if (t_cold.joinable()) {
+            if (cold_native != 0) ::pthread_kill(cold_native, SIGTERM);
+            t_cold.join();
+        }
         if (t_a.joinable())    t_a.join();
         if (t_signal.joinable()) { ::kill(::getpid(), SIGTERM); t_signal.join(); }
         return 1;
     }
 
-    // Join order: RT first (fastest exit), then workers, then signal thread.
+    // Join order: RT first (fastest exit), then cold writer (may need a
+    // SIGTERM kick to interrupt scan_frames), then Thread A, then signal.
     t_d.join();
-    t_stub.join();
+
+    // M8: kick the cold writer in case it's blocked in scan_frames(1)
+    // waiting for the SDK to deliver a frame. After SIGTERM the LiDAR
+    // source's read returns EINTR; the cold writer treats that as clean
+    // cancellation and returns at the top of the loop on g_running=false.
+    if (cold_native != 0) {
+        ::pthread_kill(cold_native, SIGTERM);
+    }
+    t_cold.join();
     t_a.join();
 
     // Kick the signal thread if no external signal arrived — raising

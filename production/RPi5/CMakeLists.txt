@@ -60,6 +60,12 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/rplidar_sdk.cmake)
 # tomlplusplus submodule — header-only TOML parser (Phase 4-1 config loader).
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/tomlplusplus.cmake)
 
+# Eigen3 — Phase 4-2 B AMCL EDT scratch + linear-algebra helpers.
+# CONFIG-mode is intentionally NOT requested: Debian Trixie ships
+# /usr/share/eigen3/cmake/Eigen3Config.cmake, but the canonical entry is
+# the FindEigen3.cmake module pattern; both work without -CONFIG.
+find_package(Eigen3 3.4 REQUIRED)
+
 # -----------------------------------------------------------------------------
 # Targets
 # -----------------------------------------------------------------------------
@@ -72,6 +78,7 @@ add_subdirectory(src/freed)
 add_subdirectory(src/udp)
 add_subdirectory(src/rt)
 add_subdirectory(src/lidar)
+add_subdirectory(src/localization)
 add_subdirectory(src/godo_jitter)
 add_subdirectory(src/godo_tracker_rt)
 add_subdirectory(src/godo_freed_passthrough)

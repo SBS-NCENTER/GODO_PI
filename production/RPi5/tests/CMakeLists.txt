@@ -178,6 +178,80 @@ target_link_libraries(test_freed_serial_reader PRIVATE
 add_test(NAME test_freed_serial_reader COMMAND test_freed_serial_reader)
 set_tests_properties(test_freed_serial_reader PROPERTIES LABELS "hardware-free")
 
+# ----------------------------------------------------------------------------
+# Phase 4-2 B Wave 1 — AMCL substrate (occupancy grid, likelihood field,
+# resampler). The Amcl class itself, cold writer, scenario test, circular
+# stats, pose helpers, and offset-invariant test land in Wave 2.
+# ----------------------------------------------------------------------------
+
+add_executable(test_occupancy_grid test_occupancy_grid.cpp)
+target_link_libraries(test_occupancy_grid PRIVATE
+    doctest::doctest godo_localization)
+target_compile_definitions(test_occupancy_grid PRIVATE
+    GODO_FIXTURES_MAPS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/maps"
+)
+add_test(NAME test_occupancy_grid COMMAND test_occupancy_grid)
+set_tests_properties(test_occupancy_grid PROPERTIES LABELS "hardware-free")
+
+add_executable(test_likelihood_field test_likelihood_field.cpp)
+target_link_libraries(test_likelihood_field PRIVATE
+    doctest::doctest godo_localization)
+add_test(NAME test_likelihood_field COMMAND test_likelihood_field)
+set_tests_properties(test_likelihood_field PROPERTIES LABELS "hardware-free")
+
+add_executable(test_resampler test_resampler.cpp)
+target_link_libraries(test_resampler PRIVATE
+    doctest::doctest godo_localization)
+add_test(NAME test_resampler COMMAND test_resampler)
+set_tests_properties(test_resampler PROPERTIES LABELS "hardware-free")
+
+# ----------------------------------------------------------------------------
+# Phase 4-2 B Wave 2 — class Amcl + cold_writer publish path + circular
+# stats + pose helpers + scenario tests.
+# ----------------------------------------------------------------------------
+
+add_executable(test_circular_stats test_circular_stats.cpp)
+target_link_libraries(test_circular_stats PRIVATE
+    doctest::doctest godo_localization)
+add_test(NAME test_circular_stats COMMAND test_circular_stats)
+set_tests_properties(test_circular_stats PROPERTIES LABELS "hardware-free")
+
+add_executable(test_pose test_pose.cpp)
+target_link_libraries(test_pose PRIVATE
+    doctest::doctest godo_localization godo_core)
+add_test(NAME test_pose COMMAND test_pose)
+set_tests_properties(test_pose PROPERTIES LABELS "hardware-free")
+
+add_executable(test_amcl_components test_amcl_components.cpp)
+target_link_libraries(test_amcl_components PRIVATE
+    doctest::doctest godo_localization godo_core)
+target_compile_definitions(test_amcl_components PRIVATE
+    GODO_FIXTURES_MAPS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/maps"
+)
+add_test(NAME test_amcl_components COMMAND test_amcl_components)
+set_tests_properties(test_amcl_components PROPERTIES LABELS "hardware-free")
+
+add_executable(test_cold_writer_offset_invariant
+    test_cold_writer_offset_invariant.cpp)
+target_link_libraries(test_cold_writer_offset_invariant PRIVATE
+    doctest::doctest godo_localization godo_core godo_lidar)
+target_compile_definitions(test_cold_writer_offset_invariant PRIVATE
+    GODO_FIXTURES_MAPS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/maps"
+)
+add_test(NAME test_cold_writer_offset_invariant
+    COMMAND test_cold_writer_offset_invariant)
+set_tests_properties(test_cold_writer_offset_invariant PROPERTIES
+    LABELS "hardware-free")
+
+add_executable(test_amcl_scenarios test_amcl_scenarios.cpp)
+target_link_libraries(test_amcl_scenarios PRIVATE
+    doctest::doctest godo_localization godo_core)
+target_compile_definitions(test_amcl_scenarios PRIVATE
+    GODO_FIXTURES_MAPS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/maps"
+)
+add_test(NAME test_amcl_scenarios COMMAND test_amcl_scenarios)
+set_tests_properties(test_amcl_scenarios PROPERTIES LABELS "hardware-free")
+
 # End-to-end replay: spawns the real godo_tracker_rt binary, so it
 # depends on that target being built first.
 add_executable(test_rt_replay test_rt_replay.cpp)
@@ -185,6 +259,7 @@ target_link_libraries(test_rt_replay PRIVATE
     doctest::doctest godo_freed godo_udp util)
 target_compile_definitions(test_rt_replay PRIVATE
     GODO_TRACKER_RT_PATH="$<TARGET_FILE:godo_tracker_rt>"
+    GODO_FIXTURES_MAPS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/maps"
 )
 add_dependencies(test_rt_replay godo_tracker_rt)
 add_test(NAME test_rt_replay COMMAND test_rt_replay)

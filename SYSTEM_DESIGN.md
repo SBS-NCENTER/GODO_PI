@@ -294,7 +294,7 @@ Live mode (mode 4, Phase 4-2 D):
     static (5 mm) to ~5–15 mm/scan for Live.
 ```
 
-`converge()` is implemented in terms of `step()` so the inner kernel is single-source. Phase 4-2 B ships only the `OneShot` branch real; the `Live` branch is stubbed in the cold writer (logs once and bounces back to `Idle`).
+`converge()` is implemented in terms of `step()` so the inner kernel is single-source. Both branches landed: Phase 4-2 B shipped the `OneShot` body (`amcl.converge()` to convergence, `forced=true` bypasses deadband); Phase 4-2 D shipped the `Live` body (per-scan `amcl.step(beams, rng, σ_live_xy, σ_live_yaw)` with the σ-explicit overload, `forced=false` reaches the deadband filter). Operator triggers the modes via two physical GPIO buttons (`src/gpio/`) or a Unix-domain JSON-lines socket at `cfg.uds_socket` (`src/uds/`); both write `g_amcl_mode` directly. Phase 4-2 D also changed OneShot to always `seed_global` (no warm `seed_around` branch) so calibrate after a base move always converges, at a ~1 s wall-clock cost the operator is willing to absorb.
 
 ### Internals
 

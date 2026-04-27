@@ -75,8 +75,13 @@ if [[ -n "${TEST_MODE:-}" ]]; then
 else
     # Production path — launch slam_toolbox + rplidar.
     # `source` of the ROS overlay is required for `ros2` to resolve.
+    # ROS Jazzy's setup.bash references unset vars (e.g. AMENT_TRACE_SETUP_FILES)
+    # and trips `set -u`. Relax strict mode for the source line only — restore
+    # immediately so the rest of the entrypoint keeps the strict guarantees.
+    set +u
     # shellcheck disable=SC1091
     source /opt/ros/jazzy/setup.bash
+    set -u
     ros2 launch /godo-mapping/launch/map.launch.py &
 fi
 LAUNCH_PID=$!

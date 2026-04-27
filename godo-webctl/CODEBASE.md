@@ -88,6 +88,15 @@ MODE_LIVE     = "Live"            json_mini.cpp:121 + :129
 CMD_PING      = "ping"            uds_server.cpp:201 (req.cmd compare)
 CMD_GET_MODE  = "get_mode"        uds_server.cpp:206
 CMD_SET_MODE  = "set_mode"        uds_server.cpp:212
+CMD_GET_LAST_POSE = "get_last_pose"
+                                  uds_server.cpp `get_last_pose` branch
+                                  (Track B; uds_protocol.md §C.4)
+LAST_POSE_FIELDS                  json_mini.cpp::format_ok_pose
+  = ("valid","x_m","y_m",         (Track B; field-name SSOT is the
+     "yaw_deg","xy_std_m",        printf format string itself; pinned
+     "yaw_std_deg","iterations",  by tests/test_protocol.py
+     "converged","forced",        ::test_last_pose_fields_match_cpp_source
+     "published_mono_ns")         which regex-extracts from C++ source)
 ERR_PARSE_ERROR = "parse_error"   uds_server.cpp:189,196
 ERR_UNKNOWN_CMD = "unknown_cmd"   uds_server.cpp:225
 ERR_BAD_MODE    = "bad_mode"      uds_server.cpp:215
@@ -219,3 +228,36 @@ by `tests/test_config.py::test_defaults_match_settings` and
 
 - 47 hardware-free tests across 5 modules; 1 hardware-required smoke test
   collected behind `@pytest.mark.hardware_tracker`.
+
+### 2026-04-27 — Track B mirror: `get_last_pose` + `LAST_POSE_FIELDS`
+
+#### Added
+
+- `src/godo_webctl/protocol.py::CMD_GET_LAST_POSE` — wire command name.
+- `src/godo_webctl/protocol.py::LAST_POSE_FIELDS` — sole Python mirror
+  of the field-name tuple embedded in
+  `production/RPi5/src/uds/json_mini.cpp::format_ok_pose`. Order is
+  ABI-visible.
+- `src/godo_webctl/protocol.py::encode_get_last_pose` — canonical wire
+  encoder.
+- `tests/test_protocol.py::test_last_pose_fields_match_cpp_source` —
+  drift pin: reads the C++ source as text, regex-extracts field names
+  from the snprintf format string, asserts byte-equal against
+  `LAST_POSE_FIELDS`. Editing one side without the other fails this
+  test.
+- `tests/test_protocol.py::test_cmd_get_last_pose_matches_cpp` and
+  `::test_encode_get_last_pose_byte_exact` — companion pins.
+
+#### Changed
+
+- Invariant (b) in this file extended: the 13-row Python ⟷ C++ mirror
+  table now includes `CMD_GET_LAST_POSE` and `LAST_POSE_FIELDS`.
+
+#### Removed
+
+- (none)
+
+#### Tests
+
+- 3 new cases in `tests/test_protocol.py`. Total webctl test count:
+  47 → 50 hardware-free; +1 hardware-required smoke (unchanged).

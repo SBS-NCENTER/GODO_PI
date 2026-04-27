@@ -90,6 +90,116 @@ warn_accept = { mode, unknown_thresh }
   키를 추가하는 follow-up 이슈를 만듭니다. C++ allowlist이 SSOT입니다.
 - 본 작업은 Track A 범위 밖이며, Parent에게 보고 후 별도 세션에서 처리합니다.
 
+## Track B — Repeatability measurement
+
+`godo_tracker_rt`가 `systemctl start godo-tracker`로 떠 있는 상태에서, 베이스를
+물리적으로 고정해 두고 OneShot calibration을 N번 반복 실행해 AMCL 결과의
+재현성을 측정하는 도구입니다. Phase 1 측정 instrument이며, 결과 CSV는 Phase
+5 hardware-in-the-loop E2E 시험의 reference baseline 역할을 합니다.
+
+```bash
+python3 godo-mapping/scripts/repeatability.py --shots 100 --interval-s 2.0
+```
+
+### 옵션 요약
+
+| 옵션 | 기본값 | 설명 |
+| --- | --- | --- |
+| `--shots N` | `100` | OneShot 반복 횟수 (`N >= 1`) |
+| `--interval-s F` | `2.0` | shot 사이 sleep (초). converge() 평균 ~1초 + 여유 |
+| `--out PATH` | `<repo>/godo-mapping/measurements/repeatability_<ISO>.csv` | 결과 CSV 경로; 부모 디렉터리는 자동 생성 |
+| `--socket PATH` | `/run/godo/ctl.sock` | UDS 소켓 경로 |
+| `--uds-timeout-s F` | `1.0` | UDS 호출 timeout (초) — tracker server-side `SO_RCVTIMEO`에 맞춤 |
+| `--oneshot-timeout-s F` | `15.0` | OneShot 후 `get_mode==Idle` 대기 한도 |
+| `--dry-run` | off | tracker probe만 하고 shot은 트리거하지 않음 |
+
+### CSV 스키마
+
+```text
+idx, timestamp_unix,
+valid, x_m, y_m, yaw_deg, xy_std_m, yaw_std_deg,
+iterations, converged, forced, published_mono_ns
+```
+
+`valid=0`인 행은 sentinel입니다 (timeout / divergence / 일시적 UDS 실패).
+`valid=1` 행만 통계 요약에 포함됩니다.
+
+### Exit 코드
+
+| 코드 | 의미 |
+| --- | --- |
+| 0 | 성공 |
+| 1 | CLI 검증 실패 (예: `--shots 0`) |
+| 2 | tracker UDS unreachable (초기 ping 실패) |
+| 3 | tracker가 Idle이 아님 (Live / OneShot 진행 중) |
+| 4 | `set_mode("OneShot")` 거부됨 |
+| 5 | CSV 파일 open / write 오류 |
+| 6 | 첫 shot 전에 SIGINT — 행이 한 줄도 기록되지 않음 |
+| 7 | tracker-death streak: UDS 연속 실패 3회 — `journalctl -u godo-tracker` 점검 |
+| 130 | SIGINT (적어도 1행 기록 후) — POSIX 128 + SIGINT |
+
+### 운영 권장 흐름
+
+1. 베이스를 calibration 위치에 고정.
+2. `systemctl is-active godo-tracker` 확인.
+3. `python3 godo-mapping/scripts/repeatability.py --shots 100 --dry-run`로
+   tracker 도달성 + Idle 상태 확인.
+4. 본 측정: `python3 godo-mapping/scripts/repeatability.py --shots 100`.
+5. CSV를 pandas / Excel에서 열어 `xy_std_m`, `x_m`/`y_m` 분포를 확인.
+
+> `--interval-s F`는 best-effort sleep입니다. converge() 시간이 길어지면
+> 실제 간격은 `max(interval_s, shot_duration)`이며 harness는 보정하지
+> 않습니다.
+
+## Live pose watch (cmd window 모니터링)
+
+본방 / 리허설 중에 다른 cmd 창을 띄워두고 AMCL의 마지막 pose를 한 줄씩
+실시간으로 흘려보내는 도구입니다. 운영자가 "지금 tracker가 무엇을 보고
+있는가"를 한 화면으로 보는 용도이며, repeatability harness와 달리 tracker
+상태를 변경하지 않습니다 (`get_last_pose` read-only).
+
+```bash
+python3 godo-mapping/scripts/pose_watch.py --interval 0.5
+```
+
+### 옵션 요약
+
+| 옵션 | 기본값 | 설명 |
+| --- | --- | --- |
+| `--socket PATH` | `/run/godo/ctl.sock` | UDS 소켓 경로 |
+| `--interval F` | `0.5` | 폴링 간격 (초). `0.5 = 2 Hz` |
+| `--format text\|json` | `text` | `text` = 사람용 1줄, `json` = log shipping용 1줄 JSON |
+| `--once` | off | 한 줄 출력 후 종료 (smoke test 용도) |
+
+### 출력 예 (text)
+
+```text
+2026-04-27T15:32:01Z  x=+1.234  y=-2.567  yaw=+42.10  std=12.3mm  iter= 12  OneShot  OK
+2026-04-27T15:32:01.5Z  x=+1.234  y=-2.567  yaw=+42.10  std=12.3mm  iter= 12  OneShot  OK
+DISCONNECTED  ConnectionRefusedError: [Errno 111] Connection refused
+2026-04-27T15:32:09Z  x=+1.235  y=-2.566  yaw=+42.11  std=11.8mm  iter= 11  Live     OK
+```
+
+### 재접속 동작
+
+tracker가 죽거나 (systemctl restart) UDS가 일시적으로 사라지면:
+
+1. 한 줄짜리 `DISCONNECTED <원인>` sentinel을 출력.
+2. backoff 1s → 2s → 4s 순으로 retry, 그 이후로는 매 4초마다 재시도.
+3. 재접속에 성공하면 sentinel 없이 정상 pose 줄로 돌아옵니다.
+
+### 권장 운용
+
+`tmux` / `screen` 안에서 띄워두면 SSH 세션이 끊어져도 살아남습니다.
+`Ctrl+C` (SIGINT) 또는 `kill <pid>` (SIGTERM) 모두 ~200 ms 안에 클린하게
+exit 0으로 종료합니다.
+
+```bash
+tmux new -s pose-watch
+python3 godo-mapping/scripts/pose_watch.py --format json | tee /tmp/pose-$(date +%Y%m%d).log
+# Ctrl+B D로 detach
+```
+
 ## 트러블슈팅
 
 ### `LiDAR device '/dev/ttyUSB0' not found`

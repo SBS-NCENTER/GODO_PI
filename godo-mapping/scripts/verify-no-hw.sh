@@ -79,6 +79,27 @@ step "scripts/run-mapping.sh --help"
 bash scripts/run-mapping.sh --help >/dev/null \
     || fail "run-mapping.sh --help did not exit 0"
 
+# Track B (F20): collect both Python test files. Prefer system python3 +
+# pytest; fall back to `uv run --project ../godo-webctl` so dev boxes
+# without `apt install python3-pytest` still pass. The error path emits a
+# pinned English message naming both install routes.
+PYTEST_RUNNER=()
+if python3 -c "import pytest" >/dev/null 2>&1; then
+    step "python3 -c 'import pytest' (pre-flight: system pytest available)"
+    PYTEST_RUNNER=(python3 -m pytest)
+elif command -v uv >/dev/null 2>&1; then
+    step "uv-managed pytest (pre-flight: falling back to godo-webctl uv env)"
+    # godo-webctl ships pytest in its dev group; we reuse its venv so
+    # godo-mapping does not need its own UV project.
+    PYTEST_RUNNER=(uv run --project "${ROOT_DIR}/../godo-webctl" -- python -m pytest)
+else
+    fail "pytest not available — install via apt (python3-pytest) or uv (cd ../godo-webctl && uv sync)"
+fi
+
+step "pytest godo-mapping/scripts/ (test_repeatability.py + test_pose_watch.py)"
+"${PYTEST_RUNNER[@]}" "${ROOT_DIR}/scripts/" -q \
+    || fail "pytest under godo-mapping/scripts/ failed"
+
 if [[ "${MODE}" == "--quick" ]]; then
     step "OK (--quick)"
     # F11 audit reminder for operators (no-op in --quick — pinned visible).

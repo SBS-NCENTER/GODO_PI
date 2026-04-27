@@ -1,6 +1,7 @@
 #include "json_mini.hpp"
 
 #include <cctype>
+#include <cstdio>
 #include <string>
 
 namespace godo::uds {
@@ -112,6 +113,53 @@ std::string format_err(std::string_view code) {
     s.append(code);
     s.append("\"}\n");
     return s;
+}
+
+// Field order pin — MUST match godo::rt::LastPose declaration in
+// core/rt_types.hpp. The Python mirror godo-webctl/protocol.py::
+// LAST_POSE_FIELDS is regex-extracted from this format string at test
+// time (see tests/test_protocol.py drift pin). Touching the field names
+// here breaks the Python mirror; touch both in the same commit.
+//
+// Precision split (F8):
+//   - pose fields (x_m, y_m, yaw_deg)            → %.6f  (µm / µdeg)
+//   - std fields  (xy_std_m, yaw_std_deg)        → %.9g  (full mantissa)
+//   - published_mono_ns                          → %llu  (uint64_t)
+//   - integers (iterations)                      → %d
+//   - flags    (valid, converged, forced)        → %u    (uint8_t → unsigned int)
+//
+// Worst-case reply size budget (F17 pin): well under 512 B — the longest
+// double rendering is ~25 chars, 5 doubles + 1 uint64 + 1 int + 3 flags =
+// ~250 chars of payload + ~120 chars of fixed JSON structure ≈ 370 B max.
+// tests/test_uds_server.cpp pins this with a 512 B assertion.
+std::string format_ok_pose(const godo::rt::LastPose& p) {
+    char buf[512];
+    const int n = std::snprintf(buf, sizeof(buf),
+        "{\"ok\":true,\"valid\":%u,\"x_m\":%.6f,\"y_m\":%.6f,"
+        "\"yaw_deg\":%.6f,\"xy_std_m\":%.9g,\"yaw_std_deg\":%.9g,"
+        "\"iterations\":%d,\"converged\":%u,\"forced\":%u,"
+        "\"published_mono_ns\":%llu}\n",
+        static_cast<unsigned>(p.valid),
+        p.x_m, p.y_m, p.yaw_deg,
+        p.xy_std_m, p.yaw_std_deg,
+        static_cast<int>(p.iterations),
+        static_cast<unsigned>(p.converged),
+        static_cast<unsigned>(p.forced),
+        static_cast<unsigned long long>(p.published_mono_ns));
+    if (n <= 0) {
+        // snprintf returned encoding error — fall back to a minimal
+        // valid=0 reply so the client receives something parseable.
+        return std::string("{\"ok\":true,\"valid\":0,\"x_m\":0.000000,"
+            "\"y_m\":0.000000,\"yaw_deg\":0.000000,\"xy_std_m\":0,"
+            "\"yaw_std_deg\":0,\"iterations\":-1,\"converged\":0,"
+            "\"forced\":0,\"published_mono_ns\":0}\n");
+    }
+    // Truncation guard: if snprintf would have written more than the
+    // buffer holds, n is the would-have-been length; clamp to buffer.
+    const std::size_t len = (static_cast<std::size_t>(n) >= sizeof(buf))
+                            ? sizeof(buf) - 1
+                            : static_cast<std::size_t>(n);
+    return std::string(buf, len);
 }
 
 std::string_view mode_to_string(godo::rt::AmclMode mode) noexcept {

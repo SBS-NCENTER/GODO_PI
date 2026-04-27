@@ -59,6 +59,7 @@ using godo::localization::Pose2D;
 using godo::localization::RangeBeam;
 using godo::localization::Rng;
 using godo::localization::run_one_iteration;
+using godo::rt::LastPose;
 using godo::rt::Offset;
 using godo::rt::Seqlock;
 
@@ -114,13 +115,14 @@ TEST_CASE("run_one_iteration — published Offset is NaN/Inf-free with canonical
     Pose2D last_pose{};
     bool   live_first_iter = true;
     Offset last_written{0.0, 0.0, 0.0};
-    Seqlock<Offset> target_offset;
+    Seqlock<Offset>   target_offset;
+    Seqlock<LastPose> last_pose_seq;
 
     const Frame frame = make_synthetic_frame(360);
     const auto result = run_one_iteration(cfg, frame, grid, amcl, rng,
                                           beams_buf, last_pose,
                                           live_first_iter, last_written,
-                                          target_offset);
+                                          target_offset, last_pose_seq);
 
     // forced=true because run_one_iteration is the OneShot kernel.
     CHECK(result.forced == true);
@@ -182,12 +184,14 @@ TEST_CASE("run_one_iteration — second call still uses seed_global (no warm-see
     Pose2D last_pose{};
     bool   live_first_iter = true;
     Offset last_written{0.0, 0.0, 0.0};
-    Seqlock<Offset> target_offset;
+    Seqlock<Offset>   target_offset;
+    Seqlock<LastPose> last_pose_seq;
     const Frame    frame = make_synthetic_frame(360);
 
     const auto r1 = run_one_iteration(cfg, frame, grid, amcl, rng,
                                       beams_buf, last_pose, live_first_iter,
-                                      last_written, target_offset);
+                                      last_written, target_offset,
+                                      last_pose_seq);
     CHECK(live_first_iter == false);
     CHECK(r1.iterations >= 1);
     CHECK(r1.iterations <= cfg.amcl_max_iters);
@@ -196,7 +200,8 @@ TEST_CASE("run_one_iteration — second call still uses seed_global (no warm-see
     // should be within ±20% of r1 (or ±2, whichever is larger).
     const auto r2 = run_one_iteration(cfg, frame, grid, amcl, rng,
                                       beams_buf, last_pose, live_first_iter,
-                                      last_written, target_offset);
+                                      last_written, target_offset,
+                                      last_pose_seq);
     CHECK(live_first_iter == false);
     CHECK(r2.iterations >= 1);
     CHECK(r2.iterations <= cfg.amcl_max_iters);

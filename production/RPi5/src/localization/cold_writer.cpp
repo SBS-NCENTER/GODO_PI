@@ -7,6 +7,7 @@
 
 #include "core/constants.hpp"
 #include "core/rt_flags.hpp"
+#include "core/time.hpp"
 #include "deadband.hpp"
 #include "likelihood_field.hpp"
 
@@ -21,7 +22,8 @@ AmclResult run_one_iteration(const godo::core::Config&         cfg,
                              Pose2D&                           last_pose_inout,
                              bool&                             live_first_iter_inout,
                              godo::rt::Offset&                 last_written_inout,
-                             godo::rt::Seqlock<godo::rt::Offset>& target_offset) {
+                             godo::rt::Seqlock<godo::rt::Offset>& target_offset,
+                             godo::rt::Seqlock<godo::rt::LastPose>& last_pose_seq) {
     // 1. Decimate the scan into AMCL beams.
     downsample(frame,
                cfg.amcl_downsample_stride,
@@ -74,6 +76,23 @@ AmclResult run_one_iteration(const godo::core::Config&         cfg,
                                  last_written_inout,
                                  target_offset);
 
+    // 7. Track B — publish LastPose snapshot UNCONDITIONALLY (independent
+    //    of the deadband decision above). The UDS `get_last_pose` reader
+    //    needs to see every OneShot completion. uds_protocol.md §C.4.
+    godo::rt::LastPose snap{};
+    snap.x_m               = result.pose.x;
+    snap.y_m               = result.pose.y;
+    snap.yaw_deg           = result.pose.yaw_deg;
+    snap.xy_std_m          = result.xy_std_m;
+    snap.yaw_std_deg       = result.yaw_std_deg;
+    snap.published_mono_ns = static_cast<std::uint64_t>(godo::rt::monotonic_ns());
+    snap.iterations        = result.iterations;
+    snap.valid             = 1;
+    snap.converged         = result.converged ? std::uint8_t{1} : std::uint8_t{0};
+    snap.forced            = std::uint8_t{1};
+    snap._pad0             = 0;
+    last_pose_seq.store(snap);
+
     // `last_pose_inout` (the AMCL particle-cloud seed for the next
     // iteration) is updated unconditionally — a rejected publish is not
     // a rejected pose estimate (§6.4.1). `live_first_iter_inout` is
@@ -95,7 +114,8 @@ AmclResult run_live_iteration(const godo::core::Config&         cfg,
                               Pose2D&                           last_pose_inout,
                               bool&                             live_first_iter_inout,
                               godo::rt::Offset&                 last_written_inout,
-                              godo::rt::Seqlock<godo::rt::Offset>& target_offset) {
+                              godo::rt::Seqlock<godo::rt::Offset>& target_offset,
+                              godo::rt::Seqlock<godo::rt::LastPose>& last_pose_seq) {
     // 1. Decimate the scan into AMCL beams (same shape as OneShot).
     downsample(frame,
                cfg.amcl_downsample_stride,
@@ -152,7 +172,23 @@ AmclResult run_live_iteration(const godo::core::Config&         cfg,
                                  last_written_inout,
                                  target_offset);
 
-    // 7. Update Live state. `last_pose` is updated unconditionally;
+    // 7. Track B — publish LastPose snapshot UNCONDITIONALLY (independent
+    //    of the deadband decision above). uds_protocol.md §C.4.
+    godo::rt::LastPose snap{};
+    snap.x_m               = result.pose.x;
+    snap.y_m               = result.pose.y;
+    snap.yaw_deg           = result.pose.yaw_deg;
+    snap.xy_std_m          = result.xy_std_m;
+    snap.yaw_std_deg       = result.yaw_std_deg;
+    snap.published_mono_ns = static_cast<std::uint64_t>(godo::rt::monotonic_ns());
+    snap.iterations        = result.iterations;
+    snap.valid             = 1;
+    snap.converged         = result.converged ? std::uint8_t{1} : std::uint8_t{0};
+    snap.forced            = std::uint8_t{0};       // Live publishes forced=0
+    snap._pad0             = 0;
+    last_pose_seq.store(snap);
+
+    // 8. Update Live state. `last_pose` is updated unconditionally;
     //    `live_first_iter` flips to false so the next iteration re-seeds
     //    around the freshly refined pose.
     last_pose_inout = result.pose;
@@ -183,9 +219,10 @@ void on_leave_live(bool& live_first_iter_inout) noexcept {
 
 }  // namespace
 
-void run_cold_writer(const godo::core::Config&            cfg,
-                     godo::rt::Seqlock<godo::rt::Offset>& target_offset,
-                     LidarFactory                         lidar_factory) {
+void run_cold_writer(const godo::core::Config&              cfg,
+                     godo::rt::Seqlock<godo::rt::Offset>&   target_offset,
+                     godo::rt::Seqlock<godo::rt::LastPose>& last_pose_seq,
+                     LidarFactory                           lidar_factory) {
     OccupancyGrid grid;
     LikelihoodField lf;
     try {
@@ -293,12 +330,17 @@ void run_cold_writer(const godo::core::Config&            cfg,
                     (void)run_one_iteration(cfg, captured, grid, amcl, rng,
                                             beams_buf, last_pose,
                                             live_first_iter,
-                                            last_written, target_offset);
+                                            last_written, target_offset,
+                                            last_pose_seq);
                 } catch (const std::exception& e) {
                     std::fprintf(stderr,
                         "cold_writer: run_one_iteration threw: %s — "
                         "returning to Idle.\n", e.what());
                 }
+                // SSOT: last_pose_seq.store BEFORE g_amcl_mode = Idle (Track B race pin).
+                // Reader (godo-mapping/scripts/repeatability.py) polls get_mode==Idle
+                // then reads get_last_pose; without this ordering the reader can see the
+                // new Idle mode and the stale pose from a previous OneShot.
                 godo::rt::g_amcl_mode.store(godo::rt::AmclMode::Idle,
                                             std::memory_order_release);
                 // OneShot → Idle is a Live exit too — re-arm so the next
@@ -360,7 +402,8 @@ void run_cold_writer(const godo::core::Config&            cfg,
                     (void)run_live_iteration(cfg, captured, grid, amcl, rng,
                                              beams_buf, last_pose,
                                              live_first_iter,
-                                             last_written, target_offset);
+                                             last_written, target_offset,
+                                             last_pose_seq);
                 } catch (const std::exception& e) {
                     std::fprintf(stderr,
                         "cold_writer: run_live_iteration threw: %s — "

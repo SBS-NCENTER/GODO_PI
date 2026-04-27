@@ -2058,3 +2058,89 @@ production/RPi5/systemd/
   if operator feedback wants one.
 - Does NOT touch `CLAUDE.md`, `PROGRESS.md`, or `SYSTEM_DESIGN.md` —
   Parent handles SSOT closeout.
+
+## 2026-04-27 — Track B: `get_last_pose` UDS surface
+
+### Added
+
+- `src/core/rt_types.hpp::godo::rt::LastPose` — 56 B trivially-copyable
+  pose snapshot (5 doubles + uint64 + int32 + 4 uint8). Field order is
+  ABI-visible; mirrored by `format_ok_pose` in `src/uds/json_mini.cpp`
+  and pinned via Python regex extraction at test time. Pinned by
+  `static_assert(sizeof(LastPose) == 56)` and `alignof == 8`.
+- `src/uds/json_mini.{hpp,cpp}::format_ok_pose(const LastPose&)` —
+  hand-rolled JSON formatter with mixed precision: `%.6f` for pose
+  fields (1 µm / 1 µdeg), `%.9g` for std fields (full mantissa),
+  `%llu` for `published_mono_ns`. Worst-case reply < 512 B (pinned
+  by `test_uds_server.cpp::format_ok_pose_reply_under_512_bytes`).
+- `src/uds/uds_server.{hpp,cpp}` — new `LastPoseGetter` callback +
+  `get_last_pose` command branch. Null callback returns
+  `valid=0, iterations=-1` so clients distinguish "no pose yet" from
+  "tracker down".
+- `src/godo_tracker_rt/main.cpp` — declares `Seqlock<LastPose>
+  last_pose_seq` (seeded with `iterations=-1`); threads it into the
+  cold writer + UDS server.
+- `tests/test_cold_writer_ordering.cpp` — single-file ordering pin
+  for F5: `run_one_iteration` and `run_live_iteration` both publish
+  to `last_pose_seq` before returning. Removing either publish call
+  would leave `last_pose_seq.generation() == 0` and fail the test.
+- `doc/uds_protocol.md §C.4` — `get_last_pose` documentation
+  including the `xy_std_m = sqrt(weighted_var_x + weighted_var_y)`
+  formula citation pointing to `amcl.cpp:272-300` (F18) and the
+  precision-split rationale (F8).
+
+### Changed
+
+- `src/localization/cold_writer.{hpp,cpp}` — `run_one_iteration`,
+  `run_live_iteration`, and `run_cold_writer` gain a
+  `Seqlock<LastPose>&` parameter. Both kernels publish
+  UNCONDITIONALLY (independent of the deadband decision). The
+  OneShot success path stores `g_amcl_mode = Idle` AFTER the kernel
+  has published — verbatim F5 comment cites the race rationale.
+- `src/uds/uds_server.hpp` wire-protocol comment block — adds
+  `get_last_pose` to the request/response shape table.
+- `tests/test_uds_server.cpp` — 4 new cases:
+  `get_last_pose returns valid=0 when no pose has been published`,
+  `get_last_pose returns published pose verbatim`,
+  `format_ok_pose — byte-exact shape on a default-zero LastPose`,
+  `format_ok_pose reply size is under 512 bytes (F17 budget pin)`.
+- `tests/test_cold_writer_offset_invariant.cpp` — 3 call sites
+  updated to thread a stack-allocated `Seqlock<LastPose>` through
+  `run_one_iteration` (F6).
+- `tests/test_cold_writer_live_iteration.cpp` — 4 call sites
+  updated to thread `Seqlock<LastPose>` through `run_live_iteration`
+  (F6 — note the plan's "7 sites" total counts 1 production +
+  prior call counts; the actual surviving test sites after Wave 2
+  are 4 in this file).
+- `tests/CMakeLists.txt` — registers `test_cold_writer_ordering`
+  with `LABELS hardware-free`.
+
+### Removed
+
+- (none)
+
+### Tests
+
+- New: `test_cold_writer_ordering` (2 cases — OneShot publish + Live
+  publish with `forced` flag distinction).
+- New: 4 cases inside `test_uds_server`.
+- Updated: `test_cold_writer_offset_invariant`,
+  `test_cold_writer_live_iteration` — call-site cascade only,
+  no contract change.
+- ctest hardware-free label: 28 → 30 tests after Track B (29 in the
+  default gate + 1 new ordering pin).
+
+### Phase 4.5 follow-up candidates
+
+- Add a `force=true` field to `set_mode` so an operator can panic-cancel
+  a mid-OneShot run; the cold writer would re-check `g_amcl_mode`
+  between converge() iterations. Not required for Wave B per
+  `uds_protocol.md §F.4`.
+- Stash a small ring of past `LastPose` snapshots so `get_last_pose`
+  can serve a `--last-N` history without per-call AMCL iteration.
+  Useful for the Phase 4.5 web UI; out of scope for Track B's
+  OneShot-only repeatability harness.
+- Promote `Seqlock<LastPose>` reads in `pose_watch.py`'s json mode to
+  a single recv with deserialization in C++; current Python `json.loads`
+  is fine for 2 Hz polling but may show up under high-frequency mass
+  pose-dump experiments.

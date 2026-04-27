@@ -59,6 +59,85 @@ Request:  {"cmd":"ping"}\n
 Response: {"ok":true}\n
 ```
 
+### `get_last_pose` (Track B)
+
+Read the last AMCL pose published by the cold writer. Used by the Phase 1
+repeatability harness (`godo-mapping/scripts/repeatability.py`) and the
+live `godo-mapping/scripts/pose_watch.py` cmd-window monitor to capture
+each OneShot result without restarting the tracker.
+
+```text
+Request:  {"cmd":"get_last_pose"}\n
+Response: {"ok":true,
+           "valid":<0|1>,
+           "x_m":<%.6f>,
+           "y_m":<%.6f>,
+           "yaw_deg":<%.6f>,
+           "xy_std_m":<%.9g>,
+           "yaw_std_deg":<%.9g>,
+           "iterations":<int>,
+           "converged":<0|1>,
+           "forced":<0|1>,
+           "published_mono_ns":<uint64>}\n
+```
+
+Field semantics:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `valid` | `0|1` | `0` = no AMCL pose ever published since boot (sentinel `iterations=-1`); `1` = at least one OneShot or Live iteration has completed |
+| `x_m`, `y_m` | `double` (m) | Weighted-mean pose in the world frame, same convention as `Offset` |
+| `yaw_deg` | `double` ([0, 360)) | Canonical-360 yaw (M3 convention) |
+| `xy_std_m` | `double` (m) | Combined-variance scalar `sqrt(weighted_var_x + weighted_var_y)`; see `localization/amcl.cpp:272-300` (`Amcl::xy_std_m`) for the formula |
+| `yaw_std_deg` | `double` (°) | Circular standard deviation of the particle yaw distribution (M5) |
+| `iterations` | `int32` | AMCL iteration count for the last run (`-1` when `valid=0`) |
+| `converged` | `0|1` | `0` = the convergence-budget tripwire fired; `1` = early-exit on convergence threshold |
+| `forced` | `0|1` | `0` = published by Live mode; `1` = published by OneShot |
+| `published_mono_ns` | `uint64` | `clock_gettime(CLOCK_MONOTONIC)` nanoseconds at publish time; readers can detect a stale snapshot by comparing against their own monotonic clock + a freshness budget |
+
+**Precision policy (F8)**:
+
+- Pose fields (`x_m`, `y_m`, `yaw_deg`) use `%.6f` — 1 µm / 1 µdeg
+  precision is well below the AMCL noise floor and avoids the `%g`
+  exponential-form output for small-magnitude values.
+- Std fields (`xy_std_m`, `yaw_std_deg`) use `%.9g` — keeps the full
+  diagnostic mantissa visible even for very small values close to the
+  convergence threshold.
+- `published_mono_ns` uses `%llu` (uint64).
+
+**Always succeeds**. There is no error response shape for this command;
+even on a fresh boot before any AMCL run, the server returns
+`valid=0, iterations=-1` and the rest of the fields zeroed.
+
+**Worst-case reply size**: under 512 bytes. Pinned by
+`tests/test_uds_server.cpp::format_ok_pose_reply_under_512_bytes` (F17).
+
+```text
+Request:  {"cmd":"get_last_pose"}\n
+Response examples:
+  No pose yet:
+    {"ok":true,"valid":0,"x_m":0.000000,...,"iterations":-1,...,"published_mono_ns":0}\n
+  After a OneShot:
+    {"ok":true,"valid":1,"x_m":1.234567,...,"iterations":12,"converged":1,"forced":1,...}\n
+  Live tick:
+    {"ok":true,"valid":1,...,"forced":0,...}\n
+```
+
+**Cross-language SSOT**: the field names embedded in the reply format
+string in `production/RPi5/src/uds/json_mini.cpp::format_ok_pose` are the
+canonical wire-name source. `godo-webctl/src/godo_webctl/protocol.py::
+LAST_POSE_FIELDS` mirrors the field-name tuple and is pinned at test
+time by `godo-webctl/tests/test_protocol.py` reading the C++ source as
+text.
+
+**Race pin (F5)**: the cold writer publishes `last_pose_seq` BEFORE
+storing `g_amcl_mode = Idle` at the OneShot success path
+(`production/RPi5/src/localization/cold_writer.cpp` — search for the
+"SSOT: last_pose_seq.store BEFORE g_amcl_mode = Idle" comment). Readers
+poll `get_mode==Idle` first, then read `get_last_pose`; without this
+ordering the reader could see the new Idle and the stale snapshot from
+the previous OneShot.
+
 ## D. Errors
 
 | Code            | Meaning                                                |

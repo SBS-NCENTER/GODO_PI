@@ -54,6 +54,7 @@
 #include "uds/uds_server.hpp"
 
 using godo::rt::FreedPacket;
+using godo::rt::LastPose;
 using godo::rt::Offset;
 using godo::rt::Seqlock;
 
@@ -179,13 +180,19 @@ void thread_gpio(const godo::core::Config& cfg) {
 // g_amcl_mode load. Same callback shape as the GPIO live-toggle path:
 // a set_mode("Live") during a OneShot is honoured (overrides) — the UDS
 // is the operator's escape hatch, distinct from the GPIO's safety guard.
-void thread_uds(const godo::core::Config& cfg) {
+//
+// Track B: also wires `get_last_pose` to the cold-writer's Seqlock<LastPose>
+// load so the repeatability harness + pose_watch can read the last AMCL
+// pose without a tracker-side restart.
+void thread_uds(const godo::core::Config& cfg,
+                Seqlock<LastPose>&        last_pose_seq) {
     godo::uds::UdsServer server(
         cfg.uds_socket,
         []() { return godo::rt::g_amcl_mode.load(std::memory_order_acquire); },
         [](godo::rt::AmclMode m) {
             godo::rt::g_amcl_mode.store(m, std::memory_order_release);
-        });
+        },
+        [&last_pose_seq]() { return last_pose_seq.load(); });
     try {
         server.open();
     } catch (const std::exception& e) {
@@ -246,6 +253,19 @@ int main(int argc, char** argv, char** envp) {
 
     Seqlock<FreedPacket> latest_freed;
     Seqlock<Offset>      target_offset;
+    // Track B — last AMCL pose published by the cold writer; consumed by
+    // the UDS `get_last_pose` handler (uds_protocol.md §C.4). Defaults to
+    // valid=0 / iterations=-1 ("no pose ever published") via the
+    // value-initialised payload.
+    Seqlock<LastPose>    last_pose_seq;
+    // Seed `iterations = -1` so the first `get_last_pose` call before any
+    // AMCL run returns a sentinel iteration count instead of zero (which
+    // would be ambiguous with "ran 0 iterations").
+    {
+        LastPose init{};
+        init.iterations = -1;
+        last_pose_seq.store(init);
+    }
 
     // Cold-writer LiDAR factory: lazily build a LidarSourceRplidar bound
     // to the configured port/baud. The factory is invoked once inside
@@ -267,10 +287,12 @@ int main(int argc, char** argv, char** envp) {
         t_cold   = std::thread(godo::localization::run_cold_writer,
                                std::cref(cfg),
                                std::ref(target_offset),
+                               std::ref(last_pose_seq),
                                lidar_factory);
         cold_native = t_cold.native_handle();
         t_gpio   = std::thread(thread_gpio, std::cref(cfg));
-        t_uds    = std::thread(thread_uds,  std::cref(cfg));
+        t_uds    = std::thread(thread_uds,  std::cref(cfg),
+                               std::ref(last_pose_seq));
         t_d      = std::thread(thread_d_rt, std::cref(cfg),
                                std::ref(latest_freed), std::ref(target_offset));
     } catch (const std::exception& e) {

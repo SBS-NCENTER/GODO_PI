@@ -283,6 +283,25 @@ set_tests_properties(test_cold_writer_live_iteration PROPERTIES
     LABELS "hardware-free")
 
 # ----------------------------------------------------------------------------
+# Track B (F5) — ordering pin: run_one_iteration / run_live_iteration
+# publish to last_pose_seq before returning. The verbatim F5 writer
+# comment at cold_writer.cpp's OneShot success path explains why the
+# publish must happen before `g_amcl_mode = Idle` is stored.
+# ----------------------------------------------------------------------------
+
+add_executable(test_cold_writer_ordering
+    test_cold_writer_ordering.cpp)
+target_link_libraries(test_cold_writer_ordering PRIVATE
+    doctest::doctest godo_localization godo_core godo_lidar)
+target_compile_definitions(test_cold_writer_ordering PRIVATE
+    GODO_FIXTURES_MAPS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/maps"
+)
+add_test(NAME test_cold_writer_ordering
+    COMMAND test_cold_writer_ordering)
+set_tests_properties(test_cold_writer_ordering PROPERTIES
+    LABELS "hardware-free")
+
+# ----------------------------------------------------------------------------
 # Phase 4-2 D Wave B — GPIO + UDS modules.
 # - test_gpio_source_fake: hardware-free; exercises the duck-typed twin
 #   `GpioSourceFake` to pin debounce + dispatch + S5 OneShot-drop semantics.

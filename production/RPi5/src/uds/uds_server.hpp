@@ -10,8 +10,10 @@
 //   Request  → {"cmd":"set_mode","mode":"<Idle|OneShot|Live>"}\n
 //              {"cmd":"get_mode"}\n
 //              {"cmd":"ping"}\n
+//              {"cmd":"get_last_pose"}\n   (Track B; uds_protocol.md §C.4)
 //   Response → {"ok":true}\n
 //              {"ok":true,"mode":"<...>"}\n
+//              {"ok":true,"valid":<0|1>,"x_m":...,...}\n
 //              {"ok":false,"err":"<code>"}\n
 //
 // One client at a time, request/response then close. Listen socket is
@@ -27,6 +29,7 @@
 #include <string>
 
 #include "core/rt_flags.hpp"
+#include "core/rt_types.hpp"
 
 namespace godo::uds {
 
@@ -36,11 +39,18 @@ namespace godo::uds {
 using ModeSetter = std::function<void(godo::rt::AmclMode)>;
 using ModeGetter = std::function<godo::rt::AmclMode()>;
 
+// Track B — `get_last_pose` callback. Production wires this to a
+// Seqlock<LastPose>::load(). A nullptr callback is treated as "valid=0"
+// (no pose ever published) — the client receives a well-formed response
+// with valid=false and the rest of the fields zeroed.
+using LastPoseGetter = std::function<godo::rt::LastPose()>;
+
 class UdsServer {
 public:
-    UdsServer(std::string socket_path,
-              ModeGetter  get_mode,
-              ModeSetter  set_mode);
+    UdsServer(std::string    socket_path,
+              ModeGetter     get_mode,
+              ModeSetter     set_mode,
+              LastPoseGetter get_last_pose = nullptr);
 
     UdsServer(const UdsServer&)            = delete;
     UdsServer& operator=(const UdsServer&) = delete;
@@ -60,11 +70,12 @@ public:
 private:
     void handle_one_request(int conn_fd) noexcept;
 
-    std::string socket_path_;
-    ModeGetter  get_mode_;
-    ModeSetter  set_mode_;
-    int         listen_fd_ = -1;
-    bool        path_bound_ = false;
+    std::string    socket_path_;
+    ModeGetter     get_mode_;
+    ModeSetter     set_mode_;
+    LastPoseGetter get_last_pose_;
+    int            listen_fd_ = -1;
+    bool           path_bound_ = false;
 };
 
 }  // namespace godo::uds

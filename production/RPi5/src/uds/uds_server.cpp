@@ -31,12 +31,14 @@ std::string strerror_safe(int e) {
 
 }  // namespace
 
-UdsServer::UdsServer(std::string socket_path,
-                     ModeGetter  get_mode,
-                     ModeSetter  set_mode)
+UdsServer::UdsServer(std::string    socket_path,
+                     ModeGetter     get_mode,
+                     ModeSetter     set_mode,
+                     LastPoseGetter get_last_pose)
     : socket_path_(std::move(socket_path)),
       get_mode_(std::move(get_mode)),
-      set_mode_(std::move(set_mode)) {}
+      set_mode_(std::move(set_mode)),
+      get_last_pose_(std::move(get_last_pose)) {}
 
 UdsServer::~UdsServer() {
     close();
@@ -218,6 +220,18 @@ void UdsServer::handle_one_request(int conn_fd) noexcept {
         }
         if (set_mode_) set_mode_(m);
         const auto resp = format_ok();
+        (void)::send(conn_fd, resp.data(), resp.size(), MSG_NOSIGNAL);
+        return;
+    }
+    if (req.cmd == "get_last_pose") {
+        // Track B — see doc/uds_protocol.md §C.4. Null callback is
+        // surfaced to the client as valid=0 (no pose ever published)
+        // rather than an error so the harness can distinguish
+        // "tracker reachable but no AMCL fix yet" from "tracker down".
+        godo::rt::LastPose pose{};
+        pose.iterations = -1;
+        if (get_last_pose_) pose = get_last_pose_();
+        const auto resp = format_ok_pose(pose);
         (void)::send(conn_fd, resp.data(), resp.size(), MSG_NOSIGNAL);
         return;
     }

@@ -64,6 +64,7 @@ using godo::localization::Pose2D;
 using godo::localization::RangeBeam;
 using godo::localization::Rng;
 using godo::localization::run_live_iteration;
+using godo::rt::LastPose;
 using godo::rt::Offset;
 using godo::rt::Seqlock;
 
@@ -112,13 +113,14 @@ TEST_CASE("run_live_iteration — forced=false (deadband applies in Live)") {
     Pose2D last_pose{};
     bool   live_first_iter = true;
     Offset last_written{0.0, 0.0, 0.0};
-    Seqlock<Offset> target_offset;
+    Seqlock<Offset>   target_offset;
+    Seqlock<LastPose> last_pose_seq;
 
     const Frame frame = make_synthetic_frame(360, 1500.0);
     const auto result = run_live_iteration(cfg, frame, grid, amcl, rng,
                                            beams_buf, last_pose,
                                            live_first_iter, last_written,
-                                           target_offset);
+                                           target_offset, last_pose_seq);
 
     CHECK(result.forced == false);   // distinct from OneShot's true
     CHECK(std::isfinite(result.offset.dx));
@@ -141,12 +143,13 @@ TEST_CASE("run_live_iteration — live_first_iter latch flips after first call")
     Pose2D last_pose{};
     bool   live_first_iter = true;
     Offset last_written{0.0, 0.0, 0.0};
-    Seqlock<Offset> target_offset;
+    Seqlock<Offset>   target_offset;
+    Seqlock<LastPose> last_pose_seq;
 
     const Frame frame = make_synthetic_frame(360, 1500.0);
     (void)run_live_iteration(cfg, frame, grid, amcl, rng,
                              beams_buf, last_pose, live_first_iter,
-                             last_written, target_offset);
+                             last_written, target_offset, last_pose_seq);
     // After the first call the latch is cleared so the next iteration
     // takes the seed_around branch.
     CHECK(live_first_iter == false);
@@ -155,7 +158,8 @@ TEST_CASE("run_live_iteration — live_first_iter latch flips after first call")
     // only re-seeds globally when the latch is true on entry).
     const auto r2 = run_live_iteration(cfg, frame, grid, amcl, rng,
                                        beams_buf, last_pose, live_first_iter,
-                                       last_written, target_offset);
+                                       last_written, target_offset,
+                                       last_pose_seq);
     CHECK(live_first_iter == false);
     CHECK(std::isfinite(r2.xy_std_m));
     CHECK(std::isfinite(r2.yaw_std_deg));
@@ -178,12 +182,13 @@ TEST_CASE("run_live_iteration — near-identical frames: second publish suppress
     Pose2D last_pose{};
     bool   live_first_iter = true;
     Offset last_written{0.0, 0.0, 0.0};
-    Seqlock<Offset> target_offset;
+    Seqlock<Offset>   target_offset;
+    Seqlock<LastPose> last_pose_seq;
 
     const Frame frame = make_synthetic_frame(360, 1500.0);
     (void)run_live_iteration(cfg, frame, grid, amcl, rng,
                              beams_buf, last_pose, live_first_iter,
-                             last_written, target_offset);
+                             last_written, target_offset, last_pose_seq);
     const std::uint64_t gen_after_first = target_offset.generation();
     CHECK(gen_after_first >= 1u);
 
@@ -192,7 +197,7 @@ TEST_CASE("run_live_iteration — near-identical frames: second publish suppress
     // is suppressed and `generation()` does NOT advance.
     (void)run_live_iteration(cfg, frame, grid, amcl, rng,
                              beams_buf, last_pose, live_first_iter,
-                             last_written, target_offset);
+                             last_written, target_offset, last_pose_seq);
     CHECK(target_offset.generation() == gen_after_first);
 }
 
@@ -209,7 +214,8 @@ TEST_CASE("run_live_iteration — clearly-different frames: second publish accep
     Pose2D last_pose{};
     bool   live_first_iter = true;
     Offset last_written{0.0, 0.0, 0.0};
-    Seqlock<Offset> target_offset;
+    Seqlock<Offset>   target_offset;
+    Seqlock<LastPose> last_pose_seq;
 
     // Frame A — beams at 1.5 m. Frame B — beams at 0.8 m. Different
     // ranges shift the AMCL weighted-mean pose well beyond 10 mm /
@@ -219,12 +225,12 @@ TEST_CASE("run_live_iteration — clearly-different frames: second publish accep
 
     (void)run_live_iteration(cfg, frame_a, grid, amcl, rng,
                              beams_buf, last_pose, live_first_iter,
-                             last_written, target_offset);
+                             last_written, target_offset, last_pose_seq);
     const std::uint64_t gen_after_first = target_offset.generation();
 
     (void)run_live_iteration(cfg, frame_b, grid, amcl, rng,
                              beams_buf, last_pose, live_first_iter,
-                             last_written, target_offset);
+                             last_written, target_offset, last_pose_seq);
     CHECK(target_offset.generation() > gen_after_first);
 }
 

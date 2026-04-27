@@ -24,10 +24,12 @@
 
 #include "core/constants.hpp"
 #include "core/rt_flags.hpp"
+#include "core/rt_types.hpp"
 #include "uds/json_mini.hpp"
 #include "uds/uds_server.hpp"
 
 using godo::rt::AmclMode;
+using godo::rt::LastPose;
 using godo::uds::UdsServer;
 
 namespace {
@@ -347,4 +349,125 @@ TEST_CASE("json_mini::parse_mode_arg round-trips") {
     CHECK_FALSE(parse_mode_arg("idle", m));      // case-sensitive
     CHECK_FALSE(parse_mode_arg("", m));
     CHECK_FALSE(parse_mode_arg("Hyperdrive", m));
+}
+
+// --------------------------------------------------------------
+// Track B — get_last_pose dispatch + format_ok_pose shape.
+// --------------------------------------------------------------
+
+TEST_CASE("get_last_pose returns valid=0 when no pose has been published") {
+    TempUdsPath guard(tmp_socket_path("getpose_invalid"));
+    ServerHarness h;
+    godo::rt::g_running.store(true, std::memory_order_release);
+
+    // No LastPoseGetter wired (default nullptr). Server treats as
+    // valid=0; clients distinguish "no pose yet" from "tracker down".
+    UdsServer server(
+        guard.path,
+        [&]() { return h.mode_target.load(); },
+        [&](AmclMode m) { h.mode_target.store(m); });
+    REQUIRE_NOTHROW(server.open());
+    h.th = std::thread([&]() { server.run(); });
+
+    int fd = connect_client(guard.path);
+    REQUIRE(fd >= 0);
+    auto resp = send_recv(fd, "{\"cmd\":\"get_last_pose\"}\n");
+    ::close(fd);
+
+    // Reply is well-formed JSON; valid:0 with iterations:-1 sentinel
+    // (server pre-fills iterations=-1 when no callback is wired).
+    CHECK(resp.find("\"ok\":true") != std::string::npos);
+    CHECK(resp.find("\"valid\":0") != std::string::npos);
+    CHECK(resp.find("\"iterations\":-1") != std::string::npos);
+    CHECK(resp.find("\"x_m\":0.000000") != std::string::npos);
+    CHECK(resp.back() == '\n');
+
+    godo::rt::g_running.store(false, std::memory_order_release);
+    h.th.join();
+}
+
+TEST_CASE("get_last_pose returns published pose verbatim") {
+    TempUdsPath guard(tmp_socket_path("getpose_synth"));
+    ServerHarness h;
+    godo::rt::g_running.store(true, std::memory_order_release);
+
+    LastPose synth{};
+    synth.x_m               = 1.234567;
+    synth.y_m               = -2.345678;
+    synth.yaw_deg           = 42.500001;
+    synth.xy_std_m          = 0.012345678;
+    synth.yaw_std_deg       = 0.987654321;
+    synth.published_mono_ns = 1234567890123ULL;
+    synth.iterations        = 12;
+    synth.valid             = 1;
+    synth.converged         = 1;
+    synth.forced            = 1;
+
+    UdsServer server(
+        guard.path,
+        [&]() { return h.mode_target.load(); },
+        [&](AmclMode m) { h.mode_target.store(m); },
+        [&]() { return synth; });
+    REQUIRE_NOTHROW(server.open());
+    h.th = std::thread([&]() { server.run(); });
+
+    int fd = connect_client(guard.path);
+    REQUIRE(fd >= 0);
+    auto resp = send_recv(fd, "{\"cmd\":\"get_last_pose\"}\n");
+    ::close(fd);
+
+    // Spot-check key field encodings (precision split per F8).
+    CHECK(resp.find("\"valid\":1") != std::string::npos);
+    CHECK(resp.find("\"x_m\":1.234567") != std::string::npos);   // %.6f
+    CHECK(resp.find("\"y_m\":-2.345678") != std::string::npos);  // %.6f
+    CHECK(resp.find("\"yaw_deg\":42.500001") != std::string::npos);
+    CHECK(resp.find("\"iterations\":12") != std::string::npos);
+    CHECK(resp.find("\"converged\":1") != std::string::npos);
+    CHECK(resp.find("\"forced\":1") != std::string::npos);
+    CHECK(resp.find("\"published_mono_ns\":1234567890123") != std::string::npos);
+    // %.9g preserves the diagnostic mantissa.
+    CHECK(resp.find("0.012345678") != std::string::npos);
+
+    godo::rt::g_running.store(false, std::memory_order_release);
+    h.th.join();
+}
+
+TEST_CASE("format_ok_pose — byte-exact shape on a default-zero LastPose") {
+    using godo::uds::format_ok_pose;
+    LastPose p{};
+    p.iterations = -1;     // sentinel
+    const std::string s = format_ok_pose(p);
+    // Field order pin: must match LAST_POSE_FIELDS in the Python mirror
+    // (godo-webctl/protocol.py). Drift here breaks the Python regex.
+    CHECK(s ==
+        "{\"ok\":true,\"valid\":0,\"x_m\":0.000000,\"y_m\":0.000000,"
+        "\"yaw_deg\":0.000000,\"xy_std_m\":0,\"yaw_std_deg\":0,"
+        "\"iterations\":-1,\"converged\":0,\"forced\":0,"
+        "\"published_mono_ns\":0}\n");
+    CHECK(s.back() == '\n');
+}
+
+TEST_CASE("format_ok_pose reply size is under 512 bytes (F17 budget pin)") {
+    using godo::uds::format_ok_pose;
+    // Worst-case field values: long mantissa doubles, max uint64,
+    // INT_MIN iterations. 512 B is the format_ok_pose internal buffer
+    // cap; if a future field addition pushes the rendering above this,
+    // truncation would silently emit malformed JSON. Pin against that.
+    LastPose p{};
+    p.x_m               = -123456789.987654321;
+    p.y_m               = 987654321.123456789;
+    p.yaw_deg           = 359.999999999;
+    p.xy_std_m          = 1.2345678901234e-15;
+    p.yaw_std_deg       = 9.8765432109876e+15;
+    p.published_mono_ns = 18446744073709551615ULL;  // UINT64_MAX
+    p.iterations        = -2147483648;              // INT32_MIN
+    p.valid             = 1;
+    p.converged         = 1;
+    p.forced            = 1;
+    const std::string s = format_ok_pose(p);
+    CHECK(s.size() < 512u);
+    CHECK(s.back() == '\n');
+    // Reply still parses as a single JSON line: no embedded newlines.
+    const auto first_nl = s.find('\n');
+    CHECK(first_nl == s.size() - 1);
 }

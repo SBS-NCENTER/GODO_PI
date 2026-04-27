@@ -1,0 +1,52 @@
+# godo-mapping — slam_toolbox async parameters.
+#
+# Magic-number policy (plan F3):
+#   ROS launch and YAML configuration files under /godo-mapping/ are themselves
+#   the Tier-2 config surface for the SLAM toolchain; numeric literals here are
+#   not CLAUDE.md §6 magic numbers, but each must carry an inline comment
+#   explaining its origin.
+
+slam_toolbox:
+  ros__parameters:
+    # ── Frames (plan F1 — Option A) ───────────────────────────────────────
+    # Hand-carried mapping has no robot base; the LiDAR is the base.
+    # Single TF chain: odom -> laser. NO base_link, NO static_transform_publisher.
+    base_frame: laser
+    odom_frame: odom
+    map_frame: map
+
+    # ── Topic ─────────────────────────────────────────────────────────────
+    # Default rplidar_ros C1 launch publishes on /scan; we keep that name.
+    scan_topic: /scan
+
+    # ── Mode + map storage ────────────────────────────────────────────────
+    mode: mapping            # async mapping (vs. localization)
+
+    # ── Resolution ────────────────────────────────────────────────────────
+    # 5 cm/cell; below project 1–2 cm accuracy target leaves Nyquist headroom
+    # on the cell grid. C1 angular resolution at 5 m wall is ~0.7 cm of arc,
+    # well under one cell.
+    resolution: 0.05
+
+    # ── Map saver timeout ─────────────────────────────────────────────────
+    # 10 s; nav2_map_server uses double seconds, NOT ms.
+    # Generous bound for a ~1-minute control-room map (PGM write + YAML write).
+    save_map_timeout: 10.0
+
+    # ── Update rates ──────────────────────────────────────────────────────
+    # slam_toolbox upstream defaults; tuned for ~30 cm/s walking speed.
+    # Each is conservative on a Pi 5 with the C1 at ~10 Hz.
+    transform_publish_period: 0.05  # 20 Hz; matches scan rate budget on RPi 5.
+    map_update_interval: 5.0        # seconds between map publishes; cosmetic only — final map comes from map_saver_cli.
+    minimum_time_interval: 0.1      # seconds; minimum between processed scans.
+
+    # ── Scan range ────────────────────────────────────────────────────────
+    # C1 spec: 0.05 m – 12 m indoor (RPLIDAR_C1.md §2). Clip to spec to
+    # reject spurious returns at the edges.
+    min_laser_range: 0.05  # 5 cm — C1 minimum range.
+    max_laser_range: 12.0  # 12 m — C1 indoor maximum.
+
+    # ── Loop closure ──────────────────────────────────────────────────────
+    # Enabled; chroma studio is small enough that a 1-min walk closes loops
+    # naturally. slam_toolbox upstream defaults are reasonable here.
+    do_loop_closing: true

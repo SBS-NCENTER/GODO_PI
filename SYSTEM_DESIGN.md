@@ -918,6 +918,68 @@ Phase 5. Top-level project at `/godo-webctl/` (UV-managed Python).
       sequence test (`test_app_hardware_tracker.py`) deferred to news-pi01
       bring-up. ruff + format clean.
 
+**Track A — Docker mapping toolchain (LANDED 2026-04-27)**
+
+- [x] New top-level dir `/godo-mapping/` packages the §4 mapping workflow as a
+      single self-contained Docker stack: `Dockerfile` (`ros:jazzy-ros-base` +
+      `slam_toolbox` + `rplidar_ros` + `nav2_map_server`), `entrypoint.sh`
+      with SIGINT-trap → `map_saver_cli -f /maps/${MAP_NAME}` discipline,
+      host-side `scripts/run-mapping.sh` with pre-flight (filename collision
+      / stale container / `LIDAR_DEV` override). `verify-no-hw.sh --quick`
+      and `--full` modes for hardware-free CI; live `docker run`-required
+      mapping run runs Monday earliest after LiDAR reseat.
+- [x] CODEBASE.md invariants (a)-(e): ROS pipeline isolation (no rclcpp/ament
+      in `production/RPi5/`, so `--network=host` is collision-free);
+      Map-format SSOT cite `production/RPi5/src/localization/occupancy_grid.cpp:148-154`;
+      single mapping container at a time; `/dev/ttyUSB0` not hardcoded;
+      hardware-free build/lint, hardware-required run.
+
+**Track B — AMCL diagnostic readout + repeatability + pose_watch (LANDED 2026-04-27)**
+
+Phase 1 measurement instrument plus the always-on diagnostic readout
+channel that makes future diagnostic consumers (frontend panel, CLI dump
+tools) thin clients on a stable surface. **Diagnostic surface principle**:
+always-on at the source (~30 ns/iter Seqlock store; cost 0 when no client
+queries), on-demand at the consumer side (operator launches the script,
+opens the panel). Explicitly NOT gated behind a compile flag — production
+needs the surface to exist the moment something goes wrong (e.g. "방송 중
+카메라가 점프했는데 발산이었나?" diagnosis); a flag-gated tool would require
+rebuild/redeploy/reproduce, too slow for control-room reality.
+
+- [x] C++ extension: new 56-byte `LastPose` rt-type (5 doubles + uint64_t
+      `published_mono_ns` + int32_t `iterations` + 4 uint8_t flags incl.
+      `valid` and `forced`); `Seqlock<LastPose>` populated unconditionally
+      by both OneShot and Live kernels (Live publishes with `forced=0` so
+      `pose_watch.py` works during shows); F5 ordering pin places
+      `last_pose_seq.store` BEFORE `g_amcl_mode = Idle` on the OneShot
+      success path so readers polling `get_mode==Idle` then
+      `get_last_pose` cannot see stale-pose-with-new-mode.
+- [x] New UDS command `get_last_pose` — additive to the post-4-2-D
+      `set_mode/get_mode/ping` schema; reply schema documented in
+      `production/RPi5/doc/uds_protocol.md` §C.4; `format_ok_pose` precision
+      split (`%.6f` for pose, `%.9g` for std fields, `%llu` for mono_ns);
+      512 B reply budget pinned by test.
+- [x] Cross-language SSOT three-layer chain: canonical at
+      `production/RPi5/src/uds/json_mini.cpp::format_ok_pose`; sole Python
+      mirror at `godo-webctl/src/godo_webctl/protocol.py::LAST_POSE_FIELDS`;
+      derived `CSV_HEADER` in `godo-mapping/scripts/repeatability.py`. Drift
+      caught by `test_protocol.py` reading C++ source as text + regex pin.
+- [x] `godo-mapping/scripts/_uds_bridge.py` — shared `UdsBridge` class
+      (Option C invariant g — both consumers `from _uds_bridge import
+      UdsBridge`, never copy-paste).
+- [x] `godo-mapping/scripts/repeatability.py` — Phase 1 measurement
+      harness: drives N OneShots, logs to CSV with incremental fsync,
+      NaN-safe summary stats (mean/stdev/min/max/p95-of-|deviation|),
+      exit codes 0..7 + 130 (incl. tracker-death-streak detection at 3
+      consecutive UDS failures).
+- [x] `godo-mapping/scripts/pose_watch.py` — cmd-window monitor with
+      reconnect loop: backoff 1s/2s/4s on EPIPE/ECONNRESET/ECONNREFUSED/ENOENT,
+      prints `DISCONNECTED` sentinel + retries; SIGINT clean exit ≤ 200 ms.
+      Text + JSON output formats. Designed for tmux/screen during shows.
+- [x] 18 hardware-free pytest cases (10 + 4 + 3 pins + 1 positive coverage)
+      + 5 new C++ tests + 13 webctl protocol pins. Hardware-required live
+      `--shots 100` run deferred to LiDAR reseat.
+
 **Phase 4.5 — Control plane extensions (defer until Phase 5 reveals need)**
 
 - [ ] `/api/config` GET/PATCH with reload-class classification (§11).

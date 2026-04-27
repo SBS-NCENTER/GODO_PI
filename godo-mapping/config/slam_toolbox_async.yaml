@@ -37,7 +37,7 @@ slam_toolbox:
     # slam_toolbox upstream defaults; tuned for ~30 cm/s walking speed.
     # Each is conservative on a Pi 5 with the C1 at ~10 Hz.
     transform_publish_period: 0.05  # 20 Hz; matches scan rate budget on RPi 5.
-    map_update_interval: 5.0        # seconds between map publishes; cosmetic only — final map comes from map_saver_cli.
+    map_update_interval: 2.0        # seconds between /map publishes; map_saver_cli subscribes here, so this caps the worst-case wait the saver sees on Ctrl+C.
     minimum_time_interval: 0.1      # seconds; minimum between processed scans.
 
     # ── Scan range ────────────────────────────────────────────────────────

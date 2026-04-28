@@ -1,2 +1,5 @@
 *.pgm
 *.yaml
+# Track E webctl runtime artefacts (flock files, atomic-rename tmp)
+.activate.lock
+.active.*.tmp

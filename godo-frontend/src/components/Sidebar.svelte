@@ -1,8 +1,6 @@
 <script lang="ts">
   import { LOCAL_HOSTNAMES } from '$lib/constants';
-  import { ROLE_ADMIN } from '$lib/protocol';
   import { navigate, route } from '$lib/router';
-  import { auth } from '$stores/auth';
 
   let currentPath = $state('/');
   $effect(() => {
@@ -10,14 +8,10 @@
     return unsub;
   });
 
-  let isAdmin = $state(false);
-  $effect(() => {
-    const unsub = auth.subscribe((s) => {
-      isAdmin = s !== null && s.role === ROLE_ADMIN;
-    });
-    return unsub;
-  });
-
+  // Track F: Config page is anon-readable (admin-gated mutations are
+  // enforced at the input level inside <ConfigEditor>). Sidebar shows
+  // the row to everyone; an anonymous viewer can browse the schema +
+  // current values, but cannot edit.
   const isLocalHost =
     typeof window !== 'undefined' && LOCAL_HOSTNAMES.includes(window.location.hostname);
 
@@ -26,6 +20,7 @@
     { path: '/', label: 'Dashboard' },
     { path: '/map', label: 'Map' },
     { path: '/diag', label: 'Diagnostics' },
+    { path: '/config', label: 'Config' },
   ];
 
   function go(p: string): void {
@@ -47,18 +42,6 @@
         </button>
       </li>
     {/each}
-    {#if isAdmin}
-      <li>
-        <button
-          class="nav-link"
-          class:active={currentPath === '/config'}
-          onclick={() => go('/config')}
-          data-testid="nav-config"
-        >
-          Config
-        </button>
-      </li>
-    {/if}
     {#if isLocalHost}
       <li>
         <button

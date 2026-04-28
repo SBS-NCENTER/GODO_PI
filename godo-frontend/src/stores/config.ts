@@ -41,12 +41,20 @@ config.subscribe((s) => {
   _state = s;
 });
 
-/** Parallel-fetch the schema + current values. Idempotent. */
+/** Parallel-fetch the schema + current values. Idempotent.
+ *
+ * `Promise.allSettled` so a 503 on `/api/config` (tracker unreachable)
+ * does NOT block the schema landing in the store — the operator must
+ * be able to see the 37 rows + reload-class indicators even when the
+ * tracker is dead. `current` is left as `{}` in that case; the
+ * `<ConfigEditor>` `fmtCurrent(undefined)` already renders "—". */
 export async function refresh(): Promise<void> {
-  const [schema, current] = await Promise.all([
+  const [schemaResult, currentResult] = await Promise.allSettled([
     apiGet<ConfigSchemaRow[]>('/api/config/schema'),
     apiGet<ConfigGetResponse>('/api/config'),
   ]);
+  const schema = schemaResult.status === 'fulfilled' ? schemaResult.value : [];
+  const current = currentResult.status === 'fulfilled' ? currentResult.value : {};
   config.set({ schema, current, errors: {} });
 }
 

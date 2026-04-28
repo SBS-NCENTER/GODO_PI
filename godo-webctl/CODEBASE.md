@@ -919,9 +919,13 @@ cases. ruff check clean; ruff format clean.
     Python mirror; serves the cached body for `CONFIG_SCHEMA_CACHE_TTL_S`.
   - `PATCH /api/config` (admin via `Depends(auth_mod.require_admin)`) —
     Pydantic body (single-key, value as int|float|bool|str), pre-checks
-    body size + special chars (`"`, `\`, `\n`) before forwarding to UDS
-    `set_config`. Mode-A S4 fold: NO ASCII check at webctl (defer to
-    tracker).
+    body size + the 3 wire-fatal characters (`"`, `\`, `\n`) before
+    forwarding to UDS `set_config`. Mode-A S4 fold + Mode-B N1 fold
+    rationale: this is **not** a general ASCII check (which the tracker
+    owns canonically); it is the strictly-defence-in-depth set of bytes
+    that would corrupt the JSON-lines wire frame to the tracker —
+    `json_mini.cpp` cannot tolerate raw `"` / `\` / `\n` inside a value.
+    Range / type / unknown-key validation stays on the tracker side.
   - `GET /api/system/restart_pending` (anon) — calls
     `restart_pending.is_pending` on the configured flag path.
 

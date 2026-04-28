@@ -10,6 +10,76 @@
 
 ---
 
+## 2026-04-29
+
+### 한 줄 요약
+
+**Phase 4.5 P1 일괄 배포 — Track D (Live LIDAR overlay) + B-DIAG (Diagnostics) + B-CONFIG α/β 4개 PR 풀파이프라인 통과 후 main 머지. 운영 surface 가 P1 단계까지 사실상 완성됨. 다음은 P2 (B-MAPEDIT / B-SYSTEM / B-BACKUP).**
+
+> 기술적 상세는 [PROGRESS.md 2026-04-29 블록](../PROGRESS.md#session-log) 참조.
+
+### 왜 이렇게 결정했는가
+
+#### Track D 와이어 스키마 — `angles_deg[]` 병렬 배열 (Mode-A M1)
+
+원안은 `angle_min + i × increment` 의 uniform-angle 가정이었음. Mode-A reviewer 가 `src/lidar/sample.hpp` 의 per-sample `angle_deg` + `scan_ops::downsample()` 의 non-uniform 필터(`distance_mm <= 0` 와 range 외 샘플 드롭)을 지적. 두 옵션:
+- (a) `angles_deg[LAST_SCAN_RANGES_MAX]` 병렬 배열 추가 — 시켰jul 페이로드 5824 → ~11.6 KiB, 와이어 ~12.2 KB/frame
+- (b) raw `frame.samples` 를 stride 로 복사 — AMCL beam SSOT 깨짐
+
+채택: **(a)**. AMCL-beam SSOT 유지하면서 non-uniform angle 정직하게 반영. SSE 5 Hz × 12.2 KB = ~61 KB/s/subscriber 로 1 Mbps 업링크에 16× headroom 여유.
+
+#### B-DIAG 의 `scan_rate` → `amcl_iteration_rate` 이름 변경 (Mode-A M2)
+
+원안은 "scan_rate" 였지만 실제 metric 은 cold writer 의 publish cadence — 즉 AMCL iteration rate. Idle 모드에서 LiDAR 가 parked 면 0 Hz, OneShot 모드에선 버튼 누를 때 1번. 운영자 mental model 충돌 ("LiDAR 가 죽었나?" 오해). Reviewer 가 정직성 요구.
+
+채택: 모든 layer (struct / JSON / endpoint URL / SPA UI / build greps) rename. `<RatePanel/>` 옆에 AMCL `mode` indicator 같이 표시해서 "Idle 일 때 0 Hz 는 의도된 동작" 이 운영자에게 보이도록.
+
+#### B-DIAG publisher thread 분리 — inline P² streaming-quantile 거부 (Mode-A P-Arch)
+
+대안으로 P² streaming-quantile 알고리즘이 O(1)/sample 로 inline 컴파일 가능. 하지만:
+- Thread D 라이프타임 동안 state 누적 → 재시작 시 per-tick state reset 필요
+- bursty distribution 에 bias (1ms GC pause 가 영원히 p99 = 2µs 에 남음)
+- branchy update logic 이 30ns ring write 보다 비쌈
+- 무엇보다 **publisher thread 가 try/catch 격리** 제공 — Thread D 는 못 함 (59.94 Hz 핫 패스 영향)
+
+채택: SCHED_OTHER lock-free ring + 1 Hz publish + try/catch 격리. PR-DIAG 의 가장 큰 architecture decision.
+
+#### B-CONFIG 의 2-PR split — Mode-A push-back (M3)
+
+원안은 단일 PR ~2650 LOC. Mode-A reviewer 가 1500 LOC borderline 초과 + 3 language × 38 files 라 Mode-B reviewer attention dilution 우려 + Wave 1/2 의 자연스러운 seam 지적.
+
+두 안 비교:
+- (i) 단일 PR 강행 — 한 번에 보고 머지, 검증 round 1번
+- (ii) 2-PR split (α C++ only Waves 0+1, β webctl + SPA Waves 2+3+4)
+
+채택: **(ii)**. PR-α 는 `test_set_config_e2e_ipc.cpp` 로 webctl 없이도 end-to-end 검증 가능 → 독립 머지 가능. PR-β 가 cold_writer reader migration + cross-language parity 책임. 이전 PR-DIAG 에서 splitting seam 으로 거론됐던 패턴 그대로 적용.
+
+#### 스택 PR 머지 메커니즘 — gh `--delete-branch` 함정
+
+PR #14 (Track D) `gh pr merge --rebase --delete-branch` 가 `feat/p4.5-track-d-live-lidar` 헤드 브랜치 삭제 → GitHub 가 그 브랜치를 base 로 참조하던 PR #15 를 **자동 close**. Reopen API 는 base 가 사라져서 실패. PR #16/#17 도 체인 반응으로 같은 운명.
+
+해결: 각 upstream 머지 후 → 로컬 `git rebase origin/main` + `git push --force-with-lease` → `gh pr create` 로 새 PR (#18/#19/#20) 띄우기. 4번 머지 = 4번 재생성. 감사 추적은 새 PR 번호로 옮겨가고 원래 PR 들은 cross-link 만 남김.
+
+**교훈**: 다음에 stacked PR 가 있으면 upstream 머지 **전에** 다음 PR 의 base 를 main 으로 retarget 해두면 자동 close 회피 가능. gh 의 default 가 "close on base-deleted" 이지 "auto-retarget" 이 아님.
+
+#### Post-merge UX 핫픽스 — Config 빈 테이블 + Sidebar anon 가시화
+
+LAN 브라우저 검증 직후 두 문제 발견 (commit `265f5f6`):
+1. **Config 페이지가 0 row** — `stores/config.ts` 의 `Promise.all` 이 `/api/config` 503 (tracker unreachable) 에 reject 되면서 schema (37 rows) 도 store 에 못 넣음. `Promise.allSettled` 로 변경 → schema 가 독립적으로 land, current 는 `{}` 로 남고 `fmtCurrent(undefined)` → "—" 렌더링.
+2. **Config link 가 admin 만 보임** — `Sidebar.svelte` 의 `{#if isAdmin}` gate. Track F (read anon, mutate admin) 모델은 이미 `<ConfigEditor>` 의 `admin` prop 으로 enforce 되고 있어서 Sidebar gate 는 중복 + 운영자 친화적이지 않음. 사용자 요청: "로그인 하지 않은 상태에서도 config 페이지와 diagnostics 데이터는 모두 볼 수 있게 하는 것이 좋겠어".
+
+두 fix 모두 클라이언트 사이드만; 백엔드 변경 없음. 테스트는 이미 `test_config_anon_returns_503_when_tracker_down` 으로 503 contract 가 핀돼 있어서 회귀 발생 안 함.
+
+### 운영 현황 (news-pi01, 2026-04-29 종료 시점)
+
+- main = `265f5f6` — Phase 4.5 P0 + P0.5 (Track D, Track E) + P1 (B-DIAG, B-CONFIG α/β) + post-merge fix 모두 안착.
+- webctl PID 2172257 on `0.0.0.0:8080`, SPA bundle `index-B1VL4OVo.js` (28.07 KB gzipped), studio_v2 active map.
+- godo-tracker 미구동 (의도된 상태).
+- LAN PC ↔ dev box 직통은 SBS_XR_NEWS AP client-isolation 으로 막힘 — Tailscale `100.127.59.15:8080` 으로 우회 (이미 동작 확인).
+- 다음 세션: Phase 4.5 P2 (B-MAPEDIT / B-SYSTEM / B-BACKUP) 진입. B-SYSTEM 부터 가는 게 가장 작음 (DIAG 인프라 재활용); B-MAPEDIT 은 `§I-Q1` 마스킹 방식 결정 필요.
+
+---
+
 ## 2026-04-28 (저녁·심야)
 
 ### 한 줄 요약

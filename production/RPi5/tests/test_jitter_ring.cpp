@@ -13,7 +13,6 @@
 #include <atomic>
 #include <cstdint>
 #include <thread>
-#include <vector>
 
 #include "core/constants.hpp"
 #include "rt/jitter_ring.hpp"

@@ -389,6 +389,16 @@ trivially-copyable `{count, last_ns}` pair). Mode-A M1 fold pinned the
 seqlock as the implementation primitive (over two atomics) to avoid
 measurable Hz-skew under concurrent writer/reader.
 
+**SINGLE-WRITER threading invariant** (Mode-B S3 fold): `record()` is a
+load-then-store sequence; two concurrent writers would lose updates.
+The build-grep enforces *file-level* exclusion (`record()` only in
+`cold_writer.cpp`) but NOT thread-level. Today the cold writer body
+runs on a single thread (Thread C); any future split that introduces a
+parallel cold-writer worker MUST either (a) add a real CAS loop inside
+`record()`, (b) wrap all `record()` callers in a mutex, or (c) split
+the accumulator per-thread and merge at publish. Code-review-enforced;
+no test pin.
+
 ### (k) PR-DIAG — hot-path jitter contract (build-grep enforced)
 
 `thread_d_rt` (the SCHED_FIFO 59.94 Hz UDP send loop in `main.cpp`) MUST

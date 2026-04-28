@@ -14,7 +14,6 @@
 #include "rt/amcl_rate.hpp"
 
 using godo::rt::AmclRateAccumulator;
-using godo::rt::AmclRateRecord;
 
 TEST_CASE("AmclRateAccumulator — initial snapshot is zero-zero") {
     AmclRateAccumulator a;

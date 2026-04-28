@@ -44,3 +44,12 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM"]
+
+[tool.ruff.lint.extend-per-file-ignores]
+# FastAPI's `Depends(...)` in default args is the framework-canonical
+# pattern; B008 is a false positive here.
+"src/godo_webctl/app.py" = ["B008"]
+"src/godo_webctl/auth.py" = ["B008"]
+# Tests legitimately use nested `with mock.patch(...)` + `pytest.raises(...)`;
+# combining them per SIM117 hides which raise is being asserted.
+"tests/test_auth.py" = ["SIM117"]

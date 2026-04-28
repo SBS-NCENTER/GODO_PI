@@ -1,16 +1,42 @@
 """
 FastAPI app factory for godo-webctl.
 
-Three routes (thin handlers, invariant (c) in CODEBASE.md):
-  GET  /api/health       — liveness + tracker mode
-  POST /api/calibrate    — latch OneShot mode on tracker (returns immediately)
-  POST /api/map/backup   — atomic snapshot of the current .pgm + .yaml
+Phase 4-3 baseline: `/api/health`, `/api/calibrate`, `/api/map/backup`,
+static page at `/`.
 
-Plus a static-file mount at ``/`` for ``static/index.html``.
+PR-A (P0 frontend backend) extension: 14 new endpoints + 2 SSE streams.
+Layout per FRONT_DESIGN §7:
 
-All HTTP status codes go through ``http.HTTPStatus`` (S3); never integer
-literals. Per N10, each handler does at most one ``call_uds`` /
-``backup_map`` call plus shape mapping — no business logic.
+  Auth (4):
+    POST /api/auth/login     POST /api/auth/logout
+    GET  /api/auth/me        POST /api/auth/refresh
+
+  Live mode (1):
+    POST /api/live           — toggle Idle <-> Live
+
+  Last-pose (1 SSE + 1 GET piggybacking on Track B):
+    GET  /api/last_pose/stream  (SSE)
+    GET  /api/last_pose         (one-shot, also exists pre-PR-A via Track B)
+
+  Map image (1):
+    GET  /api/map/image
+
+  Activity (1):
+    GET  /api/activity?n=<int>
+
+  Local-only services (4 + 1 SSE):
+    GET  /api/local/services
+    POST /api/local/service/<name>/<action>
+    GET  /api/local/journal/<name>?n=<int>
+    GET  /api/local/services/stream    (SSE)
+
+  System (2):
+    POST /api/system/reboot
+    POST /api/system/shutdown
+
+All status codes go through `http.HTTPStatus` (S3); never integer
+literals. Per N10, each handler does at most one work call plus shape
+mapping — no business logic.
 """
 
 from __future__ import annotations
@@ -22,16 +48,26 @@ from contextlib import asynccontextmanager
 from http import HTTPStatus
 from pathlib import Path
 
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
+from . import activity as activity_mod
+from . import auth as auth_mod
 from . import backup as backup_mod
+from . import map_image as map_image_mod
+from . import services as services_mod
+from . import sse as sse_mod
 from . import uds_client as uds_mod
 from .config import Settings, load_settings
-from .protocol import MODE_ONESHOT
+from .constants import JOURNAL_TAIL_DEFAULT_N
+from .local_only import loopback_only
+from .protocol import LAST_POSE_FIELDS, MODE_IDLE, MODE_LIVE, MODE_ONESHOT
 
 _LOG_FORMAT = "%(asctime)s %(levelname)s [godo-webctl] %(message)s"
+_SSE_MEDIA_TYPE = "text/event-stream"
+_PNG_MEDIA_TYPE = "image/png"
 
 logger = logging.getLogger("godo_webctl")
 
@@ -41,27 +77,95 @@ def _ensure_logging_configured() -> None:
         logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT)
 
 
+# --- request bodies (Pydantic) -----------------------------------------
+
+
+class LoginBody(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=256)
+
+
+class LiveBody(BaseModel):
+    enable: bool
+
+
+# --- helpers -----------------------------------------------------------
+
+
+def _map_uds_exc_to_response(exc: uds_mod.UdsError) -> JSONResponse:
+    """Shared error mapping for endpoints that issue exactly one UDS call."""
+    if isinstance(exc, uds_mod.UdsTimeout):
+        return JSONResponse(
+            {"ok": False, "err": "tracker_timeout"},
+            status_code=HTTPStatus.GATEWAY_TIMEOUT,
+        )
+    if isinstance(exc, uds_mod.UdsUnreachable):
+        return JSONResponse(
+            {"ok": False, "err": "tracker_unreachable"},
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+        )
+    if isinstance(exc, uds_mod.UdsServerRejected):
+        return JSONResponse(
+            {"ok": False, "err": exc.err},
+            status_code=HTTPStatus.BAD_REQUEST,
+        )
+    return JSONResponse(
+        {"ok": False, "err": "protocol_error"},
+        status_code=HTTPStatus.BAD_GATEWAY,
+    )
+
+
+def _last_pose_view(resp: dict[str, object]) -> dict[str, object]:
+    """Project the UDS reply down to the documented `LastPose` schema.
+    Drops `ok` (HTTP-level success); preserves field order via
+    LAST_POSE_FIELDS."""
+    return {field: resp.get(field) for field in LAST_POSE_FIELDS}
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     _ensure_logging_configured()
     cfg: Settings = settings if settings is not None else load_settings()
     client = uds_mod.UdsClient(cfg.uds_socket)
+    activity_log = activity_mod.ActivityLog()
+
+    # --- auth bootstrap ---------------------------------------------------
+    # Secret read once at startup; rotation = `systemctl restart`.
+    jwt_secret = auth_mod._load_or_create_secret(cfg.jwt_secret_path)
+    user_store = auth_mod.UserStore(cfg.users_file)
+    if user_store.unavailable_reason is None:
+        # Lazy-seed only when the file was absent (cached empty + no error).
+        try:
+            auth_mod._lazy_seed_default(user_store)
+        except OSError as e:
+            logger.error("auth.seed_failed: %s", e)
 
     @asynccontextmanager
-    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        app.state.jwt_secret = jwt_secret
+        app.state.user_store = user_store
+        app.state.activity_log = activity_log
+        spa_label = "spa_dist" if cfg.spa_dist is not None else "legacy_static"
         logger.info(
-            "starting; host=%s port=%d uds=%s map=%s backup_dir=%s",
+            "starting; host=%s port=%d uds=%s map=%s backup_dir=%s spa=%s",
             cfg.host,
             cfg.port,
             cfg.uds_socket,
             cfg.map_path,
             cfg.backup_dir,
+            spa_label,
         )
         yield
         logger.info("stopping")
 
     app = FastAPI(title="godo-webctl", version="0.1.0", lifespan=lifespan)
+    # Eagerly mirror state onto the app object so dependencies that read
+    # `request.app.state.<x>` work even before the lifespan startup hook
+    # has run (test clients sometimes skip `lifespan`).
+    app.state.jwt_secret = jwt_secret
+    app.state.user_store = user_store
+    app.state.activity_log = activity_log
 
-    # ---- /api/health -----------------------------------------------------
+    # ---- /api/health ----------------------------------------------------
     @app.get("/api/health")
     async def health() -> JSONResponse:
         try:
@@ -76,44 +180,41 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             status_code=HTTPStatus.OK,
         )
 
-    # ---- /api/calibrate --------------------------------------------------
+    # ---- /api/calibrate -------------------------------------------------
     @app.post("/api/calibrate")
-    async def calibrate() -> JSONResponse:
+    async def calibrate(
+        claims: auth_mod.Claims = Depends(auth_mod.require_admin),
+    ) -> JSONResponse:
         try:
             await uds_mod.call_uds(
                 client.set_mode,
                 MODE_ONESHOT,
                 cfg.calibrate_uds_timeout_s,
             )
-        except uds_mod.UdsTimeout:
-            return JSONResponse(
-                {"ok": False, "err": "tracker_timeout"},
-                status_code=HTTPStatus.GATEWAY_TIMEOUT,
-            )
-        except uds_mod.UdsUnreachable:
-            return JSONResponse(
-                {"ok": False, "err": "tracker_unreachable"},
-                status_code=HTTPStatus.SERVICE_UNAVAILABLE,
-            )
-        except uds_mod.UdsServerRejected as e:
-            # Tracker replied ok=false → propagate err code with HTTP 400.
-            return JSONResponse(
-                {"ok": False, "err": e.err},
-                status_code=HTTPStatus.BAD_REQUEST,
-            )
-        except uds_mod.UdsProtocolError:
-            # Wire-level fault (malformed JSON / missing ok / oversized) →
-            # HTTP 502 (Mode-B SHOULD-FIX S3 — exception class drives the
-            # split, not string-prefix dispatch).
-            return JSONResponse(
-                {"ok": False, "err": "protocol_error"},
-                status_code=HTTPStatus.BAD_GATEWAY,
-            )
+        except uds_mod.UdsError as e:
+            return _map_uds_exc_to_response(e)
+        activity_log.append("calibrate", claims.username)
         return JSONResponse({"ok": True}, status_code=HTTPStatus.OK)
 
-    # ---- /api/map/backup -------------------------------------------------
+    # ---- /api/live ------------------------------------------------------
+    @app.post("/api/live")
+    async def live(
+        body: LiveBody,
+        claims: auth_mod.Claims = Depends(auth_mod.require_admin),
+    ) -> JSONResponse:
+        target = MODE_LIVE if body.enable else MODE_IDLE
+        try:
+            await uds_mod.call_uds(client.set_mode, target, cfg.calibrate_uds_timeout_s)
+        except uds_mod.UdsError as e:
+            return _map_uds_exc_to_response(e)
+        activity_log.append("live_on" if body.enable else "live_off", claims.username)
+        return JSONResponse({"ok": True, "mode": target}, status_code=HTTPStatus.OK)
+
+    # ---- /api/map/backup ------------------------------------------------
     @app.post("/api/map/backup")
-    async def map_backup() -> JSONResponse:
+    async def map_backup(
+        claims: auth_mod.Claims = Depends(auth_mod.require_admin),
+    ) -> JSONResponse:
         try:
             path = await asyncio.to_thread(
                 backup_mod.backup_map,
@@ -131,13 +232,266 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 {"ok": False, "err": err},
                 status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
             )
+        activity_log.append("map_backup", claims.username)
         return JSONResponse(
             {"ok": True, "path": str(path)},
             status_code=HTTPStatus.OK,
         )
 
-    # ---- static page -----------------------------------------------------
-    static_dir = Path(__file__).parent / "static"
-    app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
+    # ---- /api/last_pose -------------------------------------------------
+    @app.get("/api/last_pose")
+    async def last_pose(
+        _: auth_mod.Claims = Depends(auth_mod.require_user),
+    ) -> JSONResponse:
+        try:
+            resp = await uds_mod.call_uds(client.get_last_pose, cfg.health_uds_timeout_s)
+        except uds_mod.UdsError as e:
+            return _map_uds_exc_to_response(e)
+        return JSONResponse(_last_pose_view(resp), status_code=HTTPStatus.OK)
+
+    # ---- /api/last_pose/stream -----------------------------------------
+    @app.get("/api/last_pose/stream")
+    async def last_pose_stream(
+        _: auth_mod.Claims = Depends(auth_mod.require_user),
+    ) -> StreamingResponse:
+        # Each subscriber gets its OWN UDS client (per Risks table —
+        # avoids holding the shared client open).
+        sub_client = uds_mod.UdsClient(cfg.uds_socket)
+        return StreamingResponse(
+            sse_mod.last_pose_stream(sub_client, cfg),
+            media_type=_SSE_MEDIA_TYPE,
+            headers=sse_mod.SSE_RESPONSE_HEADERS,
+        )
+
+    # ---- /api/map/image -------------------------------------------------
+    @app.get("/api/map/image")
+    async def map_image(
+        _: auth_mod.Claims = Depends(auth_mod.require_user),
+    ) -> Response:
+        try:
+            png = await asyncio.to_thread(map_image_mod.render_pgm_to_png, cfg.map_path)
+        except map_image_mod.MapImageNotFound:
+            return JSONResponse(
+                {"ok": False, "err": "map_path_not_found"},
+                status_code=HTTPStatus.NOT_FOUND,
+            )
+        except map_image_mod.MapImageInvalid:
+            return JSONResponse(
+                {"ok": False, "err": "map_invalid"},
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+        return Response(content=png, media_type=_PNG_MEDIA_TYPE)
+
+    # ---- /api/activity --------------------------------------------------
+    @app.get("/api/activity")
+    async def get_activity(
+        n: int = 5,
+        _: auth_mod.Claims = Depends(auth_mod.require_user),
+    ) -> JSONResponse:
+        return JSONResponse(activity_log.tail(n), status_code=HTTPStatus.OK)
+
+    # ---- /api/auth/* ----------------------------------------------------
+    @app.post("/api/auth/login")
+    async def auth_login(body: LoginBody) -> JSONResponse:
+        try:
+            role = await asyncio.to_thread(user_store.lookup_role, body.username, body.password)
+        except auth_mod.AuthUnavailable as e:
+            return JSONResponse(
+                {"ok": False, "err": "auth_unavailable", "detail": str(e)},
+                status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+        except auth_mod.InvalidCredentials:
+            # Always 401 with a generic body — do not leak whether the
+            # username exists.
+            return JSONResponse(
+                {"ok": False, "err": "bad_credentials"},
+                status_code=HTTPStatus.UNAUTHORIZED,
+            )
+        token, exp = auth_mod.issue_token(jwt_secret, body.username, role)
+        activity_log.append("login", body.username)
+        return JSONResponse(
+            {"ok": True, "token": token, "exp": exp, "role": role, "username": body.username},
+            status_code=HTTPStatus.OK,
+        )
+
+    @app.post("/api/auth/logout")
+    async def auth_logout(
+        _: auth_mod.Claims = Depends(auth_mod.require_user),
+    ) -> JSONResponse:
+        # Stateless JWT — server has no session to invalidate. The frontend
+        # drops the token from localStorage; we just acknowledge.
+        return JSONResponse({"ok": True}, status_code=HTTPStatus.OK)
+
+    @app.get("/api/auth/me")
+    async def auth_me(
+        claims: auth_mod.Claims = Depends(auth_mod.require_user),
+    ) -> JSONResponse:
+        return JSONResponse(
+            {"ok": True, "username": claims.username, "role": claims.role, "exp": claims.exp},
+            status_code=HTTPStatus.OK,
+        )
+
+    @app.post("/api/auth/refresh")
+    async def auth_refresh(
+        claims: auth_mod.Claims = Depends(auth_mod.require_user),
+    ) -> JSONResponse:
+        token, exp = auth_mod.issue_token(jwt_secret, claims.username, claims.role)
+        return JSONResponse(
+            {"ok": True, "token": token, "exp": exp},
+            status_code=HTTPStatus.OK,
+        )
+
+    # ---- /api/local/* (loopback-only + admin) --------------------------
+    @app.get(
+        "/api/local/services",
+        dependencies=[Depends(loopback_only)],
+    )
+    async def local_services(
+        _: auth_mod.Claims = Depends(auth_mod.require_admin),
+    ) -> JSONResponse:
+        items = await asyncio.to_thread(services_mod.list_active)
+        return JSONResponse(items, status_code=HTTPStatus.OK)
+
+    @app.post(
+        "/api/local/service/{name}/{action}",
+        dependencies=[Depends(loopback_only)],
+    )
+    async def local_service_action(
+        name: str,
+        action: str,
+        claims: auth_mod.Claims = Depends(auth_mod.require_admin),
+    ) -> JSONResponse:
+        try:
+            status = await asyncio.to_thread(services_mod.control, name, action)
+        except services_mod.UnknownService:
+            return JSONResponse(
+                {"ok": False, "err": "unknown_service"},
+                status_code=HTTPStatus.NOT_FOUND,
+            )
+        except services_mod.UnknownAction:
+            return JSONResponse(
+                {"ok": False, "err": "unknown_action"},
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+        except services_mod.CommandTimeout:
+            return JSONResponse(
+                {"ok": False, "err": "subprocess_timeout"},
+                status_code=HTTPStatus.GATEWAY_TIMEOUT,
+            )
+        except services_mod.CommandFailed as e:
+            return JSONResponse(
+                {"ok": False, "err": "subprocess_failed", "detail": str(e)},
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+        activity_log.append(f"svc_{action}", f"{name} by {claims.username}")
+        return JSONResponse({"ok": True, "status": status}, status_code=HTTPStatus.OK)
+
+    @app.get(
+        "/api/local/journal/{name}",
+        dependencies=[Depends(loopback_only)],
+    )
+    async def local_journal(
+        name: str,
+        n: int = JOURNAL_TAIL_DEFAULT_N,
+        _: auth_mod.Claims = Depends(auth_mod.require_admin),
+    ) -> JSONResponse:
+        try:
+            lines = await asyncio.to_thread(services_mod.journal_tail, name, n)
+        except services_mod.UnknownService:
+            return JSONResponse(
+                {"ok": False, "err": "unknown_service"},
+                status_code=HTTPStatus.NOT_FOUND,
+            )
+        except ValueError:
+            return JSONResponse(
+                {"ok": False, "err": "bad_n"},
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+        except services_mod.CommandTimeout:
+            return JSONResponse(
+                {"ok": False, "err": "subprocess_timeout"},
+                status_code=HTTPStatus.GATEWAY_TIMEOUT,
+            )
+        except services_mod.CommandFailed as e:
+            return JSONResponse(
+                {"ok": False, "err": "subprocess_failed", "detail": str(e)},
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+        return JSONResponse(lines, status_code=HTTPStatus.OK)
+
+    @app.get(
+        "/api/local/services/stream",
+        dependencies=[Depends(loopback_only)],
+    )
+    async def local_services_stream(
+        _: auth_mod.Claims = Depends(auth_mod.require_admin),
+    ) -> StreamingResponse:
+        return StreamingResponse(
+            sse_mod.services_stream(cfg),
+            media_type=_SSE_MEDIA_TYPE,
+            headers=sse_mod.SSE_RESPONSE_HEADERS,
+        )
+
+    # ---- /api/system/* --------------------------------------------------
+    @app.post("/api/system/reboot")
+    async def system_reboot(
+        claims: auth_mod.Claims = Depends(auth_mod.require_admin),
+    ) -> JSONResponse:
+        try:
+            await asyncio.to_thread(services_mod.system_reboot)
+        except services_mod.CommandTimeout:
+            return JSONResponse(
+                {"ok": False, "err": "subprocess_timeout"},
+                status_code=HTTPStatus.GATEWAY_TIMEOUT,
+            )
+        except services_mod.CommandFailed as e:
+            return JSONResponse(
+                {"ok": False, "err": "subprocess_failed", "detail": str(e)},
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+        activity_log.append("reboot", claims.username)
+        return JSONResponse({"ok": True}, status_code=HTTPStatus.OK)
+
+    @app.post("/api/system/shutdown")
+    async def system_shutdown(
+        claims: auth_mod.Claims = Depends(auth_mod.require_admin),
+    ) -> JSONResponse:
+        try:
+            await asyncio.to_thread(services_mod.system_shutdown)
+        except services_mod.CommandTimeout:
+            return JSONResponse(
+                {"ok": False, "err": "subprocess_timeout"},
+                status_code=HTTPStatus.GATEWAY_TIMEOUT,
+            )
+        except services_mod.CommandFailed as e:
+            return JSONResponse(
+                {"ok": False, "err": "subprocess_failed", "detail": str(e)},
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+        activity_log.append("shutdown", claims.username)
+        return JSONResponse({"ok": True}, status_code=HTTPStatus.OK)
+
+    # Keep FastAPI happy: it will reject 404s on unknown /api/* — but make
+    # the dependency-side HTTPException flow uniform for SSE token paths.
+    @app.exception_handler(HTTPException)
+    async def _http_exception_handler(_request: Request, exc: HTTPException) -> JSONResponse:
+        # Default FastAPI handler returns {"detail": ...}; we keep the
+        # dependency-supplied dict body so frontend sees the documented
+        # `{"ok": false, "err": "..."}` shape.
+        if isinstance(exc.detail, dict):
+            return JSONResponse(exc.detail, status_code=exc.status_code)
+        return JSONResponse(
+            {"ok": False, "err": str(exc.detail)},
+            status_code=exc.status_code,
+        )
+
+    # ---- static / SPA mount ---------------------------------------------
+    # PR-A keeps the legacy vanilla page available; PR-B will set
+    # `spa_dist` to the built `godo-frontend/dist/`.
+    if cfg.spa_dist is not None and cfg.spa_dist.is_dir():
+        app.mount("/", StaticFiles(directory=cfg.spa_dist, html=True), name="spa")
+    else:
+        static_dir = Path(__file__).parent / "static"
+        app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
 
     return app

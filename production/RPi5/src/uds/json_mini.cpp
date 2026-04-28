@@ -271,6 +271,69 @@ std::string format_ok_scan(const godo::rt::LastScan& s) {
     return std::string(buf, pos);
 }
 
+// Field order pin — MUST match godo::rt::JitterSnapshot declaration in
+// core/rt_types.hpp. The Python mirror godo-webctl/protocol.py::
+// JITTER_FIELDS is regex-pinned against this format string at test time
+// (tests/test_protocol.py drift pin). Touching the field names here
+// breaks the Python mirror; touch both in the same commit.
+//
+// Precision split (PR-DIAG): %lld for signed-ns scalars, %llu for
+// uint64, %u for the uint8 valid flag.
+std::string format_ok_jitter(const godo::rt::JitterSnapshot& j) {
+    static_assert(godo::constants::JITTER_FORMAT_SCRATCH_BYTES >= 512,
+                  "format_ok_jitter worst case requires >= 512 B scratch");
+    char buf[godo::constants::JITTER_FORMAT_SCRATCH_BYTES];
+    const int n = std::snprintf(buf, sizeof(buf),
+        "{\"ok\":true,\"valid\":%u,\"p50_ns\":%lld,\"p95_ns\":%lld,"
+        "\"p99_ns\":%lld,\"max_ns\":%lld,\"mean_ns\":%lld,"
+        "\"sample_count\":%llu,\"published_mono_ns\":%llu}\n",
+        static_cast<unsigned>(j.valid),
+        static_cast<long long>(j.p50_ns),
+        static_cast<long long>(j.p95_ns),
+        static_cast<long long>(j.p99_ns),
+        static_cast<long long>(j.max_ns),
+        static_cast<long long>(j.mean_ns),
+        static_cast<unsigned long long>(j.sample_count),
+        static_cast<unsigned long long>(j.published_mono_ns));
+    if (n <= 0) {
+        return std::string("{\"ok\":true,\"valid\":0,\"p50_ns\":0,"
+            "\"p95_ns\":0,\"p99_ns\":0,\"max_ns\":0,\"mean_ns\":0,"
+            "\"sample_count\":0,\"published_mono_ns\":0}\n");
+    }
+    const std::size_t len = (static_cast<std::size_t>(n) >= sizeof(buf))
+                            ? sizeof(buf) - 1
+                            : static_cast<std::size_t>(n);
+    return std::string(buf, len);
+}
+
+// Field order pin — MUST match godo::rt::AmclIterationRate declaration in
+// core/rt_types.hpp. The Python mirror godo-webctl/protocol.py::
+// AMCL_RATE_FIELDS is regex-pinned against this format string at test
+// time. Mode-A M2 fold renamed scan_rate → amcl_iteration_rate.
+std::string format_ok_amcl_rate(const godo::rt::AmclIterationRate& r) {
+    static_assert(godo::constants::AMCL_RATE_FORMAT_SCRATCH_BYTES >= 256,
+                  "format_ok_amcl_rate worst case requires >= 256 B scratch");
+    char buf[godo::constants::AMCL_RATE_FORMAT_SCRATCH_BYTES];
+    const int n = std::snprintf(buf, sizeof(buf),
+        "{\"ok\":true,\"valid\":%u,\"hz\":%.6f,"
+        "\"last_iteration_mono_ns\":%llu,\"total_iteration_count\":%llu,"
+        "\"published_mono_ns\":%llu}\n",
+        static_cast<unsigned>(r.valid),
+        r.hz,
+        static_cast<unsigned long long>(r.last_iteration_mono_ns),
+        static_cast<unsigned long long>(r.total_iteration_count),
+        static_cast<unsigned long long>(r.published_mono_ns));
+    if (n <= 0) {
+        return std::string("{\"ok\":true,\"valid\":0,\"hz\":0.000000,"
+            "\"last_iteration_mono_ns\":0,\"total_iteration_count\":0,"
+            "\"published_mono_ns\":0}\n");
+    }
+    const std::size_t len = (static_cast<std::size_t>(n) >= sizeof(buf))
+                            ? sizeof(buf) - 1
+                            : static_cast<std::size_t>(n);
+    return std::string(buf, len);
+}
+
 std::string_view mode_to_string(godo::rt::AmclMode mode) noexcept {
     switch (mode) {
         case godo::rt::AmclMode::Idle:    return "Idle";

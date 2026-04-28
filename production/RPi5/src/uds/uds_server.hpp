@@ -12,6 +12,8 @@
 //              {"cmd":"ping"}\n
 //              {"cmd":"get_last_pose"}\n   (Track B; uds_protocol.md §C.4)
 //              {"cmd":"get_last_scan"}\n   (Track D; uds_protocol.md §C.5)
+//              {"cmd":"get_jitter"}\n      (PR-DIAG; uds_protocol.md §C.6)
+//              {"cmd":"get_amcl_rate"}\n   (PR-DIAG; uds_protocol.md §C.7)
 //   Response → {"ok":true}\n
 //              {"ok":true,"mode":"<...>"}\n
 //              {"ok":true,"valid":<0|1>,"x_m":...,...}\n
@@ -19,6 +21,8 @@
 //                "iterations":...,"published_mono_ns":...,
 //                "pose_x_m":...,"pose_y_m":...,"pose_yaw_deg":...,
 //                "n":...,"angles_deg":[...],"ranges_m":[...]}\n
+//              {"ok":true,"valid":<0|1>,"p50_ns":...,...}\n
+//              {"ok":true,"valid":<0|1>,"hz":...,...}\n
 //              {"ok":false,"err":"<code>"}\n
 //
 // One client at a time, request/response then close. Listen socket is
@@ -56,13 +60,23 @@ using LastPoseGetter = std::function<godo::rt::LastPose()>;
 // "tracker down" (no UDS reply).
 using LastScanGetter = std::function<godo::rt::LastScan()>;
 
+// Track B-DIAG (PR-DIAG) — `get_jitter` / `get_amcl_rate` callbacks.
+// Production wires these to Seqlock<JitterSnapshot>::load() /
+// Seqlock<AmclIterationRate>::load() owned by main.cpp; the diag
+// publisher thread is the only writer (build-grep
+// [jitter-publisher-grep]). Null callback → valid=0 sentinel reply.
+using JitterGetter   = std::function<godo::rt::JitterSnapshot()>;
+using AmclRateGetter = std::function<godo::rt::AmclIterationRate()>;
+
 class UdsServer {
 public:
     UdsServer(std::string    socket_path,
               ModeGetter     get_mode,
               ModeSetter     set_mode,
-              LastPoseGetter get_last_pose = nullptr,
-              LastScanGetter get_last_scan = nullptr);
+              LastPoseGetter get_last_pose  = nullptr,
+              LastScanGetter get_last_scan  = nullptr,
+              JitterGetter   get_jitter     = nullptr,
+              AmclRateGetter get_amcl_rate  = nullptr);
 
     UdsServer(const UdsServer&)            = delete;
     UdsServer& operator=(const UdsServer&) = delete;
@@ -87,6 +101,8 @@ private:
     ModeSetter     set_mode_;
     LastPoseGetter get_last_pose_;
     LastScanGetter get_last_scan_;
+    JitterGetter   get_jitter_;
+    AmclRateGetter get_amcl_rate_;
     int            listen_fd_ = -1;
     bool           path_bound_ = false;
 };

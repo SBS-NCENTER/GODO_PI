@@ -74,6 +74,33 @@ std::string format_ok_pose(const godo::rt::LastPose& p);
 // at that cap. See cpp body for the static_assert pinning the math.
 std::string format_ok_scan(const godo::rt::LastScan& s);
 
+// Track B-DIAG (PR-DIAG) — `get_jitter` response (uds_protocol.md §C.6).
+// Field order MUST match `godo::rt::JitterSnapshot` declaration in
+// core/rt_types.hpp. The Python mirror godo-webctl/protocol.py::
+// JITTER_FIELDS is regex-pinned against this format string at test time.
+//
+// Precision split:
+//   - p-tile values + max + mean → %lld   (signed int64 ns)
+//   - sample_count                → %llu  (uint64)
+//   - published_mono_ns           → %llu  (uint64)
+//   - valid                       → %u    (uint8 → unsigned int)
+//
+// Worst-case payload pinned by static_assert against
+// constants::JITTER_FORMAT_SCRATCH_BYTES (512 B).
+std::string format_ok_jitter(const godo::rt::JitterSnapshot& j);
+
+// Track B-DIAG (Mode-A M2 fold) — `get_amcl_rate` response (uds_protocol.md
+// §C.7). Renamed from `format_ok_scan_rate` per Mode-A reviewer; the
+// metric measures cold-writer publish cadence, not raw LiDAR scan rate.
+//
+// Precision split:
+//   - hz                          → %.6f   (1 µHz precision)
+//   - last_iteration_mono_ns      → %llu   (uint64)
+//   - total_iteration_count       → %llu   (uint64)
+//   - published_mono_ns           → %llu   (uint64)
+//   - valid                       → %u
+std::string format_ok_amcl_rate(const godo::rt::AmclIterationRate& r);
+
 // Convert AmclMode → string used in the wire protocol. Inverse of
 // `parse_mode_arg` below. Returns "Idle" for unknown values for safety.
 std::string_view mode_to_string(godo::rt::AmclMode mode) noexcept;

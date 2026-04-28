@@ -52,6 +52,10 @@ class Settings:
     users_file: Path
     spa_dist: Path | None
     chromium_loopback_only: bool
+    # PR-DIAG: filesystem path os.statvfs() targets when computing disk
+    # usage in resources.snapshot(). Override via
+    # GODO_WEBCTL_DISK_CHECK_PATH for tests + alternate deployments.
+    disk_check_path: Path
 
 
 # Documented defaults — single source for code + README + systemd env-file.
@@ -68,6 +72,7 @@ _DEFAULTS: Final[dict[str, str]] = {
     "GODO_WEBCTL_USERS_FILE": "/var/lib/godo/auth/users.json",
     "GODO_WEBCTL_SPA_DIST": "",
     "GODO_WEBCTL_CHROMIUM_LOOPBACK_ONLY": "true",
+    "GODO_WEBCTL_DISK_CHECK_PATH": "/",
 }
 
 # Per-field parser. Same keys (in same order) as _DEFAULTS.
@@ -84,6 +89,7 @@ _PARSERS: Final[dict[str, Callable[[str], Any]]] = {
     "GODO_WEBCTL_USERS_FILE": Path,
     "GODO_WEBCTL_SPA_DIST": _parse_optional_path,
     "GODO_WEBCTL_CHROMIUM_LOOPBACK_ONLY": _parse_bool,
+    "GODO_WEBCTL_DISK_CHECK_PATH": Path,
 }
 
 # env-var name → Settings field name. Drift between this and the dataclass
@@ -101,6 +107,7 @@ _ENV_TO_FIELD: Final[dict[str, str]] = {
     "GODO_WEBCTL_USERS_FILE": "users_file",
     "GODO_WEBCTL_SPA_DIST": "spa_dist",
     "GODO_WEBCTL_CHROMIUM_LOOPBACK_ONLY": "chromium_loopback_only",
+    "GODO_WEBCTL_DISK_CHECK_PATH": "disk_check_path",
 }
 
 

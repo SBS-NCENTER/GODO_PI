@@ -139,6 +139,102 @@ export const ERR_MAPS_DIR_MISSING = 'maps_dir_missing';
 // invariant (k).
 export const MAPS_NAME_REGEX_PATTERN_STR = '^[a-zA-Z0-9_-]{1,64}$';
 
+// --- PR-DIAG (Track B-DIAG) — diagnostics page wire shapes ---------------
+// `JitterSnapshot` / `AmclIterationRate` / `Resources` / `DiagFrame` mirror
+// the webctl-side projections (godo_webctl.protocol::JITTER_FIELDS /
+// AMCL_RATE_FIELDS / RESOURCES_FIELDS / DIAG_FRAME_FIELDS). Upstream C++
+// origin: production/RPi5/src/core/rt_types.hpp::JitterSnapshot +
+// AmclIterationRate. Mode-A M2 fold renamed scan_rate → amcl_rate.
+//
+// Drift policy: changing this shape without changing protocol.py +
+// rt_types.hpp is a code-review block.
+
+export const CMD_GET_JITTER = 'get_jitter';
+export const CMD_GET_AMCL_RATE = 'get_amcl_rate';
+
+export const JITTER_FIELDS = [
+  'valid',
+  'p50_ns',
+  'p95_ns',
+  'p99_ns',
+  'max_ns',
+  'mean_ns',
+  'sample_count',
+  'published_mono_ns',
+] as const;
+
+export interface JitterSnapshot {
+  valid: number; // 0 | 1
+  p50_ns: number;
+  p95_ns: number;
+  p99_ns: number;
+  max_ns: number;
+  mean_ns: number;
+  sample_count: number;
+  published_mono_ns: number;
+  err?: string; // present when the sub-fetch failed; valid=0
+}
+
+export const AMCL_RATE_FIELDS = [
+  'valid',
+  'hz',
+  'last_iteration_mono_ns',
+  'total_iteration_count',
+  'published_mono_ns',
+] as const;
+
+export interface AmclIterationRate {
+  valid: number;
+  hz: number;
+  last_iteration_mono_ns: number;
+  total_iteration_count: number;
+  published_mono_ns: number;
+  err?: string;
+}
+
+export const RESOURCES_FIELDS = [
+  'cpu_temp_c',
+  'mem_used_pct',
+  'mem_total_bytes',
+  'mem_avail_bytes',
+  'disk_used_pct',
+  'disk_total_bytes',
+  'disk_avail_bytes',
+  'published_mono_ns',
+] as const;
+
+export interface Resources {
+  cpu_temp_c: number | null;
+  mem_used_pct: number | null;
+  mem_total_bytes: number | null;
+  mem_avail_bytes: number | null;
+  disk_used_pct: number | null;
+  disk_total_bytes: number | null;
+  disk_avail_bytes: number | null;
+  published_mono_ns: number;
+  // Sentinel field set by sse.py when resources.snapshot() raises;
+  // the SPA renders the panel as "unavailable".
+  valid?: number;
+  err?: string;
+}
+
+// Multiplexed SSE frame from /api/diag/stream. Mode-A M2 fold: keys are
+// `pose / jitter / amcl_rate / resources` (NOT scan_rate).
+//
+// `_arrival_ms` is a CLIENT-SIDE NON-WIRE field set by the diag store on
+// receipt; the SPA freshness gate uses `Date.now() - _arrival_ms` (per
+// Track D Mode-A M2 + PR-DIAG N4 fold) and never compares
+// published_mono_ns across the C++ / webctl boundary.
+export const DIAG_FRAME_FIELDS = ['pose', 'jitter', 'amcl_rate', 'resources'] as const;
+
+export interface DiagFrame {
+  pose: LastPose;
+  jitter: JitterSnapshot;
+  amcl_rate: AmclIterationRate;
+  resources: Resources;
+  _arrival_ms?: number;
+}
+
 // --- Roles (mirrors backend ROLE_*) ------------------------------------
 export const ROLE_ADMIN = 'admin';
 export const ROLE_VIEWER = 'viewer';

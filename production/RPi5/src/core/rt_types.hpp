@@ -127,4 +127,79 @@ static_assert(alignof(LastScan) == 8, "LastScan must be 8-aligned");
 static_assert(std::is_trivially_copyable_v<LastScan>,
               "LastScan must be trivially copyable for Seqlock payload");
 
+// Track B-DIAG (PR-DIAG) — RT-thread scheduling-jitter snapshot, published
+// by rt/diag_publisher.cpp at JITTER_PUBLISH_INTERVAL_MS cadence and
+// consumed via UDS `get_jitter` (uds_protocol.md §C.6 to be added).
+//
+// Producer: rt/diag_publisher.cpp computes p50/p95/p99/max/mean over a
+// snapshot of the JitterRing buffer (single-writer Thread D, single-
+// reader the publisher). Sort + percentile lives in jitter_stats.cpp;
+// Thread D itself never references this struct or `jitter_seq` (build-
+// time pin: scripts/build.sh::[hot-path-jitter-grep]).
+//
+// Field order is ABI-visible — the JSON formatter in
+// uds/json_mini.cpp::format_ok_jitter mirrors this order; the Python
+// mirror godo-webctl/protocol.py::JITTER_FIELDS is regex-pinned against
+// the format string at test time.
+//
+// Layout pin: 5×8 (p-tiles + mean) + 8 (sample_count) + 8 (mono_ns) +
+// 4×1 (valid + 3 byte pads) + 4 (trailing pad) = 64 B exact. Trivially
+// copyable + 8-aligned for Seqlock<T>::payload_ safety.
+struct JitterSnapshot {
+    std::int64_t  p50_ns;
+    std::int64_t  p95_ns;
+    std::int64_t  p99_ns;
+    std::int64_t  max_ns;
+    std::int64_t  mean_ns;          // signed — small negatives possible if
+                                    // scheduler runs early (Mode-A OQ-DIAG-5)
+
+    std::uint64_t sample_count;     // ring entries used for this percentile
+    std::uint64_t published_mono_ns;
+
+    std::uint8_t  valid;            // 0 = no publish yet, 1 = populated
+    std::uint8_t  _pad0;
+    std::uint8_t  _pad1;
+    std::uint8_t  _pad2;
+    std::uint8_t  _pad3[4];         // align trailing to 8 B
+};
+
+// Note (Mode-A N1 fold): trailing pad is 1 (valid) + 3 (pad0..pad2)
+// + 4 (_pad3) = 8 B; the _pad3[4] is layout-only and not a 4-element
+// semantic field.
+static_assert(sizeof(JitterSnapshot) == 64, "JitterSnapshot layout is ABI-visible");
+static_assert(alignof(JitterSnapshot) == 8, "JitterSnapshot must be 8-aligned");
+static_assert(std::is_trivially_copyable_v<JitterSnapshot>,
+              "JitterSnapshot must be trivially copyable for Seqlock payload");
+
+// Track B-DIAG (Mode-A M2 fold) — AMCL iteration-rate snapshot. Renamed
+// from `ScanRate` per Mode-A reviewer (the metric measures cold-writer
+// publish cadence, NOT raw LiDAR scan rate; in Idle the LiDAR is parked
+// and the rate is 0 Hz by design). Published by rt/diag_publisher.cpp
+// alongside JitterSnapshot at the same 1 Hz cadence.
+//
+// Producer: cold writer (`run_one_iteration` / `run_live_iteration`)
+// records each AMCL iteration via the accumulator's record method (see
+// rt/amcl_rate.hpp); the publisher differences `total_count` and
+// `last_iteration_mono_ns` against its own prior snapshot to compute Hz
+// over the last publisher tick (a two-tick differencing window — plan
+// §"Scan-rate publication").
+//
+// Field order is ABI-visible — `format_ok_amcl_rate` mirrors this order;
+// `protocol.py::AMCL_RATE_FIELDS` is regex-pinned at test time.
+//
+// Layout pin: 8 (hz) + 8 + 8 + 8 (mono_ns) + 1 (valid) + 7 (pad) = 40 B.
+struct AmclIterationRate {
+    double        hz;                         // sliding-window over AMCL_RATE_WINDOW_S
+    std::uint64_t last_iteration_mono_ns;     // time of the last recorded iteration
+    std::uint64_t total_iteration_count;      // monotonic; never wraps in practice
+    std::uint64_t published_mono_ns;
+    std::uint8_t  valid;                      // 0 = no iteration recorded yet, 1 = populated
+    std::uint8_t  _pad0[7];                   // align to 8 B
+};
+
+static_assert(sizeof(AmclIterationRate) == 40, "AmclIterationRate layout is ABI-visible");
+static_assert(alignof(AmclIterationRate) == 8, "AmclIterationRate must be 8-aligned");
+static_assert(std::is_trivially_copyable_v<AmclIterationRate>,
+              "AmclIterationRate must be trivially copyable for Seqlock payload");
+
 }  // namespace godo::rt

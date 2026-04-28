@@ -38,6 +38,7 @@ def _settings() -> Settings:
         users_file=Path("/tmp/u.json"),
         spa_dist=None,
         chromium_loopback_only=True,
+        disk_check_path=Path("/"),
     )
 
 
@@ -216,6 +217,186 @@ async def test_last_scan_stream_cancellation_propagates() -> None:
     with pytest.raises(asyncio.CancelledError):
         async for _ in sse.last_scan_stream(fake_client, _settings(), sleep=cancel_immediately):
             pass
+
+
+# ---- diag_stream (PR-DIAG) ---------------------------------------------
+
+
+def _canned_jitter() -> dict[str, object]:
+    return {
+        "ok": True,
+        "valid": 1,
+        "p50_ns": 4567,
+        "p95_ns": 12345,
+        "p99_ns": 45678,
+        "max_ns": 123456,
+        "mean_ns": 5678,
+        "sample_count": 2048,
+        "published_mono_ns": 1_000_000_000,
+    }
+
+
+def _canned_amcl_rate() -> dict[str, object]:
+    return {
+        "ok": True,
+        "valid": 1,
+        "hz": 9.987,
+        "last_iteration_mono_ns": 1_000_000_000,
+        "total_iteration_count": 42,
+        "published_mono_ns": 1_000_000_001,
+    }
+
+
+def _canned_pose_dict() -> dict[str, object]:
+    return {
+        "ok": True,
+        "valid": 1,
+        "x_m": 0.0,
+        "y_m": 0.0,
+        "yaw_deg": 0.0,
+        "xy_std_m": 0.0,
+        "yaw_std_deg": 0.0,
+        "iterations": 5,
+        "converged": 1,
+        "forced": 0,
+        "published_mono_ns": 1_000_000_000,
+    }
+
+
+def _canned_resources() -> dict[str, object]:
+    return {
+        "cpu_temp_c": 50.0,
+        "mem_used_pct": 25.0,
+        "mem_total_bytes": 1 << 32,
+        "mem_avail_bytes": 1 << 30,
+        "disk_used_pct": 41.5,
+        "disk_total_bytes": 1 << 35,
+        "disk_avail_bytes": 1 << 33,
+        "published_mono_ns": 0,
+    }
+
+
+async def test_diag_stream_emits_one_frame_per_tick() -> None:
+    sleep = RecordingSleep(max_calls=3)
+    fake_client = mock.MagicMock(spec=uds_client.UdsClient)
+    fake_client.get_last_pose.return_value = _canned_pose_dict()
+    fake_client.get_jitter.return_value = _canned_jitter()
+    fake_client.get_amcl_rate.return_value = _canned_amcl_rate()
+    with mock.patch(
+        "godo_webctl.sse.resources_mod.snapshot",
+        return_value=_canned_resources(),
+    ):
+        chunks = await _drain(sse.diag_stream(fake_client, _settings(), sleep=sleep))
+    # One emit per tick.
+    data_chunks = [c for c in chunks if c.startswith(b"data:")]
+    assert len(data_chunks) == 3
+    # Each frame contains all four top-level keys.
+    import json
+
+    body = json.loads(data_chunks[0][len(b"data: ") :].decode().rstrip("\n"))
+    assert set(body.keys()) == {"pose", "jitter", "amcl_rate", "resources"}
+
+
+async def test_diag_stream_skip_pose_error_keeps_other_panels() -> None:
+    sleep = RecordingSleep(max_calls=1)
+    fake_client = mock.MagicMock(spec=uds_client.UdsClient)
+    fake_client.get_last_pose.side_effect = uds_client.UdsUnreachable("down")
+    fake_client.get_jitter.return_value = _canned_jitter()
+    fake_client.get_amcl_rate.return_value = _canned_amcl_rate()
+    with mock.patch(
+        "godo_webctl.sse.resources_mod.snapshot",
+        return_value=_canned_resources(),
+    ):
+        chunks = await _drain(sse.diag_stream(fake_client, _settings(), sleep=sleep))
+    data = [c for c in chunks if c.startswith(b"data:")]
+    assert len(data) == 1
+    import json
+
+    body = json.loads(data[0][len(b"data: ") :].decode().rstrip("\n"))
+    # Pose became sentinel; jitter + amcl_rate populated.
+    assert body["pose"]["valid"] == 0
+    assert body["jitter"]["valid"] == 1
+    assert body["amcl_rate"]["valid"] == 1
+
+
+async def test_diag_stream_skip_resources_error_keeps_three_uds_panels() -> None:
+    sleep = RecordingSleep(max_calls=1)
+    fake_client = mock.MagicMock(spec=uds_client.UdsClient)
+    fake_client.get_last_pose.return_value = _canned_pose_dict()
+    fake_client.get_jitter.return_value = _canned_jitter()
+    fake_client.get_amcl_rate.return_value = _canned_amcl_rate()
+    with mock.patch(
+        "godo_webctl.sse.resources_mod.snapshot",
+        side_effect=RuntimeError("kaboom"),
+    ):
+        chunks = await _drain(sse.diag_stream(fake_client, _settings(), sleep=sleep))
+    data = [c for c in chunks if c.startswith(b"data:")]
+    assert len(data) == 1
+    import json
+
+    body = json.loads(data[0][len(b"data: ") :].decode().rstrip("\n"))
+    assert body["pose"]["valid"] == 1
+    assert body["jitter"]["valid"] == 1
+    assert body["amcl_rate"]["valid"] == 1
+    assert body["resources"]["valid"] == 0
+
+
+async def test_diag_stream_keepalive_after_heartbeat_window() -> None:
+    n_ticks = int(SSE_HEARTBEAT_S / SSE_TICK_S) + 1
+    sleep = RecordingSleep(max_calls=n_ticks + 1)
+    fake_client = mock.MagicMock(spec=uds_client.UdsClient)
+    fake_client.get_last_pose.return_value = _canned_pose_dict()
+    fake_client.get_jitter.return_value = _canned_jitter()
+    fake_client.get_amcl_rate.return_value = _canned_amcl_rate()
+    with mock.patch(
+        "godo_webctl.sse.resources_mod.snapshot",
+        return_value=_canned_resources(),
+    ):
+        chunks = await _drain(sse.diag_stream(fake_client, _settings(), sleep=sleep))
+    assert any(c == b": keepalive\n\n" for c in chunks)
+
+
+async def test_diag_stream_cancellation_propagates() -> None:
+    async def cancel_immediately(_d: float) -> None:
+        raise asyncio.CancelledError()
+
+    fake_client = mock.MagicMock(spec=uds_client.UdsClient)
+    fake_client.get_last_pose.return_value = _canned_pose_dict()
+    fake_client.get_jitter.return_value = _canned_jitter()
+    fake_client.get_amcl_rate.return_value = _canned_amcl_rate()
+    with (
+        mock.patch(
+            "godo_webctl.sse.resources_mod.snapshot",
+            return_value=_canned_resources(),
+        ),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        async for _ in sse.diag_stream(
+            fake_client,
+            _settings(),
+            sleep=cancel_immediately,
+        ):
+            pass
+
+
+async def test_diag_stream_all_four_fail_emits_all_sentinel_frame() -> None:
+    sleep = RecordingSleep(max_calls=1)
+    fake_client = mock.MagicMock(spec=uds_client.UdsClient)
+    fake_client.get_last_pose.side_effect = uds_client.UdsUnreachable("p")
+    fake_client.get_jitter.side_effect = uds_client.UdsUnreachable("j")
+    fake_client.get_amcl_rate.side_effect = uds_client.UdsUnreachable("r")
+    with mock.patch(
+        "godo_webctl.sse.resources_mod.snapshot",
+        side_effect=RuntimeError("res"),
+    ):
+        chunks = await _drain(sse.diag_stream(fake_client, _settings(), sleep=sleep))
+    data = [c for c in chunks if c.startswith(b"data:")]
+    assert len(data) == 1
+    import json
+
+    body = json.loads(data[0][len(b"data: ") :].decode().rstrip("\n"))
+    for key in ("pose", "jitter", "amcl_rate", "resources"):
+        assert body[key]["valid"] == 0
 
 
 # ---- response headers ---------------------------------------------------

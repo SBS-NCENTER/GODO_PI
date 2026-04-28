@@ -116,3 +116,23 @@ MAPS_ACTIVE_BASENAME: Final[str] = "active"
 # keeps it out of `list_pairs` (which only enumerates `<stem>.pgm` +
 # `<stem>.yaml` pairs).
 MAPS_ACTIVATE_LOCK_BASENAME: Final[str] = ".activate.lock"
+
+# --- PR-DIAG (Track B-DIAG) — diagnostics page constants -----------------
+# Resources sub-payload cache TTL — `/sys/class/thermal/...` and
+# `/proc/meminfo` reads cost ~10 µs each. With 5 Hz × 4 reads/tick =
+# 20 reads/s, the cache reduces this to ~1/s without affecting freshness
+# (operator-visible stat is "%-loaded" which doesn't move that fast).
+RESOURCES_CACHE_TTL_S: Final[float] = 1.0
+
+# journald tail server-side cap. 500 lines × ~2 KB worst-case = 1 MB
+# response — well within FastAPI's default budget. SPA's <input> mirrors
+# this max for defense in depth.
+LOGS_TAIL_MAX_N: Final[int] = 500
+
+# Default `n` for /api/logs/tail when the operator does not specify.
+LOGS_TAIL_DEFAULT_N: Final[int] = 50
+
+# Filesystem paths read by `resources.snapshot()`. Pinned here so the
+# tests can monkeypatch them without touching real /sys or /proc.
+THERMAL_ZONE_PATH: Final[str] = "/sys/class/thermal/thermal_zone0/temp"
+MEMINFO_PATH: Final[str] = "/proc/meminfo"

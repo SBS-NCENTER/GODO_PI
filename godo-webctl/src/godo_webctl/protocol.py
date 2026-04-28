@@ -50,6 +50,17 @@ CMD_GET_LAST_POSE: Final[str] = "get_last_pose"
 # rt_types.hpp; LAST_SCAN_HEADER_FIELDS below is regex-pinned against
 # that source by tests/test_protocol.py.
 CMD_GET_LAST_SCAN: Final[str] = "get_last_scan"
+# PR-DIAG (Track B-DIAG) — uds_server.cpp `get_jitter` / `get_amcl_rate`
+# branches. Field-name SSOT is the format strings in
+# production/RPi5/src/uds/json_mini.cpp::format_ok_jitter +
+# format_ok_amcl_rate. JITTER_FIELDS / AMCL_RATE_FIELDS below are
+# regex-pinned against those sources by tests/test_protocol.py.
+# Mode-A M2 fold: command name uses `amcl_rate` (renamed from
+# `scan_rate` per the reviewer — the metric measures AMCL iteration
+# cadence, not raw LiDAR scan rate; in Idle the LiDAR is parked and
+# the rate is 0 Hz by design).
+CMD_GET_JITTER: Final[str] = "get_jitter"
+CMD_GET_AMCL_RATE: Final[str] = "get_amcl_rate"
 
 # --- Mode names (mirrors json_mini.cpp:119-121 mode_to_string + :127-129) -
 MODE_IDLE: Final[str] = "Idle"  # json_mini.cpp:119, :127
@@ -116,6 +127,61 @@ LAST_SCAN_HEADER_FIELDS: Final[tuple[str, ...]] = (
 # regex pin below).
 LAST_SCAN_RANGES_MAX_PYTHON_MIRROR: Final[int] = 720
 
+# --- PR-DIAG: get_jitter / get_amcl_rate response field orders -----------
+# Sole Python mirror of the field names embedded in the C++ wire format
+# strings. Order MUST match production/RPi5/src/uds/json_mini.cpp::
+# format_ok_jitter + format_ok_amcl_rate verbatim. tests/test_protocol.py
+# regex-extracts the JSON keys from those format strings and asserts
+# tuple-equal — drift fails the pin.
+#
+# `ok` is intentionally NOT in either tuple (JSON-level success flag).
+JITTER_FIELDS: Final[tuple[str, ...]] = (
+    "valid",
+    "p50_ns",
+    "p95_ns",
+    "p99_ns",
+    "max_ns",
+    "mean_ns",
+    "sample_count",
+    "published_mono_ns",
+)
+
+AMCL_RATE_FIELDS: Final[tuple[str, ...]] = (
+    "valid",
+    "hz",
+    "last_iteration_mono_ns",
+    "total_iteration_count",
+    "published_mono_ns",
+)
+
+# --- PR-DIAG: webctl-only Resources schema (no C++ counterpart) ----------
+# Pinned by tests/test_resources.py + tests/test_protocol.py
+# self-consistency. The SPA's lib/protocol.ts mirror is by inspection.
+RESOURCES_FIELDS: Final[tuple[str, ...]] = (
+    "cpu_temp_c",
+    "mem_used_pct",
+    "mem_total_bytes",
+    "mem_avail_bytes",
+    "disk_used_pct",
+    "disk_total_bytes",
+    "disk_avail_bytes",
+    "published_mono_ns",
+)
+
+# --- PR-DIAG: multiplexed DiagFrame top-level keys -----------------------
+# `Resources.published_mono_ns` is the WEBCTL `time.monotonic_ns()`
+# (Python clock domain), NOT the C++ tracker's CLOCK_MONOTONIC. They
+# happen to share the same kernel + the same domain on RPi 5, but the
+# project discipline (Track D Mode-A M2) is that the SPA never crosses
+# the boundary — freshness uses arrival-wall-clock (`Date.now()` stamped
+# in `lib/sse.ts`).
+DIAG_FRAME_FIELDS: Final[tuple[str, ...]] = (
+    "pose",
+    "jitter",
+    "amcl_rate",
+    "resources",
+)
+
 # --- Error codes (mirrors json_mini.cpp::format_err callers) --------------
 ERR_PARSE_ERROR: Final[str] = "parse_error"  # json_mini.cpp callers
 ERR_UNKNOWN_CMD: Final[str] = "unknown_cmd"  # uds_server.cpp:225
@@ -165,3 +231,17 @@ def encode_get_last_pose() -> bytes:
 def encode_get_last_scan() -> bytes:
     """Canonical wire encoding of the Track D ``get_last_scan`` request."""
     return b'{"cmd":"get_last_scan"}\n'
+
+
+def encode_get_jitter() -> bytes:
+    """Canonical wire encoding of the PR-DIAG ``get_jitter`` request."""
+    return b'{"cmd":"get_jitter"}\n'
+
+
+def encode_get_amcl_rate() -> bytes:
+    """Canonical wire encoding of the PR-DIAG ``get_amcl_rate`` request.
+
+    Mode-A M2 fold: command name is ``get_amcl_rate`` (NOT
+    ``get_scan_rate``) — the metric measures AMCL iteration cadence.
+    """
+    return b'{"cmd":"get_amcl_rate"}\n'

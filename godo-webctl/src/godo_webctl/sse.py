@@ -37,6 +37,7 @@ import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any, Final
 
+from . import resources as resources_mod
 from . import services as services_mod
 from . import uds_client as uds_mod
 from .config import Settings
@@ -144,6 +145,88 @@ async def services_stream(
         except asyncio.CancelledError:
             raise
         elapsed_since_keepalive += SSE_SERVICES_TICK_S
+        if elapsed_since_keepalive >= SSE_HEARTBEAT_S:
+            yield _sse_keepalive()
+            elapsed_since_keepalive = 0.0
+
+
+def _sentinel_for_error(e: BaseException) -> dict[str, Any]:
+    """Per-sub-payload sentinel when one of the four diag fetches fails.
+    PR-DIAG TM9: a failure of any single source must not block the other
+    three — the SPA renders that sub-panel as "unavailable" while the
+    rest stay live."""
+    return {"valid": 0, "err": type(e).__name__}
+
+
+async def diag_stream(
+    client: uds_mod.UdsClient,
+    cfg: Settings,
+    *,
+    sleep: SleepCallable = asyncio.sleep,
+) -> AsyncIterator[bytes]:
+    """PR-DIAG — multiplexed 5 Hz Diagnostics stream.
+
+    Per tick, issues three parallel UDS round-trips (pose + jitter +
+    amcl_rate) via ``asyncio.gather`` so the per-tick wall-clock is
+    bounded by the SLOWEST of the three (≈ ``SSE_UDS_TIMEOUT_S``), not
+    the sum. Then runs ``resources.snapshot()`` on a worker thread.
+
+    Any individual sub-fetch failure becomes a ``{"valid": 0, "err": ...}``
+    sentinel for that key — the OTHER three sub-payloads still emit.
+
+    Lifecycle mirrors ``last_pose_stream`` / ``last_scan_stream``:
+      - cancel-safe (CancelledError from ``sleep`` propagates),
+      - heartbeat every ``SSE_HEARTBEAT_S`` of virtual time,
+      - one frame per tick OR no frame at all (we emit even when all
+        sub-payloads are sentinels so the SPA freshness gate keeps the
+        UI honest about "tracker reachable but every source failed").
+    """
+    elapsed_since_keepalive = 0.0
+    while True:
+        # Three UDS round-trips in parallel — bound on slowest, not sum.
+        try:
+            results = await asyncio.gather(
+                uds_mod.call_uds(client.get_last_pose, SSE_UDS_TIMEOUT_S),
+                uds_mod.call_uds(client.get_jitter, SSE_UDS_TIMEOUT_S),
+                uds_mod.call_uds(client.get_amcl_rate, SSE_UDS_TIMEOUT_S),
+                return_exceptions=True,
+            )
+        except asyncio.CancelledError:
+            raise
+
+        pose_r, jitter_r, amcl_rate_r = results
+        pose = _sentinel_for_error(pose_r) if isinstance(pose_r, BaseException) else pose_r
+        jitter = _sentinel_for_error(jitter_r) if isinstance(jitter_r, BaseException) else jitter_r
+        amcl_rate = (
+            _sentinel_for_error(amcl_rate_r)
+            if isinstance(amcl_rate_r, BaseException)
+            else amcl_rate_r
+        )
+
+        try:
+            resources_dict = await asyncio.to_thread(
+                resources_mod.snapshot,
+                disk_check_path=cfg.disk_check_path,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 — defence in depth
+            logger.debug("sse.diag_resources_error: %s", e)
+            resources_dict = _sentinel_for_error(e)
+
+        frame: dict[str, Any] = {
+            "pose": pose,
+            "jitter": jitter,
+            "amcl_rate": amcl_rate,
+            "resources": resources_dict,
+        }
+        yield _sse_event(frame)
+
+        try:
+            await sleep(SSE_TICK_S)
+        except asyncio.CancelledError:
+            raise
+        elapsed_since_keepalive += SSE_TICK_S
         if elapsed_since_keepalive >= SSE_HEARTBEAT_S:
             yield _sse_keepalive()
             elapsed_since_keepalive = 0.0

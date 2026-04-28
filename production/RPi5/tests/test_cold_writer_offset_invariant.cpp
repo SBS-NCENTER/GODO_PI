@@ -34,6 +34,7 @@
 #include "core/config.hpp"
 #include "core/rt_types.hpp"
 #include "core/seqlock.hpp"
+#include "rt/amcl_rate.hpp"
 #include "lidar/sample.hpp"
 #include "localization/amcl.hpp"
 #include "localization/cold_writer.hpp"
@@ -61,6 +62,7 @@ using godo::localization::Rng;
 using godo::localization::run_one_iteration;
 using godo::rt::LastPose;
 using godo::rt::LastScan;
+using godo::rt::AmclRateAccumulator;
 using godo::rt::Offset;
 using godo::rt::Seqlock;
 
@@ -119,13 +121,14 @@ TEST_CASE("run_one_iteration — published Offset is NaN/Inf-free with canonical
     Seqlock<Offset>   target_offset;
     Seqlock<LastPose> last_pose_seq;
     Seqlock<LastScan> last_scan_seq;
+    AmclRateAccumulator amcl_rate_accum;
 
     const Frame frame = make_synthetic_frame(360);
     const auto result = run_one_iteration(cfg, frame, grid, amcl, rng,
                                           beams_buf, last_pose,
                                           live_first_iter, last_written,
                                           target_offset, last_pose_seq,
-                                          last_scan_seq);
+                                          last_scan_seq, amcl_rate_accum);
 
     // forced=true because run_one_iteration is the OneShot kernel.
     CHECK(result.forced == true);
@@ -190,12 +193,13 @@ TEST_CASE("run_one_iteration — second call still uses seed_global (no warm-see
     Seqlock<Offset>   target_offset;
     Seqlock<LastPose> last_pose_seq;
     Seqlock<LastScan> last_scan_seq;
+    AmclRateAccumulator amcl_rate_accum;
     const Frame    frame = make_synthetic_frame(360);
 
     const auto r1 = run_one_iteration(cfg, frame, grid, amcl, rng,
                                       beams_buf, last_pose, live_first_iter,
                                       last_written, target_offset,
-                                      last_pose_seq, last_scan_seq);
+                                      last_pose_seq, last_scan_seq, amcl_rate_accum);
     CHECK(live_first_iter == false);
     CHECK(r1.iterations >= 1);
     CHECK(r1.iterations <= cfg.amcl_max_iters);
@@ -205,7 +209,7 @@ TEST_CASE("run_one_iteration — second call still uses seed_global (no warm-see
     const auto r2 = run_one_iteration(cfg, frame, grid, amcl, rng,
                                       beams_buf, last_pose, live_first_iter,
                                       last_written, target_offset,
-                                      last_pose_seq, last_scan_seq);
+                                      last_pose_seq, last_scan_seq, amcl_rate_accum);
     CHECK(live_first_iter == false);
     CHECK(r2.iterations >= 1);
     CHECK(r2.iterations <= cfg.amcl_max_iters);

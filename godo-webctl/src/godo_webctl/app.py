@@ -56,8 +56,10 @@ from pydantic import BaseModel, Field
 from . import activity as activity_mod
 from . import auth as auth_mod
 from . import backup as backup_mod
+from . import logs as logs_mod
 from . import map_image as map_image_mod
 from . import maps as maps_mod
+from . import resources as resources_mod
 from . import services as services_mod
 from . import sse as sse_mod
 from . import uds_client as uds_mod
@@ -67,19 +69,24 @@ from .constants import (
     JOURNAL_TAIL_DEFAULT_N,
     LOGIN_PASSWORD_MAX_LEN,
     LOGIN_USERNAME_MAX_LEN,
+    LOGS_TAIL_DEFAULT_N,
+    LOGS_TAIL_MAX_N,
     MAPS_ACTIVE_BASENAME,
 )
 from .local_only import loopback_only
 from .protocol import (
+    AMCL_RATE_FIELDS,
     ERR_INVALID_MAP_NAME,
     ERR_MAP_IS_ACTIVE,
     ERR_MAP_NOT_FOUND,
     ERR_MAPS_DIR_MISSING,
+    JITTER_FIELDS,
     LAST_POSE_FIELDS,
     LAST_SCAN_HEADER_FIELDS,
     MODE_IDLE,
     MODE_LIVE,
     MODE_ONESHOT,
+    RESOURCES_FIELDS,
 )
 
 _LOG_FORMAT = "%(asctime)s %(levelname)s [godo-webctl] %(message)s"
@@ -105,6 +112,14 @@ class LoginBody(BaseModel):
 
 class LiveBody(BaseModel):
     enable: bool
+
+
+class LogsTailQuery(BaseModel):
+    """Pydantic shape for ``/api/logs/tail`` query params. ``ge=1`` /
+    ``le=LOGS_TAIL_MAX_N`` mirror PR-DIAG TM3 + TM11 mitigations."""
+
+    unit: str
+    n: int = Field(default=LOGS_TAIL_DEFAULT_N, ge=1, le=LOGS_TAIL_MAX_N)
 
 
 # --- helpers -----------------------------------------------------------
@@ -184,6 +199,47 @@ def _last_scan_view(resp: dict[str, object]) -> dict[str, object]:
     LAST_SCAN_HEADER_FIELDS so the SPA can iterate the tuple if it wants
     the canonical ordering."""
     return {field: resp.get(field) for field in LAST_SCAN_HEADER_FIELDS}
+
+
+def _jitter_view(resp: dict[str, object]) -> dict[str, object]:
+    """PR-DIAG — project the UDS reply down to the documented JitterSnapshot
+    schema. Same shape as `_last_pose_view`."""
+    return {field: resp.get(field) for field in JITTER_FIELDS}
+
+
+def _amcl_rate_view(resp: dict[str, object]) -> dict[str, object]:
+    """PR-DIAG (Mode-A M2 fold) — projection through AMCL_RATE_FIELDS."""
+    return {field: resp.get(field) for field in AMCL_RATE_FIELDS}
+
+
+def _resources_view(snap: dict[str, object]) -> dict[str, object]:
+    """PR-DIAG — webctl-only Resources schema; pure projection through
+    RESOURCES_FIELDS so the wire shape is byte-stable across calls."""
+    return {field: snap.get(field) for field in RESOURCES_FIELDS}
+
+
+def _map_logs_exc_to_response(exc: Exception) -> JSONResponse:
+    """Local error mapper for `logs.tail` exceptions. Mirrors the
+    `_map_uds_exc_to_response` shape (HTTPStatus + ok/err body)."""
+    if isinstance(exc, logs_mod.UnknownService):
+        return JSONResponse(
+            {"ok": False, "err": "unknown_service"},
+            status_code=HTTPStatus.NOT_FOUND,
+        )
+    if isinstance(exc, logs_mod.CommandTimeout):
+        return JSONResponse(
+            {"ok": False, "err": "subprocess_timeout"},
+            status_code=HTTPStatus.GATEWAY_TIMEOUT,
+        )
+    if isinstance(exc, logs_mod.CommandFailed):
+        return JSONResponse(
+            {"ok": False, "err": "subprocess_failed", "detail": str(exc)},
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+        )
+    return JSONResponse(
+        {"ok": False, "err": "internal_error"},
+        status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+    )
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -368,6 +424,79 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         sub_client = uds_mod.UdsClient(cfg.uds_socket)
         return StreamingResponse(
             sse_mod.last_scan_stream(sub_client, cfg),
+            media_type=_SSE_MEDIA_TYPE,
+            headers=sse_mod.SSE_RESPONSE_HEADERS,
+        )
+
+    # ---- /api/system/jitter (PR-DIAG, anon read) ------------------------
+    @app.get("/api/system/jitter")
+    async def system_jitter() -> JSONResponse:
+        try:
+            resp = await uds_mod.call_uds(client.get_jitter, cfg.health_uds_timeout_s)
+        except uds_mod.UdsError as e:
+            return _map_uds_exc_to_response(e)
+        return JSONResponse(_jitter_view(resp), status_code=HTTPStatus.OK)
+
+    # ---- /api/system/amcl_rate (PR-DIAG, anon read) ---------------------
+    # Mode-A M2 fold: endpoint is /api/system/amcl_rate (NOT scan_rate).
+    @app.get("/api/system/amcl_rate")
+    async def system_amcl_rate() -> JSONResponse:
+        try:
+            resp = await uds_mod.call_uds(client.get_amcl_rate, cfg.health_uds_timeout_s)
+        except uds_mod.UdsError as e:
+            return _map_uds_exc_to_response(e)
+        return JSONResponse(_amcl_rate_view(resp), status_code=HTTPStatus.OK)
+
+    # ---- /api/system/resources (PR-DIAG, anon read) ---------------------
+    @app.get("/api/system/resources")
+    async def system_resources() -> JSONResponse:
+        snap = await asyncio.to_thread(
+            resources_mod.snapshot,
+            disk_check_path=cfg.disk_check_path,
+        )
+        return JSONResponse(_resources_view(snap), status_code=HTTPStatus.OK)
+
+    # ---- /api/logs/tail (PR-DIAG, anon read) ----------------------------
+    @app.get("/api/logs/tail")
+    async def logs_tail(
+        unit: str,
+        n: int = LOGS_TAIL_DEFAULT_N,
+    ) -> JSONResponse:
+        # FastAPI Pydantic validation on `n` lives at the LogsTailQuery
+        # shape; FastAPI surfaces parse failures as 422 — mirrored at the
+        # SPA via apiFetch. Server-side we rely on logs.tail() to enforce
+        # ge=1 / le=LOGS_TAIL_MAX_N (defense in depth + n>cap clamps to
+        # cap with a WARN log).
+        try:
+            # Build the query model so Field(ge=1, le=...) validation runs.
+            params = LogsTailQuery(unit=unit, n=n)
+            lines = await asyncio.to_thread(
+                logs_mod.tail,
+                params.unit,
+                params.n,
+            )
+        except logs_mod.UnknownService as e:
+            return _map_logs_exc_to_response(e)
+        except ValueError as e:
+            return JSONResponse(
+                {"ok": False, "err": "bad_n", "detail": str(e)},
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+        except logs_mod.CommandTimeout as e:
+            return _map_logs_exc_to_response(e)
+        except logs_mod.CommandFailed as e:
+            return _map_logs_exc_to_response(e)
+        return JSONResponse(lines, status_code=HTTPStatus.OK)
+
+    # ---- /api/diag/stream (PR-DIAG, anon read SSE) ----------------------
+    @app.get("/api/diag/stream")
+    async def diag_stream() -> StreamingResponse:
+        # Each subscriber owns its own UDS client (mirrors last_pose_stream
+        # / last_scan_stream pattern). Multiplexed frame: pose + jitter +
+        # amcl_rate + resources, 5 Hz cadence.
+        sub_client = uds_mod.UdsClient(cfg.uds_socket)
+        return StreamingResponse(
+            sse_mod.diag_stream(sub_client, cfg),
             media_type=_SSE_MEDIA_TYPE,
             headers=sse_mod.SSE_RESPONSE_HEADERS,
         )

@@ -365,6 +365,51 @@ target_link_libraries(test_uds_server PRIVATE
 add_test(NAME test_uds_server COMMAND test_uds_server)
 set_tests_properties(test_uds_server PROPERTIES LABELS "hardware-free")
 
+# ----------------------------------------------------------------------------
+# PR-DIAG (Track B-DIAG) — diagnostics page hardware-free tests.
+# - test_jitter_ring         — 1W/1R round-trip + wraparound + content invariant.
+# - test_jitter_stats        — percentile + summary correctness.
+# - test_amcl_rate           — Seqlock<AmclRateRecord> 1W/1R + monotonicity.
+# - test_diag_publisher      — virtual-clock per-tick publish + sentinel paths.
+# - test_cold_writer_amcl_rate_records — cold writer kernels record exactly once.
+# ----------------------------------------------------------------------------
+
+add_executable(test_jitter_ring test_jitter_ring.cpp)
+target_link_libraries(test_jitter_ring PRIVATE
+    doctest::doctest godo_core godo_rt)
+add_test(NAME test_jitter_ring COMMAND test_jitter_ring)
+set_tests_properties(test_jitter_ring PROPERTIES LABELS "hardware-free")
+
+add_executable(test_jitter_stats test_jitter_stats.cpp)
+target_link_libraries(test_jitter_stats PRIVATE
+    doctest::doctest godo_core godo_rt)
+add_test(NAME test_jitter_stats COMMAND test_jitter_stats)
+set_tests_properties(test_jitter_stats PROPERTIES LABELS "hardware-free")
+
+add_executable(test_amcl_rate test_amcl_rate.cpp)
+target_link_libraries(test_amcl_rate PRIVATE
+    doctest::doctest godo_core godo_rt)
+add_test(NAME test_amcl_rate COMMAND test_amcl_rate)
+set_tests_properties(test_amcl_rate PROPERTIES LABELS "hardware-free")
+
+add_executable(test_diag_publisher test_diag_publisher.cpp)
+target_link_libraries(test_diag_publisher PRIVATE
+    doctest::doctest godo_core godo_rt)
+add_test(NAME test_diag_publisher COMMAND test_diag_publisher)
+set_tests_properties(test_diag_publisher PROPERTIES LABELS "hardware-free")
+
+add_executable(test_cold_writer_amcl_rate_records
+    test_cold_writer_amcl_rate_records.cpp)
+target_link_libraries(test_cold_writer_amcl_rate_records PRIVATE
+    doctest::doctest godo_localization godo_core godo_lidar godo_rt)
+target_compile_definitions(test_cold_writer_amcl_rate_records PRIVATE
+    GODO_FIXTURES_MAPS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/maps"
+)
+add_test(NAME test_cold_writer_amcl_rate_records
+    COMMAND test_cold_writer_amcl_rate_records)
+set_tests_properties(test_cold_writer_amcl_rate_records PROPERTIES
+    LABELS "hardware-free")
+
 # End-to-end replay: spawns the real godo_tracker_rt binary, so it
 # depends on that target being built first.
 add_executable(test_rt_replay test_rt_replay.cpp)

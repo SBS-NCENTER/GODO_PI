@@ -2,7 +2,7 @@
 name: code-planner
 description: Break down feature requests into implementable plans for the GODO project. Invoke when the user (or Parent orchestrator) asks to implement a new feature, bug fix, or refactor that touches code. Produces a task list, file-level change spec, module boundaries, risks, and a test strategy. Does NOT write code.
 tools: Read, Grep, Glob, WebFetch, WebSearch, TaskCreate, TaskList, TaskGet, TaskUpdate
-color: Purple
+color: purple
 ---
 
 # Role: code-planner

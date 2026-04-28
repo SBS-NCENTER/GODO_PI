@@ -4,6 +4,7 @@
 add_library(godo_core STATIC
     rt_flags.cpp
     config.cpp
+    hot_config.cpp
 )
 
 target_include_directories(godo_core PUBLIC

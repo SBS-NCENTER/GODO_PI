@@ -53,6 +53,8 @@ Request parse_request(std::string_view line) {
 
     bool got_cmd  = false;
     bool got_mode = false;
+    bool got_key  = false;
+    bool got_val  = false;
     bool first    = true;
 
     while (true) {
@@ -85,6 +87,14 @@ Request parse_request(std::string_view line) {
             if (got_mode) return {};
             req.mode_arg = std::move(value);
             got_mode = true;
+        } else if (key == "key") {
+            if (got_key) return {};
+            req.key_arg = std::move(value);
+            got_key = true;
+        } else if (key == "value") {
+            if (got_val) return {};
+            req.value_arg = std::move(value);
+            got_val = true;
         } else {
             return {};                   // unknown key
         }
@@ -348,6 +358,46 @@ bool parse_mode_arg(std::string_view arg, godo::rt::AmclMode& out) noexcept {
     if (arg == "OneShot") { out = godo::rt::AmclMode::OneShot; return true; }
     if (arg == "Live")    { out = godo::rt::AmclMode::Live;    return true; }
     return false;
+}
+
+// Track B-CONFIG (PR-CONFIG-α) — set/get config + schema response shapes.
+// The body of get_config / get_config_schema is rendered by config/apply.cpp
+// (which owns the schema iteration); this layer wraps it in the canonical
+// {"ok":true, ...} envelope.
+std::string format_ok_set_config(std::string_view reload_class) {
+    std::string s = "{\"ok\":true,\"reload_class\":\"";
+    s.append(reload_class);
+    s.append("\"}\n");
+    return s;
+}
+
+std::string format_ok_get_config(std::string_view body_json) {
+    std::string s = "{\"ok\":true,\"keys\":";
+    s.append(body_json);
+    s.append("}\n");
+    return s;
+}
+
+std::string format_ok_get_config_schema(std::string_view body_json) {
+    std::string s = "{\"ok\":true,\"schema\":";
+    s.append(body_json);
+    s.append("}\n");
+    return s;
+}
+
+std::string format_err_with_detail(std::string_view code,
+                                   std::string_view detail) {
+    std::string s = "{\"ok\":false,\"err\":\"";
+    s.append(code);
+    s.append("\",\"detail\":\"");
+    // ASCII-only detail (validator strips non-ASCII; backslash-escape
+    // any embedded quote / backslash defensively).
+    for (char c : detail) {
+        if (c == '"' || c == '\\') s.push_back('\\');
+        s.push_back(c);
+    }
+    s.append("\"}\n");
+    return s;
 }
 
 }  // namespace godo::uds

@@ -12,4 +12,5 @@ target_link_libraries(godo_tracker_rt PRIVATE
     godo_localization
     godo_gpio
     godo_uds
+    godo_config
 )

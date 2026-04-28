@@ -25,10 +25,13 @@ namespace godo::uds {
 
 // Parsed request. `cmd.empty()` indicates a parse failure; the caller
 // returns format_err("parse_error") to the client. `mode_arg` is only
-// populated when `cmd == "set_mode"`.
+// populated when `cmd == "set_mode"`. `key_arg` + `value_arg` are only
+// populated when `cmd == "set_config"` (Track B-CONFIG / PR-CONFIG-α).
 struct Request {
     std::string cmd;
     std::string mode_arg;
+    std::string key_arg;
+    std::string value_arg;
 };
 
 // Parse one request line. Tolerates trailing whitespace / newline.
@@ -100,6 +103,21 @@ std::string format_ok_jitter(const godo::rt::JitterSnapshot& j);
 //   - published_mono_ns           → %llu   (uint64)
 //   - valid                       → %u
 std::string format_ok_amcl_rate(const godo::rt::AmclIterationRate& r);
+
+// Track B-CONFIG (PR-CONFIG-α) — `set_config` reply. The `body_json`
+// argument is the pre-rendered JSON payload (see config/apply.cpp's
+// apply_get_all / apply_get_schema for the get-side encoders). On
+// `set_config` the wire reply carries the resolved reload class so the
+// SPA can decide whether to show the restart-pending banner.
+std::string format_ok_set_config(std::string_view reload_class);
+std::string format_ok_get_config(std::string_view body_json);
+std::string format_ok_get_config_schema(std::string_view body_json);
+
+// Track B-CONFIG (PR-CONFIG-α) — `set_config` rejection with detail.
+// The validator surfaces both an `err` code and a per-key `detail`
+// string; the client renders detail inline next to the failed input.
+std::string format_err_with_detail(std::string_view code,
+                                   std::string_view detail);
 
 // Convert AmclMode → string used in the wire protocol. Inverse of
 // `parse_mode_arg` below. Returns "Idle" for unknown values for safety.

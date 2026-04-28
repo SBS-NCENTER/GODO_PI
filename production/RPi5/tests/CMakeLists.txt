@@ -410,6 +410,59 @@ add_test(NAME test_cold_writer_amcl_rate_records
 set_tests_properties(test_cold_writer_amcl_rate_records PROPERTIES
     LABELS "hardware-free")
 
+# ----------------------------------------------------------------------------
+# Track B-CONFIG (PR-CONFIG-α) — config edit pipeline.
+# - test_config_schema       : 37-row table integrity (ordering, uniqueness,
+#                              reload-class lookup, M2 fold pins).
+# - test_config_validate     : per-row validate() type/range/error matrix.
+# - test_atomic_toml_writer  : happy + ParentNotWritable + on-disk state pins
+#                              (TB2 fold).
+# - test_restart_pending     : touch / clear / idempotence.
+# - test_hot_config          : sizeof(HotConfig) == 40 (M1 fold) + snapshot.
+# - test_config_apply        : apply_set per reload-class + apply_get_*.
+# - test_set_config_e2e_ipc  : full UDS round-trip; no webctl.
+# ----------------------------------------------------------------------------
+
+add_executable(test_config_schema test_config_schema.cpp)
+target_link_libraries(test_config_schema PRIVATE doctest::doctest godo_core)
+add_test(NAME test_config_schema COMMAND test_config_schema)
+set_tests_properties(test_config_schema PROPERTIES LABELS "hardware-free")
+
+add_executable(test_config_validate test_config_validate.cpp)
+target_link_libraries(test_config_validate PRIVATE
+    doctest::doctest godo_core godo_config)
+add_test(NAME test_config_validate COMMAND test_config_validate)
+set_tests_properties(test_config_validate PROPERTIES LABELS "hardware-free")
+
+add_executable(test_atomic_toml_writer test_atomic_toml_writer.cpp)
+target_link_libraries(test_atomic_toml_writer PRIVATE
+    doctest::doctest godo_core godo_config)
+add_test(NAME test_atomic_toml_writer COMMAND test_atomic_toml_writer)
+set_tests_properties(test_atomic_toml_writer PROPERTIES LABELS "hardware-free")
+
+add_executable(test_restart_pending test_restart_pending.cpp)
+target_link_libraries(test_restart_pending PRIVATE
+    doctest::doctest godo_core godo_config)
+add_test(NAME test_restart_pending COMMAND test_restart_pending)
+set_tests_properties(test_restart_pending PROPERTIES LABELS "hardware-free")
+
+add_executable(test_hot_config test_hot_config.cpp)
+target_link_libraries(test_hot_config PRIVATE doctest::doctest godo_core)
+add_test(NAME test_hot_config COMMAND test_hot_config)
+set_tests_properties(test_hot_config PROPERTIES LABELS "hardware-free")
+
+add_executable(test_config_apply test_config_apply.cpp)
+target_link_libraries(test_config_apply PRIVATE
+    doctest::doctest godo_core godo_config)
+add_test(NAME test_config_apply COMMAND test_config_apply)
+set_tests_properties(test_config_apply PROPERTIES LABELS "hardware-free")
+
+add_executable(test_set_config_e2e_ipc test_set_config_e2e_ipc.cpp)
+target_link_libraries(test_set_config_e2e_ipc PRIVATE
+    doctest::doctest godo_core godo_config godo_uds)
+add_test(NAME test_set_config_e2e_ipc COMMAND test_set_config_e2e_ipc)
+set_tests_properties(test_set_config_e2e_ipc PROPERTIES LABELS "hardware-free")
+
 # End-to-end replay: spawns the real godo_tracker_rt binary, so it
 # depends on that target being built first.
 add_executable(test_rt_replay test_rt_replay.cpp)

@@ -143,6 +143,13 @@ TEST_CASE("write_atomic: read-only parent → ParentNotWritable (Mode-A S1)") {
     CHECK(read_file(target) == pre_body);
     // Mode-A TB2 (b): no .tracker.toml.* tmp leftovers.
     CHECK_FALSE(any_tmp_leftover(td.path));
+    // Mode-B S1 deferral note: the matching on-disk-state assertions for
+    // the other 4 WriteOutcome variants (Mkstemp/Write/Fsync/Rename
+    // failures) require an fd-factory mock seam that ships in PR-CONFIG-β.
+    // Until then, ParentNotWritable is the only variant exercised end-to-
+    // end by file-mode injection (chmod parent to 0500). The remaining
+    // variants ARE pinned by `outcome_to_string` round-trip + the
+    // `unlink-tmp-on-failure` invariant in the cleanup path.
 }
 
 TEST_CASE("write_atomic: target file content is exactly the request body") {

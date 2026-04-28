@@ -1141,6 +1141,76 @@ async def test_activate_reserved_name_returns_400_with_detail(
     assert body.get("detail") == "reserved_name"
 
 
+# Endpoint-layer rejection corpus for activate / delete (Mode-B Nit #3).
+# Mirrors the image / yaml corpus pattern at :969-1022 — string literals
+# (NOT parametrize) so a regression message names the input that escaped.
+# Per Mode-A TB1 routing-vs-handler discipline, FastAPI's path routing
+# may convert some inputs to 404 (e.g. encoded slashes that the router
+# unwraps into a different path) BEFORE the handler runs; the assertions
+# accept either 400 (handler-layer regex reject via maps.validate_name)
+# or 404 (routing-layer reject before handler) and document why. Either
+# outcome is a valid rejection; only 200/2xx would be a real escape.
+
+
+async def test_activate_dot_traversal_returns_400(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    tmp_maps_dir: Path,
+) -> None:
+    """Path-traversal corpus for /activate: `..%2Fetc%2Fpasswd` (URL-encoded
+    slash) and `foo.pgm` (literal dot escape). The first variant is
+    decoded by httpx/Starlette path normalization; depending on the
+    runtime, the URL collapses to a route that does not match the
+    `/api/maps/{name}/activate` template at all, surfacing as 404 (no
+    route) or 405 (parent path matched with a different method). Either
+    routing-layer rejection is acceptable; only a 200/2xx on a traversal
+    name would be a real escape. The literal `foo.pgm` variant DOES
+    reach the handler (no slash) and must 400 via the regex."""
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        maps_dir=tmp_maps_dir,
+    )
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r1 = await cl.post(
+            "/api/maps/..%2Fetc%2Fpasswd/activate",
+            headers=_auth(token),
+        )
+        assert r1.status_code in (
+            HTTPStatus.BAD_REQUEST,
+            HTTPStatus.NOT_FOUND,
+            HTTPStatus.METHOD_NOT_ALLOWED,
+        ), r1.text
+        if r1.status_code == HTTPStatus.BAD_REQUEST:
+            assert r1.json()["err"] == "invalid_map_name"
+        # Variant 2: literal `foo.pgm` — router passes through, handler
+        # MUST reject via the regex (no `.` allowed in MAPS_NAME_REGEX).
+        r2 = await cl.post("/api/maps/foo.pgm/activate", headers=_auth(token))
+    assert r2.status_code == HTTPStatus.BAD_REQUEST
+    assert r2.json()["err"] == "invalid_map_name"
+
+
+async def test_activate_hidden_dot_returns_400(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    tmp_maps_dir: Path,
+) -> None:
+    """Leading-dot corpus for /activate: `.hidden` MUST 400 via regex."""
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        maps_dir=tmp_maps_dir,
+    )
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post("/api/maps/.hidden/activate", headers=_auth(token))
+    assert r.status_code == HTTPStatus.BAD_REQUEST
+    assert r.json()["err"] == "invalid_map_name"
+
+
 async def test_activate_writes_activity_log(
     tmp_path: Path,
     tmp_map_pair: Path,
@@ -1237,6 +1307,64 @@ async def test_delete_unknown_returns_404(
     assert r.status_code == HTTPStatus.NOT_FOUND
 
 
+# Delete-side rejection corpus (Mode-B Nit #3) — mirrors activate.
+# Same router-vs-handler discipline: 400 (handler regex reject) and 404
+# (router reject before handler) are both valid rejection outcomes.
+
+
+async def test_delete_dot_traversal_returns_400(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    tmp_maps_dir: Path,
+) -> None:
+    """Path-traversal corpus for DELETE: encoded slash + literal `.pgm`
+    suffix. The encoded-slash variant collapses to a non-matching route
+    (404/405) or reaches the handler (400); all are valid rejections.
+    The literal `foo.pgm` case reaches the handler and must 400 via
+    regex."""
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        maps_dir=tmp_maps_dir,
+    )
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r1 = await cl.delete(
+            "/api/maps/..%2Fetc%2Fpasswd",
+            headers=_auth(token),
+        )
+        assert r1.status_code in (
+            HTTPStatus.BAD_REQUEST,
+            HTTPStatus.NOT_FOUND,
+            HTTPStatus.METHOD_NOT_ALLOWED,
+        ), r1.text
+        if r1.status_code == HTTPStatus.BAD_REQUEST:
+            assert r1.json()["err"] == "invalid_map_name"
+        r2 = await cl.delete("/api/maps/foo.pgm", headers=_auth(token))
+    assert r2.status_code == HTTPStatus.BAD_REQUEST
+    assert r2.json()["err"] == "invalid_map_name"
+
+
+async def test_delete_hidden_dot_returns_400(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    tmp_maps_dir: Path,
+) -> None:
+    """Leading-dot corpus for DELETE: `.hidden` MUST 400 via regex."""
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        maps_dir=tmp_maps_dir,
+    )
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.delete("/api/maps/.hidden", headers=_auth(token))
+    assert r.status_code == HTTPStatus.BAD_REQUEST
+    assert r.json()["err"] == "invalid_map_name"
+
+
 # ---- /api/map/image now resolves through active symlink (back-compat) ----
 
 
@@ -1315,3 +1443,64 @@ def test_lifespan_legacy_migration_creates_active_symlink(
     # is skipped — settings being constructable validates the
     # `maps_dir` field is wired into Settings (drift check).
     assert s.maps_dir == maps_dir
+
+
+def test_lifespan_warns_every_boot_when_map_path_set(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Mode-B Nit #4 / Q-OQ-E4: when `cfg.map_path` exists, every webctl
+    lifespan startup MUST emit `maps.legacy_map_path_in_use` at WARNING.
+    Operators read journals selectively — a one-shot warning is easy to
+    miss. This test boots the app twice via Starlette's `TestClient`
+    (which drives the ASGI lifespan protocol) and asserts the warning
+    fires on BOTH boots."""
+    import logging
+
+    from fastapi.testclient import TestClient
+
+    legacy_dir = tmp_path / "etc_godo_maps"
+    legacy_dir.mkdir()
+    legacy_pgm = legacy_dir / "studio_v1.pgm"
+    legacy_yaml = legacy_dir / "studio_v1.yaml"
+    legacy_pgm.write_bytes(b"P5\n4 4\n255\n" + bytes([128] * 16))
+    legacy_yaml.write_text(
+        "image: studio_v1.pgm\nresolution: 0.05\norigin: [0,0,0]\n"
+        "occupied_thresh: 0.65\nfree_thresh: 0.196\nnegate: 0\n",
+    )
+
+    maps_dir = tmp_path / "var_lib_godo_maps"
+    maps_dir.mkdir()
+
+    s = Settings(
+        host="127.0.0.1",
+        port=0,
+        uds_socket=tmp_path / "u.sock",
+        backup_dir=tmp_path / "bk",
+        map_path=legacy_pgm,
+        maps_dir=maps_dir,
+        health_uds_timeout_s=1.0,
+        calibrate_uds_timeout_s=1.0,
+        jwt_secret_path=tmp_path / "jwt",
+        users_file=tmp_path / "users.json",
+        spa_dist=None,
+        chromium_loopback_only=True,
+    )
+
+    def _boot_and_count_warns() -> int:
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="godo_webctl"):
+            app = create_app(s)
+            with TestClient(app):
+                pass  # entering the ctx triggers lifespan startup
+        return sum(
+            1
+            for rec in caplog.records
+            if rec.levelno == logging.WARNING and "maps.legacy_map_path_in_use" in rec.getMessage()
+        )
+
+    # First boot — migration runs AND the every-boot warn fires.
+    assert _boot_and_count_warns() == 1
+    # Second boot — migration is a no-op (active.pgm now exists), but
+    # the every-boot warn MUST still fire while cfg.map_path is set.
+    assert _boot_and_count_warns() == 1

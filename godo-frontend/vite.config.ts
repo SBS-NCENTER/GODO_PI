@@ -38,9 +38,7 @@ export default defineConfig({
     target: 'es2022',
     chunkSizeWarningLimit: 250,
   },
-  test: {
-    environment: 'jsdom',
-    globals: false,
-    include: ['tests/unit/**/*.test.ts'],
-  },
+  // Test config lives in `vitest.config.ts` (separate file because the
+  // svelte plugin needs different preprocess options under vitest — see
+  // the comment block in that file).
 });

@@ -93,6 +93,36 @@ async def last_pose_stream(
             elapsed_since_keepalive = 0.0
 
 
+async def last_scan_stream(
+    client: uds_mod.UdsClient,
+    cfg: Settings,  # noqa: ARG001 — reserved for future per-stream tuning
+    *,
+    sleep: SleepCallable = asyncio.sleep,
+) -> AsyncIterator[bytes]:
+    """Track D — 5 Hz get_last_scan poller. Identical lifecycle/error
+    pattern to ``last_pose_stream``: one frame per tick or skip on
+    tracker fault, heartbeat every ``SSE_HEARTBEAT_S`` of virtual time,
+    cancel-safe."""
+    elapsed_since_keepalive = 0.0
+    while True:
+        try:
+            resp = await uds_mod.call_uds(client.get_last_scan, SSE_UDS_TIMEOUT_S)
+            yield _sse_event(resp)
+        except asyncio.CancelledError:
+            raise
+        except uds_mod.UdsError as e:
+            logger.debug("sse.last_scan_uds_error: %s", e)
+            # Skip this frame; loop continues.
+        try:
+            await sleep(SSE_TICK_S)
+        except asyncio.CancelledError:
+            raise
+        elapsed_since_keepalive += SSE_TICK_S
+        if elapsed_since_keepalive >= SSE_HEARTBEAT_S:
+            yield _sse_keepalive()
+            elapsed_since_keepalive = 0.0
+
+
 async def services_stream(
     cfg: Settings,  # noqa: ARG001 — reserved for future per-stream tuning
     *,

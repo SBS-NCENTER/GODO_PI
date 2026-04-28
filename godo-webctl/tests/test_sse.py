@@ -152,6 +152,72 @@ async def test_services_stream_keepalive_after_heartbeat_window() -> None:
     assert any(c == b": keepalive\n\n" for c in chunks)
 
 
+# ---- last_scan_stream (Track D) -----------------------------------------
+
+
+def _canned_scan() -> dict[str, object]:
+    """Minimal valid LastScan-shape dict the SSE test pumps through."""
+    return {
+        "ok": True,
+        "valid": 1,
+        "forced": 0,
+        "pose_valid": 1,
+        "iterations": 7,
+        "published_mono_ns": 1_000_000_000,
+        "pose_x_m": 1.5,
+        "pose_y_m": 2.0,
+        "pose_yaw_deg": 45.0,
+        "n": 2,
+        "angles_deg": [0.0, 0.5],
+        "ranges_m": [1.0, 1.5],
+    }
+
+
+async def test_last_scan_stream_emits_5hz_sleep_sequence() -> None:
+    """Sleep sequence is `[0.2, 0.2, 0.2]` → 5 Hz cadence by construction."""
+    sleep = RecordingSleep(max_calls=3)
+    fake_client = mock.MagicMock(spec=uds_client.UdsClient)
+    fake_client.get_last_scan.return_value = _canned_scan()
+    chunks = await _drain(sse.last_scan_stream(fake_client, _settings(), sleep=sleep))
+    assert sleep.calls == [SSE_TICK_S, SSE_TICK_S, SSE_TICK_S]
+    assert any(c.startswith(b"data:") for c in chunks)
+
+
+async def test_last_scan_stream_skips_frame_on_uds_error() -> None:
+    """Tracker-down: get_last_scan raises → no frame emitted that tick,
+    generator stays alive."""
+    sleep = RecordingSleep(max_calls=2)
+    fake_client = mock.MagicMock(spec=uds_client.UdsClient)
+    fake_client.get_last_scan.side_effect = uds_client.UdsUnreachable("down")
+    chunks = await _drain(sse.last_scan_stream(fake_client, _settings(), sleep=sleep))
+    assert sleep.calls == [SSE_TICK_S, SSE_TICK_S]
+    assert all(not c.startswith(b"data:") for c in chunks)
+
+
+async def test_last_scan_stream_emits_keepalive_after_heartbeat_window() -> None:
+    """Keepalive comment line must appear once virtual elapsed time
+    crosses SSE_HEARTBEAT_S."""
+    n_ticks_to_keepalive = int(SSE_HEARTBEAT_S / SSE_TICK_S) + 1
+    sleep = RecordingSleep(max_calls=n_ticks_to_keepalive + 1)
+    fake_client = mock.MagicMock(spec=uds_client.UdsClient)
+    fake_client.get_last_scan.return_value = _canned_scan()
+    chunks = await _drain(sse.last_scan_stream(fake_client, _settings(), sleep=sleep))
+    assert any(c == b": keepalive\n\n" for c in chunks)
+
+
+async def test_last_scan_stream_cancellation_propagates() -> None:
+    """Cancelling the injected sleep terminates the loop within one tick."""
+
+    async def cancel_immediately(_d: float) -> None:
+        raise asyncio.CancelledError()
+
+    fake_client = mock.MagicMock(spec=uds_client.UdsClient)
+    fake_client.get_last_scan.return_value = _canned_scan()
+    with pytest.raises(asyncio.CancelledError):
+        async for _ in sse.last_scan_stream(fake_client, _settings(), sleep=cancel_immediately):
+            pass
+
+
 # ---- response headers ---------------------------------------------------
 
 

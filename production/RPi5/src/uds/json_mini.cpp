@@ -4,6 +4,8 @@
 #include <cstdio>
 #include <string>
 
+#include "core/constants.hpp"
+
 namespace godo::uds {
 
 namespace {
@@ -160,6 +162,113 @@ std::string format_ok_pose(const godo::rt::LastPose& p) {
                             ? sizeof(buf) - 1
                             : static_cast<std::size_t>(n);
     return std::string(buf, len);
+}
+
+// Field order pin — MUST match godo::rt::LastScan declaration in
+// core/rt_types.hpp. The Python mirror godo-webctl/protocol.py::
+// LAST_SCAN_HEADER_FIELDS is regex-extracted from rt_types.hpp at
+// test time (tests/test_protocol.py drift pin). Touching the field
+// names or order here without updating rt_types.hpp + the Python
+// mirror breaks the drift pin; touch all three in the same commit.
+//
+// Precision split (Track D):
+//   - pose anchors  → %.6f  (µm / µdeg)
+//   - ranges_m[i]   → %.4f  (0.1 mm; below C1 ~25 mm noise floor)
+//   - angles_deg[i] → %.4f  (0.0001°; below C1 ~0.36° step)
+//   - published_mono_ns → %llu (uint64_t)
+//   - iterations    → %d
+//   - flags         → %u    (uint8_t → unsigned int)
+//
+// Worst-case payload size pin: header (~250 B) + 720 angles × ~12 B
+// + array structure + 720 ranges × ~12 B ≈ 17.5 KiB. JSON_SCRATCH_BYTES
+// (24 KiB) leaves >35% headroom; the static_assert below catches a
+// future precision bump that would push past the cap.
+std::string format_ok_scan(const godo::rt::LastScan& s) {
+    static_assert(godo::constants::JSON_SCRATCH_BYTES >= 24576,
+                  "format_ok_scan worst case requires >= 24 KiB scratch");
+    char buf[godo::constants::JSON_SCRATCH_BYTES];
+
+    // Clamp `n` at the wire cap. The cold writer applies the same
+    // bound at publish time, so this is a defence-in-depth — a malformed
+    // snapshot from a future regression cannot blow the buffer.
+    const std::size_t n = (s.n > godo::constants::LAST_SCAN_RANGES_MAX)
+        ? static_cast<std::size_t>(godo::constants::LAST_SCAN_RANGES_MAX)
+        : static_cast<std::size_t>(s.n);
+
+    int wrote = std::snprintf(buf, sizeof(buf),
+        "{\"ok\":true,\"valid\":%u,\"forced\":%u,\"pose_valid\":%u,"
+        "\"iterations\":%d,\"published_mono_ns\":%llu,"
+        "\"pose_x_m\":%.6f,\"pose_y_m\":%.6f,\"pose_yaw_deg\":%.6f,"
+        "\"n\":%u,\"angles_deg\":[",
+        static_cast<unsigned>(s.valid),
+        static_cast<unsigned>(s.forced),
+        static_cast<unsigned>(s.pose_valid),
+        static_cast<int>(s.iterations),
+        static_cast<unsigned long long>(s.published_mono_ns),
+        s.pose_x_m, s.pose_y_m, s.pose_yaw_deg,
+        static_cast<unsigned>(n));
+    if (wrote <= 0 || static_cast<std::size_t>(wrote) >= sizeof(buf)) {
+        return std::string("{\"ok\":true,\"valid\":0,\"forced\":0,"
+            "\"pose_valid\":0,\"iterations\":-1,\"published_mono_ns\":0,"
+            "\"pose_x_m\":0.000000,\"pose_y_m\":0.000000,"
+            "\"pose_yaw_deg\":0.000000,\"n\":0,\"angles_deg\":[],"
+            "\"ranges_m\":[]}\n");
+    }
+    std::size_t pos = static_cast<std::size_t>(wrote);
+
+    // angles_deg array body.
+    for (std::size_t i = 0; i < n; ++i) {
+        const char* sep = (i == 0) ? "" : ",";
+        const int w = std::snprintf(buf + pos, sizeof(buf) - pos,
+            "%s%.4f", sep, s.angles_deg[i]);
+        if (w <= 0 || static_cast<std::size_t>(w) >= sizeof(buf) - pos) {
+            // Truncation guard: emit a structurally valid but empty reply
+            // rather than a half-formed JSON line.
+            return std::string("{\"ok\":true,\"valid\":0,\"forced\":0,"
+                "\"pose_valid\":0,\"iterations\":-1,\"published_mono_ns\":0,"
+                "\"pose_x_m\":0.000000,\"pose_y_m\":0.000000,"
+                "\"pose_yaw_deg\":0.000000,\"n\":0,\"angles_deg\":[],"
+                "\"ranges_m\":[]}\n");
+        }
+        pos += static_cast<std::size_t>(w);
+    }
+
+    int w = std::snprintf(buf + pos, sizeof(buf) - pos, "],\"ranges_m\":[");
+    if (w <= 0 || static_cast<std::size_t>(w) >= sizeof(buf) - pos) {
+        return std::string("{\"ok\":true,\"valid\":0,\"forced\":0,"
+            "\"pose_valid\":0,\"iterations\":-1,\"published_mono_ns\":0,"
+            "\"pose_x_m\":0.000000,\"pose_y_m\":0.000000,"
+            "\"pose_yaw_deg\":0.000000,\"n\":0,\"angles_deg\":[],"
+            "\"ranges_m\":[]}\n");
+    }
+    pos += static_cast<std::size_t>(w);
+
+    // ranges_m array body.
+    for (std::size_t i = 0; i < n; ++i) {
+        const char* sep = (i == 0) ? "" : ",";
+        const int rw = std::snprintf(buf + pos, sizeof(buf) - pos,
+            "%s%.4f", sep, s.ranges_m[i]);
+        if (rw <= 0 || static_cast<std::size_t>(rw) >= sizeof(buf) - pos) {
+            return std::string("{\"ok\":true,\"valid\":0,\"forced\":0,"
+                "\"pose_valid\":0,\"iterations\":-1,\"published_mono_ns\":0,"
+                "\"pose_x_m\":0.000000,\"pose_y_m\":0.000000,"
+                "\"pose_yaw_deg\":0.000000,\"n\":0,\"angles_deg\":[],"
+                "\"ranges_m\":[]}\n");
+        }
+        pos += static_cast<std::size_t>(rw);
+    }
+
+    const int closer = std::snprintf(buf + pos, sizeof(buf) - pos, "]}\n");
+    if (closer <= 0 || static_cast<std::size_t>(closer) >= sizeof(buf) - pos) {
+        return std::string("{\"ok\":true,\"valid\":0,\"forced\":0,"
+            "\"pose_valid\":0,\"iterations\":-1,\"published_mono_ns\":0,"
+            "\"pose_x_m\":0.000000,\"pose_y_m\":0.000000,"
+            "\"pose_yaw_deg\":0.000000,\"n\":0,\"angles_deg\":[],"
+            "\"ranges_m\":[]}\n");
+    }
+    pos += static_cast<std::size_t>(closer);
+
+    return std::string(buf, pos);
 }
 
 std::string_view mode_to_string(godo::rt::AmclMode mode) noexcept {

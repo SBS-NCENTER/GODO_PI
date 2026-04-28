@@ -318,6 +318,46 @@ by ABC. Reuses invariant (a)'s no-ABC philosophy across the localization
 module. Pinned by `cold_writer.cpp`'s no-mutex / no-virtual posture and
 by code review on `src/localization/`. Added 2026-04-26 with Wave 2.
 
+### (g) Track D — `last_scan_seq` publisher seam (build-grep enforced)
+
+Two new build-time greps enforce the Track D hot-path isolation contract
+(added 2026-04-29 with Track D):
+
+- **`[scan-publisher-grep]`** — only `src/localization/cold_writer.cpp`
+  and `src/godo_tracker_rt/main.cpp` may contain `last_scan_seq.store(...)`
+  references. main.cpp is allowed exactly ONE call (the boot-time
+  sentinel-iterations init that mirrors `last_pose_seq`'s init pattern);
+  any second call there or any reference outside this allow-list FAILS
+  the build. The cold writer is the SOLE runtime publisher of LastScan;
+  the Seqlock single-writer contract relies on this.
+- **`[hot-path-isolation-grep]`** — Thread D's body in `main.cpp` (the
+  SCHED_FIFO 59.94 Hz UDP send loop) MUST NOT reference `last_scan_seq`.
+  An awk state machine extracts the body of `void thread_d_rt(...)` and
+  greps for the seqlock identifier; any hit FAILS the build. Without
+  this gate, a future refactor could couple the hot path to a 11 KiB
+  seqlock copy.
+
+Both greps live in `scripts/build.sh` alongside the existing
+`[m1-no-mutex]` (cold writer wait-free) and `[rt-alloc-grep]` (hot path
+no-heap) gates.
+
+### (h) Track D — `LastScan` cross-language SSOT
+
+`godo::rt::LastScan` (`core/rt_types.hpp`) is the canonical struct.
+`uds/json_mini.cpp::format_ok_scan` mirrors the field order on the wire.
+The Python mirror `godo-webctl/src/godo_webctl/protocol.py::
+LAST_SCAN_HEADER_FIELDS` is regex-extracted from `rt_types.hpp` (NOT
+from `format_ok_scan`) at test time — `rt_types.hpp` is the SSOT for
+field NAMES; `format_ok_scan` is the SSOT for wire ORDER.
+
+Editing any one of (struct decl, format string, Python tuple, TS tuple
+in `lib/protocol.ts`) without the others fails one of:
+- C++ `static_assert sizeof(LastScan) == 11568` (struct shape pin),
+- `tests/test_protocol.py::test_last_scan_header_fields_match_cpp_source`
+  (Python regex pin against rt_types.hpp),
+- TS by-inspection during code review (per
+  `godo-frontend/CODEBASE.md` invariant (l)).
+
 ### Known scaffolding
 
 - (Removed 2026-04-26 with Wave 2.) `thread_stub_cold_writer` and the
@@ -2144,3 +2184,74 @@ production/RPi5/systemd/
   a single recv with deserialization in C++; current Python `json.loads`
   is fine for 2 Hz polling but may show up under high-frequency mass
   pose-dump experiments.
+
+## 2026-04-29 — Track D: Live LIDAR overlay (Phase 4.5+ P0.5)
+
+### Added
+
+- `src/core/rt_types.hpp::godo::rt::LastScan` — 11 568 B fixed-size POD
+  carrying anchor pose + flags + parallel `angles_deg[720]` /
+  `ranges_m[720]` arrays. `static_assert sizeof == 11568` pins the
+  layout. Trivially copyable (Seqlock<T> requirement).
+- `src/core/constants.hpp` — `LAST_SCAN_RANGES_MAX = 720` (Tier-1,
+  mirrors SCAN_BEAMS_MAX) + `JSON_SCRATCH_BYTES = 24576` (formatter
+  scratch budget for `format_ok_scan` worst case).
+- `src/uds/json_mini.{hpp,cpp}::format_ok_scan(const LastScan&)` —
+  mirrors `format_ok_pose` shape; `%.4f` for ranges + angles, `%.6f`
+  for pose anchors, truncation guards on every snprintf.
+- `src/uds/uds_server.{hpp,cpp}` — `LastScanGetter` typedef + new
+  `get_last_scan` cmd branch in `handle_one_request` + 5th constructor
+  parameter. Null-callback returns `valid=0,n=0,iterations=-1`.
+- `src/localization/cold_writer.{hpp,cpp}` — `run_one_iteration` and
+  `run_live_iteration` now take a 12th `Seqlock<LastScan>&` parameter;
+  both publish a snapshot UNCONDITIONALLY at the same seam where they
+  publish LastPose (independent of deadband). New private helper
+  `fill_last_scan` decimates frame samples with the same stride +
+  range filter the AMCL beam pipeline uses.
+- `src/godo_tracker_rt/main.cpp` — declares `Seqlock<LastScan>
+  last_scan_seq`, seeds with `iterations=-1`, threads through
+  `run_cold_writer` and `thread_uds`. UDS callback closure
+  `[&last_scan_seq]() { return last_scan_seq.load(); }`.
+- `tests/test_cold_writer_scan_publish.cpp` (NEW, 6 cases) — pins
+  unconditional publish on OneShot/Live + deadband-suppressed-Offset
+  paths, AMCL-aligned beam decimation, monotonic published_mono_ns,
+  n=0 corner case.
+- `tests/test_last_scan_seqlock_stress.cpp` (NEW, 1 case heavy) —
+  1W/4R 100 000 iterations on `Seqlock<LastScan>`. Mode-A TB1 fold:
+  positional torn-read invariant (`ranges_m[i] = i × 0.001`,
+  `angles_deg[i] = i × 0.5`) — readers detect tearing from a single
+  load alone, no sibling atomic.
+- `tests/test_uds_server.cpp` — 5 new cases for the `get_last_scan`
+  branch (null callback, published verbatim, concurrent set_mode,
+  default-zero formatter shape, n=720 worst-case fits scratch).
+- `scripts/build.sh` — two new build-greps:
+  `[scan-publisher-grep]` (cold_writer.cpp + 1 init in main.cpp),
+  `[hot-path-isolation-grep]` (thread_d_rt body free of last_scan_seq).
+  Both fail the build on hits.
+
+### Changed
+
+- `tests/test_cold_writer_{offset_invariant,live_iteration,ordering}.cpp`
+  — call-site cascade only (12th arg). No contract change.
+
+### Tests
+
+- ctest hardware-free label: 30 → 32 tests after Track D
+  (`test_cold_writer_scan_publish` + `test_last_scan_seqlock_stress`).
+- `test_uds_server` doctest case count: +5.
+
+### Notes
+
+- LastScan struct field order (`pose_x_m, pose_y_m, pose_yaw_deg,
+  published_mono_ns, iterations, valid, forced, pose_valid, _pad0, n,
+  _pad1, _pad2, angles_deg[], ranges_m[]`) is ABI-visible. Wire order
+  in `format_ok_scan` re-orders to put flags + iterations + pose
+  anchors before `n` so the array body sits at the tail; the Python
+  mirror `LAST_SCAN_HEADER_FIELDS` matches the wire order. Drift between
+  any of the four representations (struct, format string, Python
+  tuple, TS interface) fails one of the pins.
+- Hot path is fully insulated: the `[hot-path-isolation-grep]` build
+  step verifies thread_d_rt's body has zero `last_scan_seq` references;
+  the `[scan-publisher-grep]` step verifies only cold_writer.cpp +
+  the boot init in main.cpp store into the seqlock. Track D adds
+  zero work to Thread A (FreeD recv) or Thread D (UDP send 59.94 Hz).

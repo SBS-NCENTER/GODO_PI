@@ -50,6 +50,61 @@ export interface LastPose {
   published_mono_ns: number;
 }
 
+// --- LastScan (Track D schema, mirrors backend LAST_SCAN_HEADER_FIELDS) --
+// Tuple order matches the wire body emitted by
+// godo_webctl.app::_last_scan_view, which iterates LAST_SCAN_HEADER_FIELDS.
+// MUST equal protocol.py::LAST_SCAN_HEADER_FIELDS exactly. Drift detected
+// by inspection per godo-frontend/CODEBASE.md invariant (l).
+export const LAST_SCAN_HEADER_FIELDS = [
+  'valid',
+  'forced',
+  'pose_valid',
+  'iterations',
+  'published_mono_ns',
+  'pose_x_m',
+  'pose_y_m',
+  'pose_yaw_deg',
+  'n',
+  'angles_deg',
+  'ranges_m',
+] as const;
+
+// Mirror of production/RPi5/src/core/constants.hpp::LAST_SCAN_RANGES_MAX
+// AND godo_webctl.protocol::LAST_SCAN_RANGES_MAX_PYTHON_MIRROR. All three
+// must agree (see CODEBASE.md invariant (l)).
+export const LAST_SCAN_RANGES_MAX = 720;
+
+// Track D — `get_last_scan` UDS command name. Anchor for the SPA's
+// awareness of the wire surface; the SPA never builds UDS bytes (the
+// backend does), but having the literal here keeps the cross-language
+// drift triple consistent.
+export const CMD_GET_LAST_SCAN = 'get_last_scan';
+
+// LastScan wire shape. The two arrays (`angles_deg`, `ranges_m`) carry
+// the LiDAR's polar samples in the LiDAR frame; the SPA does the
+// polar→Cartesian world-frame transform using the same-frame anchor
+// pose (`pose_x_m`, `pose_y_m`, `pose_yaw_deg`) baked into THIS frame —
+// NOT from a parallel `lastPose` SSE (Mode-A TM5).
+//
+// `_arrival_ms` is a CLIENT-SIDE NON-WIRE field set in the SSE adapter
+// at `Date.now()`-time of frame arrival, used by the freshness gate
+// per Mode-A M2 (do not subtract `published_mono_ns` from `Date.now()`
+// — the clock domains differ). The wire never carries this field.
+export interface LastScan {
+  valid: number; // 0 | 1 (uint8 on wire, kept as number to match JSON)
+  forced: number; // 0 | 1
+  pose_valid: number; // 0 | 1
+  iterations: number;
+  published_mono_ns: number;
+  pose_x_m: number;
+  pose_y_m: number;
+  pose_yaw_deg: number;
+  n: number;
+  angles_deg: number[];
+  ranges_m: number[];
+  _arrival_ms?: number; // client-side; set by sse adapter
+}
+
 // --- Error codes (mirrors backend ERR_* + handler error strings) -------
 export const ERR_PARSE_ERROR = 'parse_error';
 export const ERR_UNKNOWN_CMD = 'unknown_cmd';

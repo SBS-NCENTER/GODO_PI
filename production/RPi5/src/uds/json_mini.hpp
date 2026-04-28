@@ -50,6 +50,25 @@ std::string format_err(std::string_view code);
 // diagnostics), %llu for `published_mono_ns` (uint64_t).
 std::string format_ok_pose(const godo::rt::LastPose& p);
 
+// Format the `get_last_scan` response (Track D). Field order MUST match
+// the `godo::rt::LastScan` struct field declarations in core/rt_types.hpp;
+// the Python mirror godo-webctl/protocol.py::LAST_SCAN_HEADER_FIELDS is
+// regex-extracted from rt_types.hpp at test time
+// (tests/test_protocol.py::test_last_scan_header_fields_match_cpp_source).
+//
+// Precision split (Track D, mirrors Track B):
+//   - pose anchor (pose_x_m, pose_y_m, pose_yaw_deg) → %.6f (µm / µdeg)
+//   - ranges_m[i]   → %.4f  (0.1 mm precision; well below C1's ~25 mm noise)
+//   - angles_deg[i] → %.4f  (0.0001° precision; well below C1's ~0.36° step)
+//   - published_mono_ns → %llu
+//   - iterations    → %d
+//   - flags (valid, forced, pose_valid) → %u
+//
+// Snapshot.n is clamped at LAST_SCAN_RANGES_MAX before iteration; the
+// scratch buffer (constants::JSON_SCRATCH_BYTES) sizes to the worst case
+// at that cap. See cpp body for the static_assert pinning the math.
+std::string format_ok_scan(const godo::rt::LastScan& s);
+
 // Convert AmclMode → string used in the wire protocol. Inverse of
 // `parse_mode_arg` below. Returns "Idle" for unknown values for safety.
 std::string_view mode_to_string(godo::rt::AmclMode mode) noexcept;

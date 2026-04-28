@@ -35,8 +35,10 @@ from pathlib import Path
 from typing import Any
 
 from .protocol import (
+    LAST_SCAN_RESPONSE_CAP,
     UDS_RESPONSE_READ_BUFSIZE,
     encode_get_last_pose,
+    encode_get_last_scan,
     encode_get_mode,
     encode_ping,
     encode_set_mode,
@@ -96,18 +98,37 @@ class UdsClient:
         ``protocol.LAST_POSE_FIELDS`` (regex-checked against C++)."""
         return self._roundtrip(encode_get_last_pose(), timeout)
 
+    def get_last_scan(self, timeout: float) -> dict[str, Any]:
+        """Track D `get_last_scan` round-trip; response shape pinned by
+        ``protocol.LAST_SCAN_HEADER_FIELDS`` (regex-checked against
+        rt_types.hpp). The reply is wider than the standard 4 KiB cap
+        (~14 KiB worst case for a 720-ray scan), so we read with a
+        dedicated 32 KiB buffer; the request side stays at 4 KiB."""
+        return self._roundtrip(
+            encode_get_last_scan(),
+            timeout,
+            response_cap=LAST_SCAN_RESPONSE_CAP,
+        )
+
     # ---- internals --------------------------------------------------------
 
-    def _roundtrip(self, request: bytes, timeout: float) -> dict[str, Any]:
+    def _roundtrip(
+        self,
+        request: bytes,
+        timeout: float,
+        *,
+        response_cap: int | None = None,
+    ) -> dict[str, Any]:
         # Narrowest-first exception ordering (S4): TimeoutError (which is
         # the modern alias for socket.timeout in Python 3.10+) is an OSError
         # subclass; if we caught OSError first we'd shadow timeouts.
+        cap = response_cap if response_cap is not None else UDS_RESPONSE_READ_BUFSIZE
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
                 sock.settimeout(timeout)
                 sock.connect(str(self._path))
                 sock.sendall(request)
-                payload = self._recv_line(sock)
+                payload = self._recv_line(sock, cap=cap)
         except TimeoutError as e:
             raise UdsTimeout(str(e)) from e
         except (FileNotFoundError, ConnectionRefusedError) as e:
@@ -128,10 +149,16 @@ class UdsClient:
         return obj
 
     @staticmethod
-    def _recv_line(sock: socket.socket) -> bytes:
-        """Read until a single ``\\n`` or one of the two error terminals (M3)."""
+    def _recv_line(sock: socket.socket, *, cap: int = UDS_RESPONSE_READ_BUFSIZE) -> bytes:
+        """Read until a single ``\\n`` or one of the two error terminals (M3).
+
+        ``cap`` overrides the per-call buffer ceiling; defaults to
+        ``UDS_RESPONSE_READ_BUFSIZE`` (4 KiB) for the small-reply commands
+        (ping / get_mode / set_mode / get_last_pose). Track D
+        ``get_last_scan`` passes a wider cap to fit ~14 KiB worst-case
+        replies.
+        """
         buf = bytearray()
-        cap = UDS_RESPONSE_READ_BUFSIZE
         while len(buf) < cap:
             chunk = sock.recv(cap - len(buf))
             if not chunk:  # EOF before newline

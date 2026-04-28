@@ -302,6 +302,36 @@ set_tests_properties(test_cold_writer_ordering PROPERTIES
     LABELS "hardware-free")
 
 # ----------------------------------------------------------------------------
+# Track D — LastScan publish path + Seqlock<LastScan> stress.
+# - test_cold_writer_scan_publish: pins UNCONDITIONAL LastScan publish
+#   for OneShot + Live + deadband-suppressed-Offset paths; mirrors AMCL
+#   beam decimation rule.
+# - test_last_scan_seqlock_stress: 1W/4R 100k iterations; positional
+#   torn-read invariant per Mode-A TB1.
+# ----------------------------------------------------------------------------
+
+add_executable(test_cold_writer_scan_publish
+    test_cold_writer_scan_publish.cpp)
+target_link_libraries(test_cold_writer_scan_publish PRIVATE
+    doctest::doctest godo_localization godo_core godo_lidar)
+target_compile_definitions(test_cold_writer_scan_publish PRIVATE
+    GODO_FIXTURES_MAPS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/maps"
+)
+add_test(NAME test_cold_writer_scan_publish
+    COMMAND test_cold_writer_scan_publish)
+set_tests_properties(test_cold_writer_scan_publish PROPERTIES
+    LABELS "hardware-free")
+
+add_executable(test_last_scan_seqlock_stress
+    test_last_scan_seqlock_stress.cpp)
+target_link_libraries(test_last_scan_seqlock_stress PRIVATE
+    doctest::doctest godo_core)
+add_test(NAME test_last_scan_seqlock_stress
+    COMMAND test_last_scan_seqlock_stress)
+set_tests_properties(test_last_scan_seqlock_stress PROPERTIES
+    LABELS "hardware-free")
+
+# ----------------------------------------------------------------------------
 # Phase 4-2 D Wave B — GPIO + UDS modules.
 # - test_gpio_source_fake: hardware-free; exercises the duck-typed twin
 #   `GpioSourceFake` to pin debounce + dispatch + S5 OneShot-drop semantics.

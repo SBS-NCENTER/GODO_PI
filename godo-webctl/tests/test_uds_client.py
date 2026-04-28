@@ -93,3 +93,44 @@ def test_set_mode_rejects_unknown_mode_locally() -> None:
     c = UdsClient(Path("/tmp/unused.sock"))
     with pytest.raises(ValueError):
         c.set_mode("Calibrate", timeout=2.0)
+
+
+# ---- Track D: get_last_scan ---------------------------------------------
+
+
+def test_get_last_scan_happy(fake_uds_server) -> None:
+    fake_uds_server.reply(
+        b'{"ok":true,"valid":1,"forced":1,"pose_valid":1,"iterations":7,'
+        b'"published_mono_ns":42,"pose_x_m":1.5,"pose_y_m":2.0,'
+        b'"pose_yaw_deg":45.0,"n":2,"angles_deg":[0.0,0.5],'
+        b'"ranges_m":[1.0,1.5]}',
+    )
+    c = UdsClient(fake_uds_server.path)
+    resp = c.get_last_scan(timeout=2.0)
+    assert resp["ok"] is True
+    assert resp["valid"] == 1
+    assert resp["n"] == 2
+    assert resp["angles_deg"] == [0.0, 0.5]
+    assert resp["ranges_m"] == [1.0, 1.5]
+
+
+def test_get_last_scan_server_rejected_propagates(fake_uds_server) -> None:
+    """Server replies err=unknown_cmd (e.g. tracker too old to know
+    Track D); client surfaces UdsServerRejected with the err code."""
+    from godo_webctl.uds_client import UdsServerRejected
+
+    fake_uds_server.reply(b'{"ok":false,"err":"unknown_cmd"}')
+    c = UdsClient(fake_uds_server.path)
+    with pytest.raises(UdsServerRejected) as ei:
+        c.get_last_scan(timeout=2.0)
+    assert ei.value.err == "unknown_cmd"
+
+
+def test_get_last_scan_response_too_large_raises(fake_uds_server) -> None:
+    """Wider read cap (32 KiB) still has an upper bound; > 32 KiB
+    without newline → response_too_large."""
+    fake_uds_server.reply_raw(b"x" * 33000)  # exceed LAST_SCAN_RESPONSE_CAP
+    c = UdsClient(fake_uds_server.path)
+    with pytest.raises(UdsProtocolError) as ei:
+        c.get_last_scan(timeout=2.0)
+    assert "response_too_large" in str(ei.value)

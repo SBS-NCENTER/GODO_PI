@@ -35,6 +35,21 @@ inline constexpr int      SCAN_BEAMS_MAX      = 720;
 inline constexpr int      EDT_TABLE_SIZE      = 1024;
 inline constexpr std::int64_t EDT_MAX_CELLS   = 4'000'000;
 
+// Track D — fixed cap on the per-frame range count published by the cold
+// writer to LastScan. Mirrors SCAN_BEAMS_MAX so the AMCL beam decimation
+// and the LastScan ranges array are sample-aligned (one stride, one
+// upper bound). The SLAMTEC C1 nominal sample rate is ~600/scan @ 10 Hz,
+// well under this cap; the cap protects against a future config change
+// pushing the stride lower than 1.
+inline constexpr int      LAST_SCAN_RANGES_MAX = 720;
+
+// JSON scratch budget for format_ok_scan (Track D — Mode-A M1 fold).
+// Worst-case payload: 720 ranges × ~10 chars + 720 angles × ~10 chars +
+// fixed scalar header (~250 B) + array brackets/commas (~50 B) ≈ 14.7 KiB.
+// 24 KiB scratch buffer leaves >50% headroom for any future precision
+// bump; pinned by static_assert in json_mini.cpp's format_ok_scan body.
+inline constexpr int      JSON_SCRATCH_BYTES = 24576;
+
 // Floor for off-map / very-low-likelihood beam contributions in
 // evaluate_scan(). Bumping this changes AMCL math: too small lets a
 // single off-map beam dominate the log-sum; too large erodes

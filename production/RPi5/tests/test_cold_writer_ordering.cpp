@@ -54,6 +54,7 @@ using godo::localization::Rng;
 using godo::localization::run_one_iteration;
 using godo::localization::run_live_iteration;
 using godo::rt::LastPose;
+using godo::rt::LastScan;
 using godo::rt::Offset;
 using godo::rt::Seqlock;
 
@@ -109,6 +110,7 @@ TEST_CASE("last_pose_seq_published_before_idle_store") {
     Offset last_written{0.0, 0.0, 0.0};
     Seqlock<Offset>   target_offset;
     Seqlock<LastPose> last_pose_seq;
+    Seqlock<LastScan> last_scan_seq;
 
     // Initial generation is 0 — never published.
     CHECK(last_pose_seq.generation() == 0u);
@@ -116,7 +118,7 @@ TEST_CASE("last_pose_seq_published_before_idle_store") {
     const Frame frame = make_synthetic_frame(360);
     (void)run_one_iteration(cfg, frame, grid, amcl, rng, beams_buf,
                             last_pose, live_first_iter, last_written,
-                            target_offset, last_pose_seq);
+                            target_offset, last_pose_seq, last_scan_seq);
 
     // After run_one_iteration: seqlock generation MUST have advanced
     // (publish happened) and the snapshot MUST be marked valid + forced.
@@ -148,11 +150,12 @@ TEST_CASE("last_pose_seq published by run_live_iteration with forced=0") {
     Offset last_written{0.0, 0.0, 0.0};
     Seqlock<Offset>   target_offset;
     Seqlock<LastPose> last_pose_seq;
+    Seqlock<LastScan> last_scan_seq;
 
     const Frame frame = make_synthetic_frame(360);
     (void)run_live_iteration(cfg, frame, grid, amcl, rng, beams_buf,
                              last_pose, live_first_iter, last_written,
-                             target_offset, last_pose_seq);
+                             target_offset, last_pose_seq, last_scan_seq);
 
     CHECK(last_pose_seq.generation() >= 2u);
     const LastPose snap = last_pose_seq.load();

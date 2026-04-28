@@ -35,7 +35,7 @@ from httpx import ASGITransport
 from godo_webctl.app import create_app
 from godo_webctl.config import Settings
 from godo_webctl.constants import JWT_ALGORITHM
-from godo_webctl.protocol import LAST_POSE_FIELDS
+from godo_webctl.protocol import LAST_POSE_FIELDS, LAST_SCAN_HEADER_FIELDS
 
 
 def _settings_for(
@@ -835,6 +835,215 @@ async def test_spa_dist_mount_serves_dist_when_set(
 @pytest.fixture
 async def _live_app() -> AsyncIterator[Any]:
     yield None  # placeholder so pytest can collect this file even with no marks
+
+
+# ============================================================================
+# Track D — /api/last_scan + /api/last_scan/stream
+# ============================================================================
+
+
+_CANNED_SCAN = (
+    b'{"ok":true,"valid":1,"forced":1,"pose_valid":1,"iterations":7,'
+    b'"published_mono_ns":42,"pose_x_m":1.5,"pose_y_m":2.0,'
+    b'"pose_yaw_deg":45.0,"n":2,"angles_deg":[0.0,0.5],'
+    b'"ranges_m":[1.0,1.5]}'
+)
+
+
+async def test_last_scan_returns_track_d_field_set(
+    fake_uds_server,
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    """Drift catch — backend must speak `LAST_SCAN_HEADER_FIELDS` exactly.
+    Frontend stub server cannot catch this."""
+    fake_uds_server.reply(_CANNED_SCAN)
+    s = _settings_for(
+        uds_socket=fake_uds_server.path,
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    async with _client(s) as cl:
+        # Track F: /api/last_scan is anonymous-readable.
+        r = await cl.get("/api/last_scan")
+    assert r.status_code == HTTPStatus.OK
+    body = r.json()
+    assert tuple(body.keys()) == LAST_SCAN_HEADER_FIELDS
+
+
+async def test_last_scan_anon_returns_200(
+    fake_uds_server,
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    """Track F: /api/last_scan is anonymous-readable; no token required.
+    Symmetric pin for the (existing) mutation-401 test."""
+    fake_uds_server.reply(_CANNED_SCAN)
+    s = _settings_for(
+        uds_socket=fake_uds_server.path,
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    async with _client(s) as cl:
+        r = await cl.get("/api/last_scan")
+    assert r.status_code == HTTPStatus.OK
+
+
+async def test_last_scan_stream_anon_returns_200(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    """Track F: /api/last_scan/stream is anonymous-readable; same gate
+    as /api/last_pose/stream."""
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+
+    async def _yield_once_then_exit(*_args: Any, **_kwargs: Any) -> AsyncIterator[bytes]:
+        yield b"data: {}\n\n"
+
+    async with _client(s) as cl:
+        with mock.patch(
+            "godo_webctl.sse.last_scan_stream",
+            side_effect=_yield_once_then_exit,
+        ):
+            r = await cl.get("/api/last_scan/stream")
+    assert r.status_code == HTTPStatus.OK
+    assert r.headers["content-type"].startswith("text/event-stream")
+    assert r.headers["cache-control"] == "no-cache"
+    assert r.headers["x-accel-buffering"] == "no"
+
+
+async def test_last_scan_path_extras_return_404(
+    fake_uds_server,
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    """TM1: route is parameter-less; extra path segments must 404."""
+    s = _settings_for(
+        uds_socket=fake_uds_server.path,
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    async with _client(s) as cl:
+        r = await cl.get("/api/last_scan/extra")
+    assert r.status_code == HTTPStatus.NOT_FOUND
+
+
+async def test_last_scan_tracker_unreachable_returns_503(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    s = _settings_for(
+        uds_socket=tmp_path / "ghost.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    async with _client(s) as cl:
+        r = await cl.get("/api/last_scan")
+    assert r.status_code == HTTPStatus.SERVICE_UNAVAILABLE
+    assert r.json()["err"] == "tracker_unreachable"
+
+
+async def test_last_scan_no_run_yet_returns_valid_zero(
+    fake_uds_server,
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    """Tracker reachable but no scan published yet (sentinel). Emits a
+    valid=0 reply per the C++ side; the SPA gates rendering on this."""
+    fake_uds_server.reply(
+        b'{"ok":true,"valid":0,"forced":0,"pose_valid":0,"iterations":-1,'
+        b'"published_mono_ns":0,"pose_x_m":0.0,"pose_y_m":0.0,'
+        b'"pose_yaw_deg":0.0,"n":0,"angles_deg":[],"ranges_m":[]}',
+    )
+    s = _settings_for(
+        uds_socket=fake_uds_server.path,
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    async with _client(s) as cl:
+        r = await cl.get("/api/last_scan")
+    assert r.status_code == HTTPStatus.OK
+    body = r.json()
+    assert body["valid"] == 0
+    assert body["n"] == 0
+    assert body["iterations"] == -1
+
+
+async def test_last_scan_server_emits_polar_not_world_cartesian(
+    fake_uds_server,
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    """Mode-A TM5 pin: the server emits RAW polar (angles_deg + ranges_m
+    in the LiDAR frame) plus the pose anchor. The SPA does the polar →
+    Cartesian world-frame transform — server must NOT pre-transform.
+
+    Verification: when the canned scan has pose_yaw=90° + a beam at
+    angle_deg=0 + range=1, the wire body MUST contain that beam at
+    angle_deg=0 (LiDAR frame), NOT the rotated world point."""
+    fake_uds_server.reply(
+        b'{"ok":true,"valid":1,"forced":1,"pose_valid":1,"iterations":1,'
+        b'"published_mono_ns":1,"pose_x_m":0.0,"pose_y_m":0.0,'
+        b'"pose_yaw_deg":90.0,"n":1,"angles_deg":[0.0],'
+        b'"ranges_m":[1.0]}',
+    )
+    s = _settings_for(
+        uds_socket=fake_uds_server.path,
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    async with _client(s) as cl:
+        r = await cl.get("/api/last_scan")
+    body = r.json()
+    # Beam stays at LiDAR-frame angle 0 (NOT yaw-rotated to 90).
+    assert body["angles_deg"] == [0.0]
+    assert body["ranges_m"] == [1.0]
+    # Anchor pose is preserved — SPA does the transform using these.
+    assert body["pose_yaw_deg"] == 90.0
+
+
+async def test_anon_read_endpoints_return_200(
+    fake_uds_server,
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    tmp_maps_dir: Path,
+) -> None:
+    """Track D + Track F symmetric coverage of the existing
+    test_mutation_endpoints_unauth_return_401: every documented anon-
+    readable endpoint MUST return 200 (or 502/503 for tracker-down
+    cases that are NOT auth failures) when called WITHOUT a token.
+
+    The matching mutation set (existing test_mutation_endpoints_unauth_return_401)
+    asserts 401 on the same anon. Drift between either list and the
+    handler `Depends(require_*)` annotations is caught."""
+    fake_uds_server.reply(b'{"ok":true,"mode":"Idle"}')
+    s = _settings_for(
+        uds_socket=fake_uds_server.path,
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        maps_dir=tmp_maps_dir,
+    )
+    # Subset of read endpoints we can hit with a single fake_uds reply
+    # queued; the assertion is "no 401". 503 is also acceptable for paths
+    # that need a fresh UDS reply (queue drained after first call).
+    paths = [
+        "/api/health",
+        "/api/last_pose",
+        "/api/last_scan",
+        "/api/maps",
+        "/api/activity",
+    ]
+    async with _client(s) as cl:
+        for path in paths:
+            r = await cl.get(path)
+            # Anon must NEVER see 401 on a read endpoint.
+            assert r.status_code != HTTPStatus.UNAUTHORIZED, (
+                f"{path} returned 401 — Track F regression"
+            )
 
 
 # ============================================================================

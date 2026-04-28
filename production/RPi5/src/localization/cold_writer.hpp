@@ -95,6 +95,10 @@ using LidarFactory =
 //     see every OneShot completion, including poses suppressed by the
 //     deadband filter. The store happens BEFORE g_amcl_mode = Idle is
 //     written by the caller (cold_writer.cpp ordering pin); see F5.
+//   - publishes a LastScan snapshot to `last_scan_seq` UNCONDITIONALLY
+//     (Track D): the UDS `get_last_scan` reader needs to see every
+//     OneShot/Live completion so the SPA's overlay updates at the cold
+//     writer's natural cadence. Same ordering discipline as last_pose_seq.
 AmclResult run_one_iteration(const godo::core::Config&         cfg,
                              const godo::lidar::Frame&         frame,
                              const OccupancyGrid&              grid,
@@ -105,7 +109,8 @@ AmclResult run_one_iteration(const godo::core::Config&         cfg,
                              bool&                             live_first_iter_inout,
                              godo::rt::Offset&                 last_written_inout,
                              godo::rt::Seqlock<godo::rt::Offset>& target_offset,
-                             godo::rt::Seqlock<godo::rt::LastPose>& last_pose_seq);
+                             godo::rt::Seqlock<godo::rt::LastPose>& last_pose_seq,
+                             godo::rt::Seqlock<godo::rt::LastScan>& last_scan_seq);
 
 // Per-Live-iteration kernel. Visible for tests so they can drive a
 // deterministic synthetic Frame through the Live AMCL pipeline without
@@ -135,7 +140,8 @@ AmclResult run_live_iteration(const godo::core::Config&         cfg,
                               bool&                             live_first_iter_inout,
                               godo::rt::Offset&                 last_written_inout,
                               godo::rt::Seqlock<godo::rt::Offset>& target_offset,
-                              godo::rt::Seqlock<godo::rt::LastPose>& last_pose_seq);
+                              godo::rt::Seqlock<godo::rt::LastPose>& last_pose_seq,
+                              godo::rt::Seqlock<godo::rt::LastScan>& last_scan_seq);
 
 // Run the cold writer until godo::rt::g_running is false. Idempotent on
 // repeated trigger; safe to call once per process lifetime.
@@ -145,9 +151,10 @@ AmclResult run_live_iteration(const godo::core::Config&         cfg,
 // reader sees every converged pose even when the deadband filter
 // suppresses an Offset publish for a sub-threshold change. See
 // production/RPi5/doc/uds_protocol.md §C.4.
-void run_cold_writer(const godo::core::Config&     cfg,
-                     godo::rt::Seqlock<godo::rt::Offset>& target_offset,
+void run_cold_writer(const godo::core::Config&              cfg,
+                     godo::rt::Seqlock<godo::rt::Offset>&   target_offset,
                      godo::rt::Seqlock<godo::rt::LastPose>& last_pose_seq,
-                     LidarFactory                  lidar_factory);
+                     godo::rt::Seqlock<godo::rt::LastScan>& last_scan_seq,
+                     LidarFactory                           lidar_factory);
 
 }  // namespace godo::localization

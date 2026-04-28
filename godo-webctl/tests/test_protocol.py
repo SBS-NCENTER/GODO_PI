@@ -18,6 +18,8 @@ from godo_webctl import protocol as P
 # parents[2] is the repo root.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _JSON_MINI_CPP = _REPO_ROOT / "production/RPi5/src/uds/json_mini.cpp"
+_RT_TYPES_HPP = _REPO_ROOT / "production/RPi5/src/core/rt_types.hpp"
+_CONSTANTS_HPP = _REPO_ROOT / "production/RPi5/src/core/constants.hpp"
 
 
 def test_uds_request_max_bytes_matches_cpp() -> None:
@@ -97,6 +99,84 @@ def test_maps_name_regex_pattern_str_mirrors_constants() -> None:
 
     # SSOT side on the LHS — drift from constants.py is what we catch.
     assert MAPS_NAME_REGEX.pattern == P.MAPS_NAME_REGEX_PATTERN_STR
+
+
+# --- Track D: get_last_scan mirror ----------------------------------------
+
+
+def test_cmd_get_last_scan_matches_cpp() -> None:
+    # production/RPi5/src/uds/uds_server.cpp `get_last_scan` branch.
+    assert P.CMD_GET_LAST_SCAN == "get_last_scan"
+
+
+def test_encode_get_last_scan_byte_exact() -> None:
+    assert P.encode_get_last_scan() == b'{"cmd":"get_last_scan"}\n'
+
+
+def test_last_scan_ranges_max_python_mirror_matches_cpp() -> None:
+    """Pin: LAST_SCAN_RANGES_MAX_PYTHON_MIRROR equals the C++ Tier-1
+    constant in core/constants.hpp. Drift here would mean the SPA renders
+    a smaller / larger array than the wire actually carries."""
+    src = _CONSTANTS_HPP.read_text(encoding="utf-8")
+    m = re.search(
+        r"LAST_SCAN_RANGES_MAX\s*=\s*(\d+)",
+        src,
+    )
+    assert m is not None, "LAST_SCAN_RANGES_MAX not found in constants.hpp"
+    cpp_value = int(m.group(1))
+    assert cpp_value == P.LAST_SCAN_RANGES_MAX_PYTHON_MIRROR, (
+        f"LAST_SCAN_RANGES_MAX drift: C++={cpp_value} Python={P.LAST_SCAN_RANGES_MAX_PYTHON_MIRROR}"
+    )
+
+
+def test_last_scan_header_fields_match_cpp_source() -> None:
+    """Drift pin: regex-extract LastScan field names from the
+    rt_types.hpp struct declaration and assert byte-equal against
+    LAST_SCAN_HEADER_FIELDS. Extracts from rt_types.hpp (the canonical
+    struct) per the Track D planner override — NOT from the format_ok_scan
+    format string. Reasoning: the struct is the SSOT for field names +
+    order; the JSON formatter is one of multiple downstream renderings.
+
+    Editing one side without the other fails this test.
+    """
+    src = _RT_TYPES_HPP.read_text(encoding="utf-8")
+
+    # Locate the struct body: from `struct LastScan {` to the matching
+    # closing `};`. We slice on the first `};` after the opening, which
+    # is robust to internal nested initialisation lists (none used in
+    # this struct as of writing).
+    start = src.find("struct LastScan {")
+    assert start != -1, "struct LastScan not found in rt_types.hpp"
+    end = src.find("};", start)
+    assert end != -1, "struct LastScan body has no terminator"
+    body = src[start:end]
+
+    # Field declarations are of the form
+    #     <type>  name;            // optional comment
+    #     <type>  name[N];         // array form (angles_deg / ranges_m)
+    # We walk the body line-by-line and extract the identifier preceding
+    # `;` (or `[`) on every declaration line. Comment lines + struct
+    # opening are skipped naturally because they do not match the regex.
+    field_re = re.compile(
+        r"^\s*(?:std::)?\w+(?:_t)?\s+([a-z_][a-z0-9_]*)\s*(?:\[[^\]]*\])?\s*;",
+        re.MULTILINE,
+    )
+    declared = field_re.findall(body)
+
+    # Filter out padding fields (start with `_pad`) — those are layout
+    # only, never on the wire.
+    visible = tuple(name for name in declared if not name.startswith("_pad"))
+
+    # The struct also declares `pose_x_m`, `pose_y_m`, `pose_yaw_deg`
+    # which appear in LAST_SCAN_HEADER_FIELDS. The wire ordering re-orders
+    # the flags + iterations + pose anchors before `n` to keep the array
+    # body at the tail; here we assert SET equality on the visible names
+    # and ALSO that the tuple LAST_SCAN_HEADER_FIELDS is a permutation of
+    # the visible-set (catches rename drift; the by-inspection convention
+    # in CODEBASE.md catches reorder drift on the wire).
+    assert set(P.LAST_SCAN_HEADER_FIELDS) == set(visible), (
+        f"Field-name drift: C++={visible} Python={P.LAST_SCAN_HEADER_FIELDS}"
+    )
 
 
 def test_last_pose_fields_match_cpp_source() -> None:

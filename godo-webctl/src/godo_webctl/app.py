@@ -76,6 +76,7 @@ from .protocol import (
     ERR_MAP_NOT_FOUND,
     ERR_MAPS_DIR_MISSING,
     LAST_POSE_FIELDS,
+    LAST_SCAN_HEADER_FIELDS,
     MODE_IDLE,
     MODE_LIVE,
     MODE_ONESHOT,
@@ -175,6 +176,14 @@ def _last_pose_view(resp: dict[str, object]) -> dict[str, object]:
     Drops `ok` (HTTP-level success); preserves field order via
     LAST_POSE_FIELDS."""
     return {field: resp.get(field) for field in LAST_POSE_FIELDS}
+
+
+def _last_scan_view(resp: dict[str, object]) -> dict[str, object]:
+    """Track D — project the UDS reply down to the documented `LastScan`
+    schema. Drops `ok` (HTTP-level success); preserves field order via
+    LAST_SCAN_HEADER_FIELDS so the SPA can iterate the tuple if it wants
+    the canonical ordering."""
+    return {field: resp.get(field) for field in LAST_SCAN_HEADER_FIELDS}
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -336,6 +345,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         sub_client = uds_mod.UdsClient(cfg.uds_socket)
         return StreamingResponse(
             sse_mod.last_pose_stream(sub_client, cfg),
+            media_type=_SSE_MEDIA_TYPE,
+            headers=sse_mod.SSE_RESPONSE_HEADERS,
+        )
+
+    # ---- /api/last_scan -------------------------------------------------
+    # Track D: live LIDAR overlay data source. Anonymous read (Track F);
+    # mutations are out of scope (read-only endpoint).
+    @app.get("/api/last_scan")
+    async def last_scan() -> JSONResponse:
+        try:
+            resp = await uds_mod.call_uds(client.get_last_scan, cfg.health_uds_timeout_s)
+        except uds_mod.UdsError as e:
+            return _map_uds_exc_to_response(e)
+        return JSONResponse(_last_scan_view(resp), status_code=HTTPStatus.OK)
+
+    # ---- /api/last_scan/stream -----------------------------------------
+    @app.get("/api/last_scan/stream")
+    async def last_scan_stream() -> StreamingResponse:
+        # Each subscriber gets its OWN UDS client (mirror of
+        # /api/last_pose/stream — per-subscriber isolation).
+        sub_client = uds_mod.UdsClient(cfg.uds_socket)
+        return StreamingResponse(
+            sse_mod.last_scan_stream(sub_client, cfg),
             media_type=_SSE_MEDIA_TYPE,
             headers=sse_mod.SSE_RESPONSE_HEADERS,
         )

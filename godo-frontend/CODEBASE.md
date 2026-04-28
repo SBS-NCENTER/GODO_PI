@@ -228,6 +228,78 @@ component is small enough that two more optional props are cheaper
 than a parallel implementation that would have to keep the same
 theming + a11y discipline.
 
+### (m) Track D — scan-overlay freshness uses arrival-wall-clock (Mode-A M2)
+
+The `LastScan` wire body carries two clocks:
+
+- `published_mono_ns` — tracker `CLOCK_MONOTONIC` ns at publish; an
+  ORDERING primitive only.
+- `_arrival_ms` — client-side, set inside `stores/lastScan.ts` at
+  `Date.now()`-time of SSE frame arrival; never on the wire.
+
+The freshness gate (`PoseCanvas.svelte::redraw`, `ScanToggle.svelte`)
+computes `Date.now() - lastScan._arrival_ms` against
+`MAP_SCAN_FRESHNESS_MS = 1000`. Subtracting `published_mono_ns`
+directly from `Date.now()` would mix tracker monotonic time and
+browser wall-clock — meaningless. The store stamps `_arrival_ms` on
+every frame BEFORE pushing to subscribers, so the gate is computed in
+a single clock domain.
+
+Pinned by:
+- `tests/unit/lastScan.test.ts::stamps _arrival_ms on every received frame (Mode-A M2)`,
+- `tests/unit/poseCanvasFreshness.test.ts` (data-scan-fresh attribute
+  flips when fake timers advance past the freshness window).
+
+### (n) Track D — SPA does the polar→Cartesian transform; uses the SCAN's anchor pose (Mode-A TM5)
+
+The server (`godo_tracker_rt`) emits raw polar (`angles_deg` +
+`ranges_m` in the LiDAR frame) plus the anchor pose
+(`pose_x_m / pose_y_m / pose_yaw_deg`) baked into the SAME LastScan
+frame. The SPA does the world-frame transform using the SCAN's own
+anchor — NOT the parallel `lastPose` store.
+
+Reasoning: the AMCL pose at the moment the cold writer processed THIS
+scan is exactly correct for THIS scan; using a separately-fetched
+pose would re-introduce the SSE-skew the brief explicitly avoids.
+The transform lives in `lib/scanTransform.ts::projectScanToWorld` so
+unit tests can exercise the math without mounting the full
+PoseCanvas component.
+
+Mode-A M3 fold: `projectScanToWorld` returns an empty array unless
+`scan.valid === 1 && scan.pose_valid === 1`. `pose_valid === 0`
+means the AMCL run that produced this scan did not converge; the
+anchor coordinates are undefined zeros, and rendering them would
+mislead the operator.
+
+Pinned by `tests/unit/poseCanvasScanLayer.test.ts` — TB2's three
+non-trivial yaw cases (yaw=90°+beam=0°; yaw=45°+beam=0° to catch
+x/y-swap; yaw=0°+beam=90° to catch yaw-vs-beam-angle confusion) +
+gating tests + the TB1-equivalent positional integrity sweep.
+
+### (o) Track D — `lastScan` SSE is gated on the `scanOverlay` toggle
+
+The `lastScan` store opens its underlying `SSEClient` ONLY when
+the `scanOverlay` store is `true` AND there is at least one
+subscriber. The gating lives inside `stores/lastScan.ts`, not in
+`Map.svelte`. Operators who never flip the toggle on never trigger
+the tracker UDS `get_last_scan` round-trip; the cold writer's seqlock
+publish is unaffected (Track D's "0 hot-path impact" promise extended
+to the webctl layer).
+
+`scanOverlay` persists in `sessionStorage` (NOT `localStorage`, per
+Q-OQ-D2): same-tab reload preserves the operator's choice; new tab /
+new operator session defaults OFF. The overlay generates ~30-60 KB/s
+of WAN traffic at 5 Hz; OFF-by-default for any new session is the
+defensive baseline.
+
+Pinned by:
+- `tests/unit/lastScan.test.ts::does not start SSE while overlay is off`,
+- `tests/unit/lastScan.test.ts::starts SSE when overlay flips to on`,
+- `tests/unit/lastScan.test.ts::stops SSE when overlay flips back to off`,
+- `tests/unit/scanOverlay.test.ts` (4 cases — default off, persist,
+  restore, toggle round-trip),
+- `tests/e2e/map.spec.ts::scan toggle state persists through same-tab reload`.
+
 ### (j) Router is home-grown (per N9)
 
 The plan called for `svelte-spa-router@~4`. After install the package's
@@ -305,6 +377,78 @@ so a single stub process is enough to drive playwright. No vite
 preview proxy needed.
 
 ## Change log
+
+### 2026-04-29 — Track D: Live LIDAR overlay (Phase 4.5+ P0.5)
+
+#### Added
+
+- `src/lib/protocol.ts` — `LastScan` interface (11 fields), tuple
+  `LAST_SCAN_HEADER_FIELDS`, `LAST_SCAN_RANGES_MAX = 720`,
+  `CMD_GET_LAST_SCAN`. `_arrival_ms` is documented as a CLIENT-SIDE
+  field (set in the SSE adapter, never on the wire).
+- `src/lib/constants.ts` — 5 new constants:
+  `MAP_SCAN_DOT_RADIUS_PX = 1.5`, `MAP_SCAN_DOT_COLOR = '#26a69a'`
+  (teal — Q-OQ-D3 color-blind friendly trio with pose red and trail
+  blue), `MAP_SCAN_DOT_OPACITY = 0.7`, `MAP_SCAN_FRESHNESS_MS = 1000`,
+  `LAST_SCAN_POLL_FALLBACK_MS = 1000`.
+- `src/lib/scanTransform.ts` — pure function `projectScanToWorld(scan)`
+  that does the polar→Cartesian world-frame transform using the SCAN's
+  own anchor pose (invariant (n)); empty array when validity flags fail
+  (Mode-A M3 — pose_valid gate). Extracted so unit tests can exercise
+  the math without mounting PoseCanvas.
+- `src/stores/scanOverlay.ts` — `Writable<boolean>` toggle store with
+  `sessionStorage` persistence (key `godo:scanOverlay`), default OFF,
+  `setScanOverlay/toggleScanOverlay/_resetScanOverlayForTests`.
+- `src/stores/lastScan.ts` — SSE-fed store + polling fallback,
+  refcounted subscribers, lifecycle GATED on the `scanOverlay` toggle
+  (invariant (o)). Stamps `_arrival_ms = Date.now()` on every frame
+  before emit (Mode-A M2). Mirrors `stores/lastPose.ts` structure.
+- `src/components/ScanToggle.svelte` — on/off button + freshness badge
+  ("최신" / "약간 지연됨" / "정지됨"). Computes the badge state from
+  `Date.now() - scan._arrival_ms` (invariant (m)). 250 ms heartbeat
+  tick so the badge animates even when no new SSE frame arrives.
+- `tests/unit/scanOverlay.test.ts` (4 cases), `lastScan.test.ts`
+  (8 cases), `poseCanvasScanLayer.test.ts` (10 cases — TB2 three
+  non-trivial yaw cases + gating + TB1-equivalent positional integrity),
+  `poseCanvasFreshness.test.ts` (2 cases — Mode-A M2 patch using
+  `vi.useFakeTimers`), `scanToggle.test.ts` (6 cases).
+- `tests/e2e/map.spec.ts` — 4 new playwright cases: toggle visible
+  + defaults off, toggle on shows ≥ 5 dots via `data-scan-count`,
+  toggle off clears, sessionStorage persists same-tab reload.
+- `tests/e2e/_stub_server.py` — `_canned_scan()` (5-dot canned shape),
+  `/api/last_scan` GET handler (anon), `/api/last_scan/stream` SSE
+  handler (anon, mirrors `last_pose_stream` pattern).
+
+#### Changed
+
+- `src/components/PoseCanvas.svelte` — extended with optional
+  `scan: LastScan | null` and `scanOverlayOn: boolean = false` props.
+  `redraw()` adds a third draw layer between the map underlay and the
+  trail loop, calling `projectScanToWorld(scan)` and rendering the
+  resulting world-frame points as teal dots. `data-scan-count` and
+  `data-scan-fresh` attributes are exposed on the wrap div for e2e
+  selector reliability (Q-OQ-D9).
+- `src/routes/Map.svelte` — mounts `<ScanToggle/>` above
+  `<PoseCanvas/>`; subscribes to `lastScan` and threads `scan` +
+  `scanOverlayOn` into `<PoseCanvas/>`. The lastScan subscription
+  lifecycle is automatic — the store gates its own SSE on the
+  scanOverlay flag.
+
+#### Tests
+
+- 47 → 67 vitest unit cases (+20: scanOverlay 4, lastScan 8,
+  poseCanvasScanLayer 10, poseCanvasFreshness 2, scanToggle 6 —
+  minus map_list_panel's 2 + auth's 11 + ... net delta is +20).
+- 14 → 18 playwright e2e cases (+4 from `map.spec.ts`).
+- `npm run lint` clean; `npm run build` produces ~22 kB gzipped.
+
+#### Notes
+
+- `LastScan` is canonically defined in `production/RPi5/src/core/
+  rt_types.hpp::struct LastScan`. The TS interface order matches the
+  wire body emitted by `godo-webctl/src/godo_webctl/app.py::
+  _last_scan_view`, which iterates `LAST_SCAN_HEADER_FIELDS`. Drift
+  detected by inspection per invariant (n).
 
 ### 2026-04-29 — Track E Mode-B folds (M4 unit test + lint scaffold)
 

@@ -221,6 +221,30 @@ fail those tests. The whitelist of allowed service names lives in
 `services.ALLOWED_SERVICES` (constant), so unknown svc strings are
 rejected before reaching subprocess.
 
+### (n) Read endpoints are anonymous; mutations require login (Track F)
+
+The auth model splits cleanly along read-vs-write:
+
+- **Anonymous-readable**: `/api/health`, `/api/last_pose`,
+  `/api/last_pose/stream`, `/api/map/image`, `/api/activity`,
+  `/api/local/services` (loopback), `/api/local/services/stream`
+  (loopback), `/api/local/journal/<name>` (loopback).
+- **Login-gated mutations** (`Depends(require_admin)`): `/api/calibrate`,
+  `/api/live`, `/api/map/backup`,
+  `/api/local/service/<name>/<action>` (loopback + admin),
+  `/api/system/reboot`, `/api/system/shutdown`.
+- **Session-only routes** (`Depends(require_user)`): `/api/auth/me`,
+  `/api/auth/refresh`, `/api/auth/logout`.
+
+The split is enforced by ZERO `Depends(require_user)` on read-route
+handlers — verified by `tests/test_app_integration.py::test_mutation_endpoints_unauth_return_401`
+parametrized over every mutation path. Loopback gating runs strictly
+before auth gating, so a non-loopback caller hitting `/api/local/*`
+sees HTTP 403 `loopback_only` regardless of token validity. The SPA
+mirrors this in `App.svelte` (no auth-redirect on the router) and
+`api.ts` (a 401 only triggers a `/login` redirect when the caller had
+a token — anon callers see the raw 401 instead of being bounced).
+
 ## Phase 4.5 follow-up candidates
 
 - Deadline-based UDS timeout (single shared `monotonic()` budget per

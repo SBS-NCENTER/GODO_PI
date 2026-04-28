@@ -13,25 +13,40 @@ Phase 4-2 D Unix-domain JSON-lines socket at `/run/godo/ctl.sock`.
 | POST | `/api/calibrate`    | Latch `OneShot` on the tracker (admin) |
 | POST | `/api/map/backup`   | Atomic snapshot of `.pgm + .yaml` (admin) |
 | POST | `/api/live`         | Toggle Live ↔ Idle on the tracker (admin) |
-| GET  | `/api/last_pose`    | One-shot pose snapshot (viewer) |
-| GET  | `/api/last_pose/stream` | SSE: pose @ 5 Hz (viewer) |
-| GET  | `/api/map/image`    | PGM rendered to PNG (viewer) |
-| GET  | `/api/activity?n=`  | Last N operator actions (viewer) |
+| GET  | `/api/last_pose`    | One-shot pose snapshot (public) |
+| GET  | `/api/last_pose/stream` | SSE: pose @ 5 Hz (public) |
+| GET  | `/api/map/image`    | PGM rendered to PNG (public) |
+| GET  | `/api/activity?n=`  | Last N operator actions (public) |
 | POST | `/api/auth/login`   | Issue a JWT (public) |
 | POST | `/api/auth/logout`  | Acknowledge logout (viewer) |
 | GET  | `/api/auth/me`      | Decode current token (viewer) |
 | POST | `/api/auth/refresh` | Re-issue a JWT with extended exp (viewer) |
-| GET  | `/api/local/services`        | systemctl status × 3 units (admin, loopback) |
+| GET  | `/api/local/services`        | systemctl status × 3 units (public, loopback) |
 | POST | `/api/local/service/<name>/<action>` | start \| stop \| restart (admin, loopback) |
-| GET  | `/api/local/journal/<name>?n=` | journalctl tail (admin, loopback) |
-| GET  | `/api/local/services/stream` | SSE: services status @ 1 Hz (admin, loopback) |
+| GET  | `/api/local/journal/<name>?n=` | journalctl tail (public, loopback) |
+| GET  | `/api/local/services/stream` | SSE: services status @ 1 Hz (public, loopback) |
 | POST | `/api/system/reboot` | `shutdown -r +0` (admin) |
 | POST | `/api/system/shutdown` | `shutdown -h +0` (admin) |
 | GET  | `/`                 | Static status page (`index.html`) — replaced by SPA when `GODO_WEBCTL_SPA_DIST` is set |
 
 ## Auth
 
-PR-A introduces JWT-based auth on every non-`/api/health` endpoint.
+**Track F (PR-B fold) auth model**: read endpoints are anonymous-readable
+so the operator can monitor the studio without logging in (open the SPA,
+see live pose / map / service status / activity / journal). Login is
+required ONLY for **mutations** (calibrate, live toggle, map backup, all
+`/api/local/service/<name>/<action>` writes, system reboot/shutdown).
+Anonymous calls to mutation endpoints return HTTP 401
+`{"err":"auth_required"}`. The SPA disables those buttons and shows a
+"제어 동작은 로그인 필요" hint when no session is present.
+
+Loopback gating on `/api/local/*` is **independent** of auth: anyone
+with a TCP peer outside `127.0.0.0/8` + `::1` is rejected at the
+`loopback_only` dependency before auth runs. So a remote viewer cannot
+read journal output, but the kiosk operator at the Pi can — without
+logging in.
+
+PR-A introduced JWT-based auth on mutation endpoints.
 HS256 with a 6 h TTL and a server-side secret persisted at
 `/var/lib/godo/auth/jwt_secret` (mode 0600, lazy-generated 32 random
 bytes on first boot). Restarting `godo-webctl` re-reads the secret;
@@ -57,8 +72,9 @@ on the kiosk B-LOCAL page. Recovery: fix the file, then restart webctl.
 
 | Role     | Powers |
 | ---      | --- |
-| `viewer` | Read-only: `/api/auth/*`, `/api/health`, `/api/last_pose*`, `/api/map/image`, `/api/activity` |
-| `admin`  | Everything `viewer` can do, plus calibrate, live, map backup, all `/api/local/*`, system reboot/shutdown |
+| anon     | Every read endpoint (`/api/health`, `/api/last_pose*`, `/api/map/image`, `/api/activity`, `/api/local/services*`, `/api/local/journal/*` from loopback). 401 on every write. |
+| `viewer` | Same as anon, plus a session for `/api/auth/me`, `/refresh`, `/logout`. No write powers. |
+| `admin`  | Everything anon/viewer can do, plus calibrate, live, map backup, `/api/local/service/*` writes, system reboot/shutdown. |
 
 ### Default `GODO_WEBCTL_HOST=127.0.0.1` is the firewall
 
@@ -71,8 +87,8 @@ the seed password before exposing the service.
 
 | Path | Cadence | Auth | Notes |
 | --- | --- | --- | --- |
-| `/api/last_pose/stream` | 5 Hz | viewer | Tracker `get_last_pose` polled per tick. |
-| `/api/local/services/stream` | 1 Hz | admin (loopback) | `systemctl is-active` polled per tick. |
+| `/api/last_pose/stream` | 5 Hz | public | Tracker `get_last_pose` polled per tick. |
+| `/api/local/services/stream` | 1 Hz | public (loopback) | `systemctl is-active` polled per tick. |
 
 Both channels:
 

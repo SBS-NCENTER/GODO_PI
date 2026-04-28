@@ -238,9 +238,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # ---- /api/last_pose -------------------------------------------------
     @app.get("/api/last_pose")
-    async def last_pose(
-        _: auth_mod.Claims = Depends(auth_mod.require_user),
-    ) -> JSONResponse:
+    async def last_pose() -> JSONResponse:
+        # Anonymous read OK (Track F): viewers monitor without login.
+        # Mutations stay admin-gated.
         try:
             resp = await uds_mod.call_uds(client.get_last_pose, cfg.health_uds_timeout_s)
         except uds_mod.UdsError as e:
@@ -249,9 +249,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # ---- /api/last_pose/stream -----------------------------------------
     @app.get("/api/last_pose/stream")
-    async def last_pose_stream(
-        _: auth_mod.Claims = Depends(auth_mod.require_user),
-    ) -> StreamingResponse:
+    async def last_pose_stream() -> StreamingResponse:
         # Each subscriber gets its OWN UDS client (per Risks table —
         # avoids holding the shared client open).
         sub_client = uds_mod.UdsClient(cfg.uds_socket)
@@ -263,9 +261,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # ---- /api/map/image -------------------------------------------------
     @app.get("/api/map/image")
-    async def map_image(
-        _: auth_mod.Claims = Depends(auth_mod.require_user),
-    ) -> Response:
+    async def map_image() -> Response:
         try:
             png = await asyncio.to_thread(map_image_mod.render_pgm_to_png, cfg.map_path)
         except map_image_mod.MapImageNotFound:
@@ -282,10 +278,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # ---- /api/activity --------------------------------------------------
     @app.get("/api/activity")
-    async def get_activity(
-        n: int = ACTIVITY_TAIL_DEFAULT_N,
-        _: auth_mod.Claims = Depends(auth_mod.require_user),
-    ) -> JSONResponse:
+    async def get_activity(n: int = ACTIVITY_TAIL_DEFAULT_N) -> JSONResponse:
         return JSONResponse(activity_log.tail(n), status_code=HTTPStatus.OK)
 
     # ---- /api/auth/* ----------------------------------------------------
@@ -344,9 +337,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         "/api/local/services",
         dependencies=[Depends(loopback_only)],
     )
-    async def local_services(
-        _: auth_mod.Claims = Depends(auth_mod.require_admin),
-    ) -> JSONResponse:
+    async def local_services() -> JSONResponse:
+        # Anonymous read OK from loopback (Track F): kiosk operator can
+        # see service status without login. Mutations stay admin-gated.
         items = await asyncio.to_thread(services_mod.list_active)
         return JSONResponse(items, status_code=HTTPStatus.OK)
 
@@ -391,7 +384,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def local_journal(
         name: str,
         n: int = JOURNAL_TAIL_DEFAULT_N,
-        _: auth_mod.Claims = Depends(auth_mod.require_admin),
     ) -> JSONResponse:
         try:
             lines = await asyncio.to_thread(services_mod.journal_tail, name, n)
@@ -421,9 +413,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         "/api/local/services/stream",
         dependencies=[Depends(loopback_only)],
     )
-    async def local_services_stream(
-        _: auth_mod.Claims = Depends(auth_mod.require_admin),
-    ) -> StreamingResponse:
+    async def local_services_stream() -> StreamingResponse:
         return StreamingResponse(
             sse_mod.services_stream(cfg),
             media_type=_SSE_MEDIA_TYPE,

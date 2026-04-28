@@ -302,6 +302,40 @@ Pinned by:
   restore, toggle round-trip),
 - `tests/e2e/map.spec.ts::scan toggle state persists through same-tab reload`.
 
+### (p) PR-DIAG — Diagnostics store opens SSE only when subscribers exist
+
+The `diag` store (`stores/diag.ts`) opens its underlying `SSEClient`
+ONLY when at least one subscriber is registered (refcounted via
+`subscribeDiag(fn)` → returns unsub closure). The gating lives inside
+the store, NOT in `routes/Diagnostics.svelte`. A page that doesn't
+mount the Diagnostics route never triggers `/api/diag/stream`; multiple
+mounts share one SSE.
+
+`_arrival_ms` is stamped on every frame on receipt (Mode-A M2 +
+PR-DIAG N4 fold extension). The freshness gate in `Diagnostics.svelte`
+reads `Date.now() - frame._arrival_ms`, NOT `published_mono_ns`
+deltas (clock-domain mismatch — the C++ tracker's CLOCK_MONOTONIC and
+the webctl-side `time.monotonic_ns()` are SEPARATE clock domains and
+must never be compared).
+
+Pinned by:
+
+- `tests/unit/diag.test.ts::does not open SSE when there are no subscribers`,
+- `tests/unit/diag.test.ts::sse opens on first subscribe and closes on last unsubscribe`,
+- `tests/unit/diag.test.ts::stamps _arrival_ms on every received frame`.
+
+### (q) PR-DIAG — JournalTail allow-list mirrors webctl
+
+`components/JournalTail.svelte` hardcodes the allow-list dropdown
+options as `['godo-tracker', 'godo-webctl', 'godo-irq-pin']` —
+mirroring `godo_webctl.services::ALLOWED_SERVICES`. Drift detected by
+inspection during code review (per OQ-DIAG-3). The webctl-side rejects
+a non-listed unit anyway (HTTP 404 `unknown_service`) so a SPA-side
+drift surfaces as a sad-UX 404, not a security hole.
+
+`n` input is clamped client-side to `LOGS_TAIL_MAX_N_MIRROR = 500`;
+the server's Pydantic `Field(le=...)` is the authoritative cap.
+
 ### (j) Router is home-grown (per N9)
 
 The plan called for `svelte-spa-router@~4`. After install the package's
@@ -580,3 +614,86 @@ ConfirmDialog}.svelte`.
   Node 20 from Debian Bookworm.
 - **`SubmitEvent` type** in `Login.svelte` requires browser globals in
   ESLint config — added `globals.browser` via the `globals` package.
+
+---
+
+## 2026-04-29 — PR-DIAG (Track B-DIAG) — Diagnostics page
+
+### Added
+
+- `src/lib/protocol.ts` — wire shapes:
+  - `interface JitterSnapshot` (mirrors C++ rt_types + format_ok_jitter).
+  - `interface AmclIterationRate` (Mode-A M2 fold renamed scan_rate).
+  - `interface Resources` (webctl-only — no C++ counterpart).
+  - `interface DiagFrame` (multiplexed top-level keys: pose / jitter /
+    amcl_rate / resources). `_arrival_ms` is a CLIENT-SIDE NON-WIRE
+    field set on receipt by the diag store.
+  - Field-order tuples `JITTER_FIELDS` / `AMCL_RATE_FIELDS` /
+    `RESOURCES_FIELDS` / `DIAG_FRAME_FIELDS`.
+  - `CMD_GET_JITTER` / `CMD_GET_AMCL_RATE` literals (anchor for the
+    cross-language drift triple).
+- `src/lib/constants.ts` — 9 new SPA-internal constants:
+  `DIAG_SPARKLINE_DEPTH`, `DIAG_SPARKLINE_WIDTH_PX`,
+  `DIAG_SPARKLINE_HEIGHT_PX`, `DIAG_FRESHNESS_MS`,
+  `DIAG_POLL_FALLBACK_MS`, `LOGS_TAIL_MAX_N_MIRROR`,
+  `LOGS_TAIL_DEFAULT_N`, `JITTER_PANEL_COLOR`,
+  `AMCL_RATE_PANEL_COLOR`, `RESOURCES_PANEL_COLOR`.
+- `src/stores/diag.ts` (NEW) — SSE-fed `Writable<DiagFrame | null>` +
+  `Writable<DiagSparklineState>` (5 ring buffers of depth 60 frames =
+  12 s @ 5 Hz lookback). Refcounted; SSE opens on first subscriber,
+  closes on last. 1 Hz polling fallback when SSE drops. Stamps
+  `_arrival_ms` on every received frame.
+- `src/stores/journalTail.ts` (NEW) — manual-refresh state
+  `Writable<JournalTailState>` + `refreshJournalTail(unit, n)`
+  function. NOT polled; operator clicks Refresh.
+- `src/components/DiagSparkline.svelte` (NEW, ~110 LOC) — canvas-based
+  sparkline. Auto-scales y-axis to data range. No external chart lib —
+  the FRONT_DESIGN §9 chart-library decision is still pending; this
+  component lets PR-DIAG ship independently (OQ-DIAG-1).
+- `src/components/JournalTail.svelte` (NEW, ~120 LOC) — allow-list
+  dropdown + n-input + refresh button + monospace `<pre>` body.
+  Hardcoded mirror of `services.ALLOWED_SERVICES`.
+- `src/routes/Diagnostics.svelte` (NEW, ~210 LOC) — B-DIAG page. Four
+  sub-panels in CSS-grid auto-fit (>=420 px columns):
+  Pose / Jitter / AMCL rate + Resources / Journal tail. Stale-frame
+  greying via `DIAG_FRESHNESS_MS` against
+  `Date.now() - frame._arrival_ms`. Re-render tick once per second
+  so the freshness gate evaluates without a new SSE frame.
+- `src/routes.ts` — `/diag` → `Diagnostics` registered.
+- `src/components/Sidebar.svelte` — added `/diag` nav row.
+- `tests/e2e/_stub_server.py` — 5 new endpoint stubs:
+  `/api/system/jitter`, `/api/system/amcl_rate`, `/api/system/resources`,
+  `/api/diag/stream`, `/api/logs/tail`.
+
+### Tests (new)
+
+- `tests/unit/diag.test.ts` (8 cases — subscribe/unsub refcount,
+  SSE open/close, no SSE without subscribers, _arrival_ms stamping,
+  sparkline ring depth, ring drops oldest at depth, polling fallback
+  on SSE error, reset).
+- `tests/unit/diagSparkline.test.ts` (5 cases — empty input, flat-line,
+  polyline shape, label + chip render, "—" chip on empty input).
+- `tests/unit/journalTail.test.ts` (4 cases — allow-list dropdown,
+  loading-disables-button, empty-state, error-state).
+- `tests/e2e/diagnostics.spec.ts` (5 cases — route renders, all four
+  panels visible, jitter chip populates after login, allow-list
+  dropdown count, journal Refresh fetches lines).
+
+### Mode-A folds applied
+
+- M2: `scan_rate` → `amcl_rate` everywhere — interface name, field
+  tuple, DiagFrame key, store field.
+- N4: SPA `_arrival_ms` pattern extended from Track D's LastScan to
+  the multiplexed DiagFrame (one stamp per frame; sub-panels share it).
+- OQ-DIAG-1: hand-rolled canvas sparkline (not uPlot / not SVG) —
+  decoupled from FRONT_DESIGN §9 chart-library decision.
+- OQ-DIAG-3: `JournalTail` allow-list hardcoded in SPA (not fetched
+  from a new endpoint); drift detected by code review per invariant (q).
+- OQ-DIAG-8: polling fallback at 1 Hz (not 5 Hz) — the choppier
+  cadence is itself a useful operator signal that "SSE is broken".
+
+### Total frontend test count
+
+84 vitest cases (was 67 pre-PR-DIAG). 23 playwright e2e cases (was 18).
+`npm run lint` clean; `npm run build` green; bundle 68.59 kB
+(gzip 25.96 kB) — +1.1 kB raw vs pre-PR-DIAG.

@@ -85,6 +85,34 @@ inline constexpr int          UDS_CONN_READ_TIMEOUT_SEC = 1;
 // from re-entering on the same press.
 inline constexpr int          GPIO_EDGE_EVENT_BUFFER_DEPTH = 16;
 
+// Track B-DIAG (PR-DIAG) — diagnostics page Tier-1 invariants.
+//
+// JITTER_RING_DEPTH: Thread D's per-tick scheduling-jitter sample buffer.
+// 2048 entries × 16.683 ms tick ≈ 34 s lookback, generous against the
+// publisher's 1 Hz cadence and against transient sub-second spikes.
+// Changing it invalidates the documented ~34 s window characterization.
+//
+// JITTER_PUBLISH_INTERVAL_MS: cadence the diag publisher thread tickets
+// at. 1000 ms keeps `compute_summary` (sort + percentile, ~30 µs at
+// N=2048 on Cortex-A76) at 0.003% CPU. Changing it invalidates the
+// publisher's CPU-budget reasoning.
+//
+// AMCL_RATE_WINDOW_S: documented "the AMCL-iteration-rate metric is
+// meaningful over a window roughly this long" comment value (Mode-A
+// fold M2 renamed scan_rate → amcl_iteration_rate). The actual rate
+// math uses two-tick differencing in the publisher; this constant is
+// informational only — see plan §"Scan-rate publication".
+inline constexpr int          JITTER_RING_DEPTH         = 2048;
+inline constexpr int          JITTER_PUBLISH_INTERVAL_MS = 1000;
+inline constexpr double       AMCL_RATE_WINDOW_S        = 5.0;
+
+// PR-DIAG json_mini scratch budgets. Worst case per-frame:
+//   - format_ok_jitter ≈ 5×8 (p-tiles + mean) doubles + scalars ≈ 220 B.
+//   - format_ok_amcl_rate ≈ 1 double + 3 uint64 + flags ≈ 130 B.
+// 512 B leaves >2× headroom; pinned by static_assert in json_mini.cpp.
+inline constexpr int          JITTER_FORMAT_SCRATCH_BYTES    = 512;
+inline constexpr int          AMCL_RATE_FORMAT_SCRATCH_BYTES = 256;
+
 // FreeD D1 field offsets within the 29-byte packet.
 // Source of truth: XR_FreeD_to_UDP/src/main.cpp L67-85.
 namespace FreeD {

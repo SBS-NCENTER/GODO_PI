@@ -134,3 +134,35 @@ export const MAP_SCAN_FRESHNESS_MS = 1000;
 // Polling fallback when SSE drops. Slightly slower than LastPose's 1 s
 // because the scan reply is wider (~14 KiB vs ~250 B for pose).
 export const LAST_SCAN_POLL_FALLBACK_MS = 1000;
+
+// --- PR-DIAG (Track B-DIAG) — diagnostics page constants ----------------
+// Sparkline ring depth: 60 frames × 5 Hz = 12 s of recent history per
+// metric. Bigger than the visible chart width (200 px / ~3 px per dot
+// = ~66 dots) so the ring buffer is always wider than the render.
+export const DIAG_SPARKLINE_DEPTH = 60;
+export const DIAG_SPARKLINE_WIDTH_PX = 200;
+export const DIAG_SPARKLINE_HEIGHT_PX = 32;
+
+// Freshness budget for the multiplexed DiagFrame. 2 s = 10 ticks @ 5 Hz —
+// generous against transient SSE delays. Mode-A M2 / N4 fold pin: this
+// is measured against `Date.now() - frame._arrival_ms` (NOT against
+// any published_mono_ns field — clock domain mismatch).
+export const DIAG_FRESHNESS_MS = 2000;
+
+// Diagnostics polling fallback when SSE drops. 1 Hz feels slightly
+// choppy when SSE is broken — itself a useful operator signal that
+// "something's off".
+export const DIAG_POLL_FALLBACK_MS = 1000;
+
+// Logs tail caps — MUST equal webctl `LOGS_TAIL_MAX_N` /
+// `LOGS_TAIL_DEFAULT_N`. Mode-A invariant (m): drift detected by
+// inspection during code review; the webctl-side cap is authoritative
+// (Pydantic Field(le=...) rejects oversized values).
+export const LOGS_TAIL_MAX_N_MIRROR = 500;
+export const LOGS_TAIL_DEFAULT_N = 50;
+
+// Diagnostics-panel canvas colours. Distinct from Track D's pose red /
+// trail blue / scan teal trio for color-blind friendliness.
+export const JITTER_PANEL_COLOR = '#7e57c2'; // purple
+export const AMCL_RATE_PANEL_COLOR = '#26a69a'; // teal (matches scan dot)
+export const RESOURCES_PANEL_COLOR = '#42a5f5'; // light blue

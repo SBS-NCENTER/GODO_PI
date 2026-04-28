@@ -35,12 +35,16 @@ UdsServer::UdsServer(std::string    socket_path,
                      ModeGetter     get_mode,
                      ModeSetter     set_mode,
                      LastPoseGetter get_last_pose,
-                     LastScanGetter get_last_scan)
+                     LastScanGetter get_last_scan,
+                     JitterGetter   get_jitter,
+                     AmclRateGetter get_amcl_rate)
     : socket_path_(std::move(socket_path)),
       get_mode_(std::move(get_mode)),
       set_mode_(std::move(set_mode)),
       get_last_pose_(std::move(get_last_pose)),
-      get_last_scan_(std::move(get_last_scan)) {}
+      get_last_scan_(std::move(get_last_scan)),
+      get_jitter_(std::move(get_jitter)),
+      get_amcl_rate_(std::move(get_amcl_rate)) {}
 
 UdsServer::~UdsServer() {
     close();
@@ -245,6 +249,25 @@ void UdsServer::handle_one_request(int conn_fd) noexcept {
         scan.iterations = -1;
         if (get_last_scan_) scan = get_last_scan_();
         const auto resp = format_ok_scan(scan);
+        (void)::send(conn_fd, resp.data(), resp.size(), MSG_NOSIGNAL);
+        return;
+    }
+    if (req.cmd == "get_jitter") {
+        // PR-DIAG — see doc/uds_protocol.md §C.6. Same null-callback
+        // semantics: valid=0 means the publisher hasn't ticked yet.
+        godo::rt::JitterSnapshot snap{};
+        if (get_jitter_) snap = get_jitter_();
+        const auto resp = format_ok_jitter(snap);
+        (void)::send(conn_fd, resp.data(), resp.size(), MSG_NOSIGNAL);
+        return;
+    }
+    if (req.cmd == "get_amcl_rate") {
+        // PR-DIAG — see doc/uds_protocol.md §C.7. Mode-A M2 fold
+        // renamed scan_rate → amcl_iteration_rate; the wire command
+        // matches the canonical name.
+        godo::rt::AmclIterationRate rate{};
+        if (get_amcl_rate_) rate = get_amcl_rate_();
+        const auto resp = format_ok_amcl_rate(rate);
         (void)::send(conn_fd, resp.data(), resp.size(), MSG_NOSIGNAL);
         return;
     }

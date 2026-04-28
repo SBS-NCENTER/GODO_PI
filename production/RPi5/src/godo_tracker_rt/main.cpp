@@ -48,12 +48,19 @@
 #include "gpio/gpio_source_libgpiod.hpp"
 #include "lidar/lidar_source_rplidar.hpp"
 #include "localization/cold_writer.hpp"
+#include "rt/amcl_rate.hpp"
+#include "rt/diag_publisher.hpp"
+#include "rt/jitter_ring.hpp"
 #include "rt/rt_setup.hpp"
 #include "smoother/offset_smoother.hpp"
 #include "udp/sender.hpp"
 #include "uds/uds_server.hpp"
 
+using godo::rt::AmclIterationRate;
+using godo::rt::AmclRateAccumulator;
 using godo::rt::FreedPacket;
+using godo::rt::JitterRing;
+using godo::rt::JitterSnapshot;
 using godo::rt::LastPose;
 using godo::rt::LastScan;
 using godo::rt::Offset;
@@ -83,7 +90,8 @@ void thread_a_serial(const godo::core::Config& cfg,
 
 void thread_d_rt(const godo::core::Config& cfg,
                  Seqlock<FreedPacket>&     latest_freed,
-                 Seqlock<Offset>&          target_offset) {
+                 Seqlock<Offset>&          target_offset,
+                 JitterRing&               jitter_ring) {
     // Thread-local lifecycle stanza.
     godo::rt::setup::pin_current_thread_to_cpu(cfg.rt_cpu);
     godo::rt::setup::set_current_thread_fifo(cfg.rt_priority);
@@ -107,6 +115,17 @@ void thread_d_rt(const godo::core::Config& cfg,
         FreedPacket out = p;
         godo::udp::apply_offset_inplace(out, live);
         udp.send(out);
+
+        // PR-DIAG (TM4): record scheduling jitter for the diag publisher
+        // BEFORE the next sleep. `next` already holds this tick's
+        // scheduled deadline (post-advance below); on entry we use
+        // (now - prev_scheduled). Compute against `next` BEFORE
+        // advancing it so delta measures actual lateness vs the
+        // deadline we just woke up for.
+        const std::int64_t scheduled_ns =
+            static_cast<std::int64_t>(next.tv_sec) * 1'000'000'000LL +
+            static_cast<std::int64_t>(next.tv_nsec);
+        jitter_ring.record(now_ns - scheduled_ns);
 
         advance_ns(next, godo::constants::FRAME_PERIOD_NS);
         int rc;
@@ -190,9 +209,11 @@ void thread_gpio(const godo::core::Config& cfg) {
 // load so the SPA's live LIDAR overlay can render at 5 Hz with zero
 // hot-path impact (Thread D never references last_scan_seq —
 // [hot-path-isolation-grep] enforces this at build time).
-void thread_uds(const godo::core::Config& cfg,
-                Seqlock<LastPose>&        last_pose_seq,
-                Seqlock<LastScan>&        last_scan_seq) {
+void thread_uds(const godo::core::Config&    cfg,
+                Seqlock<LastPose>&           last_pose_seq,
+                Seqlock<LastScan>&           last_scan_seq,
+                Seqlock<JitterSnapshot>&     jitter_seq,
+                Seqlock<AmclIterationRate>&  amcl_rate_seq) {
     godo::uds::UdsServer server(
         cfg.uds_socket,
         []() { return godo::rt::g_amcl_mode.load(std::memory_order_acquire); },
@@ -200,7 +221,9 @@ void thread_uds(const godo::core::Config& cfg,
             godo::rt::g_amcl_mode.store(m, std::memory_order_release);
         },
         [&last_pose_seq]() { return last_pose_seq.load(); },
-        [&last_scan_seq]() { return last_scan_seq.load(); });
+        [&last_scan_seq]() { return last_scan_seq.load(); },
+        [&jitter_seq]() { return jitter_seq.load(); },
+        [&amcl_rate_seq]() { return amcl_rate_seq.load(); });
     try {
         server.open();
     } catch (const std::exception& e) {
@@ -285,6 +308,19 @@ int main(int argc, char** argv, char** envp) {
         last_scan_seq.store(init);
     }
 
+    // PR-DIAG — jitter + amcl_rate seqlocks owned by main; the diag
+    // publisher thread is the SOLE writer (build-grep
+    // [jitter-publisher-grep] enforces). Default-constructed payload
+    // has valid=0 / hz=0 so the SPA shows "RT thread jitter unavailable"
+    // until the first publisher tick lands.
+    Seqlock<JitterSnapshot>     jitter_seq;
+    Seqlock<AmclIterationRate>  amcl_rate_seq;
+
+    // PR-DIAG — single-writer (Thread D) ring + single-writer (cold
+    // writer) accumulator. Both consumed by run_diag_publisher.
+    JitterRing          jitter_ring;
+    AmclRateAccumulator amcl_rate_accum;
+
     // Cold-writer LiDAR factory: lazily build a LidarSourceRplidar bound
     // to the configured port/baud. The factory is invoked once inside
     // run_cold_writer at startup.
@@ -296,7 +332,7 @@ int main(int argc, char** argv, char** envp) {
             return src;
         };
 
-    std::thread t_signal, t_a, t_cold, t_gpio, t_uds, t_d;
+    std::thread t_signal, t_a, t_cold, t_gpio, t_uds, t_d, t_diag;
     pthread_t   cold_native = 0;
     try {
         t_signal = std::thread(thread_signal_handler);
@@ -307,19 +343,33 @@ int main(int argc, char** argv, char** envp) {
                                std::ref(target_offset),
                                std::ref(last_pose_seq),
                                std::ref(last_scan_seq),
+                               std::ref(amcl_rate_accum),
                                lidar_factory);
         cold_native = t_cold.native_handle();
         t_gpio   = std::thread(thread_gpio, std::cref(cfg));
         t_uds    = std::thread(thread_uds,  std::cref(cfg),
                                std::ref(last_pose_seq),
-                               std::ref(last_scan_seq));
+                               std::ref(last_scan_seq),
+                               std::ref(jitter_seq),
+                               std::ref(amcl_rate_seq));
         t_d      = std::thread(thread_d_rt, std::cref(cfg),
-                               std::ref(latest_freed), std::ref(target_offset));
+                               std::ref(latest_freed),
+                               std::ref(target_offset),
+                               std::ref(jitter_ring));
+        // PR-DIAG — diag publisher runs on SCHED_OTHER (no rt_setup
+        // calls inside run_diag_publisher; pinned by code review per
+        // CODEBASE.md invariant).
+        t_diag   = std::thread(godo::rt::run_diag_publisher,
+                               std::ref(jitter_ring),
+                               std::ref(amcl_rate_accum),
+                               std::ref(jitter_seq),
+                               std::ref(amcl_rate_seq));
     } catch (const std::exception& e) {
         std::fprintf(stderr,
             "godo_tracker_rt: thread spawn failed: %s\n", e.what());
         godo::rt::g_running.store(false, std::memory_order_release);
         if (t_d.joinable())    t_d.join();
+        if (t_diag.joinable()) t_diag.join();
         if (t_cold.joinable()) {
             if (cold_native != 0) ::pthread_kill(cold_native, SIGTERM);
             t_cold.join();
@@ -332,9 +382,9 @@ int main(int argc, char** argv, char** envp) {
     }
 
     // Join order: RT first (fastest exit), then cold writer (may need a
-    // SIGTERM kick to interrupt scan_frames), then GPIO + UDS (poll-based
-    // self-exit on g_running=false; M1 amendment forbids pthread_kill
-    // here), then Thread A, then signal.
+    // SIGTERM kick to interrupt scan_frames), then diag publisher, then
+    // GPIO + UDS (poll-based self-exit on g_running=false; M1 amendment
+    // forbids pthread_kill here), then Thread A, then signal.
     t_d.join();
 
     // M8: kick the cold writer in case it's blocked in scan_frames(1)
@@ -345,6 +395,11 @@ int main(int argc, char** argv, char** envp) {
         ::pthread_kill(cold_native, SIGTERM);
     }
     t_cold.join();
+
+    // PR-DIAG — publisher polls g_running every JITTER_PUBLISH_INTERVAL_MS
+    // (1 s). Worst-case join latency is one publish interval; acceptable
+    // alongside cold writer's M8 kick.
+    t_diag.join();
 
     // GPIO + UDS: NO pthread_kill (M1). Both poll with
     // SHUTDOWN_POLL_TIMEOUT_MS and observe g_running on every wake-up;

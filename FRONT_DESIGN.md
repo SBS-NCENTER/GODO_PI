@@ -428,8 +428,8 @@ User 결정 fold-in: 새 frontend 도입을 계기로 top-level 디렉토리를 
 | 결정 | C++ 변경 |
 |---|---|
 | D3 (config PATCH) | UDS `set_config / get_config` 명령 + atomic TOML write + reload-class 처리 |
-| C-DIAG jitter exposure | RT thread가 jitter 통계를 seqlock에 publish + UDS `get_jitter` |
-| C-DIAG scan rate | LiDAR 모듈이 scan rate를 publish + UDS `get_scan_rate` |
+| PR-DIAG jitter exposure (있음) | Thread D가 `JitterRing::record(delta_ns)`로 sample을 ring에 적재; `rt/diag_publisher.cpp` (SCHED_OTHER)가 1 Hz로 percentile + summary 계산 후 `Seqlock<JitterSnapshot>`에 publish + UDS `get_jitter` |
+| PR-DIAG amcl_rate exposure (있음) | Cold writer가 매 AMCL iteration마다 `AmclRateAccumulator::record(now_ns)` 호출 (Mode-A M1: `Seqlock<AmclRateRecord>`); diag_publisher가 두-틱 differencing으로 Hz 계산 + UDS `get_amcl_rate` (Mode-A M2 fold rename) |
 | I2 + hot reload | inotify watch on /etc/godo/maps/*.pgm + occupancy_grid atomic swap |
 
 → Track B처럼 별도 hotfix/feature 단위로 PR 단위 분리 추천.
@@ -439,9 +439,10 @@ User 결정 fold-in: 새 frontend 도입을 계기로 top-level 디렉토리를 
 | 채널 | URL | rate | payload |
 |---|---|---|---|
 | Last pose | `/api/last_pose/stream` | 5 Hz | `LastPose` JSON (Track B schema) |
-| Diagnostics combined | `/api/diag/stream` | 5 Hz | `{pose, jitter, scan_rate, resources}` |
+| Last scan | `/api/last_scan/stream` | 5 Hz | `LastScan` JSON (Track D schema) |
+| Diagnostics combined (있음) | `/api/diag/stream` | 5 Hz | `{pose, jitter, amcl_rate, resources}` (PR-DIAG; Mode-A M2 fold renamed scan_rate) |
 | Service status | `/api/local/services/stream` | 1 Hz | systemctl status 3개 |
-| Journal tail | `/api/logs/<svc>/stream` | event-driven | journalctl --follow output |
+| Journal tail | `/api/logs/<svc>/stream` | event-driven | journalctl --follow output (P1.5 — PR-DIAG에서 deferred) |
 
 ### 6.6 Auth flow
 
@@ -492,10 +493,10 @@ JWT secret: `/var/lib/godo/auth/jwt_secret` (서버 첫 부팅 시 random 생성
 | `GET /api/local/journal/<name>?n=<int>` | admin (loopback) | P0 (있음) | LOCAL | — | `[str]` | journalctl tail |
 | `POST /api/system/reboot` | admin | P0 (있음) | LOCAL, SYSTEM | — | `{ok}` | shutdown -r now (5s grace) |
 | `POST /api/system/shutdown` | admin | P0 (있음) | LOCAL, SYSTEM | — | `{ok}` | shutdown -h now (5s grace) |
-| `GET /api/system/jitter` | viewer | P1 | DIAG, SYSTEM | — | `{p50, p99, max}` | RT thread jitter snapshot |
-| `GET /api/system/scan_rate` | viewer | P1 | DIAG | — | `{hz, last_scan_ts}` | LiDAR scan rate |
-| `GET /api/system/resources` | viewer | P1 | SYSTEM | — | `{cpu_temp, mem_used, disk_used}` | psutil + /sys read |
-| `GET /api/logs/tail?unit=<svc>&n=<int>` | viewer | P1 | DIAG, SYSTEM | — | `[str]` | journalctl --no-pager |
+| `GET /api/system/jitter` | public | P1 (있음) | DIAG, SYSTEM | — | `JitterSnapshot` (PR-DIAG schema) | RT thread jitter snapshot via seqlock; anon read (Track F) |
+| `GET /api/system/amcl_rate` | public | P1 (있음) | DIAG | — | `AmclIterationRate` (PR-DIAG schema) | AMCL 반복 cadence (Mode-A M2 fold renamed scan_rate); anon read |
+| `GET /api/system/resources` | public | P1 (있음) | SYSTEM, DIAG | — | `Resources` (PR-DIAG schema) | thermal_zone0 + /proc/meminfo + statvfs; 1s TTL cache; anon read |
+| `GET /api/logs/tail?unit=<svc>&n=<int>` | public | P1 (있음) | DIAG, SYSTEM | — | `[str]` | journalctl --no-pager; allow-list = ALLOWED_SERVICES; anon read |
 | `GET /api/config` | viewer | P1 | CONFIG | — | `{key: value, ...}` | Tier-2 키 전체 |
 | `GET /api/config/schema` | viewer | P1 | CONFIG | — | `{key: {type, range, reload_class, desc}}` | UI 메타 |
 | `PATCH /api/config` | admin | P1 | CONFIG | `{key: value, ...}` | `{applied: [str], pending_restart: [str]}` | UDS set_config + atomic TOML |
@@ -512,7 +513,7 @@ JWT secret: `/var/lib/godo/auth/jwt_secret` (서버 첫 부팅 시 random 생성
 |---|---|---|---|---|---|
 | `GET /api/last_pose/stream` | viewer | P0 (있음) | MAP | `LastPose` JSON @ 5 Hz | get_last_pose 폴링 → push |
 | `GET /api/last_scan/stream` | public | Track D (있음) | MAP | `LastScan` JSON @ 5 Hz | get_last_scan 폴링 → push; ~14 KiB/frame |
-| `GET /api/diag/stream` | viewer | P1 | DIAG | `{pose, jitter, scan_rate, resources}` @ 5 Hz | 통합 진단 |
+| `GET /api/diag/stream` | public | P1 (있음) | DIAG | `{pose, jitter, amcl_rate, resources}` @ 5 Hz | 통합 진단 (Mode-A M2 fold: amcl_rate); anon read |
 | `GET /api/local/services/stream` | admin (loopback) | P0 (있음) | LOCAL | `[{name, active, since}]` @ 1 Hz | 서비스 상태 변화 |
 | `GET /api/logs/<svc>/stream` | viewer | P1 | DIAG, SYSTEM | journalctl --follow line-by-line | journald event-driven |
 
@@ -527,8 +528,8 @@ JWT secret: `/var/lib/godo/auth/jwt_secret` (서버 첫 부팅 시 random 생성
 | `get_last_scan` | Track D (있음) | `/api/last_scan`, SSE | LastScan struct + format_ok_scan in cold writer + UDS branch |
 | `get_config` | P1 신규 | `/api/config` | tracker exposes Config struct as JSON |
 | `set_config {key, value}` | P1 신규 | `PATCH /api/config` | atomic TOML write + RAM update + reload-class flag |
-| `get_jitter` | P1 신규 | `/api/system/jitter` | RT thread publishes jitter via seqlock |
-| `get_scan_rate` | P1 신규 | `/api/system/scan_rate` | LiDAR module publishes rate |
+| `get_jitter` | P1 (있음) | `/api/system/jitter` | RT thread records into `JitterRing`; `rt/diag_publisher.cpp` publishes summary via `Seqlock<JitterSnapshot>` |
+| `get_amcl_rate` | P1 (있음) | `/api/system/amcl_rate` | Cold writer records each AMCL iteration into `AmclRateAccumulator` (Mode-A M1: `Seqlock<AmclRateRecord>`); diag_publisher computes Hz over its 1 s tick (Mode-A M2 renamed scan_rate) |
 
 ### 7.4 UI / 프론트 측 wire SSOT
 
@@ -582,8 +583,16 @@ JWT secret: `/var/lib/godo/auth/jwt_secret` (서버 첫 부팅 시 random 생성
 
 ### Phase 3 — P1 구현 (Track C-2)
 
-- B-DIAG / B-CONFIG
-- tracker D3 (set_config) + jitter/scan_rate exposure
+- B-DIAG (있음, PR-DIAG, 2026-04-29 — `feat/p4.5-track-b-diag`) — 4-panel
+  Diagnostics page (Pose / Jitter / AMCL rate + Resources / Journal tail);
+  multiplexed `/api/diag/stream` SSE @ 5 Hz (`{pose, jitter, amcl_rate,
+  resources}`); 5 new endpoints + 1 new SSE channel (모두 anon read,
+  Track F 패턴). Tracker C++: `JitterRing` + `JitterStats` + `AmclRateAccumulator`
+  (Mode-A M1 Seqlock<AmclRateRecord>) + `diag_publisher` (SCHED_OTHER
+  thread) + 2 새 UDS 명령 (`get_jitter`, `get_amcl_rate`). 3 새 build
+  greps (hot-path-jitter / jitter-publisher / amcl-rate-publisher).
+- B-CONFIG (남음, PR-CONFIG에서) — `PATCH /api/config` + reload-class
+  machinery. PR-DIAG 스코프에서 명시적으로 제외됨 (별도 PR).
 - C++ Mode-B 통과 후 머지
 
 ### Phase 4 — P2 구현 (Track C-3, Phase 4.5)

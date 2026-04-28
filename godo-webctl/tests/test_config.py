@@ -31,6 +31,7 @@ def test_empty_env_uses_defaults() -> None:
     assert s.users_file == Path("/var/lib/godo/auth/users.json")
     assert s.spa_dist is None
     assert s.chromium_loopback_only is True
+    assert s.disk_check_path == Path("/")
 
 
 def test_defaults_match_settings() -> None:
@@ -58,6 +59,7 @@ def test_each_env_var_overrides_default() -> None:
         "GODO_WEBCTL_USERS_FILE": "/tmp/users.json",
         "GODO_WEBCTL_SPA_DIST": "/tmp/dist",
         "GODO_WEBCTL_CHROMIUM_LOOPBACK_ONLY": "false",
+        "GODO_WEBCTL_DISK_CHECK_PATH": "/var/lib/godo",
     }
     s = load_settings(overrides)
     assert s.host == "0.0.0.0"
@@ -72,6 +74,7 @@ def test_each_env_var_overrides_default() -> None:
     assert s.users_file == Path("/tmp/users.json")
     assert s.spa_dist == Path("/tmp/dist")
     assert s.chromium_loopback_only is False
+    assert s.disk_check_path == Path("/var/lib/godo")
 
 
 def test_spa_dist_empty_string_is_none() -> None:

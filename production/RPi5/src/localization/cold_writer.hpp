@@ -49,6 +49,7 @@
 #include "occupancy_grid.hpp"
 #include "pose.hpp"
 #include "rng.hpp"
+#include "rt/amcl_rate.hpp"
 #include "scan_ops.hpp"
 
 namespace godo::localization {
@@ -110,7 +111,8 @@ AmclResult run_one_iteration(const godo::core::Config&         cfg,
                              godo::rt::Offset&                 last_written_inout,
                              godo::rt::Seqlock<godo::rt::Offset>& target_offset,
                              godo::rt::Seqlock<godo::rt::LastPose>& last_pose_seq,
-                             godo::rt::Seqlock<godo::rt::LastScan>& last_scan_seq);
+                             godo::rt::Seqlock<godo::rt::LastScan>& last_scan_seq,
+                             godo::rt::AmclRateAccumulator&    amcl_rate_accum);
 
 // Per-Live-iteration kernel. Visible for tests so they can drive a
 // deterministic synthetic Frame through the Live AMCL pipeline without
@@ -141,7 +143,8 @@ AmclResult run_live_iteration(const godo::core::Config&         cfg,
                               godo::rt::Offset&                 last_written_inout,
                               godo::rt::Seqlock<godo::rt::Offset>& target_offset,
                               godo::rt::Seqlock<godo::rt::LastPose>& last_pose_seq,
-                              godo::rt::Seqlock<godo::rt::LastScan>& last_scan_seq);
+                              godo::rt::Seqlock<godo::rt::LastScan>& last_scan_seq,
+                              godo::rt::AmclRateAccumulator&    amcl_rate_accum);
 
 // Run the cold writer until godo::rt::g_running is false. Idempotent on
 // repeated trigger; safe to call once per process lifetime.
@@ -151,10 +154,17 @@ AmclResult run_live_iteration(const godo::core::Config&         cfg,
 // reader sees every converged pose even when the deadband filter
 // suppresses an Offset publish for a sub-threshold change. See
 // production/RPi5/doc/uds_protocol.md §C.4.
+//
+// `amcl_rate_accum` (PR-DIAG, Mode-A M2 fold): cold writer increments
+// this on every OneShot/Live AMCL iteration so the diag publisher can
+// derive the AMCL iteration rate exposed via UDS `get_amcl_rate`.
+// Build-grep `[amcl-rate-publisher-grep]` enforces that only the cold
+// writer (here) calls `record(...)` on this accumulator.
 void run_cold_writer(const godo::core::Config&              cfg,
                      godo::rt::Seqlock<godo::rt::Offset>&   target_offset,
                      godo::rt::Seqlock<godo::rt::LastPose>& last_pose_seq,
                      godo::rt::Seqlock<godo::rt::LastScan>& last_scan_seq,
+                     godo::rt::AmclRateAccumulator&         amcl_rate_accum,
                      LidarFactory                           lidar_factory);
 
 }  // namespace godo::localization

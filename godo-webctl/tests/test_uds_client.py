@@ -134,3 +134,68 @@ def test_get_last_scan_response_too_large_raises(fake_uds_server) -> None:
     with pytest.raises(UdsProtocolError) as ei:
         c.get_last_scan(timeout=2.0)
     assert "response_too_large" in str(ei.value)
+
+
+# ---- PR-DIAG: get_jitter / get_amcl_rate --------------------------------
+
+
+def test_get_jitter_happy(fake_uds_server) -> None:
+    fake_uds_server.reply(
+        b'{"ok":true,"valid":1,"p50_ns":4567,"p95_ns":12345,'
+        b'"p99_ns":45678,"max_ns":123456,"mean_ns":5678,'
+        b'"sample_count":2048,"published_mono_ns":1234}',
+    )
+    c = UdsClient(fake_uds_server.path)
+    resp = c.get_jitter(timeout=2.0)
+    assert resp["ok"] is True
+    assert resp["valid"] == 1
+    assert resp["p50_ns"] == 4567
+    assert resp["sample_count"] == 2048
+
+
+def test_get_jitter_sends_canonical_bytes(fake_uds_server) -> None:
+    fake_uds_server.reply(b'{"ok":true,"valid":0}')
+    c = UdsClient(fake_uds_server.path)
+    c.get_jitter(timeout=2.0)
+    assert fake_uds_server.captured == [b'{"cmd":"get_jitter"}\n']
+
+
+def test_get_jitter_server_rejected_propagates(fake_uds_server) -> None:
+    from godo_webctl.uds_client import UdsServerRejected
+
+    fake_uds_server.reply(b'{"ok":false,"err":"unknown_cmd"}')
+    c = UdsClient(fake_uds_server.path)
+    with pytest.raises(UdsServerRejected) as ei:
+        c.get_jitter(timeout=2.0)
+    assert ei.value.err == "unknown_cmd"
+
+
+def test_get_amcl_rate_happy(fake_uds_server) -> None:
+    fake_uds_server.reply(
+        b'{"ok":true,"valid":1,"hz":9.987654,'
+        b'"last_iteration_mono_ns":1234,"total_iteration_count":42,'
+        b'"published_mono_ns":1234}',
+    )
+    c = UdsClient(fake_uds_server.path)
+    resp = c.get_amcl_rate(timeout=2.0)
+    assert resp["ok"] is True
+    assert resp["valid"] == 1
+    assert resp["hz"] == 9.987654
+    assert resp["total_iteration_count"] == 42
+
+
+def test_get_amcl_rate_sends_canonical_bytes(fake_uds_server) -> None:
+    fake_uds_server.reply(b'{"ok":true,"valid":0}')
+    c = UdsClient(fake_uds_server.path)
+    c.get_amcl_rate(timeout=2.0)
+    assert fake_uds_server.captured == [b'{"cmd":"get_amcl_rate"}\n']
+
+
+def test_get_amcl_rate_server_rejected_propagates(fake_uds_server) -> None:
+    from godo_webctl.uds_client import UdsServerRejected
+
+    fake_uds_server.reply(b'{"ok":false,"err":"unknown_cmd"}')
+    c = UdsClient(fake_uds_server.path)
+    with pytest.raises(UdsServerRejected) as ei:
+        c.get_amcl_rate(timeout=2.0)
+    assert ei.value.err == "unknown_cmd"

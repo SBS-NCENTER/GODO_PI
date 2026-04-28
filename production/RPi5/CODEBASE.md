@@ -358,6 +358,55 @@ in `lib/protocol.ts`) without the others fails one of:
 - TS by-inspection during code review (per
   `godo-frontend/CODEBASE.md` invariant (l)).
 
+### (i) PR-DIAG — jitter publisher seam (build-grep enforced)
+
+`Seqlock<JitterSnapshot> jitter_seq` and `Seqlock<AmclIterationRate>
+amcl_rate_seq` are owned by `main.cpp`. The SOLE writer is
+`rt/diag_publisher.cpp::run_diag_publisher_with_clock` (and its
+production wrapper `run_diag_publisher`). Build-grep
+`[jitter-publisher-grep]` (`scripts/build.sh`) enforces this — any
+`(jitter_seq|amcl_rate_seq)\.store\b` outside `rt/diag_publisher.cpp`
+fails the build.
+
+The publisher runs on `SCHED_OTHER` (no `pin_current_thread_to_cpu` or
+`set_current_thread_fifo` inside `run_diag_publisher`) — code-review
+enforced, no build grep. The seqlocks are reader-side from the UDS
+server (`thread_uds`) and from the publisher itself (snapshot →
+recompute → store). Mode-A N3 fold pins this as code-review-enforced
+symmetrically with `last_pose_seq` / `last_scan_seq`.
+
+### (j) PR-DIAG (Mode-A M2) — AMCL-rate publisher seam
+
+`AmclRateAccumulator amcl_rate_accum` is owned by `main.cpp`. The SOLE
+writer is `localization/cold_writer.cpp::run_one_iteration` +
+`run_live_iteration` (each calls `amcl_rate_accum.record(...)` exactly
+once at the top of its body). Build-grep `[amcl-rate-publisher-grep]`
+(`scripts/build.sh`) enforces this — any `amcl_rate_accum\.record\b`
+outside `cold_writer.cpp` fails the build.
+
+The accumulator's internal storage is a `Seqlock<AmclRateRecord>` (a
+trivially-copyable `{count, last_ns}` pair). Mode-A M1 fold pinned the
+seqlock as the implementation primitive (over two atomics) to avoid
+measurable Hz-skew under concurrent writer/reader.
+
+### (k) PR-DIAG — hot-path jitter contract (build-grep enforced)
+
+`thread_d_rt` (the SCHED_FIFO 59.94 Hz UDP send loop in `main.cpp`) MUST
+record exactly one jitter sample per tick via `jitter_ring.record(...)`
+and MUST NOT do anything else with the ring. Build-grep
+`[hot-path-jitter-grep]` (`scripts/build.sh`) enforces:
+
+- exactly 1 `jitter_ring\.` reference total inside `thread_d_rt`,
+- 0 `jitter_ring\.snapshot` references (snapshot is reader-side; the
+  publisher thread is the only legitimate caller),
+- 0 references to `std::sort`, `compute_percentile`, `compute_summary`,
+  `format_ok_jitter`, or `jitter_seq` (percentile machinery lives in
+  `rt/jitter_stats.cpp`, called only from the publisher).
+
+Mode-A M3 fold pinned this symmetric contract — the exact-1 + exact-0
+shape catches future drift toward Thread D reading the ring or
+publishing the seqlock directly.
+
 ### Known scaffolding
 
 - (Removed 2026-04-26 with Wave 2.) `thread_stub_cold_writer` and the
@@ -2255,3 +2304,120 @@ production/RPi5/systemd/
   the `[scan-publisher-grep]` step verifies only cold_writer.cpp +
   the boot init in main.cpp store into the seqlock. Track D adds
   zero work to Thread A (FreeD recv) or Thread D (UDP send 59.94 Hz).
+
+---
+
+## 2026-04-29 — PR-DIAG (Track B-DIAG) — Diagnostics page
+
+### Added
+
+- `src/core/rt_types.hpp` — new value types:
+  - `struct JitterSnapshot` (64 B, 8-aligned, trivially copyable;
+    p50/p95/p99/max/mean ns + sample_count + published_mono_ns + valid).
+  - `struct AmclIterationRate` (40 B, 8-aligned, trivially copyable;
+    hz + last_iteration_mono_ns + total_iteration_count +
+    published_mono_ns + valid). Mode-A M2 fold renamed scan_rate →
+    amcl_iteration_rate.
+- `src/core/constants.hpp` — Tier-1 constants:
+  - `JITTER_RING_DEPTH = 2048` (≈34 s @ 59.94 Hz).
+  - `JITTER_PUBLISH_INTERVAL_MS = 1000`.
+  - `AMCL_RATE_WINDOW_S = 5.0` (informational; window arithmetic is
+    publisher-tick-differencing).
+  - `JITTER_FORMAT_SCRATCH_BYTES = 512`,
+    `AMCL_RATE_FORMAT_SCRATCH_BYTES = 256` for json_mini formatters.
+- `src/rt/jitter_ring.{hpp}` — `class JitterRing`: lock-free 1W/1R
+  fixed-size ring (`std::array<int64_t, 2048>`); writer is Thread D
+  (`record`), reader is the diag publisher (`snapshot`).
+- `src/rt/jitter_stats.{hpp,cpp}` — pure functions
+  `compute_percentile(sorted, p)` + `compute_summary(data, &out)`
+  (sorts in place, fills JitterSnapshot).
+- `src/rt/amcl_rate.hpp` — `class AmclRateAccumulator` wrapping
+  `Seqlock<AmclRateRecord>` (Mode-A M1 fold).
+- `src/rt/diag_publisher.{hpp,cpp}` — non-RT publisher (SCHED_OTHER) +
+  test-injectable `run_diag_publisher_with_clock` variant.
+- `src/uds/json_mini.{hpp,cpp}` — `format_ok_jitter` + `format_ok_amcl_rate`
+  with worst-case scratch budgets pinned by static_assert.
+- `src/uds/uds_server.{hpp,cpp}` — `JitterGetter` / `AmclRateGetter`
+  typedefs; `get_jitter` + `get_amcl_rate` cmd branches.
+- `src/godo_tracker_rt/main.cpp` — declare `Seqlock<JitterSnapshot>` +
+  `Seqlock<AmclIterationRate>`, `JitterRing`, `AmclRateAccumulator`;
+  spawn `t_diag_publisher`; thread `jitter_ring` into Thread D and
+  `amcl_rate_accum` into the cold writer; wire the four new UDS
+  callbacks.
+- `scripts/build.sh` — three new build greps:
+  - `[hot-path-jitter-grep]` (Thread D body has exactly 1 `jitter_ring.`
+    + 0 `jitter_ring.snapshot` + 0 percentile/seqlock-store references);
+  - `[jitter-publisher-grep]` (only `rt/diag_publisher.cpp` may store
+    into `jitter_seq` / `amcl_rate_seq`);
+  - `[amcl-rate-publisher-grep]` (only `cold_writer.cpp` may call
+    `amcl_rate_accum.record`).
+
+### Changed
+
+- `src/localization/cold_writer.{hpp,cpp}` — `run_one_iteration` /
+  `run_live_iteration` / `run_cold_writer` signatures gain
+  `AmclRateAccumulator& amcl_rate_accum`; both kernels call
+  `amcl_rate_accum.record(monotonic_ns())` once at the top of their body.
+- `src/godo_tracker_rt/main.cpp::thread_d_rt` — adds one
+  `jitter_ring.record(now_ns - scheduled_ns)` per tick; computed against
+  the pre-advance `next` deadline.
+- `src/uds/uds_server.{hpp,cpp}` — constructor adds two more optional
+  callback parameters (defaults nullptr); `handle_one_request` gains
+  the two new cmd branches.
+
+### Tests
+
+- New: `tests/test_jitter_ring.cpp` (5 cases — round-trip, wraparound,
+  capacity, monotonic counter, 1W/1R subset invariant).
+- New: `tests/test_jitter_stats.cpp` (6 cases — p50 odd/even, p99 single,
+  empty, content correctness incl. Mode-A TB2 [1,100,1000]→p50=100 pin,
+  in-place sort + mean).
+- New: `tests/test_amcl_rate.cpp` (4 cases — initial zero, advance,
+  count-monotonic 1W/1R, last_ns advances).
+- New: `tests/test_diag_publisher.cpp` (4 cases — virtual-clock tick
+  publishes both seqlocks with TB2 content invariant; sleep_for=false
+  exits; g_running=false skips body; empty ring ⇒ valid=0 sentinel).
+- New: `tests/test_cold_writer_amcl_rate_records.cpp` (3 cases — OneShot
+  / Live / triple-back-to-back accumulator increments).
+- Modified: `tests/test_uds_server.cpp` — 6 new cases (get_jitter
+  null/published/concurrent + format_ok_jitter byte-exact + fits-in-
+  scratch; get_amcl_rate null/published + format_ok_amcl_rate
+  byte-exact).
+- Modified: `tests/test_cold_writer_*.cpp` (4 files) — accumulator
+  declarations added at each test scope; kernel calls extended with
+  `amcl_rate_accum` parameter.
+
+### Mode-A folds applied (verbatim)
+
+- M1: `AmclRateAccumulator` uses `Seqlock<AmclRateRecord>` (not two
+  atomics). Pin: zero Hz-skew under concurrent record/snapshot.
+- M2: `scan_rate` → `amcl_iteration_rate` everywhere (struct, JSON,
+  endpoint, SPA UI). The metric measures AMCL iteration cadence; in
+  Idle the LiDAR is parked and the rate is 0 Hz by design.
+- M3: `[hot-path-jitter-grep]` asserts exactly 1 `jitter_ring\.`
+  reference + 0 `jitter_ring\.snapshot` references inside thread_d_rt.
+- N1: `JitterSnapshot` trailing pad commented as "1 (valid) + 3
+  (pad0..pad2) + 4 (_pad3) = 8 B" so writer doesn't treat `_pad3` as
+  semantic.
+- N2: `JITTER_RING_DEPTH = 2048` overlap note (consecutive 1 s
+  publishes share ~33/34 s of samples; sparkline evolves slowly).
+- N3: `amcl_rate_seq` reader-only on `diag_publisher.cpp` is
+  code-review-enforced (not build-grep), symmetric with last_pose_seq
+  / last_scan_seq.
+- N4: Resources `published_mono_ns` is informational (webctl monotonic
+  clock); SPA freshness uses `_arrival_ms` per Track D Mode-A M2.
+- TB1: writer fills `record(i)` for monotonic i; reader's snapshot
+  values must lie in the writer's value domain (positional + arithmetic
+  invariant from a single load).
+- TB2: feeding `[1, 100, 1000]` into the ring then ticking the publisher
+  must store p50=100 in jitter_seq.
+
+### Build / test gate
+
+All 41 ctest hardware-free targets pass; all 6 build greps clean:
+`[rt-alloc-grep]` (warning-only — comment-line false positive),
+`[m1-no-mutex]`, `[scan-publisher-grep]`, `[hot-path-isolation-grep]`,
+`[hot-path-jitter-grep]`, `[jitter-publisher-grep]`,
+`[amcl-rate-publisher-grep]`. Hot-path regression check (Phase 4-1
+`godo_jitter` baseline rerun) deferred to manual smoke on news-pi01
+per the plan's Definition of Done.

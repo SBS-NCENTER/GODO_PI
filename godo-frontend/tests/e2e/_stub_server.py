@@ -379,6 +379,97 @@ def _h_last_scan_stream(req: StubHandler) -> None:
         time.sleep(0.05)
 
 
+# --- PR-DIAG (Track B-DIAG) — diagnostics handlers ----------------------
+
+
+def _canned_jitter() -> dict[str, Any]:
+    return {
+        "valid": 1,
+        "p50_ns": 4567,
+        "p95_ns": 12345,
+        "p99_ns": 45678,
+        "max_ns": 123456,
+        "mean_ns": 5678,
+        "sample_count": 2048,
+        "published_mono_ns": 1_000_000_000,
+    }
+
+
+def _canned_amcl_rate() -> dict[str, Any]:
+    return {
+        "valid": 1,
+        "hz": 9.987,
+        "last_iteration_mono_ns": 1_000_000_000,
+        "total_iteration_count": 42,
+        "published_mono_ns": 1_000_000_001,
+    }
+
+
+def _canned_resources() -> dict[str, Any]:
+    return {
+        "cpu_temp_c": 50.0,
+        "mem_used_pct": 25.0,
+        "mem_total_bytes": 1 << 32,
+        "mem_avail_bytes": 1 << 30,
+        "disk_used_pct": 41.5,
+        "disk_total_bytes": 1 << 35,
+        "disk_avail_bytes": 1 << 33,
+        "published_mono_ns": 1_000_000_002,
+    }
+
+
+def _h_system_jitter(req: StubHandler) -> None:
+    req._send_json(HTTPStatus.OK, _canned_jitter())
+
+
+def _h_system_amcl_rate(req: StubHandler) -> None:
+    req._send_json(HTTPStatus.OK, _canned_amcl_rate())
+
+
+def _h_system_resources(req: StubHandler) -> None:
+    req._send_json(HTTPStatus.OK, _canned_resources())
+
+
+def _h_diag_stream(req: StubHandler) -> None:
+    # Anon access (Track F mirror).
+    req.send_response(HTTPStatus.OK)
+    req.send_header("Content-Type", "text/event-stream")
+    req.send_header("Cache-Control", "no-cache")
+    req.send_header("X-Accel-Buffering", "no")
+    req.end_headers()
+    frame = {
+        "pose": _canned_pose(),
+        "jitter": _canned_jitter(),
+        "amcl_rate": _canned_amcl_rate(),
+        "resources": _canned_resources(),
+    }
+    for _ in range(3):
+        line = f"data: {json.dumps(frame)}\n\n"
+        try:
+            req.wfile.write(line.encode())
+            req.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            return
+        time.sleep(0.05)
+
+
+def _h_logs_tail(req: StubHandler) -> None:
+    # Allow-list match.
+    qs = parse_qs(urlparse(req.path).query)
+    unit = qs.get("unit", [""])[0]
+    n_str = qs.get("n", ["50"])[0]
+    if unit not in {"godo-tracker", "godo-webctl", "godo-irq-pin"}:
+        req._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "err": "unknown_service"})
+        return
+    try:
+        n = int(n_str)
+    except ValueError:
+        n = 50
+    n = max(1, min(n, 500))
+    lines = [f"[stub] {unit} log line {i}" for i in range(min(n, 5))]
+    req._send_json(HTTPStatus.OK, lines)
+
+
 def _canned_pose() -> dict[str, Any]:
     return {
         "valid": True,
@@ -612,6 +703,12 @@ GET_ROUTES: dict[str, Callable[[StubHandler], None]] = {
     "/api/activity": _h_activity,
     "/api/local/services": _h_local_services,
     "/api/local/services/stream": _h_local_services_stream,
+    # PR-DIAG endpoints.
+    "/api/system/jitter": _h_system_jitter,
+    "/api/system/amcl_rate": _h_system_amcl_rate,
+    "/api/system/resources": _h_system_resources,
+    "/api/diag/stream": _h_diag_stream,
+    "/api/logs/tail": _h_logs_tail,
     # /api/local/journal/<svc> matches by prefix below — but BaseHTTPServer
     # routes by exact equality, so we add a fallback in do_GET.
 }

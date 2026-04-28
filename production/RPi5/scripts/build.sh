@@ -126,11 +126,9 @@ echo "[scan-publisher-grep] clean (last_scan_seq.store only in cold_writer.cpp +
 # -----------------------------------------------------------------------
 HOT_PATH_TARGET="${ROOT_DIR}/src/godo_tracker_rt/main.cpp"
 HOT_PATH_PATTERN='last_scan_seq'
+# Extract the body of `void thread_d_rt(...)` once; reused by
+# [hot-path-isolation-grep] (Track D) and [hot-path-jitter-grep] (PR-DIAG).
 if [[ -f "${HOT_PATH_TARGET}" ]]; then
-    # Extract the body of `void thread_d_rt(...)` — every line from the
-    # function signature through the matching closing brace at column 1.
-    # awk state machine: arm on the signature line, count braces, disarm
-    # on the matching closer.
     HOT_BODY="$(awk '
         /^void thread_d_rt\(/ { in_fn=1 }
         in_fn { print; for (i=1; i<=length($0); ++i) {
@@ -147,3 +145,74 @@ if [[ -f "${HOT_PATH_TARGET}" ]]; then
     fi
     echo "[hot-path-isolation-grep] clean (thread_d_rt does not reference last_scan_seq)"
 fi
+
+# -----------------------------------------------------------------------
+# [hot-path-jitter-grep] — PR-DIAG invariant: Thread D records jitter into
+# `jitter_ring` once per tick via `jitter_ring.record(...)`, NEVER calls
+# `jitter_ring.snapshot(...)` (reader-side; lives in diag_publisher), and
+# NEVER touches the published seqlock or percentile/sort code.
+#
+# Mode-A M3 fold pinned the symmetric contract: exactly one
+# `jitter_ring\.` reference total AND zero `jitter_ring\.snapshot`
+# references. Future read of the snapshot from Thread D would otherwise
+# escape a named-symbols list.
+# -----------------------------------------------------------------------
+if [[ -f "${HOT_PATH_TARGET}" ]]; then
+    JITTER_RING_TOTAL=$(echo "${HOT_BODY}" | grep -cE 'jitter_ring\.' || true)
+    JITTER_RING_SNAPSHOT=$(echo "${HOT_BODY}" | grep -cE 'jitter_ring\.snapshot' || true)
+    if [[ "${JITTER_RING_TOTAL}" -ne 1 ]]; then
+        echo "[hot-path-jitter-grep] FAIL — thread_d_rt has ${JITTER_RING_TOTAL} 'jitter_ring.' references; expected exactly 1 (single record() call)" >&2
+        echo "${HOT_BODY}" | grep -nE 'jitter_ring\.' | sed 's/^/[hot-path-jitter-grep]   /' >&2 || true
+        exit 1
+    fi
+    if [[ "${JITTER_RING_SNAPSHOT}" -ne 0 ]]; then
+        echo "[hot-path-jitter-grep] FAIL — thread_d_rt has ${JITTER_RING_SNAPSHOT} 'jitter_ring.snapshot' references; reader-side belongs in diag_publisher only" >&2
+        exit 1
+    fi
+    JITTER_FORBIDDEN_PATTERN='\bstd::sort\b|\bcompute_percentile\b|\bcompute_summary\b|\bformat_ok_jitter\b|\bjitter_seq\b'
+    JITTER_FORBIDDEN="$(echo "${HOT_BODY}" | grep -nE "${JITTER_FORBIDDEN_PATTERN}" || true)"
+    if [[ -n "${JITTER_FORBIDDEN}" ]]; then
+        echo "[hot-path-jitter-grep] FAIL — thread_d_rt references percentile/seqlock-store machinery:" >&2
+        echo "${JITTER_FORBIDDEN}" | sed 's/^/[hot-path-jitter-grep]   /' >&2
+        exit 1
+    fi
+    echo "[hot-path-jitter-grep] clean (thread_d_rt has 1 jitter_ring. call, 0 snapshot/sort/seqlock-store references)"
+fi
+
+# -----------------------------------------------------------------------
+# [jitter-publisher-grep] — PR-DIAG invariant: only rt/diag_publisher.cpp
+# may call `jitter_seq.store(...)` or `amcl_rate_seq.store(...)`. main.cpp
+# does NOT seed these (default-constructed payload is the sentinel valid=0,
+# so no boot init is needed — different from last_pose_seq/last_scan_seq
+# where iterations=-1 is the operator-visible distinction).
+#
+# Tests are explicitly allow-listed because they construct seqlocks
+# directly to drive percentile/store assertions.
+# -----------------------------------------------------------------------
+JITTER_STORE_PATTERN='(jitter_seq|amcl_rate_seq)\.store\b'
+JITTER_STORE_HITS="$(grep -rnE "${JITTER_STORE_PATTERN}" "${ROOT_DIR}/src" 2>/dev/null \
+    | grep -v "${ROOT_DIR}/src/rt/diag_publisher.cpp" || true)"
+if [[ -n "${JITTER_STORE_HITS}" ]]; then
+    echo "[jitter-publisher-grep] FAIL — jitter_seq.store / amcl_rate_seq.store called outside diag_publisher.cpp:" >&2
+    echo "${JITTER_STORE_HITS}" | sed 's/^/[jitter-publisher-grep]   /' >&2
+    exit 1
+fi
+echo "[jitter-publisher-grep] clean (jitter_seq.store / amcl_rate_seq.store only in rt/diag_publisher.cpp)"
+
+# -----------------------------------------------------------------------
+# [amcl-rate-publisher-grep] — PR-DIAG invariant (Mode-A M2): only
+# cold_writer.cpp's run_one_iteration / run_live_iteration may call
+# `amcl_rate_accum.record(...)`. Mirrors [scan-publisher-grep] precedent.
+# Mode-A N3 note: `amcl_rate_seq` reader-only (diag_publisher reads
+# the accumulator directly via snapshot()) — pinned by code review,
+# not by build grep here.
+# -----------------------------------------------------------------------
+AMCL_RATE_RECORD_PATTERN='amcl_rate_accum\.record\b'
+AMCL_RATE_RECORD_HITS="$(grep -rnE "${AMCL_RATE_RECORD_PATTERN}" "${ROOT_DIR}/src" 2>/dev/null \
+    | grep -v "${ROOT_DIR}/src/localization/cold_writer.cpp" || true)"
+if [[ -n "${AMCL_RATE_RECORD_HITS}" ]]; then
+    echo "[amcl-rate-publisher-grep] FAIL — amcl_rate_accum.record called outside cold_writer.cpp:" >&2
+    echo "${AMCL_RATE_RECORD_HITS}" | sed 's/^/[amcl-rate-publisher-grep]   /' >&2
+    exit 1
+fi
+echo "[amcl-rate-publisher-grep] clean (amcl_rate_accum.record only in cold_writer.cpp)"

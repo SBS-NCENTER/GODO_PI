@@ -86,7 +86,15 @@ AmclResult run_one_iteration(const godo::core::Config&         cfg,
                              godo::rt::Offset&                 last_written_inout,
                              godo::rt::Seqlock<godo::rt::Offset>& target_offset,
                              godo::rt::Seqlock<godo::rt::LastPose>& last_pose_seq,
-                             godo::rt::Seqlock<godo::rt::LastScan>& last_scan_seq) {
+                             godo::rt::Seqlock<godo::rt::LastScan>& last_scan_seq,
+                             godo::rt::AmclRateAccumulator&    amcl_rate_accum) {
+    // 0. PR-DIAG (Mode-A M2): record this AMCL iteration into the rate
+    //    accumulator. Single seqlock store; no allocation; only the cold
+    //    writer (this function + run_live_iteration) is allowed to call
+    //    record(). [amcl-rate-publisher-grep] enforces.
+    amcl_rate_accum.record(
+        static_cast<std::uint64_t>(godo::rt::monotonic_ns()));
+
     // 1. Decimate the scan into AMCL beams.
     downsample(frame,
                cfg.amcl_downsample_stride,
@@ -190,7 +198,13 @@ AmclResult run_live_iteration(const godo::core::Config&         cfg,
                               godo::rt::Offset&                 last_written_inout,
                               godo::rt::Seqlock<godo::rt::Offset>& target_offset,
                               godo::rt::Seqlock<godo::rt::LastPose>& last_pose_seq,
-                              godo::rt::Seqlock<godo::rt::LastScan>& last_scan_seq) {
+                              godo::rt::Seqlock<godo::rt::LastScan>& last_scan_seq,
+                              godo::rt::AmclRateAccumulator&    amcl_rate_accum) {
+    // 0. PR-DIAG (Mode-A M2): record this AMCL iteration into the rate
+    //    accumulator. Mirrors run_one_iteration's record() pin.
+    amcl_rate_accum.record(
+        static_cast<std::uint64_t>(godo::rt::monotonic_ns()));
+
     // 1. Decimate the scan into AMCL beams (same shape as OneShot).
     downsample(frame,
                cfg.amcl_downsample_stride,
@@ -308,6 +322,7 @@ void run_cold_writer(const godo::core::Config&              cfg,
                      godo::rt::Seqlock<godo::rt::Offset>&   target_offset,
                      godo::rt::Seqlock<godo::rt::LastPose>& last_pose_seq,
                      godo::rt::Seqlock<godo::rt::LastScan>& last_scan_seq,
+                     godo::rt::AmclRateAccumulator&         amcl_rate_accum,
                      LidarFactory                           lidar_factory) {
     OccupancyGrid grid;
     LikelihoodField lf;
@@ -417,7 +432,8 @@ void run_cold_writer(const godo::core::Config&              cfg,
                                             beams_buf, last_pose,
                                             live_first_iter,
                                             last_written, target_offset,
-                                            last_pose_seq, last_scan_seq);
+                                            last_pose_seq, last_scan_seq,
+                                            amcl_rate_accum);
                 } catch (const std::exception& e) {
                     std::fprintf(stderr,
                         "cold_writer: run_one_iteration threw: %s — "
@@ -489,7 +505,8 @@ void run_cold_writer(const godo::core::Config&              cfg,
                                              beams_buf, last_pose,
                                              live_first_iter,
                                              last_written, target_offset,
-                                             last_pose_seq, last_scan_seq);
+                                             last_pose_seq, last_scan_seq,
+                                             amcl_rate_accum);
                 } catch (const std::exception& e) {
                     std::fprintf(stderr,
                         "cold_writer: run_live_iteration threw: %s — "

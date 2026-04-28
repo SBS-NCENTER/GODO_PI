@@ -62,11 +62,30 @@ MAP_IMAGE_CACHE_TTL_S: Final[float] = 300.0
 # buffer (documented in CODEBASE.md invariant — in-memory only for P0).
 ACTIVITY_BUFFER_SIZE: Final[int] = 50
 
+# Default `n` for /api/activity?n=… when the operator does not specify.
+# 5 matches the DASH "last 5 activities" line (FRONT_DESIGN §7.1).
+ACTIVITY_TAIL_DEFAULT_N: Final[int] = 5
+
 # --- Journalctl tail ------------------------------------------------------
 # Default `n` for /api/local/journal/<svc>?n=… when the operator does not
 # specify. 30 lines covers most "what just went wrong" debugging without
 # blowing up the response size.
 JOURNAL_TAIL_DEFAULT_N: Final[int] = 30
+
+# --- LoginBody field bounds ----------------------------------------------
+# Wire-side bounds on /api/auth/login payload. 64 covers the existing
+# `ncenter` seed plus any reasonable LDAP migration; 256 leaves headroom
+# above bcrypt's 72-byte input limit (longer passwords are silently
+# truncated by bcrypt, but we accept them client-side).
+LOGIN_USERNAME_MAX_LEN: Final[int] = 64
+LOGIN_PASSWORD_MAX_LEN: Final[int] = 256
+
+# --- SSE per-poll UDS timeout --------------------------------------------
+# Short — if the tracker stalls, we want the loop to skip a frame, not
+# stall the stream. 0.5 s is well under the 1 s services tick and the
+# 0.2 s last_pose tick (the latter falls back to skip-on-timeout cleanly
+# because the next tick re-queries).
+SSE_UDS_TIMEOUT_S: Final[float] = 0.5
 
 # --- Backup-side Tier-1 (relocated from protocol.py per planner M2) ------
 # Bound on rename collision retries inside backup.backup_map. Above 9

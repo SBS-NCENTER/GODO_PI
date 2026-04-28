@@ -305,8 +305,10 @@ rejected before reaching subprocess.
 - `src/godo_webctl/auth.py` — bcrypt + PyJWT (HS256, 6 h TTL).
   `UserStore` with `flock(LOCK_EX)` + atomic `os.replace` writes,
   lazy-seed `ncenter`/`ncenter` admin, corruption recovery to HTTP
-  503 instead of crashloop. `_load_or_create_secret` (32 bytes,
-  mode 0600). FastAPI `Depends(require_user)` and
+  503 instead of crashloop. `bootstrap(jwt_secret_path, users_file)`
+  is the single startup entry point used by `app.py`; it composes
+  `load_or_create_secret` (32 bytes, mode 0600) + `UserStore` build
+  + `lazy_seed_default`. FastAPI `Depends(require_user)` and
   `Depends(require_admin)`; bearer header OR `?token=` query param.
 - `src/godo_webctl/local_only.py` — loopback-only FastAPI dependency
   (8 cases per T5).

@@ -61,7 +61,12 @@ from . import services as services_mod
 from . import sse as sse_mod
 from . import uds_client as uds_mod
 from .config import Settings, load_settings
-from .constants import JOURNAL_TAIL_DEFAULT_N
+from .constants import (
+    ACTIVITY_TAIL_DEFAULT_N,
+    JOURNAL_TAIL_DEFAULT_N,
+    LOGIN_PASSWORD_MAX_LEN,
+    LOGIN_USERNAME_MAX_LEN,
+)
 from .local_only import loopback_only
 from .protocol import LAST_POSE_FIELDS, MODE_IDLE, MODE_LIVE, MODE_ONESHOT
 
@@ -81,8 +86,8 @@ def _ensure_logging_configured() -> None:
 
 
 class LoginBody(BaseModel):
-    username: str = Field(min_length=1, max_length=64)
-    password: str = Field(min_length=1, max_length=256)
+    username: str = Field(min_length=1, max_length=LOGIN_USERNAME_MAX_LEN)
+    password: str = Field(min_length=1, max_length=LOGIN_PASSWORD_MAX_LEN)
 
 
 class LiveBody(BaseModel):
@@ -130,14 +135,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # --- auth bootstrap ---------------------------------------------------
     # Secret read once at startup; rotation = `systemctl restart`.
-    jwt_secret = auth_mod._load_or_create_secret(cfg.jwt_secret_path)
-    user_store = auth_mod.UserStore(cfg.users_file)
-    if user_store.unavailable_reason is None:
-        # Lazy-seed only when the file was absent (cached empty + no error).
-        try:
-            auth_mod._lazy_seed_default(user_store)
-        except OSError as e:
-            logger.error("auth.seed_failed: %s", e)
+    jwt_secret, user_store = auth_mod.bootstrap(cfg.jwt_secret_path, cfg.users_file)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -285,7 +283,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # ---- /api/activity --------------------------------------------------
     @app.get("/api/activity")
     async def get_activity(
-        n: int = 5,
+        n: int = ACTIVITY_TAIL_DEFAULT_N,
         _: auth_mod.Claims = Depends(auth_mod.require_user),
     ) -> JSONResponse:
         return JSONResponse(activity_log.tail(n), status_code=HTTPStatus.OK)

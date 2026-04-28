@@ -116,13 +116,13 @@ def test_issue_token_rejects_unknown_role() -> None:
 
 def test_load_or_create_secret_lazy_creates_with_mode_0600(tmp_path: Path) -> None:
     p = tmp_path / "auth" / "jwt_secret"
-    secret = A._load_or_create_secret(p)
+    secret = A.load_or_create_secret(p)
     assert len(secret) == A.JWT_SECRET_BYTES
     assert p.is_file()
     mode = stat.S_IMODE(p.stat().st_mode)
     assert mode == 0o600
     # Reading again returns the same bytes.
-    again = A._load_or_create_secret(p)
+    again = A.load_or_create_secret(p)
     assert again == secret
 
 
@@ -133,7 +133,7 @@ def test_lazy_seed_default_creates_admin_when_missing(tmp_path: Path) -> None:
     users = tmp_path / "users.json"
     store = A.UserStore(users)
     assert store.unavailable_reason is None
-    A._lazy_seed_default(store)
+    A.lazy_seed_default(store)
     assert users.is_file()
     payload = json.loads(users.read_text())
     assert "ncenter" in payload
@@ -146,10 +146,46 @@ def test_lazy_seed_default_no_op_when_users_exist(tmp_path: Path) -> None:
     users = tmp_path / "users.json"
     store = A.UserStore(users)
     store.set_password("alice", "pw", "viewer")
-    A._lazy_seed_default(store)  # should not seed admin
+    A.lazy_seed_default(store)  # should not seed admin
     payload = json.loads(users.read_text())
     assert "ncenter" not in payload
     assert "alice" in payload
+
+
+def test_has_users_reflects_cached_state(tmp_path: Path) -> None:
+    users = tmp_path / "users.json"
+    store = A.UserStore(users)
+    assert not store.has_users()
+    store.set_password("alice", "pw", "viewer")
+    assert store.has_users()
+
+
+def test_bootstrap_returns_secret_and_seeded_store(tmp_path: Path) -> None:
+    """`auth.bootstrap` is the single entry point app.py uses; it must
+    create the secret, build the store, and seed the default admin
+    when users.json is absent — all in one call."""
+    secret_path = tmp_path / "auth" / "jwt_secret"
+    users_path = tmp_path / "users.json"
+    secret, store = A.bootstrap(secret_path, users_path)
+    assert isinstance(secret, bytes) and len(secret) == A.JWT_SECRET_BYTES
+    assert secret_path.is_file()
+    assert store.unavailable_reason is None
+    # Default admin was seeded because users.json was absent.
+    assert store.has_users()
+    payload = json.loads(users_path.read_text())
+    assert payload["ncenter"]["role"] == "admin"
+
+
+def test_bootstrap_does_not_seed_when_store_unavailable(tmp_path: Path) -> None:
+    """If users.json is corrupt, bootstrap must NOT attempt to seed
+    over it — the operator's broken file is the SSOT until they fix it."""
+    secret_path = tmp_path / "auth" / "jwt_secret"
+    users_path = tmp_path / "users.json"
+    users_path.write_text("not json {{{", encoding="utf-8")
+    _, store = A.bootstrap(secret_path, users_path)
+    assert store.unavailable_reason is not None
+    # File contents preserved; no seed overwrite happened.
+    assert users_path.read_text(encoding="utf-8") == "not json {{{"
 
 
 def test_user_store_lookup_role_happy(tmp_path: Path) -> None:

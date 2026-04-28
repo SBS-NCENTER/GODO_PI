@@ -55,6 +55,25 @@ def test_journal_tail_default_n_pinned() -> None:
     assert C.JOURNAL_TAIL_DEFAULT_N == 30
 
 
+def test_activity_tail_default_n_pinned() -> None:
+    # Mirrors FRONT_DESIGN §7.1 DASH "last 5 activities".
+    assert C.ACTIVITY_TAIL_DEFAULT_N == 5
+
+
+def test_login_username_max_len_pinned() -> None:
+    assert C.LOGIN_USERNAME_MAX_LEN == 64
+
+
+def test_login_password_max_len_pinned() -> None:
+    assert C.LOGIN_PASSWORD_MAX_LEN == 256
+
+
+def test_sse_uds_timeout_s_pinned() -> None:
+    # Per-poll UDS timeout for the SSE loop. Short so the loop skips on
+    # tracker stall instead of stalling the stream.
+    assert C.SSE_UDS_TIMEOUT_S == 0.5
+
+
 def test_max_rename_attempts_relocated_value_preserved() -> None:
     # Was at protocol.py:78 with value 9; relocation must preserve it.
     assert C.MAX_RENAME_ATTEMPTS == 9

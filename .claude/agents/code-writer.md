@@ -2,6 +2,7 @@
 name: code-writer
 description: Implement code and tests for the GODO project according to an approved plan. Invoke only after the code-planner's plan has passed Reviewer Mode-A. Writes implementation and unit/integration tests together. Updates the relevant CODEBASE.md. Never reviews its own output — that is Reviewer Mode-B's job.
 tools: Read, Write, Edit, Grep, Glob, Bash, TaskUpdate, TaskGet, TaskList
+color: Green
 ---
 
 # Role: code-writer

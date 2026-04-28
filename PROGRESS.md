@@ -174,6 +174,17 @@ All host-side bring-up steps complete. See per-step session log entry below. The
 
 ## Session log
 
+### 2026-04-28 evening (PR-B merge + Track E PR-13 delivered)
+
+Continuation of the same calendar day after a brief SSH drop; backgrounded agents kept running. Two merge events bracket this session:
+
+- **PR-B merged** (`main = 1f5f3c4`). User did not need a LAN-browser check — the SPA already worked end-to-end over Tailscale and over `http://192.168.3.22:8080/` from the dev box, so `gh pr merge 12 --rebase` ran cold. main now carries the full Phase 4.5 P0 surface: 14 endpoints + 2 SSE + JWT (PR-A) + 4 P0 SPA pages (PR-B) + Track F (anonymous reads, login-gated mutations) + 3a13e1a Mode-B fold + FRONT_DESIGN §8 Track D/E specs.
+- **Track E (Multi-map management) — PR-13 created** at SBS-NCENTER/GODO_PI#13, branch `feat/p4.5-track-e-map-management`, 2 commits (`d7b9281` writer, `d4fe79d` Mode-B fold). 5 new endpoints (`GET /api/maps`, `GET /api/maps/<name>/{image,yaml}`, `POST /api/maps/<name>/activate`, `DELETE /api/maps/<name>`), atomic symlink swap (`os.symlink + os.replace` via `secrets.token_hex(8)` suffix, no `tempfile`), `flock(LOCK_EX)`-serialized activate with stale-tmp pre-sweep (M3), defence-in-depth `realpath` containment in every public `maps.py` function (M1, never `assert`), `cfg.map_path` → `cfg.maps_dir` soft migration with every-boot deprecation WARN (Q-OQ-E4), cache-key migration on `map_image.py` to `(realpath, target_mtime_ns)`, `MapListPanel.svelte` admin-gated SPA panel with 3-button `<ConfirmDialog/>` (extended N4 `secondaryAction` prop) and non-loopback hide of the `godo-tracker 재시작` button (M4). 256 pytest pass / 37 vitest pass / 14 playwright pass — all gates clean.
+- **Pipeline**: full multi-agent — planner had landed yesterday → reviewer Mode-A APPROVE-WITH-NITS (5 majors + 6 nits + 3 test-bias + 8 positive — Parent folded all majors + N1/N2/N3/N4/N6 + TB1/TB2/TB3 + resolved Q-OQ-E4 every-boot, Q-OQ-E6 keep-`P0`-column inline before writer) → writer (`d7b9281`) → reviewer Mode-B APPROVE-WITH-NITS (1 major + 5 nits + 2 test-bias + 9 positive) → Parent folded the major (M4 hide-button vitest unit test using real Svelte 5 `mount` of `MapListPanel`) + 3 nits (activate/delete dot-traversal corpus parity + Q-OQ-E4 caplog pin + CODEBASE.md `test_maps.py` count fix) → 2nd commit `d4fe79d`. Skipped 4 Mode-B items intentionally (cfg.map_path dead-code branch, stub-server Track F drift on `/api/last_pose`/`/api/local/services`/`/api/activity`, e2e shared global stub state, concurrent-test 40 ms wall-clock budget) — all are deferred follow-ups, none block PR-13 merge.
+- **Local plan/review artifacts** (gitignored throwaways): `.claude/tmp/plan_track_e_map_management.md` (Mode-A folded, ~52 KB), `.claude/tmp/review_mode_a_track_e.md`, `.claude/tmp/review_mode_b_track_e.md`. Durable record is the 30-files commit on PR-13 + this entry.
+- **Branch state**: PR-13 awaiting LAN-browser check at the office tomorrow morning before merge. After merge, Track D (Live LIDAR overlay) is queued — design at FRONT_DESIGN §8, full pipeline next session.
+- **Live system on news-pi01** unchanged from session start: webctl on `0.0.0.0:8080` foreground via `setsid`, JWT/users under `~/.local/state/godo/auth/`, no systemd unit installed. godo-tracker NOT running by design (banner expected).
+
 ### 2026-04-28 (Phase 4.5 P0 frontend — PR-A + PR-B + Track F + Track D/E specs)
 
 Massive Phase 4.5 progress: end-to-end operator SPA from backend to working UI, plus two follow-up tracks scoped and one in flight.

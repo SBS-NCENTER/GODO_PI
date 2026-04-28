@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# godo-webctl-passwd — set or update an operator account in users.json.
+#
+# Usage:  godo-webctl-passwd <username> <role> <users-file-path>
+# Where:  <role> is one of: admin, viewer
+#
+# Reads the new password from stdin (no echo); writes via the same
+# `UserStore.set_password` path as the FastAPI app, so flock + atomic
+# replace are honoured.
+#
+# Example:
+#   sudo -u ncenter ./godo-webctl-passwd alice admin /var/lib/godo/auth/users.json
+
+set -euo pipefail
+
+if [[ $# -ne 3 ]]; then
+  echo "usage: $0 <username> <role> <users-file-path>" >&2
+  exit 64  # EX_USAGE
+fi
+
+username="$1"
+role="$2"
+users_file="$3"
+
+read -rsp "Password: " pw
+echo
+read -rsp "Confirm:  " pw2
+echo
+if [[ "$pw" != "$pw2" ]]; then
+  echo "passwords do not match" >&2
+  exit 1
+fi
+
+# Locate the godo-webctl python env. Prefer the deployed venv at
+# /opt/godo-webctl/.venv; fall back to the dev `uv run` if available.
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+project_root="$(dirname "$script_dir")"
+
+if [[ -x /opt/godo-webctl/.venv/bin/python ]]; then
+  PY=/opt/godo-webctl/.venv/bin/python
+elif [[ -x "$project_root/.venv/bin/python" ]]; then
+  PY="$project_root/.venv/bin/python"
+else
+  PY=python3
+fi
+
+PYTHONPATH="$project_root/src${PYTHONPATH:+:$PYTHONPATH}" \
+GODO_WEBCTL_PASSWD_PW="$pw" \
+"$PY" - "$username" "$role" "$users_file" <<'PYEOF'
+import os
+import sys
+from pathlib import Path
+
+from godo_webctl.auth import UserStore, VALID_ROLES
+
+username = sys.argv[1]
+role = sys.argv[2]
+users_path = Path(sys.argv[3])
+pw = os.environ["GODO_WEBCTL_PASSWD_PW"]
+
+if role not in VALID_ROLES:
+    print(f"invalid role: {role!r} (allowed: {sorted(VALID_ROLES)})", file=sys.stderr)
+    sys.exit(2)
+
+store = UserStore(users_path)
+store.set_password(username, pw, role)
+print(f"updated {username} ({role}) in {users_path}", file=sys.stderr)
+PYEOF

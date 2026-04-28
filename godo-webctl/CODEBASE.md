@@ -407,6 +407,13 @@ rejected before reaching subprocess.
 Total: 161 hardware-free tests (was 55), +1 hardware-marked
 (unchanged).
 
+#### PR-B hand-off
+
+The SPA bundle ships from `godo-frontend/dist/` and is mounted at `/`
+when the `GODO_WEBCTL_SPA_DIST` env var is set (PR-B,
+`feat/p4.5-frontend-pr-b-spa`). Absence of the env var falls back to the
+legacy `static/index.html`.
+
 ### 2026-04-27 — Track B mirror: `get_last_pose` + `LAST_POSE_FIELDS`
 
 #### Added

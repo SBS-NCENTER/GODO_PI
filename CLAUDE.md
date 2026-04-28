@@ -168,7 +168,11 @@ The smoother + 60 Hz hot path was designed around mode (4) — its 60 Hz interpo
 ├─ /godo-webctl                  ← Operator web control plane (Python FastAPI, Phase 4-3~)
 │    ├─ README.md                  drives godo-tracker via UDS at /run/godo/ctl.sock
 │    ├─ CODEBASE.md
-│    └─ pyproject.toml             UV-managed; 3 endpoints: /health, /calibrate, /map/backup
+│    └─ pyproject.toml             UV-managed; 14 endpoints + 2 SSE streams (PR-A, P0)
+├─ /godo-frontend                ← Operator SPA (Vite + Svelte 5 + TS, Phase 4.5 P0)
+│    ├─ README.md                  served by godo-webctl when GODO_WEBCTL_SPA_DIST is set
+│    ├─ CODEBASE.md
+│    └─ package.json               P0 pages: DASH, MAP, AUTH, LOCAL
 └─ /XR_FreeD_to_UDP              ← Legacy Arduino firmware (rollback card, reference)
      ├─ README.md
      ├─ platformio.ini

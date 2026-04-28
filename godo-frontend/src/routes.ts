@@ -6,6 +6,7 @@ import Local from './routes/Local.svelte';
 import Login from './routes/Login.svelte';
 import Map from './routes/Map.svelte';
 import NotFound from './routes/NotFound.svelte';
+import System from './routes/System.svelte';
 
 export const routes: Record<string, Component> = {
   '/': Dashboard,
@@ -14,6 +15,7 @@ export const routes: Record<string, Component> = {
   '/local': Local,
   '/diag': Diagnostics,
   '/config': Config,
+  '/system': System,
 };
 
 export const notFoundComponent: Component = NotFound;

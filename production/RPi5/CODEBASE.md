@@ -2431,3 +2431,259 @@ All 41 ctest hardware-free targets pass; all 6 build greps clean:
 `[amcl-rate-publisher-grep]`. Hot-path regression check (Phase 4-1
 `godo_jitter` baseline rerun) deferred to manual smoke on news-pi01
 per the plan's Definition of Done.
+
+---
+
+## 2026-04-29 — Track B-CONFIG (PR-CONFIG-α): C++ tracker config edit
+
+### Added
+
+**`src/core/config_schema.hpp` (NEW)** —
+- `enum class ValueType { Int, Double, String }`,
+  `enum class ReloadClass { Hot, Restart, Recalibrate }`.
+- `struct ConfigSchemaRow { name, type, min_d, max_d, default_repr,
+  reload_class, description }`.
+- `inline constexpr std::array<ConfigSchemaRow, 37> CONFIG_SCHEMA` —
+  alphabetical by `name`, wrapped in `// clang-format off` so the row
+  shape stays one-line-per-row for the Python regex parser (β).
+- `static_assert(CONFIG_SCHEMA.size() == 37)` (Mode-A M2).
+- `find(name)`, `reload_class_to_string`, `value_type_to_string` helpers.
+
+**`src/core/hot_config.{hpp,cpp}` (NEW)** — `struct HotConfig` with the
+3 hot-class fields (`deadband_mm`, `deadband_deg`,
+`amcl_yaw_tripwire_deg`) + `published_mono_ns` + `valid` + 7 B pad.
+`static_assert(sizeof(HotConfig) == 40)` (Mode-A M1 fold dropped
+`divergence_*`). `snapshot_hot(cfg)` is a pure free function.
+
+**`src/config/validate.{hpp,cpp}` (NEW)** — `validate(key, value_text)`
+returns `{ok, err, err_detail, parsed_double, parsed_string, row*}`.
+Strict integer parse (rejects decimal/exponent forms); lenient double
+parse; ASCII-only strings ≤ 256 chars.
+
+**`src/config/atomic_toml_writer.{hpp,cpp}` (NEW)** — `write_atomic`
+implements: `access(parent, W_OK)` (Mode-A S1) → `mkstemp(parent /
+".tracker.toml.XXXXXX")` → `fchmod 0644` → write loop → `fsync` →
+`close` → `rename`. On any failure the tmp file is unlinked.
+`WriteOutcome` is a typed enum (`Ok | ParentNotWritable | MkstempFailed
+| WriteFailed | FsyncFailed | RenameFailed`).
+
+**`src/config/restart_pending.{hpp,cpp}` (NEW)** — `touch_pending_flag`,
+`clear_pending_flag`, `is_pending`. Idempotent; logs but never throws.
+
+**`src/config/apply.{hpp,cpp}` (NEW)** — central orchestrator.
+- `apply_set(key, value, live_cfg, mtx, hot_seq, toml, flag)` →
+  validate → lock mtx → clone Config → apply value → render TOML →
+  atomic write → commit live_cfg → publish HotConfig (hot-class) OR
+  touch flag (restart/recalibrate) → return `ApplyResult`.
+- `apply_get_all(live_cfg, mtx)` → JSON dict of 37 keys, alphabetical.
+- `apply_get_schema()` → JSON array of 37 schema rows.
+- `render_toml(cfg)` → canonical TOML body, sectioned + alphabetical.
+
+**`src/uds/uds_server.{hpp,cpp}` (extended)** — three new commands
+wired through optional callbacks:
+- `get_config`        → `ConfigGetter`        (returns JSON body string).
+- `get_config_schema` → `ConfigSchemaGetter`  (pure, no live state).
+- `set_config`        → `ConfigSetter`        (returns `ConfigSetReply`).
+- New ctor parameters appended at the end (existing call sites still
+  compile; null callbacks surface `config_unsupported`).
+- `Request` struct extended with `key_arg` + `value_arg` for
+  `set_config`'s 3-field shape `{cmd, key, value}`.
+
+**`src/uds/json_mini.{hpp,cpp}` (extended)** — `format_ok_set_config`,
+`format_ok_get_config`, `format_ok_get_config_schema`,
+`format_err_with_detail`. The `detail` field carries the validator's
+human-readable rejection reason; backslash + quote are escaped.
+
+**`src/godo_tracker_rt/main.cpp` (extended)** — boot-time wiring:
+1. `clear_pending_flag(restart_pending_flag)` after `Config::load()`
+   succeeds and before any thread spawn (TM10 / TM11).
+2. `Seqlock<HotConfig> hot_cfg_seq` initialised with
+   `snapshot_hot(cfg)` + `published_mono_ns = monotonic_ns()`.
+3. `Config live_cfg = cfg` + `std::mutex live_cfg_mtx` — the UDS
+   thread is the SOLE writer of `live_cfg`.
+4. `thread_uds` signature now also takes `live_cfg`, `live_cfg_mtx`,
+   `hot_cfg_seq`, `toml_path`, `restart_pending_flag`. Three new
+   callbacks wire to `apply_get_all` / `apply_get_schema` / `apply_set`.
+5. `GODO_CONFIG_PATH` and `GODO_RESTART_PENDING_FLAG_PATH` env
+   overrides (CLI flag deferred to PR-CONFIG-β).
+
+**`scripts/build.sh` (3 new build greps)** —
+- `[hot-path-config-grep]` — extracts the body BETWEEN the
+  `while (godo::rt::g_running.load` line and the matching closing brace
+  inside `void thread_d_rt(...)`. That subset MUST contain zero
+  references to `cfg.`, `live_cfg`, `hot_cfg_seq`, or `HotConfig`.
+- `[hot-config-publisher-grep]` — `hot_cfg_seq\.store\b` outside
+  `src/config/apply.cpp` and `src/godo_tracker_rt/main.cpp` fails the
+  build. The boot-time init is the lone main.cpp call site (allow-listed).
+- `[atomic-toml-write-grep]` — `mkstemp` / `rename` calls in `.cpp`
+  files outside `src/config/atomic_toml_writer.cpp` fail the build.
+
+**`tests/test_config_schema.cpp` (NEW)** — 12 cases: row count = 37,
+alphabetical ordering, name uniqueness, `find()` resolves every row,
+`find()` returns nullptr for unknown / partial names, reload-class +
+value-type round-trip, M2 fold pins (`t_ramp_ms` reload_class =
+restart, live-σ description, seed-σ rows present), per-row sanity
+(non-empty fields, exactly one dot, numeric range coherence).
+
+**`tests/test_config_validate.cpp` (NEW)** — 22 cases: bad_key,
+empty key, int happy / decimal-rejected / exponent-rejected /
+empty-rejected / trailing-junk / range-below-min / range-above-max,
+double happy (int form, float form, exponent form), double trailing
+junk / range / range, string happy / empty / non-ASCII / control /
+oversized, reload-class returns by row.
+
+**`tests/test_atomic_toml_writer.cpp` (NEW)** — 9 cases: happy round-
+trip, empty body, overwrite, missing parent → ParentNotWritable +
+target absent + no tmp leftover (Mode-A TB2 (a)+(b)), read-only parent
+chmod 0500 → ParentNotWritable + pre-bytes preserved + no tmp leftover,
+exact body bytes, tmp-in-parent invariant (no leftovers, only the
+target file present), file mode 0644, `outcome_to_string` round-trip.
+
+**`tests/test_restart_pending.cpp` (NEW)** — 6 cases: touch creates,
+clear removes, touch idempotent, clear ENOENT idempotent, missing flag
+returns false, touch creates parent dir if missing.
+
+**`tests/test_hot_config.cpp` (NEW)** — 3 cases: `sizeof == 40`
+(Mode-A M1), `snapshot_hot` copies the three fields, deterministic.
+
+**`tests/test_config_apply.cpp` (NEW)** — 12 cases: hot-class
+publishes HotConfig + no flag touch; restart-class touches flag + no
+HotConfig publish; recalibrate-class touches flag + no HotConfig
+publish; bad_key leaves all state unchanged; bad_value leaves all state
+unchanged; bad_type rejected; string field round-trips through TOML;
+write-failed (parent missing) leaves live_cfg untouched;
+`apply_get_all` returns 37 alphabetical keys; `apply_get_schema`
+returns 37 rows with 3 reload-class values + 3 type values;
+`render_toml` round-trips through `apply_set`; consecutive
+restart-class edits keep flag; get-after-set reflects new value.
+
+**`tests/test_set_config_e2e_ipc.cpp` (NEW)** — 7 cases: get_config_
+schema returns valid JSON; get_config returns 37-key dict; set_config
+hot-class round-trips wire / TOML / RAM / HotConfig + reply carries
+class; set_config restart-class touches flag + reply class; set_config
+bad_value surfaces detail field on the wire; set_config bad_key
+surfaces unknown-key name; null callbacks return `config_unsupported`;
+set_config without `key` returns `bad_payload`.
+
+### Changed
+
+- `src/core/CMakeLists.txt` — `godo_core` adds `hot_config.cpp`.
+- Top-level `CMakeLists.txt` — `add_subdirectory(src/config)` between
+  gpio and uds.
+- `src/godo_tracker_rt/CMakeLists.txt` — links `godo_config`.
+- `src/uds/uds_server.{hpp,cpp}` — ctor signature appended with
+  `ConfigGetter`, `ConfigSchemaGetter`, `ConfigSetter` (all default
+  nullptr); request-dispatch branches added.
+- `src/uds/json_mini.{hpp,cpp}` — `parse_request` recognises `key` +
+  `value` fields; new format helpers added.
+
+### Removed
+
+- (none)
+
+### Invariants (additions)
+
+#### (l) Track B-CONFIG — schema is the cross-language SSOT (code-review enforced)
+
+`src/core/config_schema.hpp::CONFIG_SCHEMA[]` is the canonical 37-row
+declaration of every operator-tunable Tier-2 key. The `// clang-format
+off` block keeps one row per line so the Python mirror (β) and runtime
+SPA fetch can rely on a stable shape. Adding a row requires:
+1. New entry in `CONFIG_SCHEMA[]` (alphabetical by `name`),
+2. Bump the `static_assert(CONFIG_SCHEMA.size() == ...)`,
+3. Extend `read_effective` + `apply_one` in `config/apply.cpp` so
+   the row reaches a real `Config` field,
+4. Extend the corresponding env / CLI / TOML touchpoint in
+   `core/config.cpp` if the row is new to `Config` itself.
+
+The Python parity test (`tests/test_config_schema_parity.py`, β) and
+SPA runtime fetch from `/api/config/schema` (γ) close the cross-
+language loop.
+
+#### (m) Track B-CONFIG — hot-config publisher seam (build-grep enforced)
+
+`Seqlock<godo::core::HotConfig> hot_cfg_seq` is owned by `main.cpp`.
+The SOLE production-runtime writer is
+`config/apply.cpp::apply_set` (the UDS handler thread's call site,
+under `live_cfg_mtx`). `main.cpp` is allowed exactly one extra
+`hot_cfg_seq.store(...)` for boot-time init (idempotent; runs before
+thread spawn, so it cannot race). Build-grep
+`[hot-config-publisher-grep]` enforces this — any other `.cpp` file
+under `src/` calling `hot_cfg_seq.store` fails the build.
+
+PR-CONFIG-α does NOT yet wire cold_writer.cpp to read HotConfig; the
+publish path is in place and tested via the seqlock generation count.
+The cold-writer reader migration is pinned for a follow-up (PR-CONFIG-β
+or its own tiny PR) so this α PR stays narrowly scoped to the
+publisher / writer / wire surface.
+
+#### (n) Track B-CONFIG — atomic TOML writer seam (build-grep enforced)
+
+`config/atomic_toml_writer.cpp` is the SOLE owner of `mkstemp(2)` and
+`rename(2)` calls (against any path) in `production/RPi5/src/`. Build-
+grep `[atomic-toml-write-grep]` enforces this. Bypassing the atomic
+writer (e.g. `std::ofstream` on tracker.toml) would defeat the
+crash-safety contract pinned in TM3.
+
+The same-filesystem precondition (`tmp_path.parent_path() ==
+target_path.parent_path()`) is enforced at code level (the writer
+composes the tmp template from `target_path.parent_path()`), not by a
+runtime assert. Pinned by `tests/test_atomic_toml_writer.cpp::"tmp
+file lives in the target's parent dir"`.
+
+#### Hot-path config isolation (build-grep enforced — extension of (g))
+
+The build grep `[hot-path-config-grep]` extracts the body BETWEEN the
+`while (godo::rt::g_running.load` line and its matching closing brace
+inside `void thread_d_rt(...)`. That subset MUST contain zero
+references to `cfg.`, `live_cfg`, `hot_cfg_seq`, or `HotConfig`. Setup
+BEFORE the while loop is allowed to read `cfg.rt_cpu` / `.rt_priority`
+/ `.ue_host` / `.ue_port` / `.t_ramp_ns` once (those are restart-class
+and captured at thread start by design).
+
+### Tests
+
+- New: 7 test files, ~71 hardware-free cases.
+- Total ctest count: 41 → 43 (gain 2 hardware-free executables that
+  bundle multiple test cases each — the ctest count in the build gate
+  reflects executables, not individual cases).
+
+### Build / test gate
+
+All 43 ctest hardware-free targets pass (was 41); all 10 build greps
+clean: pre-existing 7 (`[rt-alloc-grep]` warning-only,
+`[m1-no-mutex]`, `[scan-publisher-grep]`, `[hot-path-isolation-grep]`,
+`[hot-path-jitter-grep]`, `[jitter-publisher-grep]`,
+`[amcl-rate-publisher-grep]`) + 3 new
+(`[hot-path-config-grep]`, `[hot-config-publisher-grep]`,
+`[atomic-toml-write-grep]`).
+
+### Mode-A folds applied (verbatim)
+
+- **M1** — `HotConfig` field set is 3 doubles + uint64 + uint8 + 7 B
+  pad = 40 B exact (was 5 + … = 64 B). `divergence_*` dropped from
+  HotConfig; `divergence_mm` / `divergence_deg` schema rows
+  reclassified `restart`.
+- **M2** — Schema row count 37 (not 35). Two seed-σ rows added
+  (`amcl.sigma_seed_xy_m`, `amcl.sigma_seed_yaw_deg`). `t_ramp_ms`
+  reload_class is `restart`. Live-σ row descriptions tightened.
+- **M3** — Plan split into PR-CONFIG-α (this PR; Waves 0+1, C++ only)
+  and PR-CONFIG-β (next; webctl + SPA + cross-language tests + docs).
+- **S1** — `access(parent, W_OK)` early-detect added to atomic writer
+  with typed `WriteOutcome::ParentNotWritable`.
+- **S2** — `// clang-format off` around `CONFIG_SCHEMA[]`;
+  `static_assert(N == 37)` C++-side.
+- **TB2** — Atomic writer tests assert (a) target unchanged or absent
+  and (b) no `.tracker.toml.*` tmp leftover for every failure case,
+  not just return codes.
+
+### Out of α scope (deferred to PR-CONFIG-β next session)
+
+- `godo-webctl/src/godo_webctl/{config_schema, config_view,
+  restart_pending}.py` — Python mirror + view helpers.
+- `godo-webctl` `protocol.py` `CMD_GET_CONFIG / CMD_SET_CONFIG` constants.
+- `godo-webctl/src/godo_webctl/app.py` — 3 new HTTP endpoints.
+- `godo-frontend` `lib/protocol.ts` mirrors + Config.svelte route.
+- `cold_writer.cpp` migration to read `HotConfig` per iteration.
+- Cross-language schema-parity test (`test_config_schema_parity.py`).
+- `FRONT_DESIGN.md §6.4 / §7 / §8` row-flip from "P1" to "(있음)".

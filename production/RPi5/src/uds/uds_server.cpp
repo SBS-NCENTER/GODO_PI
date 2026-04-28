@@ -31,20 +31,26 @@ std::string strerror_safe(int e) {
 
 }  // namespace
 
-UdsServer::UdsServer(std::string    socket_path,
-                     ModeGetter     get_mode,
-                     ModeSetter     set_mode,
-                     LastPoseGetter get_last_pose,
-                     LastScanGetter get_last_scan,
-                     JitterGetter   get_jitter,
-                     AmclRateGetter get_amcl_rate)
+UdsServer::UdsServer(std::string        socket_path,
+                     ModeGetter         get_mode,
+                     ModeSetter         set_mode,
+                     LastPoseGetter     get_last_pose,
+                     LastScanGetter     get_last_scan,
+                     JitterGetter       get_jitter,
+                     AmclRateGetter     get_amcl_rate,
+                     ConfigGetter       get_config,
+                     ConfigSchemaGetter get_config_schema,
+                     ConfigSetter       set_config)
     : socket_path_(std::move(socket_path)),
       get_mode_(std::move(get_mode)),
       set_mode_(std::move(set_mode)),
       get_last_pose_(std::move(get_last_pose)),
       get_last_scan_(std::move(get_last_scan)),
       get_jitter_(std::move(get_jitter)),
-      get_amcl_rate_(std::move(get_amcl_rate)) {}
+      get_amcl_rate_(std::move(get_amcl_rate)),
+      get_config_(std::move(get_config)),
+      get_config_schema_(std::move(get_config_schema)),
+      set_config_(std::move(set_config)) {}
 
 UdsServer::~UdsServer() {
     close();
@@ -268,6 +274,52 @@ void UdsServer::handle_one_request(int conn_fd) noexcept {
         godo::rt::AmclIterationRate rate{};
         if (get_amcl_rate_) rate = get_amcl_rate_();
         const auto resp = format_ok_amcl_rate(rate);
+        (void)::send(conn_fd, resp.data(), resp.size(), MSG_NOSIGNAL);
+        return;
+    }
+    if (req.cmd == "get_config") {
+        // Track B-CONFIG (PR-CONFIG-α) — operator pull of the live
+        // effective config. Null callback → config_unsupported.
+        if (!get_config_) {
+            const auto resp = format_err("config_unsupported");
+            (void)::send(conn_fd, resp.data(), resp.size(), MSG_NOSIGNAL);
+            return;
+        }
+        const std::string body = get_config_();
+        const auto resp = format_ok_get_config(body);
+        (void)::send(conn_fd, resp.data(), resp.size(), MSG_NOSIGNAL);
+        return;
+    }
+    if (req.cmd == "get_config_schema") {
+        if (!get_config_schema_) {
+            const auto resp = format_err("config_unsupported");
+            (void)::send(conn_fd, resp.data(), resp.size(), MSG_NOSIGNAL);
+            return;
+        }
+        const std::string body = get_config_schema_();
+        const auto resp = format_ok_get_config_schema(body);
+        (void)::send(conn_fd, resp.data(), resp.size(), MSG_NOSIGNAL);
+        return;
+    }
+    if (req.cmd == "set_config") {
+        if (!set_config_) {
+            const auto resp = format_err("config_unsupported");
+            (void)::send(conn_fd, resp.data(), resp.size(), MSG_NOSIGNAL);
+            return;
+        }
+        if (req.key_arg.empty()) {
+            const auto resp = format_err_with_detail(
+                "bad_payload", "missing 'key' field");
+            (void)::send(conn_fd, resp.data(), resp.size(), MSG_NOSIGNAL);
+            return;
+        }
+        const ConfigSetReply rep = set_config_(req.key_arg, req.value_arg);
+        if (rep.ok) {
+            const auto resp = format_ok_set_config(rep.reload_class);
+            (void)::send(conn_fd, resp.data(), resp.size(), MSG_NOSIGNAL);
+            return;
+        }
+        const auto resp = format_err_with_detail(rep.err, rep.err_detail);
         (void)::send(conn_fd, resp.data(), resp.size(), MSG_NOSIGNAL);
         return;
     }

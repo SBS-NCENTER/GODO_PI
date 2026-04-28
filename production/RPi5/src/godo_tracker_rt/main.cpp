@@ -28,7 +28,9 @@
 #include <cstring>
 #include <ctime>
 #include <exception>
+#include <filesystem>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -37,8 +39,11 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include "config/apply.hpp"
+#include "config/restart_pending.hpp"
 #include "core/config.hpp"
 #include "core/constants.hpp"
+#include "core/hot_config.hpp"
 #include "core/rt_flags.hpp"
 #include "core/rt_types.hpp"
 #include "core/seqlock.hpp"
@@ -209,11 +214,21 @@ void thread_gpio(const godo::core::Config& cfg) {
 // load so the SPA's live LIDAR overlay can render at 5 Hz with zero
 // hot-path impact (Thread D never references last_scan_seq —
 // [hot-path-isolation-grep] enforces this at build time).
-void thread_uds(const godo::core::Config&    cfg,
-                Seqlock<LastPose>&           last_pose_seq,
-                Seqlock<LastScan>&           last_scan_seq,
-                Seqlock<JitterSnapshot>&     jitter_seq,
-                Seqlock<AmclIterationRate>&  amcl_rate_seq) {
+//
+// Track B-CONFIG (PR-CONFIG-α): wires get_config / get_config_schema /
+// set_config to godo::config::apply_*. The UDS handler thread is the
+// SOLE writer of `live_cfg` and the SOLE production-runtime publisher
+// of `hot_cfg_seq` (build-grep [hot-config-publisher-grep] enforces).
+void thread_uds(const godo::core::Config&                 cfg,
+                godo::core::Config&                       live_cfg,
+                std::mutex&                               live_cfg_mtx,
+                Seqlock<godo::core::HotConfig>&           hot_cfg_seq,
+                std::filesystem::path                     toml_path,
+                std::filesystem::path                     restart_pending_flag,
+                Seqlock<LastPose>&                        last_pose_seq,
+                Seqlock<LastScan>&                        last_scan_seq,
+                Seqlock<JitterSnapshot>&                  jitter_seq,
+                Seqlock<AmclIterationRate>&               amcl_rate_seq) {
     godo::uds::UdsServer server(
         cfg.uds_socket,
         []() { return godo::rt::g_amcl_mode.load(std::memory_order_acquire); },
@@ -223,7 +238,28 @@ void thread_uds(const godo::core::Config&    cfg,
         [&last_pose_seq]() { return last_pose_seq.load(); },
         [&last_scan_seq]() { return last_scan_seq.load(); },
         [&jitter_seq]() { return jitter_seq.load(); },
-        [&amcl_rate_seq]() { return amcl_rate_seq.load(); });
+        [&amcl_rate_seq]() { return amcl_rate_seq.load(); },
+        [&live_cfg, &live_cfg_mtx]() {
+            return godo::config::apply_get_all(live_cfg, live_cfg_mtx);
+        },
+        []() {
+            return godo::config::apply_get_schema();
+        },
+        [&live_cfg, &live_cfg_mtx, &hot_cfg_seq, toml_path,
+         restart_pending_flag](std::string_view key, std::string_view value)
+            -> godo::uds::ConfigSetReply {
+            const godo::config::ApplyResult ar = godo::config::apply_set(
+                key, value, live_cfg, live_cfg_mtx, hot_cfg_seq,
+                toml_path, restart_pending_flag);
+            godo::uds::ConfigSetReply rep;
+            rep.ok           = ar.ok;
+            rep.err          = ar.err;
+            rep.err_detail   = ar.err_detail;
+            rep.reload_class.assign(
+                godo::core::config_schema::reload_class_to_string(
+                    ar.reload_class));
+            return rep;
+        });
     try {
         server.open();
     } catch (const std::exception& e) {
@@ -281,6 +317,55 @@ int main(int argc, char** argv, char** envp) {
         cfg.freed_port.c_str(), cfg.freed_baud,
         cfg.rt_cpu, cfg.rt_priority,
         static_cast<long>(cfg.t_ramp_ns));
+
+    // Track B-CONFIG (PR-CONFIG-α) — restart-pending flag + hot-config
+    // seqlock + live_cfg mirror. Boot ordering invariant (TM10 / TM11):
+    //   1. Config::load() succeeded above.
+    //   2. clear_pending_flag (idempotent; ENOENT is OK).
+    //   3. hot_cfg_seq.store(snapshot_hot(cfg)) — pre-thread-spawn so
+    //      the readers see a populated payload from tick zero.
+    //   4. (later, below) spawn threads.
+    //
+    // Path overrides: GODO_CONFIG_PATH (resolved by Config::load) and
+    // GODO_RESTART_PENDING_FLAG_PATH (env-only; CLI flag deferred).
+    // Defaults match SYSTEM_DESIGN.md §11.2.
+    // Helper: linear envp lookup. Boot-only path; not on Thread D.
+    auto env_lookup = [envp](std::string_view name) -> const char* {
+        if (envp == nullptr) return nullptr;
+        for (char** e = envp; *e != nullptr; ++e) {
+            std::string_view sv(*e);
+            if (sv.size() > name.size() &&
+                sv.substr(0, name.size()) == name &&
+                sv[name.size()] == '=') {
+                return *e + name.size() + 1;
+            }
+        }
+        return nullptr;
+    };
+    std::filesystem::path toml_path = "/etc/godo/tracker.toml";
+    if (const char* p = env_lookup("GODO_CONFIG_PATH"); p != nullptr) {
+        toml_path = p;
+    }
+    std::filesystem::path restart_pending_flag = "/var/lib/godo/restart_pending";
+    if (const char* p = env_lookup("GODO_RESTART_PENDING_FLAG_PATH"); p != nullptr) {
+        restart_pending_flag = p;
+    }
+
+    godo::config::clear_pending_flag(restart_pending_flag);
+
+    Seqlock<godo::core::HotConfig> hot_cfg_seq;
+    {
+        godo::core::HotConfig snap = godo::core::snapshot_hot(cfg);
+        snap.published_mono_ns =
+            static_cast<std::uint64_t>(godo::rt::monotonic_ns());
+        hot_cfg_seq.store(snap);
+    }
+
+    // `live_cfg` mirrors `cfg` and is the SOLE Config the UDS thread
+    // mutates via apply_set. Other threads still capture `cfg` by const
+    // reference (restart-class fields take effect on next boot only).
+    godo::core::Config live_cfg = cfg;
+    std::mutex         live_cfg_mtx;
 
     Seqlock<FreedPacket> latest_freed;
     Seqlock<Offset>      target_offset;
@@ -348,6 +433,11 @@ int main(int argc, char** argv, char** envp) {
         cold_native = t_cold.native_handle();
         t_gpio   = std::thread(thread_gpio, std::cref(cfg));
         t_uds    = std::thread(thread_uds,  std::cref(cfg),
+                               std::ref(live_cfg),
+                               std::ref(live_cfg_mtx),
+                               std::ref(hot_cfg_seq),
+                               toml_path,
+                               restart_pending_flag,
                                std::ref(last_pose_seq),
                                std::ref(last_scan_seq),
                                std::ref(jitter_seq),

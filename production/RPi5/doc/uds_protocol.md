@@ -138,6 +138,75 @@ poll `get_mode==Idle` first, then read `get_last_pose`; without this
 ordering the reader could see the new Idle and the stale snapshot from
 the previous OneShot.
 
+### `get_last_scan` (Track D)
+
+Returns the latest LIDAR scan snapshot published by the cold writer at
+the same seam where it publishes `LastPose`. Used by the SPA's live
+LIDAR overlay (`/api/last_scan`, `/api/last_scan/stream` @ 5 Hz) to
+draw raw scan dots on the B-MAP page so an operator can verify AMCL
+convergence visually.
+
+**Request**:
+
+```json
+{"cmd":"get_last_scan"}
+```
+
+**Response (no scan ever published)**:
+
+```json
+{"ok":true,"valid":0,"forced":0,"pose_valid":0,"iterations":-1,"published_mono_ns":0,"pose_x_m":0.000000,"pose_y_m":0.000000,"pose_yaw_deg":0.000000,"n":0,"angles_deg":[],"ranges_m":[]}
+```
+
+**Response (after a OneShot or Live publish)**:
+
+```json
+{"ok":true,"valid":1,"forced":1,"pose_valid":1,"iterations":17,"published_mono_ns":1234567890123,"pose_x_m":1.234567,"pose_y_m":-0.876543,"pose_yaw_deg":92.345678,"n":3,"angles_deg":[0.0000,0.5000,1.0000],"ranges_m":[1.2345,1.2456,1.2567]}
+```
+
+**Field semantics**:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `valid` | `0|1` | `0` = no scan ever published (sentinel); `1` = the rest of the fields carry a real publish. |
+| `forced` | `0|1` | `1` = OneShot publish; `0` = Live publish. Mirrors `LastPose.forced`. |
+| `pose_valid` | `0|1` | `1` = the anchor pose (`pose_*` fields) came from a converged AMCL run; `0` = non-converged (the SPA dims/hides the overlay in this case per Mode-A M3). |
+| `iterations` | `int32` | AMCL iterations consumed by the producing call; `-1` is the never-published sentinel. |
+| `published_mono_ns` | `uint64` | `clock_gettime(CLOCK_MONOTONIC)` ns at publish. **Ordering primitive only** — the SPA computes freshness against `Date.now() - _arrival_ms` (per Mode-A M2). |
+| `pose_x_m`, `pose_y_m`, `pose_yaw_deg` | `double` | The AMCL pose at the moment this scan was processed. The SPA uses these as the polar→Cartesian anchor; same-frame pose-scan correlation is exact (zero skew). |
+| `n` | `uint16` | Count of valid samples in `angles_deg`/`ranges_m`. ≤ `LAST_SCAN_RANGES_MAX` (= 720 in `core/constants.hpp`). |
+| `angles_deg` | `double[n]` | Per-beam bearing in the LiDAR frame, degrees, `[0, 360)`. |
+| `ranges_m` | `double[n]` | Per-beam range in metres. The cold writer drops samples with `distance_mm <= 0` or out of `[range_min_m, range_max_m]` (matches the AMCL beam decimation rule in `localization/scan_ops.cpp::downsample`). |
+
+**Bandwidth budget**: 720-sample worst case, `%.4f` precision per
+double, fits in ~14 KiB JSON. Wire scratch on both sides:
+- Server formatter: `core/constants.hpp::JSON_SCRATCH_BYTES = 24576`
+  (24 KiB) — pinned by `static_assert` in `format_ok_scan`.
+- Client (webctl) read cap: `protocol.py::LAST_SCAN_RESPONSE_CAP =
+  32768` (32 KiB) — used only by `get_last_scan`; all other commands
+  keep the standard 4 KiB.
+
+**Discipline — server emits raw polar (Mode-A TM5 + invariant (l))**:
+the scan body is in the LiDAR frame; the SPA does the world-frame
+transform using the same-frame anchor pose. The server NEVER pre-
+transforms scan points to world coordinates because doing so would
+hide the pose ↔ scan temporal correlation that makes AMCL
+debugging useful.
+
+**Cross-language SSOT**: the field NAMES are taken from the
+`godo::rt::LastScan` struct declaration in `core/rt_types.hpp`; the
+field ORDER on the wire is set by the format string in
+`uds/json_mini.cpp::format_ok_scan`; the Python mirror
+`godo-webctl/src/godo_webctl/protocol.py::LAST_SCAN_HEADER_FIELDS` is
+pinned by `tests/test_protocol.py::test_last_scan_header_fields_match_cpp_source`
+which reads `rt_types.hpp` as text and regex-extracts the names.
+
+**Hot-path isolation**: Thread D (UDP send @ 59.94 Hz) does NOT
+reference `last_scan_seq`. Build-grep `[hot-path-isolation-grep]`
+fails the build if any line inside `thread_d_rt` mentions the seqlock.
+Cold writer is the sole publisher; `[scan-publisher-grep]` enforces
+this at build time.
+
 ## D. Errors
 
 | Code            | Meaning                                                |

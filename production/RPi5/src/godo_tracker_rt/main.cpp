@@ -55,6 +55,7 @@
 
 using godo::rt::FreedPacket;
 using godo::rt::LastPose;
+using godo::rt::LastScan;
 using godo::rt::Offset;
 using godo::rt::Seqlock;
 
@@ -184,15 +185,22 @@ void thread_gpio(const godo::core::Config& cfg) {
 // Track B: also wires `get_last_pose` to the cold-writer's Seqlock<LastPose>
 // load so the repeatability harness + pose_watch can read the last AMCL
 // pose without a tracker-side restart.
+//
+// Track D: wires `get_last_scan` to the cold-writer's Seqlock<LastScan>
+// load so the SPA's live LIDAR overlay can render at 5 Hz with zero
+// hot-path impact (Thread D never references last_scan_seq —
+// [hot-path-isolation-grep] enforces this at build time).
 void thread_uds(const godo::core::Config& cfg,
-                Seqlock<LastPose>&        last_pose_seq) {
+                Seqlock<LastPose>&        last_pose_seq,
+                Seqlock<LastScan>&        last_scan_seq) {
     godo::uds::UdsServer server(
         cfg.uds_socket,
         []() { return godo::rt::g_amcl_mode.load(std::memory_order_acquire); },
         [](godo::rt::AmclMode m) {
             godo::rt::g_amcl_mode.store(m, std::memory_order_release);
         },
-        [&last_pose_seq]() { return last_pose_seq.load(); });
+        [&last_pose_seq]() { return last_pose_seq.load(); },
+        [&last_scan_seq]() { return last_scan_seq.load(); });
     try {
         server.open();
     } catch (const std::exception& e) {
@@ -267,6 +275,16 @@ int main(int argc, char** argv, char** envp) {
         last_pose_seq.store(init);
     }
 
+    // Track D — last LIDAR scan published by the cold writer; consumed by
+    // the UDS `get_last_scan` handler (uds_protocol.md §C.5). Same
+    // sentinel-iterations seed pattern as last_pose_seq.
+    Seqlock<LastScan> last_scan_seq;
+    {
+        LastScan init{};
+        init.iterations = -1;
+        last_scan_seq.store(init);
+    }
+
     // Cold-writer LiDAR factory: lazily build a LidarSourceRplidar bound
     // to the configured port/baud. The factory is invoked once inside
     // run_cold_writer at startup.
@@ -288,11 +306,13 @@ int main(int argc, char** argv, char** envp) {
                                std::cref(cfg),
                                std::ref(target_offset),
                                std::ref(last_pose_seq),
+                               std::ref(last_scan_seq),
                                lidar_factory);
         cold_native = t_cold.native_handle();
         t_gpio   = std::thread(thread_gpio, std::cref(cfg));
         t_uds    = std::thread(thread_uds,  std::cref(cfg),
-                               std::ref(last_pose_seq));
+                               std::ref(last_pose_seq),
+                               std::ref(last_scan_seq));
         t_d      = std::thread(thread_d_rt, std::cref(cfg),
                                std::ref(latest_freed), std::ref(target_offset));
     } catch (const std::exception& e) {

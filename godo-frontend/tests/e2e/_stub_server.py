@@ -338,6 +338,47 @@ def _h_last_pose(req: StubHandler) -> None:
     req._send_json(HTTPStatus.OK, _canned_pose())
 
 
+def _canned_scan() -> dict[str, Any]:
+    """Track D — minimal LastScan with 5 dots laid out around the origin
+    so e2e specs can count rendered dots deterministically."""
+    return {
+        "valid": 1,
+        "forced": 1,
+        "pose_valid": 1,
+        "iterations": 7,
+        "published_mono_ns": 1_000_000_000,
+        "pose_x_m": 0.0,
+        "pose_y_m": 0.0,
+        "pose_yaw_deg": 0.0,
+        "n": 5,
+        "angles_deg": [0.0, 30.0, 60.0, 90.0, 180.0],
+        "ranges_m": [1.0, 1.0, 1.0, 1.0, 1.0],
+    }
+
+
+def _h_last_scan(req: StubHandler) -> None:
+    # Track F: anonymous-readable per backend. Stub mirrors that —
+    # no auth check.
+    req._send_json(HTTPStatus.OK, _canned_scan())
+
+
+def _h_last_scan_stream(req: StubHandler) -> None:
+    # Same SSE pattern as /api/last_pose/stream; anon access (Track F).
+    req.send_response(HTTPStatus.OK)
+    req.send_header("Content-Type", "text/event-stream")
+    req.send_header("Cache-Control", "no-cache")
+    req.send_header("X-Accel-Buffering", "no")
+    req.end_headers()
+    for _ in range(3):
+        line = f"data: {json.dumps(_canned_scan())}\n\n"
+        try:
+            req.wfile.write(line.encode())
+            req.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            return
+        time.sleep(0.05)
+
+
 def _canned_pose() -> dict[str, Any]:
     return {
         "valid": True,
@@ -565,6 +606,8 @@ GET_ROUTES: dict[str, Callable[[StubHandler], None]] = {
     "/api/auth/me": _h_me,
     "/api/last_pose": _h_last_pose,
     "/api/last_pose/stream": _h_last_pose_stream,
+    "/api/last_scan": _h_last_scan,
+    "/api/last_scan/stream": _h_last_scan_stream,
     "/api/map/image": _h_map_image,
     "/api/activity": _h_activity,
     "/api/local/services": _h_local_services,

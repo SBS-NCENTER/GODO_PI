@@ -34,11 +34,13 @@ std::string strerror_safe(int e) {
 UdsServer::UdsServer(std::string    socket_path,
                      ModeGetter     get_mode,
                      ModeSetter     set_mode,
-                     LastPoseGetter get_last_pose)
+                     LastPoseGetter get_last_pose,
+                     LastScanGetter get_last_scan)
     : socket_path_(std::move(socket_path)),
       get_mode_(std::move(get_mode)),
       set_mode_(std::move(set_mode)),
-      get_last_pose_(std::move(get_last_pose)) {}
+      get_last_pose_(std::move(get_last_pose)),
+      get_last_scan_(std::move(get_last_scan)) {}
 
 UdsServer::~UdsServer() {
     close();
@@ -232,6 +234,17 @@ void UdsServer::handle_one_request(int conn_fd) noexcept {
         pose.iterations = -1;
         if (get_last_pose_) pose = get_last_pose_();
         const auto resp = format_ok_pose(pose);
+        (void)::send(conn_fd, resp.data(), resp.size(), MSG_NOSIGNAL);
+        return;
+    }
+    if (req.cmd == "get_last_scan") {
+        // Track D — see doc/uds_protocol.md §C.5. Same null-callback
+        // semantics as get_last_pose: valid=0 distinguishes "no scan
+        // yet" from "tracker down".
+        godo::rt::LastScan scan{};
+        scan.iterations = -1;
+        if (get_last_scan_) scan = get_last_scan_();
+        const auto resp = format_ok_scan(scan);
         (void)::send(conn_fd, resp.data(), resp.size(), MSG_NOSIGNAL);
         return;
     }

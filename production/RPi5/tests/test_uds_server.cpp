@@ -30,6 +30,7 @@
 
 using godo::rt::AmclMode;
 using godo::rt::LastPose;
+using godo::rt::LastScan;
 using godo::uds::UdsServer;
 
 namespace {
@@ -86,6 +87,23 @@ std::string send_recv(int fd, const std::string& req) {
     ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
     if (n <= 0) return {};
     return std::string(buf, static_cast<std::size_t>(n));
+}
+
+// Track D — wider read for `get_last_scan` whose worst-case reply is ~14 KiB.
+// Reads until newline OR cap (32 KiB scratch is generous against the 24 KiB
+// formatter cap). Used only by scan-side tests.
+std::string send_recv_scan(int fd, const std::string& req) {
+    if (::send(fd, req.data(), req.size(), 0) < 0) return {};
+    std::string out;
+    out.reserve(32768);
+    char chunk[4096];
+    while (out.size() < 32768) {
+        ssize_t n = ::recv(fd, chunk, sizeof(chunk), 0);
+        if (n <= 0) break;
+        out.append(chunk, static_cast<std::size_t>(n));
+        if (!out.empty() && out.back() == '\n') break;
+    }
+    return out;
 }
 
 }  // namespace
@@ -445,6 +463,197 @@ TEST_CASE("format_ok_pose — byte-exact shape on a default-zero LastPose") {
         "\"iterations\":-1,\"converged\":0,\"forced\":0,"
         "\"published_mono_ns\":0}\n");
     CHECK(s.back() == '\n');
+}
+
+// --------------------------------------------------------------
+// Track D — get_last_scan dispatch + format_ok_scan shape.
+// --------------------------------------------------------------
+
+TEST_CASE("get_last_scan returns valid=0 when no scan has been published") {
+    TempUdsPath guard(tmp_socket_path("getscan_invalid"));
+    ServerHarness h;
+    godo::rt::g_running.store(true, std::memory_order_release);
+
+    // No LastScanGetter wired (default nullptr). Server treats as
+    // valid=0; clients distinguish "no scan yet" from "tracker down".
+    UdsServer server(
+        guard.path,
+        [&]() { return h.mode_target.load(); },
+        [&](AmclMode m) { h.mode_target.store(m); });
+    REQUIRE_NOTHROW(server.open());
+    h.th = std::thread([&]() { server.run(); });
+
+    int fd = connect_client(guard.path);
+    REQUIRE(fd >= 0);
+    auto resp = send_recv_scan(fd, "{\"cmd\":\"get_last_scan\"}\n");
+    ::close(fd);
+
+    CHECK(resp.find("\"ok\":true") != std::string::npos);
+    CHECK(resp.find("\"valid\":0") != std::string::npos);
+    CHECK(resp.find("\"forced\":0") != std::string::npos);
+    CHECK(resp.find("\"pose_valid\":0") != std::string::npos);
+    CHECK(resp.find("\"iterations\":-1") != std::string::npos);
+    CHECK(resp.find("\"n\":0") != std::string::npos);
+    CHECK(resp.find("\"angles_deg\":[]") != std::string::npos);
+    CHECK(resp.find("\"ranges_m\":[]") != std::string::npos);
+    CHECK(resp.back() == '\n');
+
+    godo::rt::g_running.store(false, std::memory_order_release);
+    h.th.join();
+}
+
+TEST_CASE("get_last_scan returns published scan verbatim") {
+    TempUdsPath guard(tmp_socket_path("getscan_synth"));
+    ServerHarness h;
+    godo::rt::g_running.store(true, std::memory_order_release);
+
+    LastScan synth{};
+    synth.pose_x_m          = 1.234567;
+    synth.pose_y_m          = -0.876543;
+    synth.pose_yaw_deg      = 92.345678;
+    synth.published_mono_ns = 1234567890123ULL;
+    synth.iterations        = 17;
+    synth.valid             = 1;
+    synth.forced            = 1;
+    synth.pose_valid        = 1;
+    synth.n                 = 3;
+    synth.angles_deg[0]     = 0.0000;
+    synth.angles_deg[1]     = 0.5000;
+    synth.angles_deg[2]     = 1.0000;
+    synth.ranges_m[0]       = 1.2345;
+    synth.ranges_m[1]       = 1.2456;
+    synth.ranges_m[2]       = 1.2567;
+
+    UdsServer server(
+        guard.path,
+        [&]() { return h.mode_target.load(); },
+        [&](AmclMode m) { h.mode_target.store(m); },
+        nullptr,
+        [&]() { return synth; });
+    REQUIRE_NOTHROW(server.open());
+    h.th = std::thread([&]() { server.run(); });
+
+    int fd = connect_client(guard.path);
+    REQUIRE(fd >= 0);
+    auto resp = send_recv_scan(fd, "{\"cmd\":\"get_last_scan\"}\n");
+    ::close(fd);
+
+    CHECK(resp.find("\"valid\":1") != std::string::npos);
+    CHECK(resp.find("\"forced\":1") != std::string::npos);
+    CHECK(resp.find("\"pose_valid\":1") != std::string::npos);
+    CHECK(resp.find("\"iterations\":17") != std::string::npos);
+    CHECK(resp.find("\"published_mono_ns\":1234567890123") != std::string::npos);
+    CHECK(resp.find("\"pose_x_m\":1.234567") != std::string::npos);
+    CHECK(resp.find("\"pose_y_m\":-0.876543") != std::string::npos);
+    CHECK(resp.find("\"pose_yaw_deg\":92.345678") != std::string::npos);
+    CHECK(resp.find("\"n\":3") != std::string::npos);
+    CHECK(resp.find("\"angles_deg\":[0.0000,0.5000,1.0000]") != std::string::npos);
+    CHECK(resp.find("\"ranges_m\":[1.2345,1.2456,1.2567]") != std::string::npos);
+
+    godo::rt::g_running.store(false, std::memory_order_release);
+    h.th.join();
+}
+
+TEST_CASE("get_last_scan dispatches concurrently with set_mode") {
+    TempUdsPath guard(tmp_socket_path("getscan_concurrent"));
+    ServerHarness h;
+    godo::rt::g_running.store(true, std::memory_order_release);
+
+    LastScan synth{};
+    synth.iterations = 5;
+    synth.valid = 1;
+    synth.n = 2;
+    synth.ranges_m[0] = 0.5;
+    synth.ranges_m[1] = 1.0;
+    synth.angles_deg[0] = 0.0;
+    synth.angles_deg[1] = 0.5;
+
+    UdsServer server(
+        guard.path,
+        [&]() { return h.mode_target.load(); },
+        [&](AmclMode m) { h.mode_target.store(m); },
+        nullptr,
+        [&]() { return synth; });
+    REQUIRE_NOTHROW(server.open());
+    h.th = std::thread([&]() { server.run(); });
+
+    constexpr int kRounds = 50;
+    std::thread mode_writer([&]() {
+        for (int i = 0; i < kRounds; ++i) {
+            int fd = connect_client(guard.path);
+            if (fd < 0) continue;
+            (void)send_recv(fd, "{\"cmd\":\"set_mode\",\"mode\":\"OneShot\"}\n");
+            ::close(fd);
+        }
+    });
+    std::thread scan_reader([&]() {
+        for (int i = 0; i < kRounds; ++i) {
+            int fd = connect_client(guard.path);
+            if (fd < 0) continue;
+            auto resp = send_recv_scan(fd, "{\"cmd\":\"get_last_scan\"}\n");
+            CHECK(resp.find("\"ok\":true") != std::string::npos);
+            ::close(fd);
+        }
+    });
+    mode_writer.join();
+    scan_reader.join();
+
+    godo::rt::g_running.store(false, std::memory_order_release);
+    h.th.join();
+}
+
+TEST_CASE("format_ok_scan — byte-exact shape on a default-zero LastScan") {
+    using godo::uds::format_ok_scan;
+    LastScan s{};
+    s.iterations = -1;     // sentinel
+    const std::string out = format_ok_scan(s);
+    // Default-zero LastScan = no rays + sentinel iterations.
+    CHECK(out ==
+        "{\"ok\":true,\"valid\":0,\"forced\":0,\"pose_valid\":0,"
+        "\"iterations\":-1,\"published_mono_ns\":0,"
+        "\"pose_x_m\":0.000000,\"pose_y_m\":0.000000,"
+        "\"pose_yaw_deg\":0.000000,\"n\":0,\"angles_deg\":[],"
+        "\"ranges_m\":[]}\n");
+    CHECK(out.back() == '\n');
+}
+
+TEST_CASE("format_ok_scan — n=720 worst case stays under JSON_SCRATCH_BYTES") {
+    using godo::uds::format_ok_scan;
+    LastScan s{};
+    s.valid             = 1;
+    s.forced            = 0;
+    s.pose_valid        = 1;
+    s.iterations        = 999;
+    s.published_mono_ns = 18446744073709551615ULL;
+    s.pose_x_m          = -123.456789;
+    s.pose_y_m          =  987.654321;
+    s.pose_yaw_deg      =  359.999999;
+    s.n = static_cast<std::uint16_t>(godo::constants::LAST_SCAN_RANGES_MAX);
+    for (std::size_t i = 0;
+         i < static_cast<std::size_t>(godo::constants::LAST_SCAN_RANGES_MAX);
+         ++i) {
+        s.ranges_m[i]   = 9999.9999;
+        s.angles_deg[i] = 359.9999;
+    }
+    const std::string out = format_ok_scan(s);
+    // Buffer cap was 24576; reply must fit under that.
+    CHECK(out.size() < static_cast<std::size_t>(godo::constants::JSON_SCRATCH_BYTES));
+    CHECK(out.back() == '\n');
+    // Single JSON line (no embedded newline before the terminator).
+    const auto first_nl = out.find('\n');
+    CHECK(first_nl == out.size() - 1);
+    CHECK(out.find("\"n\":720") != std::string::npos);
+}
+
+TEST_CASE("format_ok_scan — n=0 reply fits under 256 bytes (header-only budget)") {
+    using godo::uds::format_ok_scan;
+    LastScan s{};
+    s.valid = 1;
+    s.iterations = 1;
+    const std::string out = format_ok_scan(s);
+    CHECK(out.size() < 256u);
+    CHECK(out.find("\"angles_deg\":[]") != std::string::npos);
+    CHECK(out.find("\"ranges_m\":[]") != std::string::npos);
 }
 
 TEST_CASE("format_ok_pose reply size is under 512 bytes (F17 budget pin)") {

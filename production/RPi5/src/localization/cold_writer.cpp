@@ -1,8 +1,10 @@
 #include "cold_writer.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <cstdio>
+#include <cstring>
 #include <exception>
 
 #include "core/constants.hpp"
@@ -12,6 +14,67 @@
 #include "likelihood_field.hpp"
 
 namespace godo::localization {
+
+namespace {
+
+// Build a LastScan snapshot from the same Frame the AMCL kernel just
+// processed. Mirrors the `downsample()` filter rule from scan_ops.cpp
+// (drop distance_mm <= 0 and out-of-range samples; respect stride) so
+// the wire dots are aligned with the AMCL beams. Emits both arrays in
+// LiDAR-frame polar; the SPA does the world-frame transform using the
+// pose anchor baked into the same snapshot.
+//
+// The cold writer is intentionally OFF the [rt-alloc-grep] allow-list
+// (build.sh:25-29 documents this); however this snapshot construction
+// avoids std::vector / std::string regardless, since the LastScan is a
+// fixed-size POD and the loop only writes into pre-allocated arrays.
+void fill_last_scan(godo::rt::LastScan& snap,
+                    const godo::core::Config& cfg,
+                    const godo::lidar::Frame& frame,
+                    const godo::localization::AmclResult& result) {
+    snap.pose_x_m          = result.pose.x;
+    snap.pose_y_m          = result.pose.y;
+    snap.pose_yaw_deg      = result.pose.yaw_deg;
+    snap.published_mono_ns =
+        static_cast<std::uint64_t>(godo::rt::monotonic_ns());
+    snap.iterations        = result.iterations;
+    snap.valid             = 1;
+    // forced + pose_valid are filled in by the caller (kernel knows mode).
+    snap._pad0             = 0;
+    snap._pad1             = 0;
+    std::memset(snap._pad2, 0, sizeof(snap._pad2));
+
+    const int stride_cfg = cfg.amcl_downsample_stride;
+    const int stride = (stride_cfg > 0) ? stride_cfg : 1;
+    const double range_min = cfg.amcl_range_min_m;
+    const double range_max = cfg.amcl_range_max_m;
+
+    constexpr std::size_t kCap =
+        static_cast<std::size_t>(godo::constants::LAST_SCAN_RANGES_MAX);
+    std::size_t out = 0;
+    if (range_max > range_min) {
+        for (std::size_t i = 0;
+             i < frame.samples.size() && out < kCap;
+             i += static_cast<std::size_t>(stride)) {
+            const auto& s = frame.samples[i];
+            if (s.distance_mm <= 0.0) continue;
+            const double r_m = s.distance_mm * 0.001;
+            if (r_m < range_min || r_m > range_max) continue;
+            snap.angles_deg[out] = s.angle_deg;
+            snap.ranges_m[out]   = r_m;
+            ++out;
+        }
+    }
+    snap.n = static_cast<std::uint16_t>(out);
+    // Zero-fill the unused tail so the seqlock payload is bit-exact across
+    // publishes (Mode-A TB1 torn-read invariant relies on this).
+    for (std::size_t i = out; i < kCap; ++i) {
+        snap.angles_deg[i] = 0.0;
+        snap.ranges_m[i]   = 0.0;
+    }
+}
+
+}  // namespace
 
 AmclResult run_one_iteration(const godo::core::Config&         cfg,
                              const godo::lidar::Frame&         frame,
@@ -23,7 +86,8 @@ AmclResult run_one_iteration(const godo::core::Config&         cfg,
                              bool&                             live_first_iter_inout,
                              godo::rt::Offset&                 last_written_inout,
                              godo::rt::Seqlock<godo::rt::Offset>& target_offset,
-                             godo::rt::Seqlock<godo::rt::LastPose>& last_pose_seq) {
+                             godo::rt::Seqlock<godo::rt::LastPose>& last_pose_seq,
+                             godo::rt::Seqlock<godo::rt::LastScan>& last_scan_seq) {
     // 1. Decimate the scan into AMCL beams.
     downsample(frame,
                cfg.amcl_downsample_stride,
@@ -93,6 +157,17 @@ AmclResult run_one_iteration(const godo::core::Config&         cfg,
     snap._pad0             = 0;
     last_pose_seq.store(snap);
 
+    // 8. Track D — publish LastScan snapshot UNCONDITIONALLY (same seam,
+    //    same ordering discipline as LastPose). uds_protocol.md §C.5.
+    //    Mode-A M3: pose_valid mirrors LastPose.converged so the SPA can
+    //    distinguish a legitimate (0,0,0) anchor pose from a non-converged
+    //    AMCL run that happened to publish (0,0,0) as garbage.
+    godo::rt::LastScan scan_snap{};
+    fill_last_scan(scan_snap, cfg, frame, result);
+    scan_snap.forced     = std::uint8_t{1};
+    scan_snap.pose_valid = result.converged ? std::uint8_t{1} : std::uint8_t{0};
+    last_scan_seq.store(scan_snap);
+
     // `last_pose_inout` (the AMCL particle-cloud seed for the next
     // iteration) is updated unconditionally — a rejected publish is not
     // a rejected pose estimate (§6.4.1). `live_first_iter_inout` is
@@ -115,7 +190,8 @@ AmclResult run_live_iteration(const godo::core::Config&         cfg,
                               bool&                             live_first_iter_inout,
                               godo::rt::Offset&                 last_written_inout,
                               godo::rt::Seqlock<godo::rt::Offset>& target_offset,
-                              godo::rt::Seqlock<godo::rt::LastPose>& last_pose_seq) {
+                              godo::rt::Seqlock<godo::rt::LastPose>& last_pose_seq,
+                              godo::rt::Seqlock<godo::rt::LastScan>& last_scan_seq) {
     // 1. Decimate the scan into AMCL beams (same shape as OneShot).
     downsample(frame,
                cfg.amcl_downsample_stride,
@@ -188,7 +264,17 @@ AmclResult run_live_iteration(const godo::core::Config&         cfg,
     snap._pad0             = 0;
     last_pose_seq.store(snap);
 
-    // 8. Update Live state. `last_pose` is updated unconditionally;
+    // 8. Track D — publish LastScan snapshot UNCONDITIONALLY (Live mirror
+    //    of the OneShot publish; uds_protocol.md §C.5). Mode-A M3 pin:
+    //    pose_valid mirrors AmclResult.converged so the SPA can dim the
+    //    overlay when AMCL is still settling.
+    godo::rt::LastScan scan_snap{};
+    fill_last_scan(scan_snap, cfg, frame, result);
+    scan_snap.forced     = std::uint8_t{0};         // Live publishes forced=0
+    scan_snap.pose_valid = result.converged ? std::uint8_t{1} : std::uint8_t{0};
+    last_scan_seq.store(scan_snap);
+
+    // 9. Update Live state. `last_pose` is updated unconditionally;
     //    `live_first_iter` flips to false so the next iteration re-seeds
     //    around the freshly refined pose.
     last_pose_inout = result.pose;
@@ -222,6 +308,7 @@ void on_leave_live(bool& live_first_iter_inout) noexcept {
 void run_cold_writer(const godo::core::Config&              cfg,
                      godo::rt::Seqlock<godo::rt::Offset>&   target_offset,
                      godo::rt::Seqlock<godo::rt::LastPose>& last_pose_seq,
+                     godo::rt::Seqlock<godo::rt::LastScan>& last_scan_seq,
                      LidarFactory                           lidar_factory) {
     OccupancyGrid grid;
     LikelihoodField lf;
@@ -331,7 +418,7 @@ void run_cold_writer(const godo::core::Config&              cfg,
                                             beams_buf, last_pose,
                                             live_first_iter,
                                             last_written, target_offset,
-                                            last_pose_seq);
+                                            last_pose_seq, last_scan_seq);
                 } catch (const std::exception& e) {
                     std::fprintf(stderr,
                         "cold_writer: run_one_iteration threw: %s — "
@@ -403,7 +490,7 @@ void run_cold_writer(const godo::core::Config&              cfg,
                                              beams_buf, last_pose,
                                              live_first_iter,
                                              last_written, target_offset,
-                                             last_pose_seq);
+                                             last_pose_seq, last_scan_seq);
                 } catch (const std::exception& e) {
                     std::fprintf(stderr,
                         "cold_writer: run_live_iteration threw: %s — "

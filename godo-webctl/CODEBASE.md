@@ -98,6 +98,23 @@ LAST_POSE_FIELDS                  json_mini.cpp::format_ok_pose
      "yaw_std_deg","iterations",  by tests/test_protocol.py
      "converged","forced",        ::test_last_pose_fields_match_cpp_source
      "published_mono_ns")         which regex-extracts from C++ source)
+CMD_GET_LAST_SCAN = "get_last_scan"
+                                  uds_server.cpp `get_last_scan` branch
+                                  (Track D; uds_protocol.md §C.5)
+LAST_SCAN_HEADER_FIELDS           rt_types.hpp::struct LastScan
+  = ("valid","forced",            (Track D; field-NAME SSOT is the
+     "pose_valid","iterations",   struct declaration in rt_types.hpp,
+     "published_mono_ns",         NOT format_ok_scan — pinned by
+     "pose_x_m","pose_y_m",       test_protocol.py::
+     "pose_yaw_deg","n",          test_last_scan_header_fields_match_cpp_source
+     "angles_deg","ranges_m")     which regex-extracts from rt_types.hpp)
+LAST_SCAN_RANGES_MAX_PYTHON_MIRROR = 720
+                                  core/constants.hpp::LAST_SCAN_RANGES_MAX
+                                  (Track D; pinned by
+                                  test_last_scan_ranges_max_python_mirror_matches_cpp)
+LAST_SCAN_RESPONSE_CAP = 32768    uds_client._roundtrip pass-through;
+                                  Track D wider read cap for
+                                  get_last_scan (~14 KiB worst case)
 ERR_PARSE_ERROR = "parse_error"   uds_server.cpp:189,196
 ERR_UNKNOWN_CMD = "unknown_cmd"   uds_server.cpp:225
 ERR_BAD_MODE    = "bad_mode"      uds_server.cpp:215
@@ -263,13 +280,15 @@ regular `active.pgm` and confuse the resolver. Pinned by
 The auth model splits cleanly along read-vs-write:
 
 - **Anonymous-readable**: `/api/health`, `/api/last_pose`,
-  `/api/last_pose/stream`, `/api/map/image`, `/api/activity`,
-  `/api/local/services` (loopback), `/api/local/services/stream`
-  (loopback), `/api/local/journal/<name>` (loopback).
+  `/api/last_pose/stream`, `/api/last_scan`, `/api/last_scan/stream`,
+  `/api/map/image`, `/api/maps`, `/api/maps/<name>/image`,
+  `/api/maps/<name>/yaml`, `/api/activity`, `/api/local/services`
+  (loopback), `/api/local/services/stream` (loopback),
+  `/api/local/journal/<name>` (loopback).
 - **Login-gated mutations** (`Depends(require_admin)`): `/api/calibrate`,
-  `/api/live`, `/api/map/backup`,
-  `/api/local/service/<name>/<action>` (loopback + admin),
-  `/api/system/reboot`, `/api/system/shutdown`.
+  `/api/live`, `/api/map/backup`, `/api/maps/<name>/activate`,
+  `DELETE /api/maps/<name>`, `/api/local/service/<name>/<action>`
+  (loopback + admin), `/api/system/reboot`, `/api/system/shutdown`.
 - **Session-only routes** (`Depends(require_user)`): `/api/auth/me`,
   `/api/auth/refresh`, `/api/auth/logout`.
 
@@ -293,6 +312,64 @@ a token — anon callers see the raw 401 instead of being bounced).
   different uid.
 
 ## Change log
+
+### 2026-04-29 — Track D: Live LIDAR overlay (Phase 4.5+ P0.5)
+
+#### Added
+
+- `src/godo_webctl/protocol.py` — `CMD_GET_LAST_SCAN`,
+  `LAST_SCAN_HEADER_FIELDS` (11-tuple), `LAST_SCAN_RANGES_MAX_PYTHON_MIRROR
+  = 720`, `LAST_SCAN_RESPONSE_CAP = 32768`, `encode_get_last_scan()`.
+- `src/godo_webctl/uds_client.py` — `UdsClient.get_last_scan(timeout)`;
+  passes the wider response cap to `_recv_line` so 720-ray replies
+  (~14 KiB) fit. The `_roundtrip` and `_recv_line` helpers gain an
+  optional `response_cap` / `cap` keyword that only `get_last_scan`
+  passes; all other commands keep the standard 4 KiB.
+- `src/godo_webctl/sse.py` — `last_scan_stream(client, cfg, *, sleep)`
+  async generator. Same 5 Hz cadence + heartbeat + cancel-safety as
+  `last_pose_stream`.
+- `src/godo_webctl/app.py` — `GET /api/last_scan` (anon, single-shot)
+  and `GET /api/last_scan/stream` (anon, SSE @ 5 Hz). Both use
+  `_last_scan_view(resp)` to project the UDS reply down to
+  `LAST_SCAN_HEADER_FIELDS`. SSE handler creates a fresh per-subscriber
+  `UdsClient` (mirror of `/api/last_pose/stream`).
+- `tests/test_protocol.py` — 3 new pin tests:
+  `test_cmd_get_last_scan_matches_cpp`,
+  `test_encode_get_last_scan_byte_exact`,
+  `test_last_scan_ranges_max_python_mirror_matches_cpp`,
+  `test_last_scan_header_fields_match_cpp_source` (regex-extracts
+  field names from `rt_types.hpp` per the planner override).
+- `tests/test_uds_client.py` — 3 new cases (happy, server-rejected,
+  response_too_large at the wider 32 KiB cap).
+- `tests/test_sse.py` — 4 new cases for `last_scan_stream` (5 Hz,
+  skip-on-error, keepalive, cancellation).
+- `tests/test_app_integration.py` — 7 new cases for
+  `/api/last_scan` and `/api/last_scan/stream`: field-set drift catch,
+  anon=200, SSE anon=200, path-extras=404, tracker-unreachable=503,
+  no-run-yet returns valid=0, server-emits-raw-polar (Mode-A TM5 pin).
+  Plus `test_anon_read_endpoints_return_200` symmetric to the existing
+  `test_mutation_endpoints_unauth_return_401`.
+
+#### Changed
+
+- Invariant (n) — anonymous-readable list extended with `/api/last_scan`
+  and `/api/last_scan/stream`.
+
+#### Tests
+
+- 256 → 275 hardware-free pytest (+19 from this PR).
+- `uv run ruff check` + `uv run ruff format --check` clean.
+
+#### Notes
+
+- The wire body emits raw polar (LiDAR-frame `angles_deg` / `ranges_m`)
+  + the SCAN's anchor pose. The SPA does the world-frame transform
+  using the anchor (NOT a parallel `/api/last_pose` SSE) per Mode-A
+  TM5; this preserves the pose ↔ scan temporal correlation an operator
+  needs for AMCL convergence debugging.
+- LastScan field-name SSOT is `production/RPi5/src/core/rt_types.hpp::
+  struct LastScan`; the wire ORDER is set by `format_ok_scan` in
+  `json_mini.cpp`. The Python tuple matches the wire order.
 
 ### 2026-04-29 — Track E Mode-B folds (corpus parity + WARN pin)
 

@@ -11,9 +11,14 @@
 //              {"cmd":"get_mode"}\n
 //              {"cmd":"ping"}\n
 //              {"cmd":"get_last_pose"}\n   (Track B; uds_protocol.md §C.4)
+//              {"cmd":"get_last_scan"}\n   (Track D; uds_protocol.md §C.5)
 //   Response → {"ok":true}\n
 //              {"ok":true,"mode":"<...>"}\n
 //              {"ok":true,"valid":<0|1>,"x_m":...,...}\n
+//              {"ok":true,"valid":<0|1>,"forced":...,"pose_valid":...,
+//                "iterations":...,"published_mono_ns":...,
+//                "pose_x_m":...,"pose_y_m":...,"pose_yaw_deg":...,
+//                "n":...,"angles_deg":[...],"ranges_m":[...]}\n
 //              {"ok":false,"err":"<code>"}\n
 //
 // One client at a time, request/response then close. Listen socket is
@@ -45,12 +50,19 @@ using ModeGetter = std::function<godo::rt::AmclMode()>;
 // with valid=false and the rest of the fields zeroed.
 using LastPoseGetter = std::function<godo::rt::LastPose()>;
 
+// Track D — `get_last_scan` callback. Production wires this to a
+// Seqlock<LastScan>::load(). Same null-callback semantics as
+// LastPoseGetter — clients distinguish "no scan yet" (valid=0) from
+// "tracker down" (no UDS reply).
+using LastScanGetter = std::function<godo::rt::LastScan()>;
+
 class UdsServer {
 public:
     UdsServer(std::string    socket_path,
               ModeGetter     get_mode,
               ModeSetter     set_mode,
-              LastPoseGetter get_last_pose = nullptr);
+              LastPoseGetter get_last_pose = nullptr,
+              LastScanGetter get_last_scan = nullptr);
 
     UdsServer(const UdsServer&)            = delete;
     UdsServer& operator=(const UdsServer&) = delete;
@@ -74,6 +86,7 @@ private:
     ModeGetter     get_mode_;
     ModeSetter     set_mode_;
     LastPoseGetter get_last_pose_;
+    LastScanGetter get_last_scan_;
     int            listen_fd_ = -1;
     bool           path_bound_ = false;
 };

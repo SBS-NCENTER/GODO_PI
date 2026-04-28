@@ -84,3 +84,71 @@ test('map: delete button is disabled on the active row', async ({ page }) => {
   const deleteBtn = page.locator(`[data-testid="map-delete-${name}"]`);
   await expect(deleteBtn).toBeDisabled();
 });
+
+// --- Track D — Live LIDAR overlay e2e -----------------------------------
+
+test('map: scan toggle is visible and defaults off', async ({ page }) => {
+  await loginAs(page);
+  await page.goto('/#/map');
+  const toggle = page.locator('[data-testid="scan-toggle-btn"]');
+  await expect(toggle).toBeVisible();
+  // Initial label is "라이다 보기 꺼짐" (off-state); aria-pressed=false.
+  await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+  // Wrap div carries data-scan-count="0" while overlay is off.
+  await expect(page.locator('[data-testid="pose-canvas-wrap"]')).toHaveAttribute(
+    'data-scan-count',
+    '0',
+  );
+});
+
+test('map: toggling scan overlay on shows ≥ 1 dot via data-scan-count', async ({ page }) => {
+  await loginAs(page);
+  await page.goto('/#/map');
+  const toggle = page.locator('[data-testid="scan-toggle-btn"]');
+  await expect(toggle).toBeVisible();
+  await toggle.click();
+  // After toggle on, the SSE delivers a 5-dot canned scan; freshness
+  // gate keeps it visible. data-scan-count should rise to 5.
+  await expect(page.locator('[data-testid="pose-canvas-wrap"]')).toHaveAttribute(
+    'data-scan-count',
+    '5',
+    { timeout: 5000 },
+  );
+  await expect(page.locator('[data-testid="pose-canvas-wrap"]')).toHaveAttribute(
+    'data-scan-fresh',
+    'true',
+  );
+});
+
+test('map: toggling scan overlay off clears the dot count to 0', async ({ page }) => {
+  await loginAs(page);
+  await page.goto('/#/map');
+  const toggle = page.locator('[data-testid="scan-toggle-btn"]');
+  await toggle.click();
+  await expect(page.locator('[data-testid="pose-canvas-wrap"]')).toHaveAttribute(
+    'data-scan-count',
+    '5',
+    { timeout: 5000 },
+  );
+  // Toggle off — count drops back to 0 within the next redraw.
+  await toggle.click();
+  await expect(page.locator('[data-testid="pose-canvas-wrap"]')).toHaveAttribute(
+    'data-scan-count',
+    '0',
+    { timeout: 2000 },
+  );
+});
+
+test('map: scan toggle state persists through same-tab reload (sessionStorage)', async ({
+  page,
+}) => {
+  await loginAs(page);
+  await page.goto('/#/map');
+  const toggle = page.locator('[data-testid="scan-toggle-btn"]');
+  await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-pressed', 'true');
+  // Reload preserves sessionStorage in the same tab (Q-OQ-D2).
+  await page.reload();
+  const toggleAfter = page.locator('[data-testid="scan-toggle-btn"]');
+  await expect(toggleAfter).toHaveAttribute('aria-pressed', 'true');
+});

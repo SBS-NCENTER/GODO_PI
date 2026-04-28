@@ -116,3 +116,21 @@ export const MAP_HEADING_LINE_WIDTH_PX = 2;
 
 // Conversion factor for degrees → radians.
 export const DEG_TO_RAD = Math.PI / 180;
+
+// --- Track D: live LIDAR overlay ---------------------------------------
+// Pixel-space radius of each scan dot. 1.5 px keeps the overlay readable
+// without obscuring the underlying map / pose layer.
+export const MAP_SCAN_DOT_RADIUS_PX = 1.5;
+// Teal (Q-OQ-D3) — visually distinct from pose red (#c62828) + trail
+// blue (#1565c0); color-blind friendly trio per the user decision.
+export const MAP_SCAN_DOT_COLOR = '#26a69a';
+// Slight transparency so dots stacking on a wall still show wall edges.
+export const MAP_SCAN_DOT_OPACITY = 0.7;
+// Mode-A M2 fold: freshness window in MILLISECONDS, measured against
+// `Date.now() - lastScan._arrival_ms` (NOT against published_mono_ns,
+// which is in tracker CLOCK_MONOTONIC ns). 1000 ms = 5 ticks @ 5 Hz —
+// generous against transient SSE delays.
+export const MAP_SCAN_FRESHNESS_MS = 1000;
+// Polling fallback when SSE drops. Slightly slower than LastPose's 1 s
+// because the scan reply is wider (~14 KiB vs ~250 B for pose).
+export const LAST_SCAN_POLL_FALLBACK_MS = 1000;

@@ -86,3 +86,64 @@ if [[ -f "${M1_TARGET}" ]]; then
     fi
     echo "[m1-no-mutex] clean (no mutex / cv references in cold_writer.cpp)"
 fi
+
+# -----------------------------------------------------------------------
+# [scan-publisher-grep] — Track D invariant: at RUNTIME, only
+# cold_writer.cpp's run_one_iteration / run_live_iteration may call
+# last_scan_seq.store(). main.cpp is allowed exactly ONE store at
+# startup — the sentinel-iterations init that mirrors LastPose's
+# init pattern (uds_protocol.md §C.5 + main.cpp comments). The
+# Seqlock single-writer contract is single-writer at runtime; the boot
+# init runs before any thread spawn so it can't race.
+# Hits outside the (cold_writer.cpp, main.cpp) allow-list FAIL the build.
+# -----------------------------------------------------------------------
+SCAN_PUBLISHER_PATTERN='last_scan_seq\.store\b'
+SCAN_PUBLISHER_HITS="$(grep -rnE "${SCAN_PUBLISHER_PATTERN}" "${ROOT_DIR}/src" 2>/dev/null \
+    | grep -v "${ROOT_DIR}/src/localization/cold_writer.cpp" \
+    | grep -v "${ROOT_DIR}/src/godo_tracker_rt/main.cpp" || true)"
+if [[ -n "${SCAN_PUBLISHER_HITS}" ]]; then
+    echo "[scan-publisher-grep] FAIL — last_scan_seq.store called outside the allow-list:" >&2
+    echo "${SCAN_PUBLISHER_HITS}" | sed 's/^/[scan-publisher-grep]   /' >&2
+    exit 1
+fi
+# Pin: main.cpp must contain EXACTLY ONE store call (the boot sentinel).
+# More than one would be a regression — runtime stores belong to the
+# cold writer, not main.
+MAIN_SCAN_STORES="$(grep -cE "${SCAN_PUBLISHER_PATTERN}" \
+    "${ROOT_DIR}/src/godo_tracker_rt/main.cpp" 2>/dev/null || echo 0)"
+if [[ "${MAIN_SCAN_STORES}" -gt 1 ]]; then
+    echo "[scan-publisher-grep] FAIL — main.cpp has ${MAIN_SCAN_STORES} last_scan_seq.store calls; expected 1 (boot sentinel only)" >&2
+    exit 1
+fi
+echo "[scan-publisher-grep] clean (last_scan_seq.store only in cold_writer.cpp + 1 boot init in main.cpp)"
+
+# -----------------------------------------------------------------------
+# [hot-path-isolation-grep] — Track D invariant: Thread D
+# (thread_d_rt in main.cpp) MUST NOT reference last_scan_seq. The 59.94 Hz
+# UDP send loop runs at SCHED_FIFO; touching the cold-writer's scan
+# seqlock from there would couple the hot path to a 11 KiB seqlock copy.
+# Hits FAIL the build.
+# -----------------------------------------------------------------------
+HOT_PATH_TARGET="${ROOT_DIR}/src/godo_tracker_rt/main.cpp"
+HOT_PATH_PATTERN='last_scan_seq'
+if [[ -f "${HOT_PATH_TARGET}" ]]; then
+    # Extract the body of `void thread_d_rt(...)` — every line from the
+    # function signature through the matching closing brace at column 1.
+    # awk state machine: arm on the signature line, count braces, disarm
+    # on the matching closer.
+    HOT_BODY="$(awk '
+        /^void thread_d_rt\(/ { in_fn=1 }
+        in_fn { print; for (i=1; i<=length($0); ++i) {
+                    c = substr($0, i, 1);
+                    if (c == "{") depth++;
+                    else if (c == "}") { depth--; if (depth == 0 && in_fn) { in_fn=0; exit } }
+                } }
+    ' "${HOT_PATH_TARGET}")"
+    HOT_HITS="$(echo "${HOT_BODY}" | grep -nE "${HOT_PATH_PATTERN}" || true)"
+    if [[ -n "${HOT_HITS}" ]]; then
+        echo "[hot-path-isolation-grep] FAIL — last_scan_seq referenced inside thread_d_rt:" >&2
+        echo "${HOT_HITS}" | sed 's/^/[hot-path-isolation-grep]   /' >&2
+        exit 1
+    fi
+    echo "[hot-path-isolation-grep] clean (thread_d_rt does not reference last_scan_seq)"
+fi

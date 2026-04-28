@@ -474,6 +474,7 @@ JWT secret: `/var/lib/godo/auth/jwt_secret` (서버 첫 부팅 시 random 생성
 | `POST /api/calibrate` | admin | 4-3 (있음) | DASH | — | `{ok: bool}` | UDS set_mode {OneShot} |
 | `POST /api/map/backup` | admin | 4-3 (있음) | BACKUP | — | `{ts: str, path: str}` | atomic 두-단계 copy |
 | `GET /api/last_pose` | viewer | TrackB (있음) | MAP, DIAG | — | `LastPose` (Track B schema) | get_last_pose UDS round-trip |
+| `GET /api/last_scan` | public | Track D (있음) | MAP | — | `LastScan` (Track D schema) | get_last_scan UDS round-trip; raw polar + anchor pose |
 | `POST /api/auth/login` | public | P0 (있음) | AUTH | `{username, password}` | `{token, exp, role}` | bcrypt 검증 + JWT 발급 |
 | `POST /api/auth/logout` | viewer | P0 (있음) | AUTH | — | `{ok}` | localStorage 만료 (서버는 stateless JWT) |
 | `GET /api/auth/me` | viewer | P0 (있음) | (전 페이지 상단) | — | `{username, role, exp}` | 토큰 검증 + 만료까지 남은 초 |
@@ -510,6 +511,7 @@ JWT secret: `/var/lib/godo/auth/jwt_secret` (서버 첫 부팅 시 random 생성
 | Path | 권한 | Phase | 페이지 | Frame | 설명 |
 |---|---|---|---|---|---|
 | `GET /api/last_pose/stream` | viewer | P0 (있음) | MAP | `LastPose` JSON @ 5 Hz | get_last_pose 폴링 → push |
+| `GET /api/last_scan/stream` | public | Track D (있음) | MAP | `LastScan` JSON @ 5 Hz | get_last_scan 폴링 → push; ~14 KiB/frame |
 | `GET /api/diag/stream` | viewer | P1 | DIAG | `{pose, jitter, scan_rate, resources}` @ 5 Hz | 통합 진단 |
 | `GET /api/local/services/stream` | admin (loopback) | P0 (있음) | LOCAL | `[{name, active, since}]` @ 1 Hz | 서비스 상태 변화 |
 | `GET /api/logs/<svc>/stream` | viewer | P1 | DIAG, SYSTEM | journalctl --follow line-by-line | journald event-driven |
@@ -522,6 +524,7 @@ JWT secret: `/var/lib/godo/auth/jwt_secret` (서버 첫 부팅 시 random 생성
 | `set_mode {Idle\|OneShot\|Live}` | 4-3 (있음) | `/api/calibrate`, `/api/live` | — |
 | `get_mode` | 4-3 (있음) | `/api/health`, polled | — |
 | `get_last_pose` | TrackB (있음) | `/api/last_pose`, SSE | — |
+| `get_last_scan` | Track D (있음) | `/api/last_scan`, SSE | LastScan struct + format_ok_scan in cold writer + UDS branch |
 | `get_config` | P1 신규 | `/api/config` | tracker exposes Config struct as JSON |
 | `set_config {key, value}` | P1 신규 | `PATCH /api/config` | atomic TOML write + RAM update + reload-class flag |
 | `get_jitter` | P1 신규 | `/api/system/jitter` | RT thread publishes jitter via seqlock |
@@ -599,14 +602,22 @@ JWT secret: `/var/lib/godo/auth/jwt_secret` (서버 첫 부팅 시 random 생성
 
 **모티베이션**: still 맵 + 추정 pose만 보면 "내 위치 추정이 맞나?"를 운영자가 검증할 수 없음. 라이다가 실제로 보는 점들을 같은 좌표계에 겹쳐 그리면 — pose가 맞으면 scan 점들이 벽선 위에 정확히 떨어지고, 어긋나면 시각적으로 즉시 보임. AMCL 수렴 디버깅에도 직접 사용.
 
-**스코프**:
-- tracker C++: scan thread는 이미 AMCL용 seqlock 운영 중 → `get_last_scan` UDS handler 추가 (seqlock read 1회, μ초 단위, hot-path 0 영향). `protocol.md`에 `get_last_scan` reply schema 추가 (`{ranges:[float], intensities:[float], angle_min, angle_increment, scan_time, header_seq}`).
-- webctl: `uds_client.get_last_scan` + `/api/last_scan` 단발 GET + `/api/last_scan/stream` SSE @ 5 Hz. 한 frame ~3-6 KB JSON, 5 Hz → ~30 KB/s SSE 부하 (감수 가능). FRONT_DESIGN §7.1/§7.2 갱신.
-- SPA: `PoseCanvas`에 scan layer 추가 (3rd layer: pgm 맵 / scan 점들 / pose marker), `Map.svelte`에 toggle 버튼 ("LIDAR scan 보기"), polar→직교 변환은 pose의 yaw 사용해 world frame으로.
+**상태 (2026-04-29)**: PR-D로 구현됨 (`feat/p4.5-track-d-live-lidar`). Mode-A 3 majors + 6 nits + 2 test-bias 모두 fold; tracker 32 hardware-free doctest + webctl 275 pytest + frontend 67 vitest + 18 playwright 모두 green.
 
-**UX 결정**: 새 LIDAR 탭을 만들지 않고 **B-MAP 오버레이 토글**로. 같은 데이터를 두 화면에 보이는 SSOT 위반 회피 + "내 추정 위치에서 라이다가 뭘 보고 있나?" 라는 운영자의 mental model에 직접 매핑.
+**스코프 (구현됨)**:
+- tracker C++: `LastScan` struct (`core/rt_types.hpp`) + `format_ok_scan` (`uds/json_mini.cpp`) + `get_last_scan` UDS handler. Cold writer publishes a snapshot at the same seam where it publishes LastPose (UNCONDITIONAL, mirrors deadband-bypass discipline). Hot path (Thread D) is fully insulated — `[hot-path-isolation-grep]` build step verifies thread_d_rt's body has zero `last_scan_seq` references; `[scan-publisher-grep]` verifies only cold_writer.cpp (+ 1 boot init in main.cpp) stores into the seqlock.
+- webctl: `uds_client.get_last_scan` + `/api/last_scan` (anon, single-shot) + `/api/last_scan/stream` (anon, SSE @ 5 Hz). Per-frame ~14 KiB JSON, 5 Hz → ~70 KB/s SSE (감수 가능, ≤ 200 KB/s for 3 concurrent subscribers).
+- SPA: `PoseCanvas`에 scan layer 추가 (3rd layer between map underlay and trail), `ScanToggle` 컴포넌트 + `scanOverlay` store (sessionStorage persistence, default OFF), `lastScan` store (SSE-fed, lifecycle gated on the toggle), polar→Cartesian transform uses the SCAN's anchor pose (Mode-A TM5 — zero pose↔scan skew).
 
-**예상 작업량**: tracker C++ ~80 LOC + webctl ~150 LOC + SPA ~120 LOC + tests, ≈1 PR-사이즈 작업. PR-B (P0 SPA) 머지 후 Track D로 단독 진행.
+**FRONT_DESIGN §8 wire schema deviations from the original sketch** (per Mode-A N3 + M1):
+- Drop `intensities` (C1 strong/weak flag is not visualization-grade; per `doc/RPLIDAR/RPLIDAR_C1.md` §3).
+- Drop `scan_time` — replaced by `published_mono_ns` (orderitical only; freshness uses arrival-wall-clock).
+- Drop `header_seq` — covered by `valid + pose_valid + iterations` triple.
+- Replace `(angle_min, angle_increment)` with parallel `angles_deg[]` array (per Mode-A M1 — `scan_ops::downsample` filters non-uniformly, so `angle_min + i × increment` is wrong for the AMCL-aligned beam decimation).
+- Add `pose_x_m / pose_y_m / pose_yaw_deg` anchor pose (Mode-A TM5: SPA uses these for the world-frame transform, NOT a separately-fetched pose).
+- Add `pose_valid` flag (Mode-A M3: distinguishes legitimate (0,0,0) anchor from non-converged AMCL run).
+
+**UX 결정 (확정)**: 새 LIDAR 탭을 만들지 않고 **B-MAP 오버레이 토글**로. 같은 데이터를 두 화면에 보이는 SSOT 위반 회피 + "내 추정 위치에서 라이다가 뭘 보고 있나?" 라는 운영자의 mental model에 직접 매핑.
 
 ### Phase 4.5+ Track E — Multi-map management (P0.5, 2026-04-28 user 요청)
 

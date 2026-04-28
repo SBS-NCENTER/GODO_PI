@@ -28,6 +28,14 @@ UDS_REQUEST_MAX_BYTES: Final[int] = 4096
 # read loop has a single ceiling.
 UDS_RESPONSE_READ_BUFSIZE: Final[int] = 4096
 
+# Track D — wider read cap for `get_last_scan` whose JSON reply spans
+# up to ~14 KiB (720 rays × 2 doubles × ~10 chars + scalar header).
+# 32 KiB scratch leaves >2× headroom while staying well under the C++
+# formatter's 24 KiB scratch (production/RPi5/src/core/constants.hpp::
+# JSON_SCRATCH_BYTES). Only get_last_scan reads with this wider cap;
+# all other commands keep UDS_RESPONSE_READ_BUFSIZE.
+LAST_SCAN_RESPONSE_CAP: Final[int] = 32768
+
 # --- Command names (mirrors uds_server.cpp:201,206,212 — req.cmd compares) -
 CMD_PING: Final[str] = "ping"  # uds_server.cpp:201
 CMD_GET_MODE: Final[str] = "get_mode"  # uds_server.cpp:206
@@ -37,6 +45,11 @@ CMD_SET_MODE: Final[str] = "set_mode"  # uds_server.cpp:212
 # production/RPi5/src/uds/json_mini.cpp::format_ok_pose; LAST_POSE_FIELDS
 # below is regex-pinned against that source by tests/test_protocol.py.
 CMD_GET_LAST_POSE: Final[str] = "get_last_pose"
+# Track D (Phase 4.5+ Track D) — uds_server.cpp `get_last_scan` branch.
+# Field-name SSOT is the LastScan struct in production/RPi5/src/core/
+# rt_types.hpp; LAST_SCAN_HEADER_FIELDS below is regex-pinned against
+# that source by tests/test_protocol.py.
+CMD_GET_LAST_SCAN: Final[str] = "get_last_scan"
 
 # --- Mode names (mirrors json_mini.cpp:119-121 mode_to_string + :127-129) -
 MODE_IDLE: Final[str] = "Idle"  # json_mini.cpp:119, :127
@@ -68,6 +81,41 @@ LAST_POSE_FIELDS: Final[tuple[str, ...]] = (
     "forced",
     "published_mono_ns",
 )
+
+# --- Track D: get_last_scan response field order --------------------------
+# Mirror of the LastScan struct field declarations in production/RPi5/src/
+# core/rt_types.hpp. Per the planner's brief override, the drift test
+# regex-extracts from rt_types.hpp (the canonical struct), NOT from
+# format_ok_scan's format string. Reasoning: the struct is the single
+# source of truth for field names + order; the JSON formatter is one of
+# multiple downstream renderings of the same data.
+#
+# Order matches the JSON wire payload emitted by format_ok_scan
+# (uds/json_mini.cpp). The two arrays (angles_deg, ranges_m) appear at
+# the tail; the SPA filters individual ray invalid-sentinels (0.0)
+# during render.
+#
+# `ok` is intentionally NOT in this tuple — same reason as LAST_POSE_FIELDS.
+LAST_SCAN_HEADER_FIELDS: Final[tuple[str, ...]] = (
+    "valid",
+    "forced",
+    "pose_valid",
+    "iterations",
+    "published_mono_ns",
+    "pose_x_m",
+    "pose_y_m",
+    "pose_yaw_deg",
+    "n",
+    "angles_deg",
+    "ranges_m",
+)
+
+# Mirror of production/RPi5/src/core/constants.hpp::LAST_SCAN_RANGES_MAX.
+# Defines both the C++ array bound and the JSON formatter's per-array
+# cap. SPA's lib/protocol.ts has a parallel constant; all three must
+# agree (drift detection: by inspection during code review + the
+# regex pin below).
+LAST_SCAN_RANGES_MAX_PYTHON_MIRROR: Final[int] = 720
 
 # --- Error codes (mirrors json_mini.cpp::format_err callers) --------------
 ERR_PARSE_ERROR: Final[str] = "parse_error"  # json_mini.cpp callers
@@ -113,3 +161,8 @@ def encode_set_mode(mode: str) -> bytes:
 def encode_get_last_pose() -> bytes:
     """Canonical wire encoding of the Track B ``get_last_pose`` request."""
     return b'{"cmd":"get_last_pose"}\n'
+
+
+def encode_get_last_scan() -> bytes:
+    """Canonical wire encoding of the Track D ``get_last_scan`` request."""
+    return b'{"cmd":"get_last_scan"}\n'

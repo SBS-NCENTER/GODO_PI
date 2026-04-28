@@ -13,19 +13,31 @@
     MAP_POSE_COLOR,
     MAP_POSE_DOT_RADIUS_PX,
     MAP_POSE_HEADING_LEN_PX,
+    MAP_SCAN_DOT_COLOR,
+    MAP_SCAN_DOT_OPACITY,
+    MAP_SCAN_DOT_RADIUS_PX,
+    MAP_SCAN_FRESHNESS_MS,
     MAP_TRAIL_COLOR,
     MAP_TRAIL_DOT_RADIUS_RATIO,
     MAP_TRAIL_LENGTH,
     MAP_TRAIL_MAX_OPACITY,
     MAP_WHEEL_ZOOM_FACTOR,
   } from '$lib/constants';
-  import type { LastPose } from '$lib/protocol';
+  import type { LastPose, LastScan } from '$lib/protocol';
+  import { projectScanToWorld } from '$lib/scanTransform';
 
   interface Props {
     pose: LastPose | null;
     mapImageUrl?: string;
+    scan?: LastScan | null;
+    scanOverlayOn?: boolean;
   }
-  let { pose, mapImageUrl = '/api/map/image' }: Props = $props();
+  let {
+    pose,
+    mapImageUrl = '/api/map/image',
+    scan = null,
+    scanOverlayOn = false,
+  }: Props = $props();
 
   let canvas: HTMLCanvasElement | undefined = $state();
   let img: HTMLImageElement | null = null;
@@ -39,6 +51,11 @@
   let dragStartX = 0;
   let dragStartY = 0;
   let hoverWorld = $state<{ x: number; y: number } | null>(null);
+  // Track D — exposed on the wrap div for e2e selector reliability
+  // (Q-OQ-D9). Equals the count of scan dots actually rendered last
+  // redraw, or 0 when the overlay is off / stale / hidden.
+  let scanRenderedCount = $state(0);
+  let scanFresh = $state(false);
 
   // When `pose` changes, push to trail (capped at MAP_TRAIL_LENGTH).
   // Per Mode-B M2: read `trail` inside `untrack()` so this effect has only
@@ -53,7 +70,7 @@
     }
   });
 
-  // Re-render whenever pose, trail, or transform changes.
+  // Re-render whenever pose, trail, scan, or transform changes.
   $effect(() => {
     void pose;
     void trail;
@@ -61,6 +78,8 @@
     void panX;
     void panY;
     void mapImageUrl;
+    void scan;
+    void scanOverlayOn;
     redraw();
   });
 
@@ -104,6 +123,38 @@
     return [wx, wy];
   }
 
+  /**
+   * Track D — polar→Cartesian world-frame transform for the scan overlay.
+   * Uses the SCAN's own anchor pose (`scan.pose_*`) so the dots are
+   * perfectly correlated with the AMCL pose at the moment the scan was
+   * processed, regardless of `lastPose` SSE skew (Mode-A TM5 +
+   * invariant (l)).
+   *
+   * Mode-A M3 fold: gate on `scan.valid === 1 && scan.pose_valid === 1`
+   * (NOT on a magnitude-OR heuristic). When `pose_valid === 0` the
+   * anchor coordinates are zeros from a non-converged AMCL run; rendering
+   * those would mislead the operator.
+   */
+  function drawScanLayer(ctx: CanvasRenderingContext2D, s: LastScan): number {
+    // Polar→Cartesian transform lives in lib/scanTransform.ts so unit
+    // tests can exercise the math without a canvas mount. The validity
+    // gate (Mode-A M3 — scan.valid === 1 && scan.pose_valid === 1) is
+    // enforced inside `projectScanToWorld`.
+    const points = projectScanToWorld(s);
+    if (points.length === 0) return 0;
+
+    ctx.fillStyle = MAP_SCAN_DOT_COLOR;
+    ctx.globalAlpha = MAP_SCAN_DOT_OPACITY;
+    for (const p of points) {
+      const [cx, cy] = worldToCanvas(p.x, p.y);
+      ctx.beginPath();
+      ctx.arc(cx, cy, MAP_SCAN_DOT_RADIUS_PX, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    return points.length;
+  }
+
   function redraw(): void {
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
@@ -115,6 +166,21 @@
       const h = img.naturalHeight * zoom;
       ctx.drawImage(img, canvas.width / 2 + panX - w / 2, canvas.height / 2 + panY - h / 2, w, h);
     }
+
+    // Track D — scan overlay layer (between map and trail). Gated on the
+    // operator-controlled `scanOverlayOn` toggle and the freshness
+    // budget (Mode-A M2 — arrival-wall-clock, NOT published_mono_ns).
+    let drawnDots = 0;
+    let isFresh = false;
+    if (scanOverlayOn && scan) {
+      const arrival = scan._arrival_ms ?? 0;
+      isFresh = arrival > 0 && Date.now() - arrival < MAP_SCAN_FRESHNESS_MS;
+      if (isFresh) {
+        drawnDots = drawScanLayer(ctx, scan);
+      }
+    }
+    scanRenderedCount = drawnDots;
+    scanFresh = isFresh;
 
     // Trail (oldest faintest).
     for (let i = 0; i < trail.length; i++) {
@@ -211,7 +277,12 @@
   });
 </script>
 
-<div class="pose-canvas-wrap" data-testid="pose-canvas-wrap">
+<div
+  class="pose-canvas-wrap"
+  data-testid="pose-canvas-wrap"
+  data-scan-count={scanRenderedCount}
+  data-scan-fresh={scanFresh ? 'true' : 'false'}
+>
   <canvas
     bind:this={canvas}
     data-testid="pose-canvas"

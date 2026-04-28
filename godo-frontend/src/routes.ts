@@ -1,4 +1,5 @@
 import type { Component } from 'svelte';
+import Backup from './routes/Backup.svelte';
 import Config from './routes/Config.svelte';
 import Dashboard from './routes/Dashboard.svelte';
 import Diagnostics from './routes/Diagnostics.svelte';
@@ -16,6 +17,7 @@ export const routes: Record<string, Component> = {
   '/diag': Diagnostics,
   '/config': Config,
   '/system': System,
+  '/backup': Backup,
 };
 
 export const notFoundComponent: Component = NotFound;

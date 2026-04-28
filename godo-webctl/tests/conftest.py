@@ -129,6 +129,46 @@ def tmp_map_pair(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def tmp_backup_dir(tmp_path: Path) -> Path:
+    """Track B-BACKUP fixture.
+
+    Returns a fresh `backup_dir` pre-populated with two canonical
+    backup directories at distinct UTC timestamps and one `<ts>.tmp/`
+    orphan (mirror of a crashed `backup.backup_map` mid-rename).
+
+        <backup_dir>/
+        ├─ 20260101T010101Z/   (older)
+        │   ├─ studio_v1.pgm
+        │   └─ studio_v1.yaml
+        ├─ 20260202T020202Z/   (newer)
+        │   ├─ studio_v2.pgm
+        │   └─ studio_v2.yaml
+        └─ 20260303T030303Z.tmp/   (orphan — must be skipped)
+            └─ studio_v3.pgm
+    """
+    backup_dir = tmp_path / "map-backups"
+    backup_dir.mkdir(mode=0o750)
+    older = backup_dir / "20260101T010101Z"
+    older.mkdir()
+    (older / "studio_v1.pgm").write_bytes(b"P5\n4 4\n255\n" + bytes([10] * 16))
+    (older / "studio_v1.yaml").write_text(
+        "image: studio_v1.pgm\nresolution: 0.05\norigin: [0,0,0]\n"
+        "occupied_thresh: 0.65\nfree_thresh: 0.196\nnegate: 0\n",
+    )
+    newer = backup_dir / "20260202T020202Z"
+    newer.mkdir()
+    (newer / "studio_v2.pgm").write_bytes(b"P5\n4 4\n255\n" + bytes([20] * 16))
+    (newer / "studio_v2.yaml").write_text(
+        "image: studio_v2.pgm\nresolution: 0.05\norigin: [0,0,0]\n"
+        "occupied_thresh: 0.65\nfree_thresh: 0.196\nnegate: 0\n",
+    )
+    orphan = backup_dir / "20260303T030303Z.tmp"
+    orphan.mkdir()
+    (orphan / "studio_v3.pgm").write_bytes(b"P5\n1 1\n255\n\x00")
+    return backup_dir
+
+
+@pytest.fixture
 def tmp_maps_dir(tmp_path: Path) -> Path:
     """Track E (PR-C) fixture.
 

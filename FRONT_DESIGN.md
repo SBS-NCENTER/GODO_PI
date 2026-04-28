@@ -502,7 +502,7 @@ JWT secret: `/var/lib/godo/auth/jwt_secret` (서버 첫 부팅 시 random 생성
 | `PATCH /api/config` | admin | P1 (있음) | CONFIG | `{key, value}` | `{ok, reload_class}` | 단일 키 only; webctl pre-validates body size + special-char shape; 트래커가 schema 매칭 + atomic TOML write + RAM update + restart-pending flag touch (`reload_class != "hot"` 일 때) |
 | `GET /api/system/restart_pending` | public | P1 (있음) | CONFIG, DASH | — | `{pending: bool}` | 트래커가 set_config 후 touch한 sentinel file 존재 여부; SPA의 RestartPendingBanner 가 구독 |
 | `POST /api/map/edit` | admin | P2 | MAPEDIT | `{ops: [{type, mask}]}` | `{ok, backup_ts}` | numpy/Pillow + auto-backup |
-| `GET /api/map/backup/list` | viewer | P2 | BACKUP | — | `[{ts, files, size}]` | /var/lib/godo/map-backups/ scan |
+| `GET /api/map/backup/list` | anon | P2 | BACKUP | — | `[{ts, files, size}]` | /var/lib/godo/map-backups/ scan |
 | `POST /api/map/backup/<ts>/restore` | admin | P2 | BACKUP | — | `{ok}` | cp + reload |
 | `POST /api/auth/users` | admin | P2 | LOCAL | `{username, password, role}` | `{ok}` | 사용자 추가 |
 | `PATCH /api/auth/users/<name>/password` | admin or self | P2 | LOCAL | `{old, new}` | `{ok}` | password reset |

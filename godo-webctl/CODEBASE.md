@@ -50,6 +50,7 @@ godo-webctl/
 | `uds_client.py` | `protocol`, stdlib | Sync AF_UNIX client; typed exceptions; per-syscall timeout. |
 | `backup.py` | `protocol`, stdlib | Two-phase atomic copy + bounded retry-on-rename. |
 | `maps.py` | `constants`, stdlib | Pure-function multi-map primitives. SOLE owner of every FS touch in `cfg.maps_dir`. No FastAPI / Pillow / subprocess imports. |
+| `map_backup.py` | stdlib | Pure-function map-backup history primitives. SOLE owner of FS touches in `cfg.backup_dir`; restore writer ALSO writes into `cfg.maps_dir` but does NOT import `maps.py` (Track E uncoupled-leaves discipline). |
 | `app.py` | `config`, `uds_client`, `backup`, `protocol`, FastAPI | App factory, 3 thin route handlers, static mount. |
 | `__main__.py` | `config`, `app`, uvicorn | Process entrypoint; `workers=1` hardcoded. |
 
@@ -57,9 +58,9 @@ Dependency graph (no back-edges):
 
 ```text
 protocol.py ◄── uds_client.py ◄──┐
-                                  ├── app.py ◄── __main__.py
-backup.py    ◄───────────────────┤
-config.py    ◄───────────────────┘
+                                  ├── map_backup.py ◄── app.py ◄── __main__.py
+backup.py    ◄───────────────────┤   (sole owner of cfg.backup_dir
+config.py    ◄───────────────────┘    + restore writes to cfg.maps_dir)
 ```
 
 ## Invariants
@@ -312,14 +313,16 @@ The auth model splits cleanly along read-vs-write:
 
 - **Anonymous-readable**: `/api/health`, `/api/last_pose`,
   `/api/last_pose/stream`, `/api/last_scan`, `/api/last_scan/stream`,
-  `/api/map/image`, `/api/maps`, `/api/maps/<name>/image`,
-  `/api/maps/<name>/yaml`, `/api/activity`, `/api/system/jitter` (PR-DIAG),
-  `/api/system/amcl_rate` (PR-DIAG), `/api/system/resources` (PR-DIAG),
-  `/api/diag/stream` (PR-DIAG, SSE @ 5 Hz), `/api/logs/tail` (PR-DIAG),
-  `/api/local/services` (loopback), `/api/local/services/stream`
-  (loopback), `/api/local/journal/<name>` (loopback).
+  `/api/map/image`, `/api/map/backup/list` (Track B-BACKUP), `/api/maps`,
+  `/api/maps/<name>/image`, `/api/maps/<name>/yaml`, `/api/activity`,
+  `/api/system/jitter` (PR-DIAG), `/api/system/amcl_rate` (PR-DIAG),
+  `/api/system/resources` (PR-DIAG), `/api/diag/stream` (PR-DIAG,
+  SSE @ 5 Hz), `/api/logs/tail` (PR-DIAG), `/api/local/services`
+  (loopback), `/api/local/services/stream` (loopback),
+  `/api/local/journal/<name>` (loopback).
 - **Login-gated mutations** (`Depends(require_admin)`): `/api/calibrate`,
-  `/api/live`, `/api/map/backup`, `/api/maps/<name>/activate`,
+  `/api/live`, `/api/map/backup`, `/api/map/backup/<ts>/restore`
+  (Track B-BACKUP), `/api/maps/<name>/activate`,
   `DELETE /api/maps/<name>`, `/api/local/service/<name>/<action>`
   (loopback + admin), `/api/system/reboot`, `/api/system/shutdown`.
 - **Session-only routes** (`Depends(require_user)`): `/api/auth/me`,
@@ -365,6 +368,21 @@ sub-fetch failure becomes `{"valid": 0, "err": "..."}` for that key —
 the OTHER three sub-payloads still emit. Pinned by
 `tests/test_sse.py::test_diag_stream_*` (cadence + skip-pose-error +
 skip-resources-error + all-four-fail-emits-all-sentinel).
+
+### (t) Track B-BACKUP — `map_backup.py` is the SOLE owner of `cfg.backup_dir` filesystem touches
+
+Every path inside `cfg.backup_dir` (the
+`/var/lib/godo/map-backups/` directory) is read or operated on
+through `map_backup.py`. `app.py` and tests use the `map_backup.*`
+public API exclusively. The restore writer in `map_backup.py` ALSO
+writes the restored pair into `cfg.maps_dir`, but does NOT import
+`maps.py` — restore deliberately does not touch the `active.pgm` /
+`active.yaml` symlinks (Option A semantics; operator activates
+separately via `POST /api/maps/<name>/activate` + `godo-tracker`
+restart). Concurrency-correctness inherits from invariant (e)
+(single uvicorn worker = serial handler execution); no dedicated
+concurrent test. Pinned by `tests/test_map_backup.py` and the
+absence of any `from .maps import` line in `map_backup.py`.
 
 ## Phase 4.5 follow-up candidates
 
@@ -971,3 +989,99 @@ cases. ruff check clean; ruff format clean.
 | Python mirror | `godo-webctl/src/godo_webctl/config_schema.py` | regex parse + `EXPECTED_ROW_COUNT == 37` |
 | TS mirror | `godo-frontend/src/lib/protocol.ts` (interfaces only) | hand-mirrored; runtime fetch from `/api/config/schema` for the row data |
 | Tests | `tests/test_config_schema_parity.py` | loads C++ source by real path; asserts row count + every reload_class string + every type string + alphabetical + 7 sections + 3 hot keys present |
+
+
+## 2026-04-29 — Track B-BACKUP: map-backup history page (P2 Step 2)
+
+NOTE: top-level invariants now reach (t); the post-(s) duplicates inside Track B-CONFIG's change-log subsection are known and out of scope for this PR.
+
+### Added
+
+- `src/godo_webctl/map_backup.py` — pure-function backup-history primitives
+  (`list_backups`, `restore_backup`) + custom exceptions
+  (`BackupNotFound`, `RestoreNameConflict`). SOLE owner of every FS
+  touch inside `cfg.backup_dir` (new invariant (t)). The restore
+  writer ALSO writes into `cfg.maps_dir` but does NOT import `maps.py`
+  — restore deliberately does not touch the active symlinks (Option A
+  semantics; operator activates separately via the existing Track E
+  flow + `godo-tracker` restart).
+- `src/godo_webctl/protocol.py` — 2 new error-code mirrors
+  (`ERR_BACKUP_NOT_FOUND`, `ERR_RESTORE_NAME_CONFLICT`). Mode-A M5 fold
+  intentionally drops `ERR_BACKUP_DIR_MISSING`: `list_backups` returns
+  `[]` for both "dir missing" and "dir exists but empty", so the wire
+  shape is uniformly 200.
+- `src/godo_webctl/app.py` — 2 new endpoints + `_map_backup_exc_to_response`
+  helper:
+  - `GET    /api/map/backup/list` (anon, Track F).
+  - `POST   /api/map/backup/<ts>/restore` (admin via
+    `Depends(auth_mod.require_admin)`).
+
+  Mode-A N6 fold: the restore route uses
+  `Annotated[str, Path(pattern=r"^[0-9]{8}T[0-9]{6}Z$")]` so a
+  malformed `<ts>` returns 422 BEFORE the handler runs; the internal
+  `restore_backup` regex stays as the second defence layer.
+  Mode-A N7 fold: activity-log entry detail format is
+  `f"{ts} ({n} files)"`.
+- `tests/conftest.py` — new `tmp_backup_dir` fixture (2 canonical
+  backup dirs at distinct UTC stamps + 1 `<ts>.tmp/` orphan).
+- `tests/test_map_backup.py` — 12 new pure-function tests covering
+  list/restore happy paths, traversal corpus collapse to
+  `BackupNotFound`, partial-failure contract (M6 fold:
+  `test_restore_never_leaves_partial_pgm`), tmp-cleanup on copy
+  failure, size sum, newest-first ordering, `<ts>.tmp/` orphan skip,
+  empty/missing dir uniform return.
+- `tests/test_app_integration.py` — 8 new cases for the 2 endpoints:
+  anon list 200, newest-first wire shape, missing-dir 200-empty
+  (replaces the dropped 503 path), admin restore 200, anon restore
+  401, unknown-ts 404, dot-traversal corpus collapses to 4xx, activity
+  log detail pin (`f"{ts} ({n} files)"`).
+- `tests/test_protocol.py` — 2 new pin tests
+  (`test_track_b_backup_error_codes_pinned`,
+  `test_track_b_backup_no_dir_missing_constant` — pins the absence of
+  the dropped symbol).
+
+### Changed
+
+- Invariant (n) — anonymous-readable list extended with
+  `/api/map/backup/list`; admin-mutation list extended with
+  `/api/map/backup/<ts>/restore`.
+- Module map and dependency graph extended to show `map_backup.py`.
+
+### Removed
+
+- (none — `ERR_BACKUP_DIR_MISSING` was never present; Mode-A M5 fold
+  removed it from the planned diff.)
+
+### Tests
+
+- 387 → 408 hardware-free pytest cases (+21 from this PR; +12 in
+  `test_map_backup.py`, +8 in `test_app_integration.py`, +2 in
+  `test_protocol.py` → minus −1 because the dropped 503 case in the
+  plan was replaced rather than added).
+- `uv run ruff check` clean; `uv run ruff format --check` clean.
+
+### Mode-A folds applied
+
+- **M1**: invariant added as `(t)` (lowest unused top-level letter; the
+  post-(s) duplicates inside Track B-CONFIG's change-log subsection
+  are pre-existing letter pollution out of scope for this PR).
+- **M3**: `FRONT_DESIGN.md:505` 권한 column for
+  `GET /api/map/backup/list` brought into alignment with Track F
+  invariant (n) (`viewer` → `anon`).
+- **M4**: `restore_backup` does NOT import `_yaml_path_for` from
+  `backup.py`; copies every basename in `<backup_dir>/<ts>/` verbatim.
+- **M5**: `BackupDirMissing` exception removed; `list_backups` returns
+  `[]` for both dir-missing and dir-empty; the 503 path is gone.
+- **M6**: `test_restore_never_leaves_partial_pgm` pins the contract,
+  not the mechanism (3-file backup with a monkeypatched 2nd
+  `os.replace`).
+- **M7**: `restore_backup` docstring documents partial-restore
+  semantics (committed-before-failure files remain replaced;
+  at-or-after-failure files retain their pre-restore state).
+- **N6**: FastAPI `Path(pattern=...)` regex constraint applied on the
+  restore route.
+- **N7**: activity-log entry detail format = `f"{ts} ({n} files)"`,
+  pinned by `test_backup_restore_appends_activity_log`.
+- **TB4**: malformed and unknown-ts arguments both raise
+  `BackupNotFound` (deliberate folding for log-uniformity; the
+  handler returns 404 for both).

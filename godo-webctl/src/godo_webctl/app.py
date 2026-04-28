@@ -50,6 +50,7 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Path as FastApiPath
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -60,6 +61,7 @@ from . import backup as backup_mod
 from . import config_schema as config_schema_mod
 from . import config_view as config_view_mod
 from . import logs as logs_mod
+from . import map_backup as map_backup_mod
 from . import map_image as map_image_mod
 from . import maps as maps_mod
 from . import resources as resources_mod
@@ -85,10 +87,12 @@ from .constants import (
 from .local_only import loopback_only
 from .protocol import (
     AMCL_RATE_FIELDS,
+    ERR_BACKUP_NOT_FOUND,
     ERR_INVALID_MAP_NAME,
     ERR_MAP_IS_ACTIVE,
     ERR_MAP_NOT_FOUND,
     ERR_MAPS_DIR_MISSING,
+    ERR_RESTORE_NAME_CONFLICT,
     JITTER_FIELDS,
     LAST_POSE_FIELDS,
     LAST_SCAN_HEADER_FIELDS,
@@ -97,6 +101,12 @@ from .protocol import (
     MODE_ONESHOT,
     RESOURCES_FIELDS,
 )
+
+# Track B-BACKUP — `<ts>` path constraint for the restore route. Same
+# canonical-UTC-stamp regex `map_backup._TS_REGEX` enforces internally;
+# this is the FIRST defence layer (FastAPI returns 422 before the
+# handler runs).
+_BACKUP_TS_PATTERN = r"^[0-9]{8}T[0-9]{6}Z$"
 
 _LOG_FORMAT = "%(asctime)s %(levelname)s [godo-webctl] %(message)s"
 _SSE_MEDIA_TYPE = "text/event-stream"
@@ -196,6 +206,31 @@ def _map_maps_exc_to_response(exc: Exception) -> JSONResponse:
         return JSONResponse(
             {"ok": False, "err": ERR_MAPS_DIR_MISSING},
             status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+        )
+    return JSONResponse(
+        {"ok": False, "err": "internal_error"},
+        status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+    )
+
+
+def _map_backup_exc_to_response(exc: Exception) -> JSONResponse:
+    """Local error mapper for `map_backup.*` exceptions. Kept separate
+    from `_map_maps_exc_to_response` because the two error families do
+    not overlap (CODEBASE.md invariant (c))."""
+    if isinstance(exc, map_backup_mod.BackupNotFound):
+        return JSONResponse(
+            {"ok": False, "err": ERR_BACKUP_NOT_FOUND},
+            status_code=HTTPStatus.NOT_FOUND,
+        )
+    if isinstance(exc, map_backup_mod.RestoreNameConflict):
+        return JSONResponse(
+            {"ok": False, "err": ERR_RESTORE_NAME_CONFLICT},
+            status_code=HTTPStatus.CONFLICT,
+        )
+    if isinstance(exc, OSError):
+        return JSONResponse(
+            {"ok": False, "err": "restore_failed", "detail": str(exc)},
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
         )
     return JSONResponse(
         {"ok": False, "err": "internal_error"},
@@ -396,6 +431,49 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         activity_log.append("map_backup", claims.username)
         return JSONResponse(
             {"ok": True, "path": str(path)},
+            status_code=HTTPStatus.OK,
+        )
+
+    # ---- /api/map/backup/list (Track B-BACKUP, anon read) --------------
+    # Track F: anonymous-readable. Mode-A M5 fold: returns 200 with
+    # items=[] when the backup dir is missing OR empty (uniform shape).
+    @app.get("/api/map/backup/list")
+    async def map_backup_list() -> JSONResponse:
+        entries = await asyncio.to_thread(map_backup_mod.list_backups, cfg.backup_dir)
+        return JSONResponse(
+            {"items": [e.to_dict() for e in entries]},
+            status_code=HTTPStatus.OK,
+        )
+
+    # ---- /api/map/backup/<ts>/restore (Track B-BACKUP, admin) ----------
+    # Mode-A N6 fold: FastAPI `Path(pattern=...)` is the FIRST defence
+    # layer against malformed `<ts>` (returns 422 BEFORE handler runs);
+    # `restore_backup`'s internal regex is the second layer.
+    @app.post("/api/map/backup/{ts}/restore")
+    async def map_backup_restore(
+        ts: Annotated[str, FastApiPath(pattern=_BACKUP_TS_PATTERN)],
+        claims: auth_mod.Claims = Depends(auth_mod.require_admin),
+    ) -> JSONResponse:
+        try:
+            restored = await asyncio.to_thread(
+                map_backup_mod.restore_backup,
+                cfg.backup_dir,
+                ts,
+                cfg.maps_dir,
+            )
+        except (
+            map_backup_mod.BackupNotFound,
+            map_backup_mod.RestoreNameConflict,
+            OSError,
+        ) as e:
+            return _map_backup_exc_to_response(e)
+        # Mode-A N7 fold: detail is `f"{ts} ({n} files)"`.
+        activity_log.append(
+            "map_backup_restored",
+            f"{ts} ({len(restored)} files)",
+        )
+        return JSONResponse(
+            {"ok": True, "ts": ts, "restored": restored},
             status_code=HTTPStatus.OK,
         )
 

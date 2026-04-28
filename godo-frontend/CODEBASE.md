@@ -697,3 +697,76 @@ ConfirmDialog}.svelte`.
 84 vitest cases (was 67 pre-PR-DIAG). 23 playwright e2e cases (was 18).
 `npm run lint` clean; `npm run build` green; bundle 68.59 kB
 (gzip 25.96 kB) — +1.1 kB raw vs pre-PR-DIAG.
+
+## 2026-04-29 — Track B-CONFIG (PR-CONFIG-β): /config page
+
+### Added
+
+- `src/lib/protocol.ts` (extended) — `RELOAD_CLASS_HOT/_RESTART/_RECALIBRATE`
+  literals + `ReloadClass` type, `VALID_RELOAD_CLASSES` set,
+  `ConfigValueType` union, `ConfigSchemaRow`, `ConfigKV`,
+  `ConfigGetResponse`, `ConfigPatchBody`, `ConfigSetResult`,
+  `RestartPendingResponse`. Hand-mirrored from the Python NamedTuple
+  in `godo-webctl/src/godo_webctl/config_schema.py`; drift catch by
+  inspection per invariant (k).
+- `src/stores/config.ts` — `Writable<ConfigState>` with
+  `{schema, current, errors}`. `refresh()` parallel-fetches
+  `/api/config/schema` + `/api/config`. `set(key, value)` does
+  optimistic update + PATCH; on 400 rolls back the local value and
+  populates `errors[key]` from the tracker's `detail` text. On
+  success refetches `/api/config` for an authoritative read AND
+  triggers `refreshRestartPending()` so the global banner updates
+  immediately on `restart`/`recalibrate` edits.
+- `src/stores/restartPending.ts` — `Writable<{pending, trackerOk}>`.
+  `refresh()` joins `/api/system/restart_pending` with
+  `/api/health.tracker`; the banner component differentiates the
+  two failure modes (Mode-A S5 fold).
+- `src/components/RestartPendingBanner.svelte` — top-of-app red
+  banner with two failure-mode messages: "godo-tracker 재시작 필요"
+  (tracker ok + flag set) vs "godo-tracker 시작 실패 — journalctl 확인"
+  (tracker unreachable + flag set). Non-dismissable; the C++ boot
+  clears the flag.
+- `src/components/ConfigEditor.svelte` — main editor table. One row
+  per schema entry; type-aware input (number / number / text per
+  Int / Double / String). Submit on blur or Enter; Escape cancels.
+  Reload-class glyph (✓ / ! / !!) with tooltip on the leftmost cell.
+  Anonymous viewers see disabled inputs. On 400 the row's `error[key]`
+  shows under the input.
+- `src/routes/Config.svelte` — page composition: header + editor.
+  The banner is global (App.svelte) so we DO NOT double-render here.
+- `src/routes.ts` — register `/config` → `Config.svelte`.
+- `src/components/Sidebar.svelte` — admin-only "Config" nav row.
+- `src/App.svelte` — `RestartPendingBanner` mounted globally so it's
+  visible on every page (DASH, MAP, DIAG, CONFIG, LOCAL).
+
+### Tests
+
+- New: `tests/unit/config.test.ts` (4 cases) — refresh + optimistic
+  set + 400 rollback + network-error rollback.
+- New: `tests/unit/restartPending.test.ts` (4 cases) — pending + ok,
+  pending + tracker-down, flag-clear, dual-API-error fallback.
+- New: `tests/unit/protocol.test.ts` (7 cases) — interface shape +
+  reload-class string pins.
+- New: `tests/e2e/config.spec.ts` (5 cases) — anonymous-disabled,
+  admin nav-link + edit hot key, restart banner appears on
+  `restart`-class edit, anon-no-nav, inline 400 error.
+- Extended: `tests/e2e/_stub_server.py` — 4 stub schema rows (one per
+  reload-class + type combo) + in-memory `RESTART_PENDING_FLAG`
+  state; `do_PATCH` handler routes `/api/config`.
+
+### Invariants
+
+- (r) `/config` is admin-gated by Sidebar visibility ONLY (Track F:
+  the page itself renders for anon, with disabled inputs). The PATCH
+  is admin-gated server-side; SPA disablement is UX polish.
+- (s) `RestartPendingBanner` is mounted at App.svelte ONLY (single
+  source). Routes MUST NOT double-render the component — playwright
+  strict mode catches this regression.
+- (t) `config.set()` triggers `restartPending.refresh()` after PATCH
+  success (fire-and-forget). The unit test pins this side-effect by
+  verifying the head 4 calls match the synchronous PATCH+refetch
+  sequence; restart-pending refresh happens after.
+- (u) The TS interfaces in `lib/protocol.ts` are hand-mirrored from
+  the Python NamedTuple at compile time. The runtime schema fetch
+  populates the field DATA, but the field TYPES come from this file.
+  Drift catch: `tests/unit/protocol.test.ts` constructor pins.

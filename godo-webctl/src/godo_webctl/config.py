@@ -56,6 +56,11 @@ class Settings:
     # usage in resources.snapshot(). Override via
     # GODO_WEBCTL_DISK_CHECK_PATH for tests + alternate deployments.
     disk_check_path: Path
+    # Track B-CONFIG (PR-CONFIG-β): tracker writes a sentinel here when
+    # a `restart`/`recalibrate`-class config edit lands. Webctl reads
+    # via `restart_pending.is_pending()`. Override via
+    # GODO_WEBCTL_RESTART_PENDING_PATH.
+    restart_pending_path: Path
 
 
 # Documented defaults — single source for code + README + systemd env-file.
@@ -73,6 +78,7 @@ _DEFAULTS: Final[dict[str, str]] = {
     "GODO_WEBCTL_SPA_DIST": "",
     "GODO_WEBCTL_CHROMIUM_LOOPBACK_ONLY": "true",
     "GODO_WEBCTL_DISK_CHECK_PATH": "/",
+    "GODO_WEBCTL_RESTART_PENDING_PATH": "/var/lib/godo/restart_pending",
 }
 
 # Per-field parser. Same keys (in same order) as _DEFAULTS.
@@ -90,6 +96,7 @@ _PARSERS: Final[dict[str, Callable[[str], Any]]] = {
     "GODO_WEBCTL_SPA_DIST": _parse_optional_path,
     "GODO_WEBCTL_CHROMIUM_LOOPBACK_ONLY": _parse_bool,
     "GODO_WEBCTL_DISK_CHECK_PATH": Path,
+    "GODO_WEBCTL_RESTART_PENDING_PATH": Path,
 }
 
 # env-var name → Settings field name. Drift between this and the dataclass
@@ -108,6 +115,7 @@ _ENV_TO_FIELD: Final[dict[str, str]] = {
     "GODO_WEBCTL_SPA_DIST": "spa_dist",
     "GODO_WEBCTL_CHROMIUM_LOOPBACK_ONLY": "chromium_loopback_only",
     "GODO_WEBCTL_DISK_CHECK_PATH": "disk_check_path",
+    "GODO_WEBCTL_RESTART_PENDING_PATH": "restart_pending_path",
 }
 
 

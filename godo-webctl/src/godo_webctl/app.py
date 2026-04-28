@@ -57,16 +57,24 @@ from pydantic import BaseModel, Field
 from . import activity as activity_mod
 from . import auth as auth_mod
 from . import backup as backup_mod
+from . import config_schema as config_schema_mod
+from . import config_view as config_view_mod
 from . import logs as logs_mod
 from . import map_image as map_image_mod
 from . import maps as maps_mod
 from . import resources as resources_mod
+from . import restart_pending as restart_pending_mod
 from . import services as services_mod
 from . import sse as sse_mod
 from . import uds_client as uds_mod
 from .config import Settings, load_settings
 from .constants import (
     ACTIVITY_TAIL_DEFAULT_N,
+    CONFIG_GET_UDS_TIMEOUT_S,
+    CONFIG_PATCH_BODY_MAX_BYTES,
+    CONFIG_SCHEMA_CACHE_TTL_S,
+    CONFIG_SET_UDS_TIMEOUT_S,
+    CONFIG_VALUE_TEXT_MAX_LEN,
     JOURNAL_TAIL_DEFAULT_N,
     LOGIN_PASSWORD_MAX_LEN,
     LOGIN_USERNAME_MAX_LEN,
@@ -113,6 +121,22 @@ class LoginBody(BaseModel):
 
 class LiveBody(BaseModel):
     enable: bool
+
+
+class ConfigPatchBody(BaseModel):
+    """`PATCH /api/config` body. Mode-A S4 fold: webctl pre-validation
+    is body size + single-key shape + JSON well-formedness only — no
+    ASCII / regex / range checks. The C++ tracker's `validate.cpp` is
+    the canonical validator and emits typed `bad_key` / `bad_value` /
+    `non_ascii_value` errors that webctl forwards verbatim.
+    """
+
+    key: str = Field(min_length=1, max_length=128)
+    # `value` is forwarded as a string to the tracker's `set_config`
+    # wire (the tracker re-parses per the schema's ValueType). We
+    # accept Python int/float/bool here for SPA convenience and
+    # str-coerce server-side to keep the wire shape canonical.
+    value: str | int | float | bool = Field(...)
 
 
 # --- helpers -----------------------------------------------------------
@@ -448,6 +472,126 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             disk_check_path=cfg.disk_check_path,
         )
         return JSONResponse(_resources_view(snap), status_code=HTTPStatus.OK)
+
+    # ---- /api/config (Track B-CONFIG, anon read) ------------------------
+    # Track F: anonymous-readable. The schema is C++ Tier-1 + the
+    # current values are not credentials. Mutations stay admin-gated
+    # below.
+    @app.get("/api/config")
+    async def get_config_endpoint() -> JSONResponse:
+        try:
+            resp = await uds_mod.call_uds(client.get_config, CONFIG_GET_UDS_TIMEOUT_S)
+        except uds_mod.UdsError as e:
+            return _map_uds_exc_to_response(e)
+        return JSONResponse(
+            config_view_mod.project_config_view(resp),
+            status_code=HTTPStatus.OK,
+        )
+
+    # ---- /api/config/schema (Track B-CONFIG, anon read) -----------------
+    # The schema is constexpr in the tracker; serve from the Python
+    # mirror cache (parse-once, hold-for-process). The tracker's
+    # `get_config_schema` UDS handler exists for completeness +
+    # cross-language parity tests, but webctl never calls it: the
+    # local mirror is byte-equivalent and survives a tracker outage.
+    _schema_cache: dict[str, object] = {"value": None, "ts": 0.0}
+
+    @app.get("/api/config/schema")
+    async def get_config_schema_endpoint() -> JSONResponse:
+        import time
+
+        now = time.monotonic()
+        cached_ts = _schema_cache.get("ts")
+        if (
+            _schema_cache.get("value") is not None
+            and isinstance(cached_ts, float)
+            and now - cached_ts < CONFIG_SCHEMA_CACHE_TTL_S
+        ):
+            return JSONResponse(_schema_cache["value"], status_code=HTTPStatus.OK)
+        try:
+            rows = await asyncio.to_thread(config_schema_mod.load_schema)
+        except config_schema_mod.ConfigSchemaError as e:
+            return JSONResponse(
+                {"ok": False, "err": "schema_unavailable", "detail": str(e)},
+                status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+        body = config_view_mod.project_schema_view(rows)
+        _schema_cache["value"] = body
+        _schema_cache["ts"] = now
+        return JSONResponse(body, status_code=HTTPStatus.OK)
+
+    # ---- PATCH /api/config (Track B-CONFIG, admin) ----------------------
+    @app.patch("/api/config")
+    async def patch_config_endpoint(
+        request: Request,
+        claims: auth_mod.Claims = Depends(auth_mod.require_admin),
+    ) -> JSONResponse:
+        # Defence-in-depth: enforce the body-size cap BEFORE Pydantic
+        # parsing so a malicious 100 MiB upload cannot consume CPU.
+        raw = await request.body()
+        if len(raw) > CONFIG_PATCH_BODY_MAX_BYTES:
+            return JSONResponse(
+                {"ok": False, "err": "bad_payload", "detail": "body_too_large"},
+                status_code=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+            )
+        try:
+            body = ConfigPatchBody.model_validate_json(raw)
+        except ValueError as e:
+            return JSONResponse(
+                {"ok": False, "err": "bad_payload", "detail": str(e)},
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+        # Mode-A S4: webctl validates body size + single-key shape +
+        # JSON well-formedness only. NO ASCII check (defer to tracker).
+        # The Pydantic model already pinned single-key + 1..128 byte
+        # key + value type as one of {str,int,float,bool}.
+        value_str = (
+            "true" if body.value is True else "false" if body.value is False else str(body.value)
+        )
+        if len(value_str) > CONFIG_VALUE_TEXT_MAX_LEN:
+            return JSONResponse(
+                {"ok": False, "err": "bad_payload", "detail": "value_too_long"},
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+        # Reject characters that would break the hand-rolled tracker
+        # JSON parser (json_mini.cpp tolerates ASCII + no \" / \\ / \n
+        # in field values).
+        if any(c in body.key for c in ('"', "\\", "\n")):
+            return JSONResponse(
+                {"ok": False, "err": "bad_payload", "detail": "key_has_special_char"},
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+        if any(c in value_str for c in ('"', "\\", "\n")):
+            return JSONResponse(
+                {"ok": False, "err": "bad_payload", "detail": "value_has_special_char"},
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+        try:
+            resp = await uds_mod.call_uds(
+                client.set_config,
+                body.key,
+                value_str,
+                CONFIG_SET_UDS_TIMEOUT_S,
+            )
+        except uds_mod.UdsError as e:
+            return _map_uds_exc_to_response(e)
+        activity_log.append("config_set", f"{body.key} by {claims.username}")
+        return JSONResponse(
+            {
+                "ok": True,
+                "reload_class": resp.get("reload_class", "hot"),
+            },
+            status_code=HTTPStatus.OK,
+        )
+
+    # ---- /api/system/restart_pending (Track B-CONFIG, anon read) --------
+    @app.get("/api/system/restart_pending")
+    async def get_restart_pending_endpoint() -> JSONResponse:
+        pending = await asyncio.to_thread(
+            restart_pending_mod.is_pending,
+            cfg.restart_pending_path,
+        )
+        return JSONResponse({"pending": pending}, status_code=HTTPStatus.OK)
 
     # ---- /api/logs/tail (PR-DIAG, anon read) ----------------------------
     @app.get("/api/logs/tail")

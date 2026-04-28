@@ -207,6 +207,115 @@ fails the build if any line inside `thread_d_rt` mentions the seqlock.
 Cold writer is the sole publisher; `[scan-publisher-grep]` enforces
 this at build time.
 
+### `get_config` (Track B-CONFIG, §C.8)
+
+Returns a single JSON object whose keys are the dotted Tier-2 names
+declared in `core/config_schema.hpp` and whose values are the live
+effective Config (post-CLI/env/TOML application). The reply is
+typed: `int` rows emit JSON integers, `double` rows emit JSON numbers,
+`string` rows emit quoted strings.
+
+**Request**:
+
+```json
+{"cmd":"get_config"}
+```
+
+**Response (abridged — 37 keys in production)**:
+
+```json
+{"ok":true,"amcl.converge_xy_std_m":0.015,"amcl.map_path":"/etc/godo/maps/studio_v1.pgm","network.ue_port":6666,"smoother.deadband_mm":10.0}
+```
+
+**Order**: alphabetical by key. Mirrors the schema's compile-time order.
+Webctl's projection (`config_view.project_config_view`) drops the `ok`
+flag before forwarding to the SPA.
+
+**Bandwidth**: ~2 KiB for 37 rows; default 4 KiB read cap is sufficient.
+
+### `get_config_schema` (Track B-CONFIG, §C.9)
+
+Returns the schema metadata as a JSON array. Each row carries the
+operator-visible attributes (`name`, `type`, numeric range, default,
+reload-class, description). Webctl's Python mirror parses
+`config_schema.hpp` directly, so this UDS command is rarely needed in
+production — it exists for cross-language parity tests + future
+clients that lack the C++ source on disk.
+
+**Request**:
+
+```json
+{"cmd":"get_config_schema"}
+```
+
+**Response (one row example)**:
+
+```json
+{"ok":true,"schema":[{"name":"smoother.deadband_mm","type":"double","min":0.0,"max":200.0,"default":"10.0","reload_class":"hot","description":"Deadband on translation (mm)."}]}
+```
+
+**Bandwidth**: ~7 KiB for 37 rows; webctl's read cap for this command
+is `protocol.py::CONFIG_SCHEMA_RESPONSE_CAP = 16384` (16 KiB).
+
+### `set_config` (Track B-CONFIG, §C.10)
+
+Validates a (key, value_text) pair against the schema and, on success,
+atomically rewrites `/etc/godo/tracker.toml`, updates the live Config
+under `live_cfg_mtx`, publishes the hot-config seqlock if the row's
+reload-class is `hot`, and touches `/var/lib/godo/restart_pending` if
+the reload-class is `restart` or `recalibrate`.
+
+**Request**:
+
+```json
+{"cmd":"set_config","key":"smoother.deadband_mm","value":"12.5"}
+```
+
+`value` is always a JSON string on the wire — the tracker's
+`validate.cpp` re-parses per the schema's `ValueType` (Int / Double /
+String). Webctl's PATCH endpoint accepts native JSON int / float /
+bool / string in the body and string-coerces server-side before
+forwarding to this command.
+
+**Response (success)**:
+
+```json
+{"ok":true,"reload_class":"hot"}
+```
+
+**Response (validation failure)**:
+
+```json
+{"ok":false,"err":"bad_value","detail":"smoother.deadband_mm out of range [0.0, 200.0]: got 250.0"}
+```
+
+**Error codes**:
+
+| `err`             | Meaning                                                          |
+|-------------------|------------------------------------------------------------------|
+| `bad_key`         | The `key` is not in `CONFIG_SCHEMA`.                             |
+| `bad_value`       | `value` failed type or range validation; `detail` carries the human-readable reason. |
+| `non_ascii_value` | `value` contains a byte outside `[0x20, 0x7E]`; the tracker's hand-rolled JSON parser tolerates ASCII only. |
+| `write_failed`    | `core/atomic_toml_writer` could not write `tracker.toml`; `detail` carries the underlying errno text. RAM `Config` is unchanged in this case. |
+
+**Atomicity**: the on-disk TOML and live RAM Config are kept in
+lockstep. The sequence is `validate → mkstemp/write/fsync/rename →
+update RAM → publish seqlock | touch restart-pending`. A power loss
+between any two steps leaves either the pre-PATCH state OR the post-
+PATCH state on disk, never a torn write. See
+`core/atomic_toml_writer.cpp` + `[atomic-toml-write-grep]`.
+
+**Reload-class semantics**:
+- `hot`: the cold writer reads the new value via
+  `hot_cfg_seq.load()` on the next iteration (no restart needed). The
+  SPA shows ✓ on this row.
+- `restart`: the new value lands in TOML + RAM but is only consumed by
+  code that reads `Config` once at startup (e.g. UDP sender, serial
+  reader). The SPA shows red `!` and the
+  `RestartPendingBanner` until the operator restarts via B-LOCAL.
+- `recalibrate`: same as `restart` plus the AMCL particle cloud must
+  be re-seeded (next OneShot). The SPA shows red `‼`.
+
 ## D. Errors
 
 | Code            | Meaning                                                |

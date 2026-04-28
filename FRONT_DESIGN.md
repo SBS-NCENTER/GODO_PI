@@ -611,7 +611,7 @@ JWT secret: `/var/lib/godo/auth/jwt_secret` (서버 첫 부팅 시 random 생성
 
 **FRONT_DESIGN §8 wire schema deviations from the original sketch** (per Mode-A N3 + M1):
 - Drop `intensities` (C1 strong/weak flag is not visualization-grade; per `doc/RPLIDAR/RPLIDAR_C1.md` §3).
-- Drop `scan_time` — replaced by `published_mono_ns` (orderitical only; freshness uses arrival-wall-clock).
+- Drop `scan_time` — replaced by `published_mono_ns` (ordering only; freshness uses arrival-wall-clock).
 - Drop `header_seq` — covered by `valid + pose_valid + iterations` triple.
 - Replace `(angle_min, angle_increment)` with parallel `angles_deg[]` array (per Mode-A M1 — `scan_ops::downsample` filters non-uniformly, so `angle_min + i × increment` is wrong for the AMCL-aligned beam decimation).
 - Add `pose_x_m / pose_y_m / pose_yaw_deg` anchor pose (Mode-A TM5: SPA uses these for the world-frame transform, NOT a separately-fetched pose).

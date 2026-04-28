@@ -1,6 +1,5 @@
 #include "cold_writer.hpp"
 
-#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <cstdio>
@@ -58,7 +57,7 @@ void fill_last_scan(godo::rt::LastScan& snap,
              i += static_cast<std::size_t>(stride)) {
             const auto& s = frame.samples[i];
             if (s.distance_mm <= 0.0) continue;
-            const double r_m = s.distance_mm * 0.001;
+            const double r_m = s.distance_mm / godo::constants::MM_PER_M;
             if (r_m < range_min || r_m > range_max) continue;
             snap.angles_deg[out] = s.angle_deg;
             snap.ranges_m[out]   = r_m;

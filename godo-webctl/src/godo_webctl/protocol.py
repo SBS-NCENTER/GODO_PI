@@ -83,17 +83,16 @@ LAST_POSE_FIELDS: Final[tuple[str, ...]] = (
 )
 
 # --- Track D: get_last_scan response field order --------------------------
-# Mirror of the LastScan struct field declarations in production/RPi5/src/
-# core/rt_types.hpp. Per the planner's brief override, the drift test
-# regex-extracts from rt_types.hpp (the canonical struct), NOT from
-# format_ok_scan's format string. Reasoning: the struct is the single
-# source of truth for field names + order; the JSON formatter is one of
-# multiple downstream renderings of the same data.
-#
-# Order matches the JSON wire payload emitted by format_ok_scan
-# (uds/json_mini.cpp). The two arrays (angles_deg, ranges_m) appear at
-# the tail; the SPA filters individual ray invalid-sentinels (0.0)
-# during render.
+# Mirror of the JSON wire payload emitted by format_ok_scan in
+# production/RPi5/src/uds/json_mini.cpp. Pinned in two complementary
+# places: (1) test_last_scan_header_fields_match_cpp_source extracts
+# field NAMES from the LastScan struct in rt_types.hpp and asserts
+# set-equality (catches name drift / additions / removals), (2)
+# test_last_scan_wire_order_matches_format_ok_scan regex-extracts the
+# JSON keys from format_ok_scan's snprintf format string and asserts
+# tuple-equality with this Python tuple (catches wire-order drift).
+# The two arrays (angles_deg, ranges_m) appear at the tail; the SPA
+# filters individual ray invalid-sentinels (0.0) during render.
 #
 # `ok` is intentionally NOT in this tuple — same reason as LAST_POSE_FIELDS.
 LAST_SCAN_HEADER_FIELDS: Final[tuple[str, ...]] = (

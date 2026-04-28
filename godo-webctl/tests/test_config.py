@@ -26,6 +26,10 @@ def test_empty_env_uses_defaults() -> None:
     assert s.map_path == Path("/etc/godo/maps/studio_v1.pgm")
     assert s.health_uds_timeout_s == 2.0
     assert s.calibrate_uds_timeout_s == 30.0
+    assert s.jwt_secret_path == Path("/var/lib/godo/auth/jwt_secret")
+    assert s.users_file == Path("/var/lib/godo/auth/users.json")
+    assert s.spa_dist is None
+    assert s.chromium_loopback_only is True
 
 
 def test_defaults_match_settings() -> None:
@@ -48,6 +52,10 @@ def test_each_env_var_overrides_default() -> None:
         "GODO_WEBCTL_MAP_PATH": "/tmp/m.pgm",
         "GODO_WEBCTL_HEALTH_UDS_TIMEOUT_S": "0.5",
         "GODO_WEBCTL_CALIBRATE_UDS_TIMEOUT_S": "5.0",
+        "GODO_WEBCTL_JWT_SECRET_PATH": "/tmp/jwt",
+        "GODO_WEBCTL_USERS_FILE": "/tmp/users.json",
+        "GODO_WEBCTL_SPA_DIST": "/tmp/dist",
+        "GODO_WEBCTL_CHROMIUM_LOOPBACK_ONLY": "false",
     }
     s = load_settings(overrides)
     assert s.host == "0.0.0.0"
@@ -57,6 +65,23 @@ def test_each_env_var_overrides_default() -> None:
     assert s.map_path == Path("/tmp/m.pgm")
     assert s.health_uds_timeout_s == 0.5
     assert s.calibrate_uds_timeout_s == 5.0
+    assert s.jwt_secret_path == Path("/tmp/jwt")
+    assert s.users_file == Path("/tmp/users.json")
+    assert s.spa_dist == Path("/tmp/dist")
+    assert s.chromium_loopback_only is False
+
+
+def test_spa_dist_empty_string_is_none() -> None:
+    """Empty value (operator left it commented out) → ``None`` so app.py
+    falls back to the legacy static/index.html mount."""
+    s = load_settings({"GODO_WEBCTL_SPA_DIST": ""})
+    assert s.spa_dist is None
+
+
+def test_chromium_loopback_only_rejects_ambiguous() -> None:
+    with pytest.raises(ConfigError) as ei:
+        load_settings({"GODO_WEBCTL_CHROMIUM_LOOPBACK_ONLY": "maybe"})
+    assert "GODO_WEBCTL_CHROMIUM_LOOPBACK_ONLY" in str(ei.value)
 
 
 @pytest.mark.parametrize(

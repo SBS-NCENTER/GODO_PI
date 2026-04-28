@@ -23,6 +23,21 @@ class ConfigError(ValueError):
     """Raised when an env value cannot be parsed into its target type."""
 
 
+def _parse_optional_path(raw: str) -> Path | None:
+    """Empty string → ``None``; anything else → ``Path``."""
+    return Path(raw) if raw else None
+
+
+def _parse_bool(raw: str) -> bool:
+    """Accept the obvious truthy/falsy tokens; reject ambiguity loudly."""
+    s = raw.strip().lower()
+    if s in {"1", "true", "yes", "on"}:
+        return True
+    if s in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"not a boolean: {raw!r}")
+
+
 @dataclass(frozen=True)
 class Settings:
     host: str
@@ -32,6 +47,10 @@ class Settings:
     map_path: Path
     health_uds_timeout_s: float
     calibrate_uds_timeout_s: float
+    jwt_secret_path: Path
+    users_file: Path
+    spa_dist: Path | None
+    chromium_loopback_only: bool
 
 
 # Documented defaults — single source for code + README + systemd env-file.
@@ -43,6 +62,10 @@ _DEFAULTS: Final[dict[str, str]] = {
     "GODO_WEBCTL_MAP_PATH": "/etc/godo/maps/studio_v1.pgm",
     "GODO_WEBCTL_HEALTH_UDS_TIMEOUT_S": "2.0",
     "GODO_WEBCTL_CALIBRATE_UDS_TIMEOUT_S": "30.0",
+    "GODO_WEBCTL_JWT_SECRET_PATH": "/var/lib/godo/auth/jwt_secret",
+    "GODO_WEBCTL_USERS_FILE": "/var/lib/godo/auth/users.json",
+    "GODO_WEBCTL_SPA_DIST": "",
+    "GODO_WEBCTL_CHROMIUM_LOOPBACK_ONLY": "true",
 }
 
 # Per-field parser. Same keys (in same order) as _DEFAULTS.
@@ -54,6 +77,10 @@ _PARSERS: Final[dict[str, Callable[[str], Any]]] = {
     "GODO_WEBCTL_MAP_PATH": Path,
     "GODO_WEBCTL_HEALTH_UDS_TIMEOUT_S": float,
     "GODO_WEBCTL_CALIBRATE_UDS_TIMEOUT_S": float,
+    "GODO_WEBCTL_JWT_SECRET_PATH": Path,
+    "GODO_WEBCTL_USERS_FILE": Path,
+    "GODO_WEBCTL_SPA_DIST": _parse_optional_path,
+    "GODO_WEBCTL_CHROMIUM_LOOPBACK_ONLY": _parse_bool,
 }
 
 # env-var name → Settings field name. Drift between this and the dataclass
@@ -66,6 +93,10 @@ _ENV_TO_FIELD: Final[dict[str, str]] = {
     "GODO_WEBCTL_MAP_PATH": "map_path",
     "GODO_WEBCTL_HEALTH_UDS_TIMEOUT_S": "health_uds_timeout_s",
     "GODO_WEBCTL_CALIBRATE_UDS_TIMEOUT_S": "calibrate_uds_timeout_s",
+    "GODO_WEBCTL_JWT_SECRET_PATH": "jwt_secret_path",
+    "GODO_WEBCTL_USERS_FILE": "users_file",
+    "GODO_WEBCTL_SPA_DIST": "spa_dist",
+    "GODO_WEBCTL_CHROMIUM_LOOPBACK_ONLY": "chromium_loopback_only",
 }
 
 

@@ -51,10 +51,6 @@ def test_error_codes_match_cpp() -> None:
     assert P.ERR_BAD_MODE == "bad_mode"
 
 
-def test_max_rename_attempts_is_tier1() -> None:
-    assert P.MAX_RENAME_ATTEMPTS == 9
-
-
 def test_encode_ping_byte_exact() -> None:
     assert P.encode_ping() == b'{"cmd":"ping"}\n'
 
@@ -96,18 +92,14 @@ def test_last_pose_fields_match_cpp_source() -> None:
     # them, then pull out the JSON keys with a regex.
     func_marker = "format_ok_pose"
     start = src.find(func_marker + "(const godo::rt::LastPose")
-    assert start != -1, (
-        f"Could not locate '{func_marker}' definition in {_JSON_MINI_CPP}"
-    )
+    assert start != -1, f"Could not locate '{func_marker}' definition in {_JSON_MINI_CPP}"
     # Scope to the snprintf format string only — this is the SSOT. The
     # function body also contains a fallback `return std::string(...)`
     # for the encoding-error path which is structurally identical (so
     # both sides benefit from the same drift catch on the canonical
     # string), but counting field names twice would inflate the tuple.
     snprintf_idx = src.find("std::snprintf(buf, sizeof(buf),", start)
-    assert snprintf_idx != -1, (
-        f"Could not locate snprintf in format_ok_pose body"
-    )
+    assert snprintf_idx != -1, "Could not locate snprintf in format_ok_pose body"
     # End at the first `,` that closes the format-string argument: that
     # is the `,` immediately after the closing quote of the format
     # string literal block. We search for the line starting with

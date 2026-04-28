@@ -17,7 +17,11 @@ def _settings_for(
     uds_socket: Path,
     map_path: Path,
     backup_dir: Path,
+    jwt_secret_path: Path | None = None,
+    users_file: Path | None = None,
+    spa_dist: Path | None = None,
 ) -> Settings:
+    base = backup_dir.parent
     return Settings(
         host="127.0.0.1",
         port=0,
@@ -26,6 +30,10 @@ def _settings_for(
         map_path=map_path,
         health_uds_timeout_s=1.0,
         calibrate_uds_timeout_s=1.0,
+        jwt_secret_path=jwt_secret_path or (base / "jwt_secret"),
+        users_file=users_file or (base / "users.json"),
+        spa_dist=spa_dist,
+        chromium_loopback_only=True,
     )
 
 
@@ -142,6 +150,10 @@ async def test_calibrate_timeout_returns_504(
         map_path=s.map_path,
         health_uds_timeout_s=s.health_uds_timeout_s,
         calibrate_uds_timeout_s=0.2,
+        jwt_secret_path=s.jwt_secret_path,
+        users_file=s.users_file,
+        spa_dist=s.spa_dist,
+        chromium_loopback_only=s.chromium_loopback_only,
     )
     async with _client(s) as cl:
         r = await cl.post("/api/calibrate")

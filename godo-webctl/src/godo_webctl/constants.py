@@ -1,0 +1,76 @@
+"""
+Webctl-internal Tier-1 constants.
+
+Scope: values that are NOT on the wire to the C++ tracker. The wire SSOT
+lives in ``protocol.py``; that file is a deliberate one-to-one mirror of
+production/RPi5/src/core/constants.hpp + uds_server.cpp + json_mini.cpp
+and must stay free of webctl-only knobs.
+
+Anything pinned here is a **deliberate** choice; tests in
+``tests/test_constants.py`` pin every value so changes require a visible
+diff. CLAUDE.md §6 forbids magic numbers in ``src/`` — every literal in
+``src/godo_webctl/`` that is not a local iteration bound or a wire-side
+mirror MUST resolve to a constant declared here or a Settings field in
+``config.py``.
+
+Leaf module: imports nothing from the package.
+"""
+
+from __future__ import annotations
+
+from typing import Final
+
+# --- JWT / auth -----------------------------------------------------------
+# HS256 keeps the secret + verify operations inside the FastAPI process —
+# no public-key infrastructure needed for a 1-2 user studio host.
+JWT_ALGORITHM: Final[str] = "HS256"
+
+# 6 h session window. Long enough that an operator who logs in at the
+# start of a recording day does not get bounced; short enough that a
+# stolen token has a bounded blast radius.
+JWT_TTL_SECONDS: Final[int] = 21600  # 6 h
+
+# bcrypt cost factor. ~300 ms per login on RPi 5 Cortex-A76 — deliberate
+# friction against credential-stuffing on a LAN-exposed host. Do NOT
+# lower without revisiting the threat model; at 1-2 users / ~1 login per
+# day cadence the latency is invisible.
+BCRYPT_COST_FACTOR: Final[int] = 12
+
+# --- SSE cadence ----------------------------------------------------------
+# Last-pose stream tick: 5 Hz matches the cold-writer publish cadence
+# (no benefit polling faster than the tracker updates the seqlock).
+SSE_TICK_S: Final[float] = 0.2  # 5 Hz
+
+# Services stream tick: 1 Hz is plenty for systemctl status — service
+# state transitions are operator-driven, not high-frequency events.
+SSE_SERVICES_TICK_S: Final[float] = 1.0
+
+# Keepalive comment line interval. 15 s is well under typical 60 s
+# proxy/browser idle timeouts and short enough that a cold reverse-proxy
+# does not buffer past the first frame.
+SSE_HEARTBEAT_S: Final[float] = 15.0
+
+# --- Map image cache ------------------------------------------------------
+# PGM → PNG conversion takes ~200 ms for a 1024×1024 map. Cache for 5 min
+# so back-to-back B-MAP page loads are O(1). Invalidation is mtime-keyed
+# (see map_image.render_pgm_to_png).
+MAP_IMAGE_CACHE_TTL_S: Final[float] = 300.0
+
+# --- Activity log ---------------------------------------------------------
+# In-process ring buffer size. Last 50 actions covers a typical recording
+# session; older entries fall off silently. Process restart wipes the
+# buffer (documented in CODEBASE.md invariant — in-memory only for P0).
+ACTIVITY_BUFFER_SIZE: Final[int] = 50
+
+# --- Journalctl tail ------------------------------------------------------
+# Default `n` for /api/local/journal/<svc>?n=… when the operator does not
+# specify. 30 lines covers most "what just went wrong" debugging without
+# blowing up the response size.
+JOURNAL_TAIL_DEFAULT_N: Final[int] = 30
+
+# --- Backup-side Tier-1 (relocated from protocol.py per planner M2) ------
+# Bound on rename collision retries inside backup.backup_map. Above 9
+# means more than 9 backups in the same UTC second, which never happens
+# in practice. Lives here because it is webctl-internal — the tracker
+# has no opinion on how webctl manages its backup directory.
+MAX_RENAME_ATTEMPTS: Final[int] = 9

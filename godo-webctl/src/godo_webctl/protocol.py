@@ -72,11 +72,6 @@ ERR_PARSE_ERROR: Final[str] = "parse_error"  # json_mini.cpp callers
 ERR_UNKNOWN_CMD: Final[str] = "unknown_cmd"  # uds_server.cpp:225
 ERR_BAD_MODE: Final[str] = "bad_mode"  # json_mini.cpp:215 caller
 
-# --- Backup-side Tier-1 (webctl-internal) ---------------------------------
-# Bound on rename collision retries inside backup.backup_map. Above 9 means
-# more than 9 backups in the same UTC second, which never happens in practice.
-MAX_RENAME_ATTEMPTS: Final[int] = 9
-
 
 # --- Canonical request encoders -------------------------------------------
 # The server tolerates whitespace + arbitrary key order, but the client MUST

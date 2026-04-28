@@ -548,11 +548,11 @@ async def test_last_pose_stream_route_is_wired_with_correct_headers(
     tmp_path: Path,
     tmp_map_pair: Path,
 ) -> None:
-    """Smoke test: the route exists and is configured with the right
-    media type + defensive proxy-buffering headers. End-to-end frame
-    cadence is asserted by `tests/test_sse.py` against the generator
-    directly with a virtual clock (per T3) — there is no value in
-    racing a wall-clock SSE read through httpx ASGI here."""
+    """Smoke test: the route exists, is reachable, and is configured
+    with the right media type + defensive proxy-buffering headers. End-
+    to-end frame cadence is asserted by `tests/test_sse.py` against the
+    generator directly with a virtual clock (per T3) — there is no
+    value in racing a wall-clock SSE read through httpx ASGI here."""
     s = _settings_for(
         uds_socket=tmp_path / "u.sock",
         map_path=tmp_map_pair,
@@ -567,6 +567,32 @@ async def test_last_pose_stream_route_is_wired_with_correct_headers(
 
     assert SSE_RESPONSE_HEADERS["X-Accel-Buffering"] == "no"
     assert SSE_RESPONSE_HEADERS["Cache-Control"] == "no-cache"
+
+    # N-B6: actually call the route — catches "refactor broke
+    # `StreamingResponse(...)` construction" that the route-existence
+    # check above misses entirely. ASGITransport buffers the full
+    # response (it is not a true streaming transport), so we cannot
+    # iterate forever; we mock the generator with one that yields once
+    # and exits, so ASGI completes the response and we get headers +
+    # status to assert against. The generator's actual cadence /
+    # heartbeat behaviour is covered by `tests/test_sse.py` against
+    # the generator directly with a virtual clock (per T3).
+
+    async def _yield_once_then_exit(*_args: Any, **_kwargs: Any) -> AsyncIterator[bytes]:
+        yield b"data: {}\n\n"
+
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        with mock.patch(
+            "godo_webctl.sse.last_pose_stream",
+            side_effect=_yield_once_then_exit,
+        ):
+            r = await cl.get("/api/last_pose/stream", headers=_auth(token))
+    assert r.status_code == HTTPStatus.OK
+    assert r.headers["content-type"].startswith("text/event-stream")
+    assert r.headers["cache-control"] == "no-cache"
+    assert r.headers["x-accel-buffering"] == "no"
+    assert r.text == "data: {}\n\n"
 
 
 # ---- /api/local/* loopback gate ------------------------------------------
@@ -589,10 +615,19 @@ async def test_local_services_loopback_allowed(
     assert r.json() == fake_list
 
 
-async def test_local_services_non_loopback_returns_403(
+@pytest.mark.parametrize(
+    "path",
+    ["/api/local/services", "/api/local/services/stream"],
+)
+async def test_local_endpoint_non_loopback_returns_403(
     tmp_path: Path,
     tmp_map_pair: Path,
+    path: str,
 ) -> None:
+    """Both the REST and SSE local-only endpoints must reject non-
+    loopback peers identically. Per N-B7: SSE-side gate was previously
+    only verified to be wired the same way; this asserts the actual
+    deny path."""
     s = _settings_for(
         uds_socket=tmp_path / "u.sock",
         map_path=tmp_map_pair,
@@ -605,7 +640,7 @@ async def test_local_services_non_loopback_returns_403(
         # an issue_token shortcut against the app's secret.
         secret = app.state.jwt_secret
         token, _ = auth_mod.issue_token(secret, "ncenter", "admin")
-        r = await cl.get("/api/local/services", headers=_auth(token))
+        r = await cl.get(path, headers=_auth(token))
     assert r.status_code == HTTPStatus.FORBIDDEN
     assert r.json()["err"] == "loopback_only"
 

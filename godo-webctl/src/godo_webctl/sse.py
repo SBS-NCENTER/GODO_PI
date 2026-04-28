@@ -40,7 +40,12 @@ from typing import Any, Final
 from . import services as services_mod
 from . import uds_client as uds_mod
 from .config import Settings
-from .constants import SSE_HEARTBEAT_S, SSE_SERVICES_TICK_S, SSE_TICK_S
+from .constants import (
+    SSE_HEARTBEAT_S,
+    SSE_SERVICES_TICK_S,
+    SSE_TICK_S,
+    SSE_UDS_TIMEOUT_S,
+)
 
 logger = logging.getLogger("godo_webctl.sse")
 
@@ -50,10 +55,6 @@ SSE_RESPONSE_HEADERS: Final[dict[str, str]] = {
     "Cache-Control": "no-cache",
     "X-Accel-Buffering": "no",
 }
-
-# Per-poll UDS timeout for the SSE loop. Short — if the tracker stalls,
-# we want the loop to skip a frame, not stall the stream.
-_SSE_UDS_TIMEOUT_S: Final[float] = 0.5
 
 
 def _sse_event(payload: dict[str, Any]) -> bytes:
@@ -75,7 +76,7 @@ async def last_pose_stream(
     elapsed_since_keepalive = 0.0
     while True:
         try:
-            resp = await uds_mod.call_uds(client.get_last_pose, _SSE_UDS_TIMEOUT_S)
+            resp = await uds_mod.call_uds(client.get_last_pose, SSE_UDS_TIMEOUT_S)
             yield _sse_event(resp)
         except asyncio.CancelledError:
             raise

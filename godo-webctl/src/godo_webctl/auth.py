@@ -91,7 +91,7 @@ class Claims:
 # --- secret -------------------------------------------------------------
 
 
-def _load_or_create_secret(path: Path) -> bytes:
+def load_or_create_secret(path: Path) -> bytes:
     """Read 32-byte secret from `path`; if missing, generate + persist
     with mode 0600. Returns the raw bytes (HS256 accepts arbitrary
     binary)."""
@@ -178,6 +178,12 @@ class UserStore:
     @property
     def unavailable_reason(self) -> str | None:
         return self._unavailable
+
+    def has_users(self) -> bool:
+        """True iff the store currently holds at least one user record.
+        Returns False if the store is in error state (which the caller
+        should check separately via `unavailable_reason`)."""
+        return bool(self._cached)
 
     # ---- public ----------------------------------------------------------
 
@@ -289,19 +295,36 @@ class UserStore:
             raise
 
 
-def _lazy_seed_default(store: UserStore) -> None:
+def lazy_seed_default(store: UserStore) -> None:
     """If `users.json` is absent (cached empty + no error), seed the
     default admin so first-boot is operable. No-op if any users exist or
     if the store is in error state."""
     if store.unavailable_reason is not None:
         return
-    if store._cached:  # noqa: SLF001 — same module
+    if store.has_users():
         return
     store.set_password(DEFAULT_USERNAME, DEFAULT_PASSWORD, DEFAULT_ROLE)
     logger.warning(
         "auth.default_admin_seeded: username=%s — change via scripts/godo-webctl-passwd",
         DEFAULT_USERNAME,
     )
+
+
+def bootstrap(jwt_secret_path: Path, users_file: Path) -> tuple[bytes, UserStore]:
+    """Single entry point for app startup: load (or create) the JWT
+    secret, build the user store, lazy-seed the default admin if the
+    file was absent. Returns ``(secret_bytes, user_store)`` ready for
+    `app.state` wiring. Failures during the seed step are logged but
+    not raised — the corruption-recovery path (`unavailable_reason`)
+    keeps the app servable."""
+    secret = load_or_create_secret(jwt_secret_path)
+    store = UserStore(users_file)
+    if store.unavailable_reason is None:
+        try:
+            lazy_seed_default(store)
+        except OSError as e:
+            logger.error("auth.seed_failed: %s", e)
+    return secret, store
 
 
 # --- JWT issue / verify -------------------------------------------------

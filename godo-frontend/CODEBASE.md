@@ -306,6 +306,38 @@ preview proxy needed.
 
 ## Change log
 
+### 2026-04-29 — Track E Mode-B folds (M4 unit test + lint scaffold)
+
+#### Added
+
+- `tests/unit/map_list_panel.test.ts` — 2 vitest cases mounting the
+  real `MapListPanel` component into jsdom via Svelte 5's built-in
+  `mount(...)` API (no `@testing-library/svelte` dependency added).
+  Pins the Mode-A M4 hide-button contract: with
+  `window.location.hostname` stubbed to `192.168.1.50`, the activate
+  dialog's primary button is HIDDEN and the placeholder span carrying
+  the `로컬 kiosk에서만 가능` tooltip renders in its slot. Companion
+  case on `127.0.0.1` proves the primary button DOES render on
+  loopback (anti-tautology check).
+- `vitest.config.ts` — dedicated test config so the svelte plugin can
+  run with `style: false` preprocessing under vitest (the production
+  `vite.config.ts` + `svelte.config.js` use `vitePreprocess()` with
+  default style preprocessing, which `preprocessCSS` cannot consume
+  inside vitest's transform pipeline). Adds `resolve.conditions =
+['browser']` so `mount(...)` resolves to svelte's client build under
+  jsdom.
+
+#### Changed
+
+- `vite.config.ts` — removed the embedded `test:` block (now lives in
+  `vitest.config.ts`); production build is unchanged.
+
+#### Tests
+
+- 37 vitest unit cases (was 35; +2 from `map_list_panel.test.ts`).
+- 14 playwright e2e cases unchanged.
+- `npm run lint` clean; `npm run build` produces ~22 kB gzipped.
+
 ### 2026-04-29 — PR-C: Track E (multi-map management)
 
 #### Added

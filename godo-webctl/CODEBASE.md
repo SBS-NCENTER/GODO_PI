@@ -294,6 +294,39 @@ a token — anon callers see the raw 401 instead of being bounced).
 
 ## Change log
 
+### 2026-04-29 — Track E Mode-B folds (corpus parity + WARN pin)
+
+#### Added
+
+- `tests/test_app_integration.py` — 5 new cases:
+  - `test_activate_dot_traversal_returns_400` and
+    `test_activate_hidden_dot_returns_400` (Mode-B Nit #3): rejection
+    corpus for `POST /api/maps/<name>/activate` mirrors the existing
+    `image` / `yaml` corpus pattern at :969-1022. String literals (NOT
+    parametrize). Routing-vs-handler outcomes (400 / 404 / 405) are
+    all accepted as valid rejections per Mode-A TB1 discipline.
+  - `test_delete_dot_traversal_returns_400` and
+    `test_delete_hidden_dot_returns_400` (same, for DELETE).
+  - `test_lifespan_warns_every_boot_when_map_path_set` (Mode-B Nit #4 /
+    Q-OQ-E4): pins the `maps.legacy_map_path_in_use` WARNING firing
+    on EVERY boot via Starlette `TestClient` lifespan + `caplog`.
+
+#### Changed
+
+- `CODEBASE.md` change-log entry below — `test_maps.py` count
+  corrected from 41 to 40 (Mode-B Nit #2). The plan §"Concurrent
+  activate" line 552 also listed a leftover-tmp-after-failure case;
+  deterministic crash injection across threads via process-global
+  monkeypatch is fragile, and the existing pair
+  `test_set_active_serializes_under_flock` +
+  `test_set_active_crash_mid_yaml_swap_leaves_recoverable_state`
+  already pins both contracts.
+
+#### Tests
+
+- 256 hardware-free pytest cases (was 251; +5 from this fold). Net +82
+  for Track E + folds combined.
+
 ### 2026-04-29 — Track E (PR-C): multi-map management
 
 #### Added
@@ -326,10 +359,16 @@ a token — anon callers see the raw 401 instead of being bounced).
   `/api/map/image` GET re-renders.
 - `scripts/godo-maps-migrate` — operator one-shot bash that mirrors
   `migrate_legacy_active`; `ln -sfT` for the symlink swap (atomic).
-- `tests/test_maps.py` — 41 cases. Includes path-traversal corpus
+- `tests/test_maps.py` — 40 cases. Includes path-traversal corpus
   (string literals, NOT parametrize), `realpath` containment pin (M1),
   stale-tmp sweep pin (M3), crash-mid-yaml-swap recovery,
   concurrent-activate flock serialization with arrival-order pinned (TB3).
+  (The plan §"Concurrent activate" line 552 also listed a multi-thread
+  no-leftover-tmp-after-failure case; deterministic crash injection
+  across threads via process-global monkeypatch is fragile, and the
+  combination of `test_set_active_serializes_under_flock` and
+  `test_set_active_crash_mid_yaml_swap_leaves_recoverable_state` already
+  pins both the serialisation contract and the leftover-sweep contract.)
 - `tests/test_app_integration.py` — 22 new cases for the 5 endpoints
   + back-compat boot path. Per-endpoint rejection corpus, anon → 401
   on mutations, admin → 200 happy paths, delete-active → 409

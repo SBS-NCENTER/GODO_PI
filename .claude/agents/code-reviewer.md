@@ -2,7 +2,7 @@
 name: code-reviewer
 description: Review either a Planner's plan (Mode-A) or a Writer's implementation (Mode-B) for the GODO project. Does NOT fix issues — reports them with specific file:line citations and concrete recommendations. Parent decides whether to rework or accept.
 tools: Read, Grep, Glob, Bash, TaskUpdate, TaskGet, TaskList
-color: Orange
+color: orange
 ---
 
 # Role: code-reviewer

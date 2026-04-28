@@ -49,6 +49,7 @@ godo-webctl/
 | `config.py` | stdlib | `Settings` dataclass + `load_settings(env)`. Pure function. |
 | `uds_client.py` | `protocol`, stdlib | Sync AF_UNIX client; typed exceptions; per-syscall timeout. |
 | `backup.py` | `protocol`, stdlib | Two-phase atomic copy + bounded retry-on-rename. |
+| `maps.py` | `constants`, stdlib | Pure-function multi-map primitives. SOLE owner of every FS touch in `cfg.maps_dir`. No FastAPI / Pillow / subprocess imports. |
 | `app.py` | `config`, `uds_client`, `backup`, `protocol`, FastAPI | App factory, 3 thin route handlers, static mount. |
 | `__main__.py` | `config`, `app`, uvicorn | Process entrypoint; `workers=1` hardcoded. |
 
@@ -221,6 +222,42 @@ fail those tests. The whitelist of allowed service names lives in
 `services.ALLOWED_SERVICES` (constant), so unknown svc strings are
 rejected before reaching subprocess.
 
+### (o) `maps.py` is the SOLE owner of `cfg.maps_dir` filesystem touches (Track E, PR-C)
+
+Every path inside `cfg.maps_dir` (the multi-map directory) is read or
+written through `maps.py`. `app.py` and tests use the `maps.*` public
+API exclusively; `map_image.py` does NOT import `maps.py` (the cache
+fix is internal to `map_image.py` via `os.path.realpath`). Keeping
+these two leaves uncoupled means a future change to one cannot break
+the other.
+
+### (p) Active map is two relative symlinks under `flock` (Track E, PR-C)
+
+`active.pgm` and `active.yaml` are **relative-target** symlinks living
+inside `cfg.maps_dir`. Both swap together under one
+`flock(LOCK_EX)` on `cfg.maps_dir/.activate.lock` per
+`maps.set_active`. The atomic per-symlink swap is two syscalls:
+`os.symlink(target, .active.<rand>.<ext>.tmp)` then
+`os.replace(.active.<rand>.<ext>.tmp, active.<ext>)` — POSIX
+`rename(2)` semantics, atomic on the same filesystem. `secrets.token_hex(8)`
+gives a 64-bit collision space; no `mkstemp` dance. Stale `.active.*.tmp`
+leftovers from a prior crashed swap are swept at the START of every
+`set_active` (before creating the new tmp). Pinned by
+`tests/test_maps.py::test_set_active_serializes_under_flock` and
+`test_set_active_sweeps_stale_tmp_leftovers`.
+
+### (q) Map-name regex is a Tier-1 constant; `realpath` containment runs everywhere (Track E, PR-C)
+
+`MAPS_NAME_REGEX = ^[a-zA-Z0-9_-]{1,64}$` lives in `constants.py`
+(Tier-1). Every public `maps.py` function that returns or operates on
+a path validates the name AND runs `os.path.realpath(result).startswith(
+os.path.realpath(maps_dir) + os.sep)` — explicit `if not …: raise
+InvalidName("path_outside_maps_dir")`, NEVER `assert` (production may
+run with `-O`). The reserved name `"active"` passes the regex but is
+rejected at the public-function layer so an operator cannot upload a
+regular `active.pgm` and confuse the resolver. Pinned by
+`test_realpath_containment_rejects_symlink_targeting_outside_maps_dir`.
+
 ### (n) Read endpoints are anonymous; mutations require login (Track F)
 
 The auth model splits cleanly along read-vs-write:
@@ -256,6 +293,95 @@ a token — anon callers see the raw 401 instead of being bounced).
   different uid.
 
 ## Change log
+
+### 2026-04-29 — Track E (PR-C): multi-map management
+
+#### Added
+
+- `src/godo_webctl/maps.py` — pure-function multi-map primitives
+  (`validate_name`, `pgm_for`, `yaml_for`, `is_pair_present`,
+  `list_pairs`, `read_active_name`, `set_active`, `delete_pair`,
+  `migrate_legacy_active`). Custom exceptions `InvalidName`,
+  `MapNotFound`, `MapIsActive`, `MapsDirMissing`. SOLE owner of every
+  FS touch in `cfg.maps_dir` (invariant (o)).
+- `src/godo_webctl/constants.py` — `MAPS_NAME_REGEX`,
+  `MAPS_NAME_MAX_LEN = 64`, `MAPS_ACTIVE_BASENAME = "active"`,
+  `MAPS_ACTIVATE_LOCK_BASENAME = ".activate.lock"`.
+- `src/godo_webctl/protocol.py` — 4 new error-code mirrors
+  (`ERR_INVALID_MAP_NAME`, `ERR_MAP_NOT_FOUND`, `ERR_MAP_IS_ACTIVE`,
+  `ERR_MAPS_DIR_MISSING`) + `MAPS_NAME_REGEX_PATTERN_STR` for the SPA
+  client-side validator.
+- `src/godo_webctl/app.py` — 5 new endpoints:
+  - `GET    /api/maps` (anon, Track F),
+  - `GET    /api/maps/<name>/image` (anon),
+  - `GET    /api/maps/<name>/yaml` (anon),
+  - `POST   /api/maps/<name>/activate` (admin),
+  - `DELETE /api/maps/<name>` (admin).
+  + `_map_maps_exc_to_response` shape mapper kept local to `app.py`.
+  + `lifespan` runs `maps.migrate_legacy_active` once on boot if
+  `${maps_dir}/active.pgm` is missing AND `cfg.map_path` is set; logs
+  WARN every boot (per Q-OQ-E4) until `cfg.map_path` is unset.
+- `src/godo_webctl/map_image.py::invalidate_cache()` — public hook
+  called by `app.py` after a successful activate so the next
+  `/api/map/image` GET re-renders.
+- `scripts/godo-maps-migrate` — operator one-shot bash that mirrors
+  `migrate_legacy_active`; `ln -sfT` for the symlink swap (atomic).
+- `tests/test_maps.py` — 41 cases. Includes path-traversal corpus
+  (string literals, NOT parametrize), `realpath` containment pin (M1),
+  stale-tmp sweep pin (M3), crash-mid-yaml-swap recovery,
+  concurrent-activate flock serialization with arrival-order pinned (TB3).
+- `tests/test_app_integration.py` — 22 new cases for the 5 endpoints
+  + back-compat boot path. Per-endpoint rejection corpus, anon → 401
+  on mutations, admin → 200 happy paths, delete-active → 409
+  (named test, NOT folded into delete suite).
+- `tests/test_map_image.py` —
+  `test_cache_invalidates_on_symlink_target_change_same_mtime` (TB2:
+  pins `_entry.path == os.path.realpath(target)` directly, NOT just
+  PNG byte comparison) + `test_cache_invalidates_on_symlink_target_path_change`.
+- `tests/conftest.py` — `tmp_maps_dir` fixture (two pairs +
+  active symlinks).
+
+#### Changed
+
+- `src/godo_webctl/config.py` — added `maps_dir: Path` field to
+  `Settings` (default `/var/lib/godo/maps`, env
+  `GODO_WEBCTL_MAPS_DIR`). `map_path` retained, deprecated.
+- `src/godo_webctl/map_image.py` — cache key migration to
+  `(realpath, target_mtime_ns)` (Track E PR-C cache fix).
+  Renamed `_reset_cache_for_tests` → `invalidate_cache` (public)
+  with the old name kept as a back-compat alias for tests.
+- `src/godo_webctl/app.py` — `/api/map/image` resolves through
+  `${maps_dir}/active.pgm` (falls back to `cfg.map_path` for the
+  one-release deprecation window).
+- `systemd/godo-webctl.env.example` — added `GODO_WEBCTL_MAPS_DIR`
+  block; flagged `GODO_WEBCTL_MAP_PATH` deprecated.
+- `systemd/install.md` — new "Multi-map storage" section documenting
+  the `install -d -m 0750` setup, mapping container volume mount, and
+  the `EROFS` override for non-default `maps_dir` paths (M5).
+- `README.md` — endpoint table extended with 5 new rows, env-var
+  table extended, new "Multi-map management" section, troubleshooting
+  entries for `EROFS`, `map_is_active`, and the every-boot deprecation
+  WARN.
+- `tests/conftest.py` — 1 new fixture; existing fixtures unchanged.
+- `tests/test_constants.py` — 11 new pin tests.
+- `tests/test_protocol.py` — 2 new mirror tests.
+- `tests/test_config.py` — `maps_dir` added to drift assertions.
+- `tests/test_sse.py` — `_settings()` constructor updated to include
+  `maps_dir` (drift-catch from the new dataclass field).
+
+#### Removed
+
+- (none)
+
+#### Tests
+
+- 251 hardware-free pytest cases (was 174); +1 hardware-marked smoke
+  unchanged. Net +77 from this PR.
+
+#### Mode-A folds (verbatim)
+
+All Mode-A reviewer findings (M1–M5, N1–N6, TB1–TB3, Q-OQ-E4 + E6)
+folded; see the plan's "Mode-A fold (2026-04-29)" header.
 
 ### 2026-04-26 — Phase 4-3 initial scaffold
 

@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from typing import Final
 
+from .constants import MAPS_NAME_REGEX
+
 # --- Bytes on the wire (mirrors constants.hpp) ----------------------------
 # UDS_REQUEST_MAX_BYTES: production/RPi5/src/core/constants.hpp:54
 UDS_REQUEST_MAX_BYTES: Final[int] = 4096
@@ -71,6 +73,19 @@ LAST_POSE_FIELDS: Final[tuple[str, ...]] = (
 ERR_PARSE_ERROR: Final[str] = "parse_error"  # json_mini.cpp callers
 ERR_UNKNOWN_CMD: Final[str] = "unknown_cmd"  # uds_server.cpp:225
 ERR_BAD_MODE: Final[str] = "bad_mode"  # json_mini.cpp:215 caller
+
+# --- Track E (PR-C) — multi-map error codes ------------------------------
+# These are webctl-internal (no C++ wire counterpart) but live here so
+# the frontend mirror can be derived from a single source.
+ERR_INVALID_MAP_NAME: Final[str] = "invalid_map_name"
+ERR_MAP_NOT_FOUND: Final[str] = "map_not_found"
+ERR_MAP_IS_ACTIVE: Final[str] = "map_is_active"
+ERR_MAPS_DIR_MISSING: Final[str] = "maps_dir_missing"
+
+# Mirror the regex pattern as a string so the SPA can do client-side
+# validation without depending on a Python regex parse. Frontend file:
+# `godo-frontend/src/lib/protocol.ts::MAPS_NAME_REGEX_PATTERN_STR`.
+MAPS_NAME_REGEX_PATTERN_STR: Final[str] = MAPS_NAME_REGEX.pattern
 
 
 # --- Canonical request encoders -------------------------------------------

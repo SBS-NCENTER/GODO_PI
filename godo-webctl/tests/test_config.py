@@ -24,6 +24,7 @@ def test_empty_env_uses_defaults() -> None:
     assert s.uds_socket == Path("/run/godo/ctl.sock")
     assert s.backup_dir == Path("/var/lib/godo/map-backups")
     assert s.map_path == Path("/etc/godo/maps/studio_v1.pgm")
+    assert s.maps_dir == Path("/var/lib/godo/maps")
     assert s.health_uds_timeout_s == 2.0
     assert s.calibrate_uds_timeout_s == 30.0
     assert s.jwt_secret_path == Path("/var/lib/godo/auth/jwt_secret")
@@ -50,6 +51,7 @@ def test_each_env_var_overrides_default() -> None:
         "GODO_WEBCTL_UDS_SOCKET": "/tmp/x.sock",
         "GODO_WEBCTL_BACKUP_DIR": "/tmp/b",
         "GODO_WEBCTL_MAP_PATH": "/tmp/m.pgm",
+        "GODO_WEBCTL_MAPS_DIR": "/tmp/maps",
         "GODO_WEBCTL_HEALTH_UDS_TIMEOUT_S": "0.5",
         "GODO_WEBCTL_CALIBRATE_UDS_TIMEOUT_S": "5.0",
         "GODO_WEBCTL_JWT_SECRET_PATH": "/tmp/jwt",
@@ -63,6 +65,7 @@ def test_each_env_var_overrides_default() -> None:
     assert s.uds_socket == Path("/tmp/x.sock")
     assert s.backup_dir == Path("/tmp/b")
     assert s.map_path == Path("/tmp/m.pgm")
+    assert s.maps_dir == Path("/tmp/maps")
     assert s.health_uds_timeout_s == 0.5
     assert s.calibrate_uds_timeout_s == 5.0
     assert s.jwt_secret_path == Path("/tmp/jwt")

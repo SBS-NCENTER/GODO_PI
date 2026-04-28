@@ -43,6 +43,7 @@ def _settings_for(
     uds_socket: Path,
     map_path: Path,
     backup_dir: Path,
+    maps_dir: Path | None = None,
     jwt_secret_path: Path | None = None,
     users_file: Path | None = None,
     spa_dist: Path | None = None,
@@ -54,6 +55,10 @@ def _settings_for(
         uds_socket=uds_socket,
         backup_dir=backup_dir,
         map_path=map_path,
+        # Default to a sibling that does NOT contain `active.pgm` so the
+        # legacy back-compat path is exercised when the test does not
+        # pin a specific maps_dir.
+        maps_dir=maps_dir or (base / "maps"),
         health_uds_timeout_s=1.0,
         calibrate_uds_timeout_s=1.0,
         jwt_secret_path=jwt_secret_path or (base / "jwt_secret"),
@@ -188,6 +193,7 @@ async def test_calibrate_timeout_returns_504(
         uds_socket=s.uds_socket,
         backup_dir=s.backup_dir,
         map_path=s.map_path,
+        maps_dir=s.maps_dir,
         health_uds_timeout_s=s.health_uds_timeout_s,
         calibrate_uds_timeout_s=0.2,
         jwt_secret_path=s.jwt_secret_path,
@@ -829,3 +835,483 @@ async def test_spa_dist_mount_serves_dist_when_set(
 @pytest.fixture
 async def _live_app() -> AsyncIterator[Any]:
     yield None  # placeholder so pytest can collect this file even with no marks
+
+
+# ============================================================================
+# Track E (PR-C) — multi-map management
+# ============================================================================
+
+
+# ---- GET /api/maps (anon-readable per Track F) ---------------------------
+
+
+async def test_list_maps_anon_returns_two_entries(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    tmp_maps_dir: Path,
+) -> None:
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        maps_dir=tmp_maps_dir,
+    )
+    async with _client(s) as cl:
+        r = await cl.get("/api/maps")
+    assert r.status_code == HTTPStatus.OK
+    body = r.json()
+    assert isinstance(body, list)
+    names = sorted(e["name"] for e in body)
+    assert names == ["studio_v1", "studio_v2"]
+    actives = [e["is_active"] for e in body if e["name"] == "studio_v1"]
+    assert actives == [True]
+
+
+async def test_list_maps_admin_token_also_works(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    tmp_maps_dir: Path,
+) -> None:
+    """Track F: read endpoints accept (but do not require) auth."""
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        maps_dir=tmp_maps_dir,
+    )
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.get("/api/maps", headers=_auth(token))
+    assert r.status_code == HTTPStatus.OK
+
+
+async def test_list_maps_empty_dir_returns_empty_list(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    empty_maps = tmp_path / "empty_maps"
+    empty_maps.mkdir()
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        maps_dir=empty_maps,
+    )
+    async with _client(s) as cl:
+        r = await cl.get("/api/maps")
+    assert r.status_code == HTTPStatus.OK
+    assert r.json() == []
+
+
+# ---- GET /api/maps/<name>/image -----------------------------------------
+
+
+async def test_get_map_image_named_returns_png(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    tmp_maps_dir: Path,
+) -> None:
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        maps_dir=tmp_maps_dir,
+    )
+    async with _client(s) as cl:
+        r = await cl.get("/api/maps/studio_v1/image")
+    assert r.status_code == HTTPStatus.OK
+    assert r.headers["content-type"].startswith("image/png")
+    assert r.content[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+async def test_get_map_image_named_empty_name_returns_404_routing(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    tmp_maps_dir: Path,
+) -> None:
+    """Mode-A TB1: empty name `""` is rejected by FastAPI's router (route
+    `/api/maps/{name}/image` requires a non-empty path segment) before
+    the handler runs. We pin the 404 explicitly so a future router-config
+    change cannot silently introduce a code path with an empty name."""
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        maps_dir=tmp_maps_dir,
+    )
+    async with _client(s) as cl:
+        r = await cl.get("/api/maps//image")
+    assert r.status_code == HTTPStatus.NOT_FOUND
+
+
+async def test_get_map_image_named_unknown_returns_404(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    tmp_maps_dir: Path,
+) -> None:
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        maps_dir=tmp_maps_dir,
+    )
+    async with _client(s) as cl:
+        r = await cl.get("/api/maps/no_such_map/image")
+    assert r.status_code == HTTPStatus.NOT_FOUND
+    assert r.json()["err"] == "map_not_found"
+
+
+# Path-traversal corpus uses string literals (NOT parametrize) per the
+# CODEBASE.md test-discipline pattern: each rejection carries its own
+# named test so a regression message names the input that escaped.
+
+
+async def test_get_map_image_named_dot_traversal_returns_400(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    tmp_maps_dir: Path,
+) -> None:
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        maps_dir=tmp_maps_dir,
+    )
+    async with _client(s) as cl:
+        # FastAPI routes `/api/maps/..%2Fetc/image` differently from
+        # `/api/maps/foo.pgm/image` — both must be rejected. We pick a
+        # name that the router will pass to the handler (no slashes),
+        # confirming the validator rejects it at the maps.py layer.
+        r = await cl.get("/api/maps/foo.pgm/image")
+    assert r.status_code == HTTPStatus.BAD_REQUEST
+    assert r.json()["err"] == "invalid_map_name"
+
+
+async def test_get_map_image_named_hidden_dot_returns_400(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    tmp_maps_dir: Path,
+) -> None:
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        maps_dir=tmp_maps_dir,
+    )
+    async with _client(s) as cl:
+        r = await cl.get("/api/maps/.hidden/image")
+    assert r.status_code == HTTPStatus.BAD_REQUEST
+    assert r.json()["err"] == "invalid_map_name"
+
+
+async def test_get_map_image_named_too_long_returns_400(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    tmp_maps_dir: Path,
+) -> None:
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        maps_dir=tmp_maps_dir,
+    )
+    async with _client(s) as cl:
+        long_name = "a" * 65
+        r = await cl.get(f"/api/maps/{long_name}/image")
+    assert r.status_code == HTTPStatus.BAD_REQUEST
+    assert r.json()["err"] == "invalid_map_name"
+
+
+# ---- GET /api/maps/<name>/yaml ------------------------------------------
+
+
+async def test_get_map_yaml_named_returns_text(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    tmp_maps_dir: Path,
+) -> None:
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        maps_dir=tmp_maps_dir,
+    )
+    async with _client(s) as cl:
+        r = await cl.get("/api/maps/studio_v1/yaml")
+    assert r.status_code == HTTPStatus.OK
+    assert r.headers["content-type"].startswith("text/plain")
+    assert "image: studio_v1.pgm" in r.text
+
+
+async def test_get_map_yaml_named_bad_name_returns_400(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    tmp_maps_dir: Path,
+) -> None:
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        maps_dir=tmp_maps_dir,
+    )
+    async with _client(s) as cl:
+        r = await cl.get("/api/maps/.hidden/yaml")
+    assert r.status_code == HTTPStatus.BAD_REQUEST
+
+
+# ---- POST /api/maps/<name>/activate (admin) -----------------------------
+
+
+async def test_activate_admin_repoints_active_symlink(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    tmp_maps_dir: Path,
+) -> None:
+    import os as _os
+
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        maps_dir=tmp_maps_dir,
+    )
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post("/api/maps/studio_v2/activate", headers=_auth(token))
+    assert r.status_code == HTTPStatus.OK
+    body = r.json()
+    assert body == {"ok": True, "restart_required": True}
+    assert _os.readlink(tmp_maps_dir / "active.pgm") == "studio_v2.pgm"
+    assert _os.readlink(tmp_maps_dir / "active.yaml") == "studio_v2.yaml"
+
+
+async def test_activate_anon_returns_401(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    tmp_maps_dir: Path,
+) -> None:
+    """Track F: mutation endpoints reject anonymous callers with 401."""
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        maps_dir=tmp_maps_dir,
+    )
+    async with _client(s) as cl:
+        r = await cl.post("/api/maps/studio_v2/activate")
+    assert r.status_code == HTTPStatus.UNAUTHORIZED
+    assert r.json()["err"] == "auth_required"
+
+
+async def test_activate_unknown_returns_404(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    tmp_maps_dir: Path,
+) -> None:
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        maps_dir=tmp_maps_dir,
+    )
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post("/api/maps/no_such_map/activate", headers=_auth(token))
+    assert r.status_code == HTTPStatus.NOT_FOUND
+    assert r.json()["err"] == "map_not_found"
+
+
+async def test_activate_reserved_name_returns_400_with_detail(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    tmp_maps_dir: Path,
+) -> None:
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        maps_dir=tmp_maps_dir,
+    )
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post("/api/maps/active/activate", headers=_auth(token))
+    assert r.status_code == HTTPStatus.BAD_REQUEST
+    body = r.json()
+    assert body["err"] == "invalid_map_name"
+    assert body.get("detail") == "reserved_name"
+
+
+async def test_activate_writes_activity_log(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    tmp_maps_dir: Path,
+) -> None:
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        maps_dir=tmp_maps_dir,
+    )
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        await cl.post("/api/maps/studio_v2/activate", headers=_auth(token))
+        r = await cl.get("/api/activity?n=10")
+    assert r.status_code == HTTPStatus.OK
+    types = [e["type"] for e in r.json()]
+    assert "map_activate" in types
+
+
+# ---- DELETE /api/maps/<name> (admin) ------------------------------------
+
+
+async def test_delete_admin_removes_pair(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    tmp_maps_dir: Path,
+) -> None:
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        maps_dir=tmp_maps_dir,
+    )
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.delete("/api/maps/studio_v2", headers=_auth(token))
+    assert r.status_code == HTTPStatus.OK
+    assert r.json() == {"ok": True}
+    assert not (tmp_maps_dir / "studio_v2.pgm").exists()
+    assert not (tmp_maps_dir / "studio_v2.yaml").exists()
+
+
+async def test_delete_anon_returns_401(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    tmp_maps_dir: Path,
+) -> None:
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        maps_dir=tmp_maps_dir,
+    )
+    async with _client(s) as cl:
+        r = await cl.delete("/api/maps/studio_v2")
+    assert r.status_code == HTTPStatus.UNAUTHORIZED
+
+
+async def test_delete_active_map_returns_409(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    tmp_maps_dir: Path,
+) -> None:
+    """Named test (NOT folded into delete suite per Mode-A discipline):
+    deleting the currently active map MUST 409, not 400/404/500."""
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        maps_dir=tmp_maps_dir,
+    )
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.delete("/api/maps/studio_v1", headers=_auth(token))
+    assert r.status_code == HTTPStatus.CONFLICT
+    assert r.json()["err"] == "map_is_active"
+
+
+async def test_delete_unknown_returns_404(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    tmp_maps_dir: Path,
+) -> None:
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        maps_dir=tmp_maps_dir,
+    )
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.delete("/api/maps/no_such_map", headers=_auth(token))
+    assert r.status_code == HTTPStatus.NOT_FOUND
+
+
+# ---- /api/map/image now resolves through active symlink (back-compat) ----
+
+
+async def test_existing_map_image_resolves_through_active_symlink(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    tmp_maps_dir: Path,
+) -> None:
+    """Existing PoseCanvas callers continue working: /api/map/image now
+    serves the PGM behind `active.pgm` (which the conftest fixture wires
+    to studio_v1.pgm)."""
+    from godo_webctl import map_image as _M
+
+    _M.invalidate_cache()
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        maps_dir=tmp_maps_dir,
+    )
+    async with _client(s) as cl:
+        r = await cl.get("/api/map/image")
+    assert r.status_code == HTTPStatus.OK
+    assert r.content[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+# ---- Back-compat boot: cfg.map_path migration ---------------------------
+
+
+def test_lifespan_legacy_migration_creates_active_symlink(
+    tmp_path: Path,
+) -> None:
+    """When `cfg.maps_dir/active.pgm` is missing AND `cfg.map_path` is
+    set + the file exists, app boot copies the legacy pair into
+    `maps_dir` and creates the active symlinks. Idempotent on second
+    boot."""
+    import os as _os
+
+    legacy_dir = tmp_path / "etc_godo_maps"
+    legacy_dir.mkdir()
+    legacy_pgm = legacy_dir / "studio_v1.pgm"
+    legacy_yaml = legacy_dir / "studio_v1.yaml"
+    legacy_pgm.write_bytes(b"P5\n4 4\n255\n" + bytes([128] * 16))
+    legacy_yaml.write_text(
+        "image: studio_v1.pgm\nresolution: 0.05\norigin: [0,0,0]\n"
+        "occupied_thresh: 0.65\nfree_thresh: 0.196\nnegate: 0\n",
+    )
+
+    maps_dir = tmp_path / "var_lib_godo_maps"
+    s = Settings(
+        host="127.0.0.1",
+        port=0,
+        uds_socket=tmp_path / "u.sock",
+        backup_dir=tmp_path / "bk",
+        map_path=legacy_pgm,
+        maps_dir=maps_dir,
+        health_uds_timeout_s=1.0,
+        calibrate_uds_timeout_s=1.0,
+        jwt_secret_path=tmp_path / "jwt",
+        users_file=tmp_path / "users.json",
+        spa_dist=None,
+        chromium_loopback_only=True,
+    )
+
+    # Manually invoke the migration helper that the lifespan uses.
+    from godo_webctl import maps as _MM
+
+    ran = _MM.migrate_legacy_active(maps_dir, legacy_pgm)
+    assert ran is True
+    assert (maps_dir / "studio_v1.pgm").exists()
+    assert _os.readlink(maps_dir / "active.pgm") == "studio_v1.pgm"
+
+    # Second invocation is a no-op (returns False).
+    assert _MM.migrate_legacy_active(maps_dir, legacy_pgm) is False
+    # Reference settings to keep the test purposeful even if app create
+    # is skipped — settings being constructable validates the
+    # `maps_dir` field is wired into Settings (drift check).
+    assert s.maps_dir == maps_dir

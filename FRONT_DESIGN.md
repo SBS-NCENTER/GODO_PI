@@ -479,7 +479,12 @@ JWT secret: `/var/lib/godo/auth/jwt_secret` (서버 첫 부팅 시 random 생성
 | `GET /api/auth/me` | viewer | P0 (있음) | (전 페이지 상단) | — | `{username, role, exp}` | 토큰 검증 + 만료까지 남은 초 |
 | `POST /api/auth/refresh` | viewer | P0 (있음) | (auto) | — | `{token, exp}` | 라우트 이동 시 토큰 갱신 |
 | `POST /api/live` | admin | P0 (있음) | DASH | `{enable: bool}` | `{ok, mode}` | UDS set_mode {Live\|Idle} |
-| `GET /api/map/image` | viewer | P0 (있음) | MAP | (query: `?map=<name>`) | PNG image binary | PGM → PNG (Pillow), 캐시 5분 |
+| `GET /api/map/image` | viewer | P0 (있음) | MAP | — | PNG image binary | active 맵의 PGM → PNG (Pillow), 캐시 5분, realpath-keyed (PR-C) |
+| `GET /api/maps` | viewer | P0 (있음) | MAP | — | `MapEntry[]` | maps_dir 안의 모든 페어 + active flag (PR-C) |
+| `GET /api/maps/<name>/image` | viewer | P0 (있음) | MAP | — | PNG image binary | 특정 맵 PNG (PR-C) |
+| `GET /api/maps/<name>/yaml` | viewer | P0 (있음) | MAP | — | text/plain | 특정 맵 YAML (PR-C) |
+| `POST /api/maps/<name>/activate` | admin | P0 (있음) | MAP | — | `{ok, restart_required: true}` | atomic symlink swap; tracker 재시작 필요 (PR-C) |
+| `DELETE /api/maps/<name>` | admin | P0 (있음) | MAP | — | `{ok}` | non-active 맵 페어 삭제; active는 409 (PR-C) |
 | `GET /api/activity?n=<int>` | viewer | P0 (있음) | DASH | — | `[{ts, type, detail}]` | webctl 자체 활동 로그 |
 | `GET /api/local/services` | admin (loopback) | P0 (있음) | LOCAL | — | `[{name, active, since}]` | systemctl status 3개 |
 | `POST /api/local/service/<name>/<action>` | admin (loopback) | P0 (있음) | LOCAL | — | `{ok, status}` | start \| stop \| restart |
@@ -614,8 +619,10 @@ JWT secret: `/var/lib/godo/auth/jwt_secret` (서버 첫 부팅 시 random 생성
 - godo-tracker C++ **변경 0** — tracker는 시작 시 `cfg.map_path`(symlink) 읽음. 활성 맵 변경 후엔 tracker 재시작 필요 (P2 hot-reload 도입 전까지). 활성 변경 후 webctl이 운영자에게 "tracker 재시작 필요" 안내 (또는 admin 클릭으로 자동 `systemctl restart godo-tracker`).
 - webctl: `cfg.map_path` (single) → `cfg.maps_dir` (default `/var/lib/godo/maps/`) + active symlink resolver로 재구성. 기존 `/api/map/image`는 active 맵을 반환하는 것으로 호환 유지.
 
+**상태 (2026-04-29)**: PR-C로 구현됨 (`feat/p4.5-track-e-map-management`). Mode-A 5 majors + 6 nits + 3 test-bias 모두 fold; backend 251 pytest + frontend 35 vitest + 14 playwright 모두 green.
+
 **스코프**:
-- 신규 endpoint 5개: `GET /api/maps` (list), `GET /api/maps/<name>/image` (single map PNG), `POST /api/maps/<name>/activate` (admin, atomic symlink swap), `DELETE /api/maps/<name>` (admin, 활성 맵엔 409 거부), `GET /api/maps/<name>/yaml` (필요 시).
+- 신규 endpoint 5개 (구현됨): `GET /api/maps` (list), `GET /api/maps/<name>/image` (single map PNG), `POST /api/maps/<name>/activate` (admin, atomic symlink swap), `DELETE /api/maps/<name>` (admin, 활성 맵엔 409 거부), `GET /api/maps/<name>/yaml`.
 - Path traversal 방지: `name` regex `^[a-zA-Z0-9_-]{1,64}$`, 절대 사용자 입력 그대로 path concat 금지.
 - 권한: list/image는 `require_user`, activate/delete는 `require_admin` (PR-A 패턴 그대로).
 - SPA Map.svelte 확장: 맵 선택 패널 (사이드 또는 페이지 상단 토글), 각 맵에 "기본으로 지정" / "삭제" 버튼 (admin disabled), confirm dialog reuse, 활성 맵 강조 표시.

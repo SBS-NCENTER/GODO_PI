@@ -18,6 +18,7 @@ Leaf module: imports nothing from the package.
 
 from __future__ import annotations
 
+import re
 from typing import Final
 
 # --- JWT / auth -----------------------------------------------------------
@@ -93,3 +94,25 @@ SSE_UDS_TIMEOUT_S: Final[float] = 0.5
 # in practice. Lives here because it is webctl-internal — the tracker
 # has no opinion on how webctl manages its backup directory.
 MAX_RENAME_ATTEMPTS: Final[int] = 9
+
+# --- Multi-map management (Track E, PR-C) --------------------------------
+# Map name validator. ASCII only, case-sensitive, no dots / slashes /
+# whitespace. `.pgm` and `.yaml` extensions are appended by the caller —
+# names are stems. The reserved name `"active"` passes this regex (so a
+# router-level mismatch cannot dodge it) and is rejected separately by
+# the public maps.py functions to keep the active-symlink names from
+# colliding with a regular map.
+MAPS_NAME_MAX_LEN: Final[int] = 64
+MAPS_NAME_REGEX: Final[re.Pattern[str]] = re.compile(
+    r"^[a-zA-Z0-9_-]{1,64}$",
+)
+
+# Reserved basename used for the active-pair symlink pair
+# (`active.pgm` + `active.yaml`). Operators cannot upload a regular map
+# with this name — `set_active`/`delete_pair` reject it before any FS op.
+MAPS_ACTIVE_BASENAME: Final[str] = "active"
+
+# Advisory `flock(LOCK_EX)` target inside `cfg.maps_dir`. The leading dot
+# keeps it out of `list_pairs` (which only enumerates `<stem>.pgm` +
+# `<stem>.yaml` pairs).
+MAPS_ACTIVATE_LOCK_BASENAME: Final[str] = ".activate.lock"

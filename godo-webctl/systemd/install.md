@@ -57,3 +57,63 @@ journalctl -u godo-local-window -n 30
 # or, from the kiosk display:
 xdotool search --name "godo" getwindowname
 ```
+
+## Multi-map storage (Track E, PR-C — 2026-04-29)
+
+The Track E surface lives in `${GODO_WEBCTL_MAPS_DIR}` (default
+`/var/lib/godo/maps`). Map pairs are `<name>.pgm + <name>.yaml`; the
+active pair is selected via `active.pgm + active.yaml` symlinks (atomic
+`os.replace` swaps under `flock`).
+
+### Initial setup on news-pi01
+
+```bash
+sudo install -d -m 0750 -o ncenter -g ncenter /var/lib/godo/maps
+```
+
+The default `godo-webctl.service` already covers
+`/var/lib/godo` via `ReadWritePaths=/var/lib/godo` (no change needed).
+
+### Mapping container volume mount
+
+The mapping Docker pipeline previously wrote into
+`godo-mapping/maps/` on the dev workspace. For production deploys
+flip the volume mount to the new directory:
+
+```bash
+docker run --rm \
+  -v /var/lib/godo/maps:/output \
+  godo-mapping:latest
+```
+
+The mapping container drops `<name>.pgm + <name>.yaml`; webctl picks
+them up automatically (no restart). The operator activates one via
+the SPA.
+
+### Operator script install
+
+`scripts/godo-maps-migrate` is a one-shot for legacy
+`GODO_WEBCTL_MAP_PATH`-based deployments. Install once on news-pi01:
+
+```bash
+sudo install -m 0755 /opt/godo-webctl/scripts/godo-maps-migrate \
+  /usr/local/bin/
+```
+
+### Overriding `GODO_WEBCTL_MAPS_DIR`
+
+The default unit's `ReadWritePaths=/var/lib/godo` covers the default
+`maps_dir`. If an operator overrides to a path outside `/var/lib/godo`
+(e.g. an external SSD), they MUST extend the unit:
+
+```bash
+sudo systemctl edit godo-webctl
+# add:
+#   [Service]
+#   ReadWritePaths=/var/lib/godo /mnt/maps
+sudo systemctl daemon-reload
+sudo systemctl restart godo-webctl
+```
+
+Without that override, `set_active`/`delete_pair` raise `EROFS` from
+`ProtectSystem=strict`.

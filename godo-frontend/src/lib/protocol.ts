@@ -71,6 +71,19 @@ export const ERR_UNKNOWN_ACTION = 'unknown_action';
 export const ERR_SUBPROCESS_TIMEOUT = 'subprocess_timeout';
 export const ERR_SUBPROCESS_FAILED = 'subprocess_failed';
 
+// Track E (PR-C) — multi-map error codes (mirror godo_webctl/protocol.py).
+export const ERR_INVALID_MAP_NAME = 'invalid_map_name';
+export const ERR_MAP_NOT_FOUND = 'map_not_found';
+export const ERR_MAP_IS_ACTIVE = 'map_is_active';
+export const ERR_MAPS_DIR_MISSING = 'maps_dir_missing';
+
+// Track E — map-name regex pattern. SPA-side validation (e.g. disable
+// the activate button on a name the backend will reject anyway).
+// MUST equal `godo_webctl.constants.MAPS_NAME_REGEX.pattern` —
+// drift detected by inspection per godo-frontend/CODEBASE.md
+// invariant (k).
+export const MAPS_NAME_REGEX_PATTERN_STR = '^[a-zA-Z0-9_-]{1,64}$';
+
 // --- Roles (mirrors backend ROLE_*) ------------------------------------
 export const ROLE_ADMIN = 'admin';
 export const ROLE_VIEWER = 'viewer';
@@ -143,4 +156,26 @@ export interface ErrResponse {
   ok: false;
   err: string;
   detail?: string;
+}
+
+// --- Track E (PR-C) — multi-map management wire shapes ---------------
+// JSON shape for one row of GET /api/maps. Mirrors backend
+// `maps.MapEntry.to_dict()` (mtime is float epoch seconds, NOT raw
+// nanoseconds — per Mode-A N3 wire format).
+export interface MapEntry {
+  name: string;
+  size_bytes: number;
+  mtime_unix: number;
+  is_active: boolean;
+}
+
+// GET /api/maps response = array of MapEntry. The store keeps the array
+// in `Writable<MapEntry[]>` directly; this type alias documents the
+// wire shape without a wrapper object.
+export type MapListResponse = MapEntry[];
+
+// POST /api/maps/<name>/activate response shape.
+export interface ActivateResponse {
+  ok: true;
+  restart_required: true;
 }

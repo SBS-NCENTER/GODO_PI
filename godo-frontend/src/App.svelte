@@ -20,15 +20,11 @@
     return unsub;
   });
 
-  // Health polling subscription: kept alive for the duration of an authed
-  // session so the tracker-unreachable banner reflects current state on
-  // every page (not just DASH). Tears down on logout.
+  // Health polling subscription: always-on (Track F) so anonymous viewers
+  // also see the tracker-unreachable banner on every page. Backend health
+  // endpoint is anon-readable; nothing requires a session here.
   let trackerOnline = $state(true);
   $effect(() => {
-    if (!session) {
-      trackerOnline = true; // suppress banner on /login
-      return;
-    }
     const unsubMode = subscribeMode(() => {});
     const unsubOk = trackerOk.subscribe((v) => (trackerOnline = v));
     return () => {
@@ -37,12 +33,13 @@
     };
   });
 
-  // Auth gate: anything other than /login requires a session. We do this
-  // with a pure side-effect — render <Login/> if not authed, regardless
-  // of the URL hash, except when the hash is /login itself.
+  // Track F: no auth gate on routing. Anonymous viewers can browse every
+  // page (read endpoints are anon-readable, mutations 401 cleanly and the
+  // SPA disables their buttons). The only navigation rule is: a logged-in
+  // user landing on /login gets bounced to / so they don't see the form.
   $effect(() => {
-    if (!session && currentPath !== '/login') {
-      navigate('/login');
+    if (session && currentPath === '/login') {
+      navigate('/');
     }
   });
 
@@ -50,14 +47,9 @@
   let onLoginPage = $derived(currentPath === '/login');
 </script>
 
-{#if onLoginPage || !session}
+{#if onLoginPage}
   <main style="padding: 16px;">
-    {#if !session}
-      {@const Login = routes['/login']}
-      <Login />
-    {:else}
-      <Component />
-    {/if}
+    <Component />
   </main>
 {:else}
   <div class="app-shell">

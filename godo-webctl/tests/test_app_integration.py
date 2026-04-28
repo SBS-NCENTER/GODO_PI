@@ -32,7 +32,6 @@ import jwt
 import pytest
 from httpx import ASGITransport
 
-from godo_webctl import auth as auth_mod
 from godo_webctl.app import create_app
 from godo_webctl.config import Settings
 from godo_webctl.constants import JWT_ALGORITHM
@@ -536,8 +535,8 @@ async def test_last_pose_returns_track_b_field_set(
         backup_dir=tmp_path / "bk",
     )
     async with _client(s) as cl:
-        token = await _login_admin(cl)
-        r = await cl.get("/api/last_pose", headers=_auth(token))
+        # Track F: /api/last_pose is anonymous-readable.
+        r = await cl.get("/api/last_pose")
     assert r.status_code == HTTPStatus.OK
     body = r.json()
     assert tuple(body.keys()) == LAST_POSE_FIELDS
@@ -582,12 +581,12 @@ async def test_last_pose_stream_route_is_wired_with_correct_headers(
         yield b"data: {}\n\n"
 
     async with _client(s) as cl:
-        token = await _login_admin(cl)
+        # Track F: SSE stream is anonymous-readable.
         with mock.patch(
             "godo_webctl.sse.last_pose_stream",
             side_effect=_yield_once_then_exit,
         ):
-            r = await cl.get("/api/last_pose/stream", headers=_auth(token))
+            r = await cl.get("/api/last_pose/stream")
     assert r.status_code == HTTPStatus.OK
     assert r.headers["content-type"].startswith("text/event-stream")
     assert r.headers["cache-control"] == "no-cache"
@@ -606,11 +605,11 @@ async def test_local_services_loopback_allowed(
         backup_dir=tmp_path / "bk",
     )
     # ASGITransport client.host defaults to 127.0.0.1 (loopback).
+    # Track F: /api/local/services is anonymous-readable from loopback.
     fake_list = [{"name": "godo-tracker", "active": "active"}]
     with mock.patch("godo_webctl.app.services_mod.list_active", return_value=fake_list):
         async with _client(s) as cl:
-            token = await _login_admin(cl)
-            r = await cl.get("/api/local/services", headers=_auth(token))
+            r = await cl.get("/api/local/services")
     assert r.status_code == HTTPStatus.OK
     assert r.json() == fake_list
 
@@ -636,11 +635,10 @@ async def test_local_endpoint_non_loopback_returns_403(
     app = create_app(s)
     transport = ASGITransport(app=app, client=("192.168.1.50", 12345))
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as cl:
-        # login must come from loopback; emulate by fetching a token via
-        # an issue_token shortcut against the app's secret.
-        secret = app.state.jwt_secret
-        token, _ = auth_mod.issue_token(secret, "ncenter", "admin")
-        r = await cl.get(path, headers=_auth(token))
+        # Track F: read endpoints are anonymous, but loopback gate still
+        # enforced. Anon GET from non-loopback → 403 loopback_only,
+        # never 401 (loopback dependency runs before auth).
+        r = await cl.get(path)
     assert r.status_code == HTTPStatus.FORBIDDEN
     assert r.json()["err"] == "loopback_only"
 
@@ -698,7 +696,10 @@ async def test_activity_returns_recent_actions_newest_first(
         token = await _login_admin(cl)  # appends "login"
         r = await cl.post("/api/calibrate", headers=_auth(token))  # appends "calibrate"
         assert r.status_code == HTTPStatus.OK
-        r = await cl.get("/api/activity?n=5", headers=_auth(token))
+        # Track F: /api/activity is anonymous-readable; login/calibrate
+        # entries above were added via the admin session, but reading
+        # the log does not itself require auth.
+        r = await cl.get("/api/activity?n=5")
     assert r.status_code == HTTPStatus.OK
     items = r.json()
     assert isinstance(items, list)
@@ -722,11 +723,64 @@ async def test_map_image_returns_png(
         backup_dir=tmp_path / "bk",
     )
     async with _client(s) as cl:
-        token = await _login_admin(cl)
-        r = await cl.get("/api/map/image", headers=_auth(token))
+        # Track F: /api/map/image is anonymous-readable.
+        r = await cl.get("/api/map/image")
     assert r.status_code == HTTPStatus.OK
     assert r.headers["content-type"] == "image/png"
     assert r.content[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+# ---- Track F: anonymous-read coverage + mutation-401 coverage -----------
+@pytest.mark.parametrize(
+    "method,path,body",
+    [
+        ("POST", "/api/map/backup", None),
+        ("POST", "/api/system/reboot", None),
+        ("POST", "/api/system/shutdown", None),
+        ("POST", "/api/local/service/godo-tracker/restart", None),
+    ],
+)
+async def test_mutation_endpoints_unauth_return_401(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    method: str,
+    path: str,
+    body: object,
+) -> None:
+    """Track F: every mutation endpoint MUST return 401 to anonymous
+    callers. The matching read endpoints (covered elsewhere) are
+    anonymous-OK; the gate is exclusively on writes."""
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    async with _client(s) as cl:
+        if method == "POST":
+            r = await cl.post(path, json=body)
+        else:
+            r = await cl.request(method, path)
+    assert r.status_code == HTTPStatus.UNAUTHORIZED
+    assert r.json()["err"] == "auth_required"
+
+
+async def test_local_service_action_unauth_from_loopback_returns_401(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    """Track F: even from loopback (passes loopback_only), an anonymous
+    call to a /api/local/service/<name>/<action> POST must 401 — the
+    auth gate runs after the loopback gate. Reads from loopback are
+    anonymous OK; writes are not."""
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    async with _client(s) as cl:
+        r = await cl.post("/api/local/service/godo-tracker/restart")
+    assert r.status_code == HTTPStatus.UNAUTHORIZED
+    assert r.json()["err"] == "auth_required"
 
 
 # ---- users.json corruption recovery (per N2) -----------------------------

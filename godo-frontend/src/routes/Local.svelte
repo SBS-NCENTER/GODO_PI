@@ -164,7 +164,11 @@
           data-testid="shutdown-btn">Shutdown Pi</button
         >
       </div>
-      {#if !isAdmin}
+      {#if !session}
+        <div class="muted" style="margin-top: 8px;" data-testid="anon-hint">
+          제어 동작은 로그인이 필요합니다.
+        </div>
+      {:else if !isAdmin}
         <div class="muted" style="margin-top: 8px;">admin 권한이 필요합니다.</div>
       {/if}
       {#if actionError}

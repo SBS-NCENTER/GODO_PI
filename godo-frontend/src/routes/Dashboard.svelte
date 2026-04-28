@@ -139,7 +139,9 @@
         >Backup map</button
       >
     </div>
-    {#if !isAdmin}
+    {#if !session}
+      <div class="muted" data-testid="anon-hint">제어 동작은 로그인이 필요합니다.</div>
+    {:else if !isAdmin}
       <div class="muted">읽기 전용 사용자입니다 (admin 권한 필요).</div>
     {/if}
     {#if actionError}

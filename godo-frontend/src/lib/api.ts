@@ -94,8 +94,16 @@ export async function apiFetch(
   clearTimeout(timeoutId);
 
   if (resp.status === 401) {
-    onUnauthorized();
-    if (!isLoginPage()) navigate('/login');
+    // Track F: anon viewers calling a mutation get 401 cleanly. Only
+    // bounce to /login when we *had* a token (= an expired session) —
+    // not when the caller never had one (= deliberate anon click on a
+    // disabled button bypassed via DevTools, etc., where the user
+    // already knows what they're doing).
+    const hadToken = getToken() !== null;
+    if (hadToken) {
+      onUnauthorized();
+      if (!isLoginPage()) navigate('/login');
+    }
     const body = await readJsonOrNull(resp);
     throw new ApiError(401, body, body?.err || 'unauthorized');
   }

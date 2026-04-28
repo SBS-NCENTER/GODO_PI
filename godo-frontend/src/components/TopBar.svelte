@@ -51,12 +51,16 @@
       <span class="muted" data-testid="session-info">
         Logged in as <strong>{session.username}</strong> · {remainingLabel} 후 만료
       </span>
+    {:else}
+      <span class="muted" data-testid="session-info"> 익명 열람 중 — 제어 동작은 로그인 필요 </span>
     {/if}
     <button onclick={toggleTheme} title="Toggle theme" data-testid="theme-toggle">
       {themeValue === 'light' ? '🌙' : '☀️'}
     </button>
     {#if session}
       <button onclick={onLogout} data-testid="logout-btn">Logout</button>
+    {:else}
+      <button onclick={() => navigate('/login')} data-testid="login-btn">로그인</button>
     {/if}
   </div>
 </header>

@@ -1,0 +1,36 @@
+{
+  "name": "godo-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "GODO operator SPA — Vite + Svelte. Served by godo-webctl.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview --port 4173 --strictPort",
+    "test:unit": "vitest run",
+    "test:e2e": "playwright test --config=tests/e2e/playwright.config.ts",
+    "lint": "eslint . && prettier --check .",
+    "format": "prettier --write ."
+  },
+  "devDependencies": {
+    "@eslint/js": "~9.10.0",
+    "@playwright/test": "~1.45.0",
+    "@sveltejs/vite-plugin-svelte": "~5.0.0",
+    "@tsconfig/svelte": "~5.0.4",
+    "@types/node": "~20.14.0",
+    "eslint": "~9.10.0",
+    "eslint-plugin-svelte": "~2.46.0",
+    "globals": "^17.5.0",
+    "jsdom": "~25.0.0",
+    "prettier": "~3.3.0",
+    "prettier-plugin-svelte": "~3.2.0",
+    "svelte": "~5.20.0",
+    "svelte-check": "~4.1.0",
+    "svelte-eslint-parser": "~0.43.0",
+    "typescript": "~5.5.0",
+    "typescript-eslint": "~8.5.0",
+    "vite": "~6.0.0",
+    "vitest": "~2.1.0"
+  }
+}

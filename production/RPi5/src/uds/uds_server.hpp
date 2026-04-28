@@ -68,15 +68,42 @@ using LastScanGetter = std::function<godo::rt::LastScan()>;
 using JitterGetter   = std::function<godo::rt::JitterSnapshot()>;
 using AmclRateGetter = std::function<godo::rt::AmclIterationRate()>;
 
+// Track B-CONFIG (PR-CONFIG-α) — config edit callbacks.
+//
+// - ConfigGetter           returns a JSON-array body for `get_config`.
+// - ConfigSchemaGetter     returns a JSON-array body for
+//                          `get_config_schema` (pure; no live state).
+// - ConfigSetter           applies (key, value_text); returns the
+//                          tuple `{ok, err, err_detail, reload_class}`
+//                          serialized as a small POD.
+//
+// Production wires Setter to godo::config::apply_set; Getter to
+// apply_get_all; SchemaGetter to apply_get_schema. Null callbacks
+// surface `config_unsupported` to the wire.
+struct ConfigSetReply {
+    bool        ok           = false;
+    std::string err;            // bad_key | bad_type | bad_value | write_failed
+    std::string err_detail;     // human-readable detail; ASCII only
+    std::string reload_class;   // "hot" | "restart" | "recalibrate"
+};
+
+using ConfigGetter       = std::function<std::string()>;
+using ConfigSchemaGetter = std::function<std::string()>;
+using ConfigSetter       = std::function<ConfigSetReply(std::string_view key,
+                                                        std::string_view value)>;
+
 class UdsServer {
 public:
-    UdsServer(std::string    socket_path,
-              ModeGetter     get_mode,
-              ModeSetter     set_mode,
-              LastPoseGetter get_last_pose  = nullptr,
-              LastScanGetter get_last_scan  = nullptr,
-              JitterGetter   get_jitter     = nullptr,
-              AmclRateGetter get_amcl_rate  = nullptr);
+    UdsServer(std::string        socket_path,
+              ModeGetter         get_mode,
+              ModeSetter         set_mode,
+              LastPoseGetter     get_last_pose      = nullptr,
+              LastScanGetter     get_last_scan      = nullptr,
+              JitterGetter       get_jitter         = nullptr,
+              AmclRateGetter     get_amcl_rate      = nullptr,
+              ConfigGetter       get_config         = nullptr,
+              ConfigSchemaGetter get_config_schema  = nullptr,
+              ConfigSetter       set_config         = nullptr);
 
     UdsServer(const UdsServer&)            = delete;
     UdsServer& operator=(const UdsServer&) = delete;
@@ -96,15 +123,18 @@ public:
 private:
     void handle_one_request(int conn_fd) noexcept;
 
-    std::string    socket_path_;
-    ModeGetter     get_mode_;
-    ModeSetter     set_mode_;
-    LastPoseGetter get_last_pose_;
-    LastScanGetter get_last_scan_;
-    JitterGetter   get_jitter_;
-    AmclRateGetter get_amcl_rate_;
-    int            listen_fd_ = -1;
-    bool           path_bound_ = false;
+    std::string        socket_path_;
+    ModeGetter         get_mode_;
+    ModeSetter         set_mode_;
+    LastPoseGetter     get_last_pose_;
+    LastScanGetter     get_last_scan_;
+    JitterGetter       get_jitter_;
+    AmclRateGetter     get_amcl_rate_;
+    ConfigGetter       get_config_;
+    ConfigSchemaGetter get_config_schema_;
+    ConfigSetter       set_config_;
+    int                listen_fd_  = -1;
+    bool               path_bound_ = false;
 };
 
 }  // namespace godo::uds

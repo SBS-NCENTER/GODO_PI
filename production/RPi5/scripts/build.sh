@@ -216,3 +216,72 @@ if [[ -n "${AMCL_RATE_RECORD_HITS}" ]]; then
     exit 1
 fi
 echo "[amcl-rate-publisher-grep] clean (amcl_rate_accum.record only in cold_writer.cpp)"
+
+# -----------------------------------------------------------------------
+# [hot-path-config-grep] — Track B-CONFIG (PR-CONFIG-α) invariant: the
+# while-loop body of `void thread_d_rt(...)` MUST NOT reference `cfg.`,
+# `live_cfg`, `hot_cfg_seq`, or `HotConfig`. Setup BEFORE the while loop
+# is allowed to read `cfg.rt_cpu` / `cfg.rt_priority` / `cfg.ue_host` /
+# `cfg.ue_port` / `cfg.t_ramp_ns` ONCE — those are restart-class fields,
+# captured at thread start.
+#
+# Implementation: extract the body BETWEEN the line containing
+# "while (godo::rt::g_running.load" and the matching closing brace.
+# That subset must contain ZERO references to cfg / HotConfig / hot_cfg_seq.
+# -----------------------------------------------------------------------
+if [[ -f "${HOT_PATH_TARGET}" ]]; then
+    HOT_LOOP_BODY="$(awk '
+        /^void thread_d_rt\(/ { in_fn=1 }
+        in_fn && /while \(godo::rt::g_running.load/ { in_loop=1 }
+        in_loop { print; for (i=1; i<=length($0); ++i) {
+                    c = substr($0, i, 1);
+                    if (c == "{") loop_depth++;
+                    else if (c == "}") { loop_depth--;
+                        if (loop_depth == 0 && in_loop) { in_loop=0; in_fn=0; exit }
+                    }
+                } }
+    ' "${HOT_PATH_TARGET}")"
+    HOT_CFG_PATTERN='\bcfg\.|\blive_cfg\b|\bhot_cfg_seq\b|\bHotConfig\b'
+    HOT_CFG_HITS="$(echo "${HOT_LOOP_BODY}" | grep -nE "${HOT_CFG_PATTERN}" || true)"
+    if [[ -n "${HOT_CFG_HITS}" ]]; then
+        echo "[hot-path-config-grep] FAIL — thread_d_rt loop body references cfg/live_cfg/hot_cfg_seq/HotConfig:" >&2
+        echo "${HOT_CFG_HITS}" | sed 's/^/[hot-path-config-grep]   /' >&2
+        exit 1
+    fi
+    echo "[hot-path-config-grep] clean (thread_d_rt loop body has no cfg/live_cfg/hot_cfg_seq/HotConfig references)"
+fi
+
+# -----------------------------------------------------------------------
+# [hot-config-publisher-grep] — Track B-CONFIG (PR-CONFIG-α) invariant:
+# only `src/config/apply.cpp` (production runtime) and
+# `src/godo_tracker_rt/main.cpp` (boot init) may store into `hot_cfg_seq`.
+# Tests construct seqlocks under their own names, so this grep is scoped
+# to `src/`.
+# -----------------------------------------------------------------------
+HOT_CFG_STORE_PATTERN='hot_cfg_seq\.store\b'
+HOT_CFG_STORE_HITS="$(grep -rnE --include='*.cpp' "${HOT_CFG_STORE_PATTERN}" "${ROOT_DIR}/src" 2>/dev/null \
+    | grep -v "${ROOT_DIR}/src/config/apply.cpp" \
+    | grep -v "${ROOT_DIR}/src/godo_tracker_rt/main.cpp" || true)"
+if [[ -n "${HOT_CFG_STORE_HITS}" ]]; then
+    echo "[hot-config-publisher-grep] FAIL — hot_cfg_seq.store called outside the allow-list:" >&2
+    echo "${HOT_CFG_STORE_HITS}" | sed 's/^/[hot-config-publisher-grep]   /' >&2
+    exit 1
+fi
+echo "[hot-config-publisher-grep] clean (hot_cfg_seq.store only in config/apply.cpp + main.cpp boot init)"
+
+# -----------------------------------------------------------------------
+# [atomic-toml-write-grep] — Track B-CONFIG (PR-CONFIG-α) invariant:
+# only `src/config/atomic_toml_writer.cpp` may issue `::rename(`,
+# `::mkstemp(`, or `std::filesystem::rename` against TOML paths. Other
+# producers writing tracker.toml directly would bypass the atomic-write
+# protocol (TM3 in plan).
+# -----------------------------------------------------------------------
+ATOMIC_TOML_PATTERN='::mkstemp\(|::rename\(|std::filesystem::rename'
+ATOMIC_TOML_HITS="$(grep -rnE --include='*.cpp' "${ATOMIC_TOML_PATTERN}" "${ROOT_DIR}/src" 2>/dev/null \
+    | grep -v "${ROOT_DIR}/src/config/atomic_toml_writer.cpp" || true)"
+if [[ -n "${ATOMIC_TOML_HITS}" ]]; then
+    echo "[atomic-toml-write-grep] FAIL — mkstemp/rename called outside atomic_toml_writer.cpp:" >&2
+    echo "${ATOMIC_TOML_HITS}" | sed 's/^/[atomic-toml-write-grep]   /' >&2
+    exit 1
+fi
+echo "[atomic-toml-write-grep] clean (mkstemp/rename only in config/atomic_toml_writer.cpp)"

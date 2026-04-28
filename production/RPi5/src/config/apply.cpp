@@ -1,0 +1,349 @@
+#include "apply.hpp"
+
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <string_view>
+
+#include "atomic_toml_writer.hpp"
+#include "core/time.hpp"
+#include "restart_pending.hpp"
+#include "validate.hpp"
+
+namespace godo::config {
+
+namespace {
+
+using godo::core::Config;
+using godo::core::config_schema::CONFIG_SCHEMA;
+using godo::core::config_schema::ConfigSchemaRow;
+using godo::core::config_schema::ReloadClass;
+using godo::core::config_schema::ValueType;
+
+// JSON-string escape for the small ASCII subset we accept. Backslash
+// and double-quote get escaped; other ASCII passes through. Mirrors
+// uds/json_mini.cpp's input-side rejection (no backslash on the wire).
+void append_json_string(std::string& out, std::string_view s) {
+    out.push_back('"');
+    for (char c : s) {
+        if (c == '"' || c == '\\') out.push_back('\\');
+        out.push_back(c);
+    }
+    out.push_back('"');
+}
+
+// Read the current effective value of a Config field by schema name.
+// Returns the value as a typed variant via `is_int` / `out_int` /
+// `out_double` / `out_string`. Mirrors apply_one; both must stay in
+// sync with config.cpp's apply_toml_file / apply_env / apply_cli.
+struct EffectiveValue {
+    ValueType   type        = ValueType::String;
+    long long   as_int      = 0;
+    double      as_double   = 0.0;
+    std::string as_string;
+};
+
+EffectiveValue read_effective(const Config& c, const ConfigSchemaRow& row) {
+    EffectiveValue v;
+    v.type = row.type;
+    const std::string_view k = row.name;
+    // Sections by alphabetical name — matches the schema ordering.
+    if      (k == "amcl.converge_xy_std_m")          v.as_double = c.amcl_converge_xy_std_m;
+    else if (k == "amcl.converge_yaw_std_deg")       v.as_double = c.amcl_converge_yaw_std_deg;
+    else if (k == "amcl.downsample_stride")          v.as_int    = c.amcl_downsample_stride;
+    else if (k == "amcl.map_path")                   v.as_string = c.amcl_map_path;
+    else if (k == "amcl.max_iters")                  v.as_int    = c.amcl_max_iters;
+    else if (k == "amcl.origin_x_m")                 v.as_double = c.amcl_origin_x_m;
+    else if (k == "amcl.origin_y_m")                 v.as_double = c.amcl_origin_y_m;
+    else if (k == "amcl.origin_yaw_deg")             v.as_double = c.amcl_origin_yaw_deg;
+    else if (k == "amcl.particles_global_n")         v.as_int    = c.amcl_particles_global_n;
+    else if (k == "amcl.particles_local_n")          v.as_int    = c.amcl_particles_local_n;
+    else if (k == "amcl.range_max_m")                v.as_double = c.amcl_range_max_m;
+    else if (k == "amcl.range_min_m")                v.as_double = c.amcl_range_min_m;
+    else if (k == "amcl.sigma_hit_m")                v.as_double = c.amcl_sigma_hit_m;
+    else if (k == "amcl.sigma_seed_xy_m")            v.as_double = c.amcl_sigma_seed_xy_m;
+    else if (k == "amcl.sigma_seed_yaw_deg")         v.as_double = c.amcl_sigma_seed_yaw_deg;
+    else if (k == "amcl.sigma_xy_jitter_live_m")     v.as_double = c.amcl_sigma_xy_jitter_live_m;
+    else if (k == "amcl.sigma_xy_jitter_m")          v.as_double = c.amcl_sigma_xy_jitter_m;
+    else if (k == "amcl.sigma_yaw_jitter_deg")       v.as_double = c.amcl_sigma_yaw_jitter_deg;
+    else if (k == "amcl.sigma_yaw_jitter_live_deg")  v.as_double = c.amcl_sigma_yaw_jitter_live_deg;
+    else if (k == "amcl.trigger_poll_ms")            v.as_int    = c.amcl_trigger_poll_ms;
+    else if (k == "amcl.yaw_tripwire_deg")           v.as_double = c.amcl_yaw_tripwire_deg;
+    else if (k == "gpio.calibrate_pin")              v.as_int    = c.gpio_calibrate_pin;
+    else if (k == "gpio.live_toggle_pin")            v.as_int    = c.gpio_live_toggle_pin;
+    else if (k == "ipc.uds_socket")                  v.as_string = c.uds_socket;
+    else if (k == "network.ue_host")                 v.as_string = c.ue_host;
+    else if (k == "network.ue_port")                 v.as_int    = c.ue_port;
+    else if (k == "rt.cpu")                          v.as_int    = c.rt_cpu;
+    else if (k == "rt.priority")                     v.as_int    = c.rt_priority;
+    else if (k == "serial.freed_baud")               v.as_int    = c.freed_baud;
+    else if (k == "serial.freed_port")               v.as_string = c.freed_port;
+    else if (k == "serial.lidar_baud")               v.as_int    = c.lidar_baud;
+    else if (k == "serial.lidar_port")               v.as_string = c.lidar_port;
+    else if (k == "smoother.deadband_deg")           v.as_double = c.deadband_deg;
+    else if (k == "smoother.deadband_mm")            v.as_double = c.deadband_mm;
+    else if (k == "smoother.divergence_deg")         v.as_double = c.divergence_deg;
+    else if (k == "smoother.divergence_mm")          v.as_double = c.divergence_mm;
+    else if (k == "smoother.t_ramp_ms")              v.as_int    = c.t_ramp_ns / 1'000'000LL;
+    return v;
+}
+
+// Apply a validated value to the staging Config. Mirrors read_effective
+// (1:1 mapping). Returns true if applied; false on internal mismatch
+// (which would indicate a schema-vs-Config drift bug).
+bool apply_one(Config& c,
+               const ConfigSchemaRow& row,
+               const ValidateResult& vr) {
+    const std::string_view k = row.name;
+    if      (k == "amcl.converge_xy_std_m")          c.amcl_converge_xy_std_m          = vr.parsed_double;
+    else if (k == "amcl.converge_yaw_std_deg")       c.amcl_converge_yaw_std_deg       = vr.parsed_double;
+    else if (k == "amcl.downsample_stride")          c.amcl_downsample_stride          = static_cast<int>(vr.parsed_double);
+    else if (k == "amcl.map_path")                   c.amcl_map_path                   = vr.parsed_string;
+    else if (k == "amcl.max_iters")                  c.amcl_max_iters                  = static_cast<int>(vr.parsed_double);
+    else if (k == "amcl.origin_x_m")                 c.amcl_origin_x_m                 = vr.parsed_double;
+    else if (k == "amcl.origin_y_m")                 c.amcl_origin_y_m                 = vr.parsed_double;
+    else if (k == "amcl.origin_yaw_deg")             c.amcl_origin_yaw_deg             = vr.parsed_double;
+    else if (k == "amcl.particles_global_n")         c.amcl_particles_global_n         = static_cast<int>(vr.parsed_double);
+    else if (k == "amcl.particles_local_n")          c.amcl_particles_local_n          = static_cast<int>(vr.parsed_double);
+    else if (k == "amcl.range_max_m")                c.amcl_range_max_m                = vr.parsed_double;
+    else if (k == "amcl.range_min_m")                c.amcl_range_min_m                = vr.parsed_double;
+    else if (k == "amcl.sigma_hit_m")                c.amcl_sigma_hit_m                = vr.parsed_double;
+    else if (k == "amcl.sigma_seed_xy_m")            c.amcl_sigma_seed_xy_m            = vr.parsed_double;
+    else if (k == "amcl.sigma_seed_yaw_deg")         c.amcl_sigma_seed_yaw_deg         = vr.parsed_double;
+    else if (k == "amcl.sigma_xy_jitter_live_m")     c.amcl_sigma_xy_jitter_live_m     = vr.parsed_double;
+    else if (k == "amcl.sigma_xy_jitter_m")          c.amcl_sigma_xy_jitter_m          = vr.parsed_double;
+    else if (k == "amcl.sigma_yaw_jitter_deg")       c.amcl_sigma_yaw_jitter_deg       = vr.parsed_double;
+    else if (k == "amcl.sigma_yaw_jitter_live_deg")  c.amcl_sigma_yaw_jitter_live_deg  = vr.parsed_double;
+    else if (k == "amcl.trigger_poll_ms")            c.amcl_trigger_poll_ms            = static_cast<int>(vr.parsed_double);
+    else if (k == "amcl.yaw_tripwire_deg")           c.amcl_yaw_tripwire_deg           = vr.parsed_double;
+    else if (k == "gpio.calibrate_pin")              c.gpio_calibrate_pin              = static_cast<int>(vr.parsed_double);
+    else if (k == "gpio.live_toggle_pin")            c.gpio_live_toggle_pin            = static_cast<int>(vr.parsed_double);
+    else if (k == "ipc.uds_socket")                  c.uds_socket                      = vr.parsed_string;
+    else if (k == "network.ue_host")                 c.ue_host                         = vr.parsed_string;
+    else if (k == "network.ue_port")                 c.ue_port                         = static_cast<int>(vr.parsed_double);
+    else if (k == "rt.cpu")                          c.rt_cpu                          = static_cast<int>(vr.parsed_double);
+    else if (k == "rt.priority")                     c.rt_priority                     = static_cast<int>(vr.parsed_double);
+    else if (k == "serial.freed_baud")               c.freed_baud                      = static_cast<int>(vr.parsed_double);
+    else if (k == "serial.freed_port")               c.freed_port                      = vr.parsed_string;
+    else if (k == "serial.lidar_baud")               c.lidar_baud                      = static_cast<int>(vr.parsed_double);
+    else if (k == "serial.lidar_port")               c.lidar_port                      = vr.parsed_string;
+    else if (k == "smoother.deadband_deg")           c.deadband_deg                    = vr.parsed_double;
+    else if (k == "smoother.deadband_mm")            c.deadband_mm                     = vr.parsed_double;
+    else if (k == "smoother.divergence_deg")         c.divergence_deg                  = vr.parsed_double;
+    else if (k == "smoother.divergence_mm")          c.divergence_mm                   = vr.parsed_double;
+    else if (k == "smoother.t_ramp_ms")              c.t_ramp_ns                       = static_cast<long long>(vr.parsed_double) * 1'000'000LL;
+    else                                             return false;
+    return true;
+}
+
+// Split "section.leaf" into the two halves on the first dot. Schema
+// guarantees exactly one dot per name.
+void split_section(std::string_view name,
+                   std::string_view& section,
+                   std::string_view& leaf) noexcept {
+    const auto dot = name.find('.');
+    section = name.substr(0, dot);
+    leaf    = name.substr(dot + 1);
+}
+
+void append_int(std::string& out, long long v) {
+    char buf[32];
+    const int n = std::snprintf(buf, sizeof(buf), "%lld", v);
+    if (n > 0) out.append(buf, static_cast<std::size_t>(n));
+}
+
+void append_double(std::string& out, double v) {
+    // %.9g — round-trip-safe for double; matches operator-readable form.
+    char buf[64];
+    const int n = std::snprintf(buf, sizeof(buf), "%.9g", v);
+    if (n > 0) out.append(buf, static_cast<std::size_t>(n));
+}
+
+}  // namespace
+
+std::string render_toml(const Config& cfg) {
+    // Group rows by section so the rendered TOML is operator-readable.
+    // Schema is alphabetical by full name; alphabetical sections fall
+    // out naturally (amcl < gpio < ipc < network < rt < serial <
+    // smoother). Within each section we keep schema row order.
+    std::string out;
+    out.reserve(2048);
+
+    std::string_view current_section;
+    for (const auto& row : CONFIG_SCHEMA) {
+        std::string_view section, leaf;
+        split_section(row.name, section, leaf);
+
+        if (section != current_section) {
+            if (!current_section.empty()) out.push_back('\n');
+            out.append("[");
+            out.append(section);
+            out.append("]\n");
+            current_section = section;
+        }
+
+        out.append(leaf);
+        out.append(" = ");
+
+        const EffectiveValue v = read_effective(cfg, row);
+        switch (v.type) {
+            case ValueType::Int:
+                append_int(out, v.as_int);
+                break;
+            case ValueType::Double:
+                append_double(out, v.as_double);
+                break;
+            case ValueType::String:
+                out.push_back('"');
+                for (char c : v.as_string) {
+                    if (c == '"' || c == '\\') out.push_back('\\');
+                    out.push_back(c);
+                }
+                out.push_back('"');
+                break;
+        }
+        out.push_back('\n');
+    }
+    return out;
+}
+
+ApplyResult apply_set(std::string_view                              key,
+                      std::string_view                              value_text,
+                      Config&                                       live_cfg,
+                      std::mutex&                                   live_cfg_mtx,
+                      godo::rt::Seqlock<godo::core::HotConfig>&     hot_seq,
+                      const std::filesystem::path&                  toml_path,
+                      const std::filesystem::path&                  restart_pending_flag) {
+    ApplyResult ar;
+
+    // Step 1 — pure validation.
+    const ValidateResult vr = validate(key, value_text);
+    if (!vr.ok) {
+        ar.err        = vr.err;
+        ar.err_detail = vr.err_detail;
+        return ar;
+    }
+
+    // Steps 2–6 under the live_cfg mutex.
+    std::lock_guard<std::mutex> lock(live_cfg_mtx);
+
+    Config staging = live_cfg;
+    if (!apply_one(staging, *vr.row, vr)) {
+        // Schema↔Config drift — should be caught by parity test.
+        ar.err        = "internal_error";
+        ar.err_detail = "schema row has no Config applicator: ";
+        ar.err_detail.append(vr.row->name);
+        return ar;
+    }
+
+    const std::string body = render_toml(staging);
+    const WriteResult wr = write_atomic(toml_path, body);
+    if (wr.outcome != WriteOutcome::Ok) {
+        ar.err        = "write_failed";
+        ar.err_detail.assign(outcome_to_string(wr.outcome));
+        if (wr.errno_capture != 0) {
+            ar.err_detail.append(": ");
+            ar.err_detail.append(std::strerror(wr.errno_capture));
+        }
+        return ar;
+    }
+
+    live_cfg = staging;
+    ar.reload_class = vr.row->reload_class;
+    ar.ok = true;
+
+    if (vr.row->reload_class == ReloadClass::Hot) {
+        // [hot-config-publisher-grep]: this is the SOLE production
+        // call site for hot_seq.store(). main.cpp does the boot init
+        // (allow-listed in the grep).
+        godo::core::HotConfig snap = godo::core::snapshot_hot(live_cfg);
+        snap.published_mono_ns =
+            static_cast<std::uint64_t>(godo::rt::monotonic_ns());
+        hot_seq.store(snap);
+    } else {
+        touch_pending_flag(restart_pending_flag);
+    }
+
+    return ar;
+}
+
+std::string apply_get_all(Config& live_cfg, std::mutex& live_cfg_mtx) {
+    // Snapshot under lock; format outside lock.
+    Config snapshot;
+    {
+        std::lock_guard<std::mutex> lock(live_cfg_mtx);
+        snapshot = live_cfg;
+    }
+
+    std::string out;
+    out.reserve(2048);
+    out.push_back('{');
+    bool first = true;
+    for (const auto& row : CONFIG_SCHEMA) {
+        if (!first) out.push_back(',');
+        first = false;
+        append_json_string(out, row.name);
+        out.push_back(':');
+        const EffectiveValue v = read_effective(snapshot, row);
+        switch (v.type) {
+            case ValueType::Int:    append_int(out, v.as_int);       break;
+            case ValueType::Double: append_double(out, v.as_double); break;
+            case ValueType::String: append_json_string(out, v.as_string); break;
+        }
+    }
+    out.push_back('}');
+    return out;
+}
+
+std::string apply_get_schema() {
+    std::string out;
+    out.reserve(8192);
+    out.push_back('[');
+    bool first = true;
+    for (const auto& row : CONFIG_SCHEMA) {
+        if (!first) out.push_back(',');
+        first = false;
+        out.push_back('{');
+        append_json_string(out, "name");
+        out.push_back(':');
+        append_json_string(out, row.name);
+        out.push_back(',');
+
+        append_json_string(out, "type");
+        out.push_back(':');
+        append_json_string(out,
+            godo::core::config_schema::value_type_to_string(row.type));
+        out.push_back(',');
+
+        append_json_string(out, "min");
+        out.push_back(':');
+        append_double(out, row.min_d);
+        out.push_back(',');
+
+        append_json_string(out, "max");
+        out.push_back(':');
+        append_double(out, row.max_d);
+        out.push_back(',');
+
+        append_json_string(out, "default");
+        out.push_back(':');
+        append_json_string(out, row.default_repr);
+        out.push_back(',');
+
+        append_json_string(out, "reload_class");
+        out.push_back(':');
+        append_json_string(out,
+            godo::core::config_schema::reload_class_to_string(row.reload_class));
+        out.push_back(',');
+
+        append_json_string(out, "description");
+        out.push_back(':');
+        append_json_string(out, row.description);
+        out.push_back('}');
+    }
+    out.push_back(']');
+    return out;
+}
+
+}  // namespace godo::config

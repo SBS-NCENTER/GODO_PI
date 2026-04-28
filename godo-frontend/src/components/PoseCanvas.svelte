@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { onDestroy, onMount } from 'svelte';
+  import { onDestroy, onMount, untrack } from 'svelte';
+  import { apiFetch } from '$lib/api';
   import {
     DEG_TO_RAD,
     MAP_CANVAS_MIN_HEIGHT_PX,
@@ -28,6 +29,8 @@
 
   let canvas: HTMLCanvasElement | undefined = $state();
   let img: HTMLImageElement | null = null;
+  let blobUrl: string | null = null;
+  let mapLoadError = $state<string | null>(null);
   let trail = $state<Array<{ x: number; y: number; yaw: number }>>([]);
   let zoom = $state(MAP_DEFAULT_ZOOM);
   let panX = $state(0);
@@ -38,12 +41,15 @@
   let hoverWorld = $state<{ x: number; y: number } | null>(null);
 
   // When `pose` changes, push to trail (capped at MAP_TRAIL_LENGTH).
+  // Per Mode-B M2: read `trail` inside `untrack()` so this effect has only
+  // one reactive dep (`pose`) — otherwise reading + writing the same
+  // `$state` is the documented Svelte 5 reactive-loop footgun.
   $effect(() => {
     if (pose && pose.valid) {
-      trail = [
+      trail = untrack(() => [
         ...trail.slice(-(MAP_TRAIL_LENGTH - 1)),
         { x: pose.x_m, y: pose.y_m, yaw: pose.yaw_deg },
-      ];
+      ]);
     }
   });
 
@@ -65,6 +71,20 @@
       i.onerror = reject;
       i.src = url;
     });
+  }
+
+  /**
+   * Fetch the map PNG with the auth header attached, then turn the bytes
+   * into a blob: URL so a plain `<img>`/`Image` can render it. Native
+   * `<img src=...>` cannot send Authorization headers, so the direct-URL
+   * approach 401s under JWT auth — see Mode-B follow-up note.
+   */
+  async function fetchMapImageAuthed(url: string): Promise<HTMLImageElement> {
+    const resp = await apiFetch(url);
+    const blob = await resp.blob();
+    if (blobUrl !== null) URL.revokeObjectURL(blobUrl);
+    blobUrl = URL.createObjectURL(blob);
+    return loadImage(blobUrl);
   }
 
   function worldToCanvas(wx: number, wy: number): [number, number] {
@@ -166,18 +186,27 @@
       canvas.width = Math.max(rect.width, MAP_CANVAS_MIN_WIDTH_PX);
       canvas.height = Math.max(rect.height, MAP_CANVAS_MIN_HEIGHT_PX);
     }
-    void loadImage(mapImageUrl)
+    void fetchMapImageAuthed(mapImageUrl)
       .then((i) => {
         img = i;
+        mapLoadError = null;
         redraw();
       })
-      .catch(() => {
-        // No map yet — render only pose layer.
+      .catch((e: unknown) => {
+        // Surface the cause to the operator instead of silently leaving
+        // the canvas blank — common cases: (a) tracker has not run a
+        // mapping session yet so /api/map/image is 404, (b) auth lapsed.
+        const status = (e as { status?: number })?.status;
+        if (status === 404) mapLoadError = '맵 파일이 아직 없습니다.';
+        else if (status === 401) mapLoadError = '인증이 만료되었습니다.';
+        else mapLoadError = '맵 이미지를 불러오지 못했습니다.';
         redraw();
       });
   });
 
   onDestroy(() => {
+    if (blobUrl !== null) URL.revokeObjectURL(blobUrl);
+    blobUrl = null;
     img = null;
   });
 </script>
@@ -196,6 +225,9 @@
     <div class="hover-coord muted" data-testid="hover-coord">
       ({hoverWorld.x.toFixed(2)} m, {hoverWorld.y.toFixed(2)} m)
     </div>
+  {/if}
+  {#if mapLoadError}
+    <div class="map-error muted" data-testid="map-error">{mapLoadError}</div>
   {/if}
 </div>
 
@@ -224,6 +256,15 @@
     right: 8px;
     background: var(--color-bg-elev);
     padding: 2px 6px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--color-border);
+  }
+  .map-error {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    background: var(--color-bg-elev);
+    padding: 4px 8px;
     border-radius: var(--radius-sm);
     border: 1px solid var(--color-border);
   }

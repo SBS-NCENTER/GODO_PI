@@ -588,6 +588,21 @@ JWT secret: `/var/lib/godo/auth/jwt_secret` (서버 첫 부팅 시 random 생성
 
 - 실 스튜디오 운영 + UE 연동 + 8h 안정성 테스트
 
+### Phase 4.5+ Track D — Live LIDAR overlay (P0.5, 2026-04-28 user 요청)
+
+운영자가 B-MAP 페이지에서 **현재 RPLIDAR가 보고 있는 raw scan**을 맵 underlay 위 오버레이로 토글해서 볼 수 있게. localization / FreeD UDP 송출은 **0 영향** (seqlock read-only path).
+
+**모티베이션**: still 맵 + 추정 pose만 보면 "내 위치 추정이 맞나?"를 운영자가 검증할 수 없음. 라이다가 실제로 보는 점들을 같은 좌표계에 겹쳐 그리면 — pose가 맞으면 scan 점들이 벽선 위에 정확히 떨어지고, 어긋나면 시각적으로 즉시 보임. AMCL 수렴 디버깅에도 직접 사용.
+
+**스코프**:
+- tracker C++: scan thread는 이미 AMCL용 seqlock 운영 중 → `get_last_scan` UDS handler 추가 (seqlock read 1회, μ초 단위, hot-path 0 영향). `protocol.md`에 `get_last_scan` reply schema 추가 (`{ranges:[float], intensities:[float], angle_min, angle_increment, scan_time, header_seq}`).
+- webctl: `uds_client.get_last_scan` + `/api/last_scan` 단발 GET + `/api/last_scan/stream` SSE @ 5 Hz. 한 frame ~3-6 KB JSON, 5 Hz → ~30 KB/s SSE 부하 (감수 가능). FRONT_DESIGN §7.1/§7.2 갱신.
+- SPA: `PoseCanvas`에 scan layer 추가 (3rd layer: pgm 맵 / scan 점들 / pose marker), `Map.svelte`에 toggle 버튼 ("LIDAR scan 보기"), polar→직교 변환은 pose의 yaw 사용해 world frame으로.
+
+**UX 결정**: 새 LIDAR 탭을 만들지 않고 **B-MAP 오버레이 토글**로. 같은 데이터를 두 화면에 보이는 SSOT 위반 회피 + "내 추정 위치에서 라이다가 뭘 보고 있나?" 라는 운영자의 mental model에 직접 매핑.
+
+**예상 작업량**: tracker C++ ~80 LOC + webctl ~150 LOC + SPA ~120 LOC + tests, ≈1 PR-사이즈 작업. PR-B (P0 SPA) 머지 후 Track D로 단독 진행.
+
 ---
 
 ## 9. 보류 / 추후 결정

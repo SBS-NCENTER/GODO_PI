@@ -47,10 +47,6 @@ export const ACTIVITY_TAIL_DEFAULT_N = 5;
 // /api/local/* calls; backend separately enforces 403 via Depends(loopback_only).
 export const LOCAL_HOSTNAMES: readonly string[] = ['127.0.0.1', 'localhost', '::1'];
 
-// --- UI breakpoint -----------------------------------------------------
-// At >= this width, the sidebar is open by default; below, hamburger.
-export const MOBILE_BREAKPOINT_PX = 1024;
-
 // --- Topbar countdown ---------------------------------------------------
 // Tick interval for "X후 만료" countdown. 1 s feels alive without burning
 // frames.
@@ -64,7 +60,6 @@ export const API_FETCH_TIMEOUT_MS = 3000;
 // --- Storage keys -------------------------------------------------------
 export const STORAGE_KEY_TOKEN = 'godo:auth';
 export const STORAGE_KEY_THEME = 'godo:theme';
-export const STORAGE_KEY_SIDEBAR = 'godo:sidebar';
 
 // --- Map render --------------------------------------------------------
 // Pixel-space radius of the pose dot.

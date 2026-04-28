@@ -18,7 +18,6 @@
 // target_path.parent_path()`, so `rename(2)` cannot trip EXDEV.
 
 #include <filesystem>
-#include <string>
 #include <string_view>
 
 namespace godo::config {

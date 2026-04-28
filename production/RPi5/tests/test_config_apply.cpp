@@ -27,9 +27,7 @@
 using godo::config::apply_get_all;
 using godo::config::apply_get_schema;
 using godo::config::apply_set;
-using godo::config::ApplyResult;
 using godo::config::is_pending;
-using godo::config::render_toml;
 using godo::core::Config;
 using godo::core::HotConfig;
 using godo::core::config_schema::ReloadClass;

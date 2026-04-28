@@ -668,7 +668,7 @@ ConfirmDialog}.svelte`.
 ### Tests (new)
 
 - `tests/unit/diag.test.ts` (8 cases — subscribe/unsub refcount,
-  SSE open/close, no SSE without subscribers, _arrival_ms stamping,
+  SSE open/close, no SSE without subscribers, \_arrival_ms stamping,
   sparkline ring depth, ring drops oldest at depth, polling fallback
   on SSE error, reset).
 - `tests/unit/diagSparkline.test.ts` (5 cases — empty input, flat-line,

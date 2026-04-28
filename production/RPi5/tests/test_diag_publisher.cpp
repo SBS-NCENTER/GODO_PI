@@ -91,6 +91,37 @@ TEST_CASE("diag_publisher — publishes-once-per-interval with virtual clock") {
     // and valid=0; that's fine, the upstream consumer dims the chip.
 }
 
+TEST_CASE("diag_publisher — first tick computes hz correctly (Mode-B TB2)") {
+    JitterRing            ring;
+    AmclRateAccumulator   accum;
+    Seqlock<JitterSnapshot>     jitter_seq;
+    Seqlock<AmclIterationRate>  amcl_rate_seq;
+
+    // Two record()s exactly 1 s apart. After the first publish tick:
+    // count_delta = 2 - 0 = 2, time_delta = 1e9 - 0 = 1 s → hz = 2.0.
+    accum.record(0ULL);
+    accum.record(1'000'000'000ULL);
+
+    // max_ticks=1 captures the snapshot AFTER the first publish, before
+    // the rate window arithmetic clobbers prev to (count=2, last_ns=1e9)
+    // and yields hz=0 on subsequent ticks.
+    VirtualClock vc(1'000'000'000LL, /*max_ticks=*/1);
+
+    godo::rt::g_running.store(true, std::memory_order_release);
+    godo::rt::run_diag_publisher_with_clock(
+        ring, accum, jitter_seq, amcl_rate_seq,
+        [&]() { return vc.time_now(); },
+        [&](std::int64_t ns) { return vc.sleep_for(ns); });
+
+    const AmclIterationRate ar = amcl_rate_seq.load();
+    CHECK(ar.valid == 1);
+    CHECK(ar.total_iteration_count == 2u);
+    CHECK(ar.last_iteration_mono_ns == 1'000'000'000u);
+    // The actual rate-correctness pin: a bug returning hz=999 or hz=0.5
+    // here would not be caught by the count check above.
+    CHECK(ar.hz == doctest::Approx(2.0));
+}
+
 TEST_CASE("diag_publisher — exits when sleep_for returns false") {
     JitterRing            ring;
     AmclRateAccumulator   accum;

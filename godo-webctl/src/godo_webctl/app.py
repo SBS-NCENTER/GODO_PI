@@ -47,8 +47,9 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from http import HTTPStatus
 from pathlib import Path
+from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -112,14 +113,6 @@ class LoginBody(BaseModel):
 
 class LiveBody(BaseModel):
     enable: bool
-
-
-class LogsTailQuery(BaseModel):
-    """Pydantic shape for ``/api/logs/tail`` query params. ``ge=1`` /
-    ``le=LOGS_TAIL_MAX_N`` mirror PR-DIAG TM3 + TM11 mitigations."""
-
-    unit: str
-    n: int = Field(default=LOGS_TAIL_DEFAULT_N, ge=1, le=LOGS_TAIL_MAX_N)
 
 
 # --- helpers -----------------------------------------------------------
@@ -459,29 +452,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # ---- /api/logs/tail (PR-DIAG, anon read) ----------------------------
     @app.get("/api/logs/tail")
     async def logs_tail(
-        unit: str,
-        n: int = LOGS_TAIL_DEFAULT_N,
+        unit: Annotated[str, Query(min_length=1, max_length=64)],
+        n: Annotated[int, Query(ge=1, le=LOGS_TAIL_MAX_N)] = LOGS_TAIL_DEFAULT_N,
     ) -> JSONResponse:
-        # FastAPI Pydantic validation on `n` lives at the LogsTailQuery
-        # shape; FastAPI surfaces parse failures as 422 — mirrored at the
-        # SPA via apiFetch. Server-side we rely on logs.tail() to enforce
-        # ge=1 / le=LOGS_TAIL_MAX_N (defense in depth + n>cap clamps to
-        # cap with a WARN log).
+        # FastAPI's own Annotated[Query(...)] validation runs BEFORE the
+        # handler body, so out-of-range `n` and missing `unit` surface as
+        # native 422 (Mode-B S1 fold). Inside the handler we still rely
+        # on logs.tail() for defence-in-depth (n>cap clamp + WARN, allow-
+        # list lookup).
         try:
-            # Build the query model so Field(ge=1, le=...) validation runs.
-            params = LogsTailQuery(unit=unit, n=n)
-            lines = await asyncio.to_thread(
-                logs_mod.tail,
-                params.unit,
-                params.n,
-            )
+            lines = await asyncio.to_thread(logs_mod.tail, unit, n)
         except logs_mod.UnknownService as e:
             return _map_logs_exc_to_response(e)
-        except ValueError as e:
-            return JSONResponse(
-                {"ok": False, "err": "bad_n", "detail": str(e)},
-                status_code=HTTPStatus.BAD_REQUEST,
-            )
         except logs_mod.CommandTimeout as e:
             return _map_logs_exc_to_response(e)
         except logs_mod.CommandFailed as e:

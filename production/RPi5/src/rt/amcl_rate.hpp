@@ -41,10 +41,14 @@ public:
     AmclRateAccumulator(const AmclRateAccumulator&)            = delete;
     AmclRateAccumulator& operator=(const AmclRateAccumulator&) = delete;
 
-    // Single-writer record. Reads the current (count, last_ns) atomically,
-    // increments count, then writes the new (count+1, now_ns) pair back
-    // under the seqlock. Race-free against publisher reads even though the
-    // logical update is a load-then-store sequence.
+    // SINGLE-WRITER ONLY. The load-then-store sequence is race-free
+    // against publisher READS under the seqlock, but TWO concurrent
+    // record() callers would lose updates (both load the same `cur`,
+    // both store cur.count+1, the second clobbers the first). The
+    // [amcl-rate-publisher-grep] build gate enforces "only cold_writer.cpp
+    // calls record()" textually; the single-thread invariant on top of
+    // that is asserted in production/RPi5/CODEBASE.md (Mode-B S3 fold).
+    // Caller MUST guarantee no concurrent record().
     void record(std::uint64_t now_ns) noexcept {
         const auto cur = rec_.load();
         rec_.store({cur.count + 1, now_ns});

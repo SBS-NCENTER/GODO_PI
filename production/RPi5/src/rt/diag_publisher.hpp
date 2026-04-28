@@ -21,7 +21,6 @@
 // without wall-clock waits. The production overload calls the variant
 // with CLOCK_MONOTONIC + clock_nanosleep.
 
-#include <chrono>
 #include <functional>
 
 #include "core/rt_types.hpp"

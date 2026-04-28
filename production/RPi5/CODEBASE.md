@@ -2687,3 +2687,67 @@ clean: pre-existing 7 (`[rt-alloc-grep]` warning-only,
 - `cold_writer.cpp` migration to read `HotConfig` per iteration.
 - Cross-language schema-parity test (`test_config_schema_parity.py`).
 - `FRONT_DESIGN.md §6.4 / §7 / §8` row-flip from "P1" to "(있음)".
+
+
+## 2026-04-29 — Track B-CONFIG (PR-CONFIG-β): cold_writer HotConfig reader migration
+
+### Added
+
+- `tests/test_cold_writer_reads_hot_config.cpp` — pins that
+  `run_one_iteration` consumes `hot_cfg_seq.load()` once at the head
+  of every iteration and falls back to `cfg.deadband_*` /
+  `cfg.amcl_yaw_tripwire_deg` when the seqlock payload's `valid==0`
+  (boot sentinel). 4 cases: happy fallback, hot-publish honoured,
+  mid-call republish takes effect on next iter, 100k-loop wait-free
+  cost. Co-located with the existing cold-writer kernel tests.
+
+### Changed
+
+- `src/localization/cold_writer.{hpp,cpp}` — `run_one_iteration` and
+  `run_live_iteration` now take a final
+  `Seqlock<HotConfig>& hot_cfg_seq` parameter. The kernels load once
+  per iteration; `cfg.deadband_mm` / `cfg.deadband_deg` /
+  `cfg.amcl_yaw_tripwire_deg` reads in the deadband filter +
+  yaw-tripwire branch are replaced with the seqlock payload's fields,
+  with cfg-fallback on `hot.valid==0`. `run_cold_writer` threads the
+  seqlock reference through to both kernels. The non-hot Config
+  fields (origin, sigma_*, range_*, downsample_stride) continue to
+  read directly from `cfg` because they are `restart`/`recalibrate`-
+  class — changes take effect on next boot, not mid-iteration.
+- `src/godo_tracker_rt/main.cpp` — `t_cold = std::thread(run_cold_writer,
+  ..., std::ref(hot_cfg_seq), lidar_factory)` — one new ref-arg; rest
+  of the boot sequence and ordering invariant unchanged.
+- `tests/test_cold_writer_{amcl_rate_records, offset_invariant,
+  ordering, live_iteration, scan_publish}.cpp` — every direct call to
+  `run_one_iteration` / `run_live_iteration` extended with a
+  `Seqlock<godo::core::HotConfig> hot_cfg_seq` declared local; the
+  default-constructed payload's `valid==0` exercises the cfg-fallback
+  path automatically. No assertion change in any of the existing test
+  cases — they still pin the same invariants (offset shape, deadband
+  filter, scan publish ordering).
+
+### Test deltas
+
+- New: `test_cold_writer_reads_hot_config` (4 cases).
+- Changed: 5 existing cold-writer test files now thread the seqlock
+  parameter through every kernel call (no behavioural change).
+
+### Build greps
+
+`[hot-path-config-grep]`, `[hot-config-publisher-grep]`,
+`[atomic-toml-write-grep]` all stay green — Thread D continues to have
+zero `cfg.` / `HotConfig` references, only `config/apply.cpp` +
+`main.cpp` write to `hot_cfg_seq`, and only `atomic_toml_writer.cpp`
+mkstemp/renames against `tracker.toml`. The new cold-writer reads of
+`hot_cfg_seq.load()` are not on the publisher list (load is reader-
+side wait-free).
+
+### Invariants tightened
+
+- (t-extended) The cold-writer kernel reads `HotConfig` ONCE per
+  iteration at the head (before AMCL beam decimation). The deadband
+  filter + yaw-tripwire then read the local `hot.*` snapshot, NOT the
+  seqlock payload directly, so a mid-iteration republish does not
+  cause partial visibility within a single AMCL kernel call. Pin:
+  `test_cold_writer_reads_hot_config::"mid-call hot publish takes
+  effect on next iter"`.

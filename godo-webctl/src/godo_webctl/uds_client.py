@@ -35,14 +35,18 @@ from pathlib import Path
 from typing import Any
 
 from .protocol import (
+    CONFIG_SCHEMA_RESPONSE_CAP,
     LAST_SCAN_RESPONSE_CAP,
     UDS_RESPONSE_READ_BUFSIZE,
     encode_get_amcl_rate,
+    encode_get_config,
+    encode_get_config_schema,
     encode_get_jitter,
     encode_get_last_pose,
     encode_get_last_scan,
     encode_get_mode,
     encode_ping,
+    encode_set_config,
     encode_set_mode,
 )
 
@@ -124,6 +128,36 @@ class UdsClient:
         ``protocol.AMCL_RATE_FIELDS``. Mode-A M2 fold renamed the
         underlying metric from `scan_rate` to `amcl_rate`."""
         return self._roundtrip(encode_get_amcl_rate(), timeout)
+
+    # --- Track B-CONFIG (PR-CONFIG-β) ---------------------------------
+    def get_config(self, timeout: float) -> dict[str, Any]:
+        """`get_config` round-trip. Response is the projected dict
+        ``{"<key>": <value>, ...}`` plus the protocol ``ok``; callers
+        pass through `config_view.project_config_view` to drop ``ok``.
+
+        Reply size is ~2 KiB (37 rows × ~50 B); 4 KiB default cap fits.
+        """
+        return self._roundtrip(encode_get_config(), timeout)
+
+    def get_config_schema(self, timeout: float) -> dict[str, Any]:
+        """`get_config_schema` round-trip. Response is
+        ``{"ok":true,"schema":[<row>, ...]}`` per the C++ wire shape.
+
+        Schema reply is ~7 KiB; uses CONFIG_SCHEMA_RESPONSE_CAP (16 KiB).
+        """
+        return self._roundtrip(
+            encode_get_config_schema(),
+            timeout,
+            response_cap=CONFIG_SCHEMA_RESPONSE_CAP,
+        )
+
+    def set_config(self, key: str, value: str, timeout: float) -> dict[str, Any]:
+        """`set_config` round-trip. Returns the success body
+        ``{"ok":true,"reload_class":"hot|restart|recalibrate"}``; raises
+        ``UdsServerRejected`` with ``err`` ∈ {"bad_key","bad_value",
+        "write_failed", ...} on any tracker-side rejection.
+        """
+        return self._roundtrip(encode_set_config(key, value), timeout)
 
     # ---- internals --------------------------------------------------------
 

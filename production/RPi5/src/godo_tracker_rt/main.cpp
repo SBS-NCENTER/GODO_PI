@@ -429,6 +429,7 @@ int main(int argc, char** argv, char** envp) {
                                std::ref(last_pose_seq),
                                std::ref(last_scan_seq),
                                std::ref(amcl_rate_accum),
+                               std::ref(hot_cfg_seq),
                                lidar_factory);
         cold_native = t_cold.native_handle();
         t_gpio   = std::thread(thread_gpio, std::cref(cfg));

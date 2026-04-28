@@ -410,6 +410,22 @@ add_test(NAME test_cold_writer_amcl_rate_records
 set_tests_properties(test_cold_writer_amcl_rate_records PROPERTIES
     LABELS "hardware-free")
 
+# Track B-CONFIG (PR-CONFIG-β) — pin that the cold-writer kernels read
+# the hot-class Tier-2 keys (deadband_*, amcl_yaw_tripwire_deg) through
+# `hot_cfg_seq.load()` once per iteration, with cfg-fallback on the
+# valid=0 boot sentinel.
+add_executable(test_cold_writer_reads_hot_config
+    test_cold_writer_reads_hot_config.cpp)
+target_link_libraries(test_cold_writer_reads_hot_config PRIVATE
+    doctest::doctest godo_localization godo_core godo_lidar godo_rt)
+target_compile_definitions(test_cold_writer_reads_hot_config PRIVATE
+    GODO_FIXTURES_MAPS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/maps"
+)
+add_test(NAME test_cold_writer_reads_hot_config
+    COMMAND test_cold_writer_reads_hot_config)
+set_tests_properties(test_cold_writer_reads_hot_config PROPERTIES
+    LABELS "hardware-free")
+
 # ----------------------------------------------------------------------------
 # Track B-CONFIG (PR-CONFIG-α) — config edit pipeline.
 # - test_config_schema       : 37-row table integrity (ordering, uniqueness,

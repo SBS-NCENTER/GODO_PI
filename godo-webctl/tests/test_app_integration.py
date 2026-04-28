@@ -48,6 +48,7 @@ def _settings_for(
     users_file: Path | None = None,
     spa_dist: Path | None = None,
     disk_check_path: Path | None = None,
+    restart_pending_path: Path | None = None,
 ) -> Settings:
     base = backup_dir.parent
     return Settings(
@@ -67,6 +68,7 @@ def _settings_for(
         spa_dist=spa_dist,
         chromium_loopback_only=True,
         disk_check_path=disk_check_path or Path("/"),
+        restart_pending_path=restart_pending_path or (base / "restart_pending"),
     )
 
 
@@ -203,6 +205,7 @@ async def test_calibrate_timeout_returns_504(
         spa_dist=s.spa_dist,
         chromium_loopback_only=s.chromium_loopback_only,
         disk_check_path=s.disk_check_path,
+        restart_pending_path=s.restart_pending_path,
     )
     async with _client(s) as cl:
         token = await _login_admin(cl)
@@ -1653,6 +1656,7 @@ def test_lifespan_legacy_migration_creates_active_symlink(
         spa_dist=None,
         chromium_loopback_only=True,
         disk_check_path=Path("/"),
+        restart_pending_path=tmp_path / "rp",
     )
 
     # Manually invoke the migration helper that the lifespan uses.
@@ -1712,6 +1716,7 @@ def test_lifespan_warns_every_boot_when_map_path_set(
         spa_dist=None,
         chromium_loopback_only=True,
         disk_check_path=Path("/"),
+        restart_pending_path=tmp_path / "rp",
     )
 
     def _boot_and_count_warns() -> int:
@@ -1851,6 +1856,7 @@ async def test_system_amcl_rate_tracker_timeout_returns_504(
         spa_dist=s.spa_dist,
         chromium_loopback_only=s.chromium_loopback_only,
         disk_check_path=s.disk_check_path,
+        restart_pending_path=s.restart_pending_path,
     )
     async with _client(s) as cl:
         r = await cl.get("/api/system/amcl_rate")
@@ -1870,6 +1876,7 @@ async def test_system_resources_anon_returns_200(
         map_path=tmp_map_pair,
         backup_dir=tmp_path / "bk",
         disk_check_path=tmp_path,
+        restart_pending_path=tmp_path / "rp",
     )
     # Reset the resources module-level cache so this test sees fresh data.
     from godo_webctl import resources as _R
@@ -1898,6 +1905,7 @@ async def test_system_resources_with_admin_token_also_works(
         map_path=tmp_map_pair,
         backup_dir=tmp_path / "bk",
         disk_check_path=tmp_path,
+        restart_pending_path=tmp_path / "rp",
     )
     async with _client(s) as cl:
         token = await _login_admin(cl)
@@ -2005,6 +2013,7 @@ async def test_diag_stream_anon_returns_event_stream(
         map_path=tmp_map_pair,
         backup_dir=tmp_path / "bk",
         disk_check_path=tmp_path,
+        restart_pending_path=tmp_path / "rp",
     )
 
     async def _peek_one_chunk() -> tuple[int, str]:
@@ -2026,3 +2035,233 @@ async def test_diag_stream_anon_returns_event_stream(
         return
     assert status == HTTPStatus.OK
     assert "text/event-stream" in ctype
+
+
+# =====================================================================
+# Track B-CONFIG (PR-CONFIG-β) — config edit pipeline endpoints.
+# =====================================================================
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/config",
+        "/api/config/schema",
+        "/api/system/restart_pending",
+    ],
+)
+async def test_config_read_endpoints_anon_return_200(
+    fake_uds_server,
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    path: str,
+) -> None:
+    """Track F: every read endpoint is anonymous-OK. Mirrors the
+    test_anon_read_endpoints_return_200 pattern (single canned reply
+    queued; assertion is `not 401`)."""
+    fake_uds_server.reply(b'{"ok":true,"smoother.deadband_mm":10.0}')
+    s = _settings_for(
+        uds_socket=fake_uds_server.path,
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    async with _client(s) as cl:
+        r = await cl.get(path)
+    assert r.status_code != HTTPStatus.UNAUTHORIZED, f"{path} returned 401 — Track F regression"
+
+
+async def test_get_config_returns_projected_dict(
+    fake_uds_server,
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    fake_uds_server.reply(b'{"ok":true,"smoother.deadband_mm":12.5,"network.ue_port":6666}')
+    s = _settings_for(
+        uds_socket=fake_uds_server.path,
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    async with _client(s) as cl:
+        r = await cl.get("/api/config")
+    assert r.status_code == HTTPStatus.OK
+    body = r.json()
+    assert "ok" not in body
+    assert body["smoother.deadband_mm"] == 12.5
+    assert body["network.ue_port"] == 6666
+
+
+async def test_get_config_schema_returns_37_rows(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    """The schema is mirrored from C++; the endpoint serves the local
+    parse cache, not a UDS round-trip."""
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    async with _client(s) as cl:
+        r = await cl.get("/api/config/schema")
+    assert r.status_code == HTTPStatus.OK
+    rows = r.json()
+    assert isinstance(rows, list)
+    assert len(rows) == 37
+    # Each row has the documented keys.
+    for row in rows:
+        assert {
+            "name",
+            "type",
+            "min",
+            "max",
+            "default",
+            "reload_class",
+            "description",
+        } == set(row.keys())
+
+
+async def test_patch_config_admin_happy(
+    fake_uds_server,
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    fake_uds_server.reply(b'{"ok":true,"reload_class":"hot"}')
+    s = _settings_for(
+        uds_socket=fake_uds_server.path,
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.patch(
+            "/api/config",
+            headers=_auth(token),
+            json={"key": "smoother.deadband_mm", "value": "12.5"},
+        )
+    assert r.status_code == HTTPStatus.OK, r.text
+    assert r.json() == {"ok": True, "reload_class": "hot"}
+    # Wire-byte-exact check.
+    assert (
+        b'{"cmd":"set_config","key":"smoother.deadband_mm","value":"12.5"}'
+        in fake_uds_server.captured[0]
+    )
+
+
+async def test_patch_config_anon_returns_401(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    async with _client(s) as cl:
+        r = await cl.patch(
+            "/api/config",
+            json={"key": "smoother.deadband_mm", "value": "12.5"},
+        )
+    assert r.status_code == HTTPStatus.UNAUTHORIZED
+    assert r.json()["err"] == "auth_required"
+
+
+async def test_patch_config_bad_key_returns_400_with_err(
+    fake_uds_server,
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    """Tracker rejection of unknown key surfaces as 400 + err='bad_key'."""
+    fake_uds_server.reply(b'{"ok":false,"err":"bad_key","detail":"unknown"}')
+    s = _settings_for(
+        uds_socket=fake_uds_server.path,
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.patch(
+            "/api/config",
+            headers=_auth(token),
+            json={"key": "no.such.key", "value": "1"},
+        )
+    assert r.status_code == HTTPStatus.BAD_REQUEST
+    assert r.json()["ok"] is False
+    assert r.json()["err"] == "bad_key"
+
+
+async def test_patch_config_oversized_body_rejected(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    """`CONFIG_PATCH_BODY_MAX_BYTES` defence-in-depth before Pydantic."""
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        oversized = "x" * 2048
+        r = await cl.patch(
+            "/api/config",
+            headers=_auth(token),
+            json={"key": "k", "value": oversized},
+        )
+    assert r.status_code == HTTPStatus.REQUEST_ENTITY_TOO_LARGE
+    assert r.json()["err"] == "bad_payload"
+
+
+async def test_patch_config_rejects_quote_in_key(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    """Webctl pre-checks the two byte values that would break the
+    tracker's hand-rolled JSON parser."""
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.patch(
+            "/api/config",
+            headers=_auth(token),
+            json={"key": 'evil"key', "value": "1"},
+        )
+    assert r.status_code == HTTPStatus.BAD_REQUEST
+    assert r.json()["err"] == "bad_payload"
+
+
+async def test_get_restart_pending_false_when_flag_missing(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        restart_pending_path=tmp_path / "no_flag",
+    )
+    async with _client(s) as cl:
+        r = await cl.get("/api/system/restart_pending")
+    assert r.status_code == HTTPStatus.OK
+    assert r.json() == {"pending": False}
+
+
+async def test_get_restart_pending_true_when_flag_exists(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    flag = tmp_path / "rp"
+    flag.write_text("")
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        restart_pending_path=flag,
+    )
+    async with _client(s) as cl:
+        r = await cl.get("/api/system/restart_pending")
+    assert r.status_code == HTTPStatus.OK
+    assert r.json() == {"pending": True}

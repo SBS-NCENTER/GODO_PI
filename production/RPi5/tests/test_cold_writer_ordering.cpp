@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "core/config.hpp"
+#include "core/hot_config.hpp"
 #include "core/rt_types.hpp"
 #include "core/seqlock.hpp"
 #include "rt/amcl_rate.hpp"
@@ -114,6 +115,7 @@ TEST_CASE("last_pose_seq_published_before_idle_store") {
     Seqlock<LastPose> last_pose_seq;
     Seqlock<LastScan> last_scan_seq;
     AmclRateAccumulator amcl_rate_accum;
+    Seqlock<godo::core::HotConfig> hot_cfg_seq;
 
     // Initial generation is 0 — never published.
     CHECK(last_pose_seq.generation() == 0u);
@@ -121,7 +123,7 @@ TEST_CASE("last_pose_seq_published_before_idle_store") {
     const Frame frame = make_synthetic_frame(360);
     (void)run_one_iteration(cfg, frame, grid, amcl, rng, beams_buf,
                             last_pose, live_first_iter, last_written,
-                            target_offset, last_pose_seq, last_scan_seq, amcl_rate_accum);
+                            target_offset, last_pose_seq, last_scan_seq, amcl_rate_accum, hot_cfg_seq);
 
     // After run_one_iteration: seqlock generation MUST have advanced
     // (publish happened) and the snapshot MUST be marked valid + forced.
@@ -155,11 +157,12 @@ TEST_CASE("last_pose_seq published by run_live_iteration with forced=0") {
     Seqlock<LastPose> last_pose_seq;
     Seqlock<LastScan> last_scan_seq;
     AmclRateAccumulator amcl_rate_accum;
+    Seqlock<godo::core::HotConfig> hot_cfg_seq;
 
     const Frame frame = make_synthetic_frame(360);
     (void)run_live_iteration(cfg, frame, grid, amcl, rng, beams_buf,
                              last_pose, live_first_iter, last_written,
-                             target_offset, last_pose_seq, last_scan_seq, amcl_rate_accum);
+                             target_offset, last_pose_seq, last_scan_seq, amcl_rate_accum, hot_cfg_seq);
 
     CHECK(last_pose_seq.generation() >= 2u);
     const LastPose snap = last_pose_seq.load();

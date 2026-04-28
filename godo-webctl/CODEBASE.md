@@ -878,3 +878,92 @@ legacy `static/index.html`.
 
 333 hardware-free pytest cases pass (was 286 pre-PR-DIAG). +47 new
 cases. ruff check clean; ruff format clean.
+
+
+## 2026-04-29 — Track B-CONFIG (PR-CONFIG-β): config edit pipeline
+
+### Added
+
+- `src/godo_webctl/config_schema.py` — Python mirror of
+  `production/RPi5/src/core/config_schema.hpp`. Regex-extracts each
+  `ConfigSchemaRow{...}` initializer at process startup, caches as
+  `tuple[ConfigSchemaRow, ...]`. `EXPECTED_ROW_COUNT = 37` (Mode-A M2
+  fold pin). The C++ source's `// clang-format off` block keeps the
+  one-row-per-line shape stable so the regex stays robust.
+- `src/godo_webctl/config_view.py` — pure projection helpers
+  (`project_config_view`, `project_schema_view`).
+- `src/godo_webctl/restart_pending.py` — `is_pending(flag_path)`
+  reads the C++-tracker-owned sentinel file. Tracker is authoritative;
+  this module never writes (Mode-A scope fold).
+- `src/godo_webctl/protocol.py` — 3 new commands (`CMD_GET_CONFIG`,
+  `CMD_GET_CONFIG_SCHEMA`, `CMD_SET_CONFIG`), 3 reload-class strings,
+  `CONFIG_SCHEMA_ROW_FIELDS`, `CONFIG_SCHEMA_RESPONSE_CAP = 16384`,
+  3 new encoders (`encode_get_config`, `encode_get_config_schema`,
+  `encode_set_config`). `encode_set_config` rejects `"`, `\`, `\n` in
+  key/value (defence-in-depth before the tracker's hand-rolled JSON
+  parser sees them).
+- `src/godo_webctl/uds_client.py` — 3 new methods (`get_config`,
+  `get_config_schema`, `set_config`). `get_config_schema` uses the
+  wider `CONFIG_SCHEMA_RESPONSE_CAP` read cap (16 KiB).
+- `src/godo_webctl/constants.py` — `CONFIG_GET_UDS_TIMEOUT_S = 0.5`,
+  `CONFIG_SET_UDS_TIMEOUT_S = 2.0`, `CONFIG_SCHEMA_CACHE_TTL_S = 60.0`,
+  `CONFIG_PATCH_BODY_MAX_BYTES = 1024`,
+  `CONFIG_VALUE_TEXT_MAX_LEN = 256`, `RESTART_PENDING_FLAG_PATH`.
+- `src/godo_webctl/config.py` — `Settings.restart_pending_path: Path`
+  (default `/var/lib/godo/restart_pending`); env override
+  `GODO_WEBCTL_RESTART_PENDING_PATH`.
+- `src/godo_webctl/app.py` — 4 new endpoints:
+  - `GET /api/config` (anon) — UDS `get_config` round-trip; projects
+    via `config_view.project_config_view`.
+  - `GET /api/config/schema` (anon) — process-cached parse of the
+    Python mirror; serves the cached body for `CONFIG_SCHEMA_CACHE_TTL_S`.
+  - `PATCH /api/config` (admin via `Depends(auth_mod.require_admin)`) —
+    Pydantic body (single-key, value as int|float|bool|str), pre-checks
+    body size + special chars (`"`, `\`, `\n`) before forwarding to UDS
+    `set_config`. Mode-A S4 fold: NO ASCII check at webctl (defer to
+    tracker).
+  - `GET /api/system/restart_pending` (anon) — calls
+    `restart_pending.is_pending` on the configured flag path.
+
+### Tests added
+
+- `tests/test_config_schema.py` (8 cases) — synthetic + real-source
+  parses; cache discipline; `_parse_source` invariants.
+- `tests/test_config_schema_parity.py` (8 cases, TB1 fold) — loads
+  `production/RPi5/src/core/config_schema.hpp` BY REAL PATH (mirrors
+  `LAST_POSE_FIELDS` precedent in `test_protocol.py`), asserts row
+  count == 37, every reload_class / type in known set, every default
+  non-empty, alphabetical, sections match design, hot keys present.
+- `tests/test_config_view.py` (4 cases) — projection shape tests.
+- `tests/test_restart_pending.py` (5 cases) — file-existence sentinel.
+- `tests/test_uds_client.py` (extended +6) — get_config / get_config
+  schema / set_config round-trip + UdsServerRejected on bad_key.
+- `tests/test_protocol.py` (extended +9) — command-name / encoder /
+  reload-class / cap pins.
+- `tests/test_app_integration.py` (extended +9) — the 4 new endpoints
+  with anon-200 parametrization, admin gating, bad_key 400 forwarding,
+  oversized body 413, `"`-in-key 400, restart_pending happy + missing.
+
+### Invariants
+
+- (n) `config_schema.py` parser is the SOLE Python parser of the C++
+  schema source; the cache is process-scoped (single-worker uvicorn).
+- (o) `restart_pending.py` is read-only — the C++ tracker is
+  authoritative for both touch + clear.
+- (p) `set_config` PATCH body is Pydantic-validated for shape +
+  size + character set ONLY at webctl; range/type validation lives
+  in the C++ `validate.cpp`. Mode-A S4 fold pin.
+- (q) `/api/config/schema` cache TTL is `CONFIG_SCHEMA_CACHE_TTL_S`
+  (60 s). The schema is constexpr in C++ — never changes within a
+  tracker boot — so a positive cache window is safe; the 60 s ceiling
+  bounds startup-staleness when the operator replaces the tracker
+  binary.
+
+### Cross-language SSOT (extended)
+
+| Layer | File | Drift catch |
+|---|---|---|
+| C++ canonical | `production/RPi5/src/core/config_schema.hpp` | `static_assert(N == 37)` + `// clang-format off` |
+| Python mirror | `godo-webctl/src/godo_webctl/config_schema.py` | regex parse + `EXPECTED_ROW_COUNT == 37` |
+| TS mirror | `godo-frontend/src/lib/protocol.ts` (interfaces only) | hand-mirrored; runtime fetch from `/api/config/schema` for the row data |
+| Tests | `tests/test_config_schema_parity.py` | loads C++ source by real path; asserts row count + every reload_class string + every type string + alphabetical + 7 sections + 3 hot keys present |

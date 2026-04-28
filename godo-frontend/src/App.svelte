@@ -1,4 +1,5 @@
 <script lang="ts">
+  import RestartPendingBanner from '$components/RestartPendingBanner.svelte';
   import Sidebar from '$components/Sidebar.svelte';
   import TopBar from '$components/TopBar.svelte';
   import { matchRoute, navigate, route } from '$lib/router';
@@ -62,6 +63,7 @@
           확인해주세요.
         </div>
       {/if}
+      <RestartPendingBanner />
       <Component />
     </main>
   </div>

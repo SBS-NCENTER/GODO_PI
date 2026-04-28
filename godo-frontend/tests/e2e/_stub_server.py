@@ -245,6 +245,13 @@ class StubHandler(BaseHTTPRequestHandler):
             return
         self._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "err": "not_found"})
 
+    def do_PATCH(self) -> None:  # noqa: N802 - stdlib API
+        path = urlparse(self.path).path
+        if path == "/api/config":
+            _h_patch_config(self)
+            return
+        self._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "err": "not_found"})
+
     def do_DELETE(self) -> None:  # noqa: N802 - stdlib API
         path = urlparse(self.path).path
         # Track E: /api/maps/<name>
@@ -451,6 +458,115 @@ def _h_diag_stream(req: StubHandler) -> None:
         except (BrokenPipeError, ConnectionResetError):
             return
         time.sleep(0.05)
+
+
+# --- Track B-CONFIG (PR-CONFIG-β) — config edit pipeline ----------------
+
+
+# In-memory schema mirror for stub. Real backend parses
+# config_schema.hpp; the stub uses a small representative set so e2e
+# can verify the table renders + the edit loop works without parsing
+# the real C++ source from playwright.
+STUB_SCHEMA = [
+    {
+        "name": "smoother.deadband_mm",
+        "type": "double",
+        "min": 0.0,
+        "max": 200.0,
+        "default": "10.0",
+        "reload_class": "hot",
+        "description": "Deadband on translation (mm).",
+    },
+    {
+        "name": "smoother.deadband_deg",
+        "type": "double",
+        "min": 0.0,
+        "max": 5.0,
+        "default": "0.1",
+        "reload_class": "hot",
+        "description": "Deadband on yaw (deg).",
+    },
+    {
+        "name": "network.ue_port",
+        "type": "int",
+        "min": 1.0,
+        "max": 65535.0,
+        "default": "6666",
+        "reload_class": "restart",
+        "description": "UE receiver UDP port.",
+    },
+    {
+        "name": "amcl.map_path",
+        "type": "string",
+        "min": 0.0,
+        "max": 0.0,
+        "default": "/etc/godo/maps/studio_v1.pgm",
+        "reload_class": "recalibrate",
+        "description": "PGM map path.",
+    },
+]
+CONFIG_VALUES: dict[str, Any] = {
+    "smoother.deadband_mm": 10.0,
+    "smoother.deadband_deg": 0.1,
+    "network.ue_port": 6666,
+    "amcl.map_path": "/etc/godo/maps/studio_v1.pgm",
+}
+RESTART_PENDING_FLAG = {"value": False}
+
+
+def _h_get_config(req: StubHandler) -> None:
+    req._send_json(HTTPStatus.OK, dict(CONFIG_VALUES))
+
+
+def _h_get_config_schema(req: StubHandler) -> None:
+    req._send_json(HTTPStatus.OK, STUB_SCHEMA)
+
+
+def _h_patch_config(req: StubHandler) -> None:
+    c = req._require_admin()
+    if c is None:
+        return
+    body = req._read_json_body() or {}
+    key = body.get("key", "")
+    value = body.get("value", None)
+    schema_row = next((r for r in STUB_SCHEMA if r["name"] == key), None)
+    if schema_row is None:
+        req._send_json(
+            HTTPStatus.BAD_REQUEST,
+            {"ok": False, "err": "bad_key", "detail": f"unknown key: {key}"},
+        )
+        return
+    # Crude type coercion mirroring the tracker.
+    if schema_row["type"] == "int":
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            req._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"ok": False, "err": "bad_value", "detail": "int parse failed"},
+            )
+            return
+    elif schema_row["type"] == "double":
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            req._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"ok": False, "err": "bad_value", "detail": "double parse failed"},
+            )
+            return
+    else:
+        value = str(value)
+    CONFIG_VALUES[key] = value
+    cls = schema_row["reload_class"]
+    if cls != "hot":
+        RESTART_PENDING_FLAG["value"] = True
+    _activity_append("config_set", f"{key} by {c['sub']}")
+    req._send_json(HTTPStatus.OK, {"ok": True, "reload_class": cls})
+
+
+def _h_restart_pending(req: StubHandler) -> None:
+    req._send_json(HTTPStatus.OK, {"pending": RESTART_PENDING_FLAG["value"]})
 
 
 def _h_logs_tail(req: StubHandler) -> None:
@@ -709,6 +825,10 @@ GET_ROUTES: dict[str, Callable[[StubHandler], None]] = {
     "/api/system/resources": _h_system_resources,
     "/api/diag/stream": _h_diag_stream,
     "/api/logs/tail": _h_logs_tail,
+    # Track B-CONFIG endpoints.
+    "/api/config": _h_get_config,
+    "/api/config/schema": _h_get_config_schema,
+    "/api/system/restart_pending": _h_restart_pending,
     # /api/local/journal/<svc> matches by prefix below — but BaseHTTPServer
     # routes by exact equality, so we add a fallback in do_GET.
 }

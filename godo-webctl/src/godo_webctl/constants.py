@@ -136,3 +136,35 @@ LOGS_TAIL_DEFAULT_N: Final[int] = 50
 # tests can monkeypatch them without touching real /sys or /proc.
 THERMAL_ZONE_PATH: Final[str] = "/sys/class/thermal/thermal_zone0/temp"
 MEMINFO_PATH: Final[str] = "/proc/meminfo"
+
+# --- Track B-CONFIG (PR-CONFIG-β) — config-edit endpoints ----------------
+# `/api/config` and `/api/config/schema` UDS round-trip timeout. Short
+# read; tracker simply walks its constexpr array and emits ~2/7 KiB.
+CONFIG_GET_UDS_TIMEOUT_S: Final[float] = 0.5
+
+# `/api/config` PATCH UDS round-trip timeout. The tracker `set_config`
+# handler does an `fsync` on /etc partition (~10 ms RPi5 SD), then a
+# rename + a flag touch — generous 2 s ceiling against worst-case fs
+# stall while keeping the SPA's "submitting…" spinner snappy.
+CONFIG_SET_UDS_TIMEOUT_S: Final[float] = 2.0
+
+# Schema cache TTL. The C++ schema is constexpr — never changes within
+# a tracker boot — so any positive cache window means the SPA's repeat
+# `/api/config/schema` calls become O(1). 60 s lets a fresh tracker
+# boot propagate within one cache window.
+CONFIG_SCHEMA_CACHE_TTL_S: Final[float] = 60.0
+
+# Server-side ceiling on `PATCH /api/config` body size. Single-key
+# payload is ~50 B in practice; 1 KiB stops a malicious operator from
+# DoS-ing the parser with a multi-MB JSON. Mirror in Pydantic field
+# bound below.
+CONFIG_PATCH_BODY_MAX_BYTES: Final[int] = 1024
+
+# Per-value text length cap. The C++ validator independently enforces
+# 256 (validate.cpp::kStringValueMaxLen); this is the webctl-side
+# defence-in-depth pre-check.
+CONFIG_VALUE_TEXT_MAX_LEN: Final[int] = 256
+
+# Default flag-file location. Override via
+# GODO_WEBCTL_RESTART_PENDING_PATH.
+RESTART_PENDING_FLAG_PATH: Final[str] = "/var/lib/godo/restart_pending"

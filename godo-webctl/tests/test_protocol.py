@@ -393,3 +393,61 @@ def test_last_pose_fields_match_cpp_source() -> None:
     assert fields_in_cpp == P.LAST_POSE_FIELDS, (
         f"Field-order drift: C++={fields_in_cpp} Python={P.LAST_POSE_FIELDS}"
     )
+
+
+# --- Track B-CONFIG (PR-CONFIG-β) — config edit pipeline pins -----------
+
+
+def test_config_command_names() -> None:
+    """Pin the 3 new wire commands."""
+    assert P.CMD_GET_CONFIG == "get_config"
+    assert P.CMD_GET_CONFIG_SCHEMA == "get_config_schema"
+    assert P.CMD_SET_CONFIG == "set_config"
+
+
+def test_reload_class_strings_match_cpp_source() -> None:
+    """Pin against `reload_class_to_string` in config_schema.hpp."""
+    src = (_REPO_ROOT / "production/RPi5/src/core/config_schema.hpp").read_text(encoding="utf-8")
+    # The C++ enum maps Hot→"hot", Restart→"restart", Recalibrate→"recalibrate".
+    # Pull the literals from the function body.
+    matches = re.findall(r'return\s+"(hot|restart|recalibrate)"', src)
+    cpp_strings = set(matches)
+    # The function has 3 cases + a default duplicating "hot".
+    assert {"hot", "restart", "recalibrate"} <= cpp_strings
+    assert P.RELOAD_CLASS_HOT == "hot"
+    assert P.RELOAD_CLASS_RESTART == "restart"
+    assert P.RELOAD_CLASS_RECALIBRATE == "recalibrate"
+    assert frozenset({"hot", "restart", "recalibrate"}) == P.VALID_RELOAD_CLASSES
+
+
+def test_encode_get_config_byte_exact() -> None:
+    assert P.encode_get_config() == b'{"cmd":"get_config"}\n'
+
+
+def test_encode_get_config_schema_byte_exact() -> None:
+    assert P.encode_get_config_schema() == b'{"cmd":"get_config_schema"}\n'
+
+
+def test_encode_set_config_byte_exact() -> None:
+    out = P.encode_set_config("smoother.deadband_mm", "12.5")
+    assert out == b'{"cmd":"set_config","key":"smoother.deadband_mm","value":"12.5"}\n'
+
+
+def test_encode_set_config_rejects_quote_in_key() -> None:
+    with pytest.raises(ValueError):
+        P.encode_set_config('a"b', "1")
+
+
+def test_encode_set_config_rejects_backslash_in_value() -> None:
+    with pytest.raises(ValueError):
+        P.encode_set_config("k", "a\\b")
+
+
+def test_encode_set_config_rejects_newline_in_value() -> None:
+    with pytest.raises(ValueError):
+        P.encode_set_config("k", "a\nb")
+
+
+def test_config_schema_response_cap_above_4kb() -> None:
+    """37 rows × ~200 B → ~7.5 KiB; cap MUST be wider than the default."""
+    assert P.CONFIG_SCHEMA_RESPONSE_CAP >= 16 * 1024

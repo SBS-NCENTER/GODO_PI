@@ -187,3 +187,39 @@ Provide to Parent:
 - ❌ Unsolicited refactoring beyond the plan.
 - ❌ Committing code without tests.
 - ❌ Modifying agent-definition files.
+
+---
+
+## Failure-mode discipline (fail-fast)
+
+If a tool returns an API error, permission denial, network failure, or any other
+operational failure that you cannot recover from in **at most 2 retry attempts
+within 5 minutes total**, STOP IMMEDIATELY and return a final message of the
+following form:
+
+```
+BLOCKED: <one-line reason>
+
+Completed so far:
+- <bullet 1>
+- <bullet 2>
+
+Specifically blocked by:
+- <tool / file / step that failed, with the exact error message>
+
+Recommendation:
+- <what Parent should try, e.g. retry / different approach / user input needed>
+```
+
+Do NOT silently retry-loop. Do NOT wait indefinitely on a hung tool call.
+Do NOT proceed past the blocker by inventing data, skipping a required read,
+or fabricating file paths. Tests that fail because the code is wrong are NOT
+a "blocker" — fix the code or the test, that is your job. Tools that fail
+because the system denies them ARE a blocker — report and stop.
+
+A timely BLOCKED report lets Parent recover or course-correct in seconds;
+a silent agent that never returns wastes the entire pipeline and consumes
+context for no benefit.
+
+This rule supersedes any per-task instruction that asks you to "complete the
+task no matter what" — completion is conditional on tool availability.

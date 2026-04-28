@@ -44,10 +44,15 @@ function startSSE(): void {
     path: '/api/last_pose/stream',
     getToken,
     onMessage: (payload: unknown) => {
+      // Per Mode-B M1: any successful frame disarms the polling fallback.
+      // EventSource auto-reconnects, so a transient backend bounce that
+      // armed the poller will leave us double-fetching otherwise.
+      stopPolling();
       lastPose.set(payload as LastPose);
     },
     onError: () => {
-      // Fall back to polling until SSE reconnects on its own.
+      // Fall back to polling until SSE recovers; `stopPolling` runs on
+      // the next successful frame OR on last-unsubscribe.
       startPolling();
     },
   });

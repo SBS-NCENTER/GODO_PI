@@ -56,12 +56,22 @@
     }
   }
 
+  function stopPolling(): void {
+    if (pollTimer !== null) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+  }
+
   function startSSE(): void {
     if (sseClient !== null) return;
     sseClient = new SSEClient({
       path: '/api/local/services/stream',
       getToken,
       onMessage: (payload: unknown) => {
+        // Per Mode-B M1: a successful frame disarms the polling fallback
+        // so we do not double-fetch after a transient backend bounce.
+        stopPolling();
         const frame = payload as ServicesStreamFrame;
         if (frame && Array.isArray(frame.services)) services = frame.services;
       },
@@ -110,7 +120,7 @@
 
   onDestroy(() => {
     sseClient?.close();
-    if (pollTimer !== null) clearInterval(pollTimer);
+    stopPolling();
   });
 </script>
 

@@ -603,6 +603,27 @@ JWT secret: `/var/lib/godo/auth/jwt_secret` (서버 첫 부팅 시 random 생성
 
 **예상 작업량**: tracker C++ ~80 LOC + webctl ~150 LOC + SPA ~120 LOC + tests, ≈1 PR-사이즈 작업. PR-B (P0 SPA) 머지 후 Track D로 단독 진행.
 
+### Phase 4.5+ Track E — Multi-map management (P0.5, 2026-04-28 user 요청)
+
+운영자가 B-MAP 페이지에서 **여러 버전의 맵 (studio_v1, studio_v2, …)을 list로 보고 / 활성 맵 지정 / 삭제**할 수 있게. 매핑 Docker 세션이 새 맵을 떨어뜨릴 때마다 같은 디렉토리에 누적되고, 운영자가 GUI로 어느 맵으로 운영할지 고름.
+
+**모티베이션**: 현재는 webctl이 단일 `cfg.map_path`만 알고 있어서 (a) 새 맵 만들면 매번 systemd env 수정 + restart 필요, (b) 옛 맵으로 fallback 하려면 SSH로 직접 파일 조작, (c) 어떤 맵이 활성인지 운영자가 한눈에 못 봄. UI로 통합하면 fallback도 한 클릭, 관리도 GUI.
+
+**아키텍처**:
+- 맵 저장소: `/var/lib/godo/maps/<name>.{pgm,yaml}` 페어. **활성 맵은 `/var/lib/godo/maps/active.pgm` symlink로 표시** (atomic `os.replace`로 갱신 가능). 매핑 Docker 컨테이너의 output volume이 같은 디렉토리.
+- godo-tracker C++ **변경 0** — tracker는 시작 시 `cfg.map_path`(symlink) 읽음. 활성 맵 변경 후엔 tracker 재시작 필요 (P2 hot-reload 도입 전까지). 활성 변경 후 webctl이 운영자에게 "tracker 재시작 필요" 안내 (또는 admin 클릭으로 자동 `systemctl restart godo-tracker`).
+- webctl: `cfg.map_path` (single) → `cfg.maps_dir` (default `/var/lib/godo/maps/`) + active symlink resolver로 재구성. 기존 `/api/map/image`는 active 맵을 반환하는 것으로 호환 유지.
+
+**스코프**:
+- 신규 endpoint 5개: `GET /api/maps` (list), `GET /api/maps/<name>/image` (single map PNG), `POST /api/maps/<name>/activate` (admin, atomic symlink swap), `DELETE /api/maps/<name>` (admin, 활성 맵엔 409 거부), `GET /api/maps/<name>/yaml` (필요 시).
+- Path traversal 방지: `name` regex `^[a-zA-Z0-9_-]{1,64}$`, 절대 사용자 입력 그대로 path concat 금지.
+- 권한: list/image는 `require_user`, activate/delete는 `require_admin` (PR-A 패턴 그대로).
+- SPA Map.svelte 확장: 맵 선택 패널 (사이드 또는 페이지 상단 토글), 각 맵에 "기본으로 지정" / "삭제" 버튼 (admin disabled), confirm dialog reuse, 활성 맵 강조 표시.
+
+**UX 결정**: 새 페이지 만들지 않고 **B-MAP 페이지에 통합**. 운영자가 "이 맵으로 본다"와 "이 맵을 활성화한다"가 같은 화면에서 자연스러움.
+
+**예상 작업량**: webctl ~250 LOC + 테스트 ~150 LOC + SPA ~200 LOC + 테스트 ~50 LOC ≈ 650 LOC. PR-B 머지 후 Track E로 단독 진행 (Track D보다 우선 — 운영 편의성 더 직접적).
+
 ---
 
 ## 9. 보류 / 추후 결정

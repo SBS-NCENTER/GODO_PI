@@ -1033,13 +1033,21 @@ async def test_anon_read_endpoints_return_200(
     # Subset of read endpoints we can hit with a single fake_uds reply
     # queued; the assertion is "no 401". 503 is also acceptable for paths
     # that need a fresh UDS reply (queue drained after first call).
+    #
+    # Mode-B S2 fold: the SSE endpoint /api/diag/stream is intentionally
+    # NOT in this list — its anon-200 contract is pinned by a dedicated
+    # test (test_diag_stream_anon_returns_event_stream below) which uses
+    # cl.stream() + timeout to handle the unbounded async generator.
+    # Wedging SSE into this single-shot loop would either hang the
+    # generator (cl.stream() with no timeout) or duplicate the dedicated
+    # test's logic. The two together cover all 5 PR-DIAG anon endpoints.
     paths = [
         "/api/health",
         "/api/last_pose",
         "/api/last_scan",
         "/api/maps",
         "/api/activity",
-        # PR-DIAG anon-readable endpoints (TM8 mitigation).
+        # PR-DIAG anon-readable single-shot endpoints (TM8 mitigation).
         "/api/system/jitter",
         "/api/system/amcl_rate",
         "/api/system/resources",
@@ -1949,14 +1957,10 @@ async def test_logs_tail_n_above_cap_returns_422(
     )
     async with _client(s) as cl:
         r = await cl.get("/api/logs/tail?unit=godo-tracker&n=10000")
-    # FastAPI route signature uses raw int; we run the LogsTailQuery
-    # validation INSIDE the handler, which raises ValidationError →
-    # FastAPI returns 500 by default. Keep the assertion permissive.
-    assert r.status_code in (
-        HTTPStatus.UNPROCESSABLE_ENTITY,
-        HTTPStatus.INTERNAL_SERVER_ERROR,
-        HTTPStatus.BAD_REQUEST,
-    )
+    # Mode-B S1 fold: route uses Annotated[Query(le=LOGS_TAIL_MAX_N)],
+    # so FastAPI's own validation surfaces the over-cap as 422 BEFORE
+    # the handler body runs.
+    assert r.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
 
 
 async def test_logs_tail_subprocess_timeout_returns_504(

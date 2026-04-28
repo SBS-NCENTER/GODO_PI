@@ -814,9 +814,10 @@ legacy `static/index.html`.
   - `GET /api/system/jitter` (single-shot UDS call).
   - `GET /api/system/amcl_rate` (single-shot UDS call).
   - `GET /api/system/resources` (process-local 1 s cache; no UDS).
-  - `GET /api/logs/tail?unit=<svc>&n=<int>` (Pydantic
-    `LogsTailQuery(n: int = Field(ge=1, le=LOGS_TAIL_MAX_N))`;
-    allow-list reuses `services.ALLOWED_SERVICES`).
+  - `GET /api/logs/tail?unit=<svc>&n=<int>` (FastAPI
+    `Annotated[int, Query(ge=1, le=LOGS_TAIL_MAX_N)]` so out-of-range
+    `n` surfaces as 422 from FastAPI's own validation BEFORE the handler
+    body — Mode-B S1 fold; allow-list reuses `services.ALLOWED_SERVICES`).
   - `GET /api/diag/stream` (SSE @ 5 Hz; per-subscriber UdsClient).
   - Helpers: `_jitter_view` / `_amcl_rate_view` / `_resources_view` /
     `_map_logs_exc_to_response`.

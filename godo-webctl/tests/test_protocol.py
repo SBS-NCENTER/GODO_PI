@@ -131,11 +131,12 @@ def test_last_scan_ranges_max_python_mirror_matches_cpp() -> None:
 
 def test_last_scan_header_fields_match_cpp_source() -> None:
     """Drift pin: regex-extract LastScan field names from the
-    rt_types.hpp struct declaration and assert byte-equal against
-    LAST_SCAN_HEADER_FIELDS. Extracts from rt_types.hpp (the canonical
-    struct) per the Track D planner override — NOT from the format_ok_scan
-    format string. Reasoning: the struct is the SSOT for field names +
-    order; the JSON formatter is one of multiple downstream renderings.
+    rt_types.hpp struct declaration and assert SET-equality against
+    LAST_SCAN_HEADER_FIELDS. Catches rename / addition / removal drift
+    on either side. Wire-order drift is caught by the sister test
+    test_last_scan_wire_order_matches_format_ok_scan below — together
+    they pin both the field set (vs. struct) and the field sequence
+    (vs. wire format string).
 
     Editing one side without the other fails this test.
     """
@@ -171,11 +172,55 @@ def test_last_scan_header_fields_match_cpp_source() -> None:
     # which appear in LAST_SCAN_HEADER_FIELDS. The wire ordering re-orders
     # the flags + iterations + pose anchors before `n` to keep the array
     # body at the tail; here we assert SET equality on the visible names
-    # and ALSO that the tuple LAST_SCAN_HEADER_FIELDS is a permutation of
-    # the visible-set (catches rename drift; the by-inspection convention
-    # in CODEBASE.md catches reorder drift on the wire).
+    # (catches rename / addition / removal drift). Wire-order drift is
+    # caught by the sister test test_last_scan_wire_order_matches_format_
+    # ok_scan below.
     assert set(P.LAST_SCAN_HEADER_FIELDS) == set(visible), (
         f"Field-name drift: C++={visible} Python={P.LAST_SCAN_HEADER_FIELDS}"
+    )
+
+
+def test_last_scan_wire_order_matches_format_ok_scan() -> None:
+    """Drift pin: regex-extract JSON keys from format_ok_scan's snprintf
+    format string in json_mini.cpp and assert TUPLE-EQUAL against
+    LAST_SCAN_HEADER_FIELDS.
+
+    Mode-B S1 fold (2026-04-29). The sister test above asserts SET
+    equality vs. struct names (catches rename drift); this test asserts
+    TUPLE equality vs. the wire format string (catches wire-order
+    drift). The two together pin both the field set and the field
+    sequence between C++ wire and Python mirror.
+    """
+    src = _JSON_MINI_CPP.read_text(encoding="utf-8")
+    func_marker = "format_ok_scan"
+    start = src.find(func_marker + "(const godo::rt::LastScan")
+    assert start != -1, f"Could not locate '{func_marker}' definition in {_JSON_MINI_CPP}"
+    # End at the closing `}` of format_ok_scan. We use the first
+    # `\nstd::string_view mode_to_string` (the next free function) as
+    # the sentinel; this is robust to in-body braces.
+    end = src.find("\nstd::string_view mode_to_string", start)
+    assert end != -1, "Could not locate end of format_ok_scan body"
+    body = src[start:end]
+    # Find every `\"<key>\":` token in the function body. The format
+    # string is split across multiple snprintf calls (header + array
+    # bodies); every JSON key still matches this pattern because the
+    # array key (e.g., "ranges_m") is followed by `:[`.
+    field_pattern = re.compile(r'\\"([a-z_]+)\\":')
+    found = field_pattern.findall(body)
+    # Exclude the `ok` key (JSON-level success flag). De-duplicate while
+    # preserving first-seen order: the truncation-fallback returns
+    # repeat the same key sequence, and we want a single tuple.
+    seen: set[str] = set()
+    fields_in_cpp: list[str] = []
+    for name in found:
+        if name == "ok":
+            continue
+        if name in seen:
+            continue
+        seen.add(name)
+        fields_in_cpp.append(name)
+    assert tuple(fields_in_cpp) == P.LAST_SCAN_HEADER_FIELDS, (
+        f"Field-order drift: C++={tuple(fields_in_cpp)} Python={P.LAST_SCAN_HEADER_FIELDS}"
     )
 
 

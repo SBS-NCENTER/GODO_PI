@@ -50,11 +50,16 @@ std::string format_err(std::string_view code);
 // diagnostics), %llu for `published_mono_ns` (uint64_t).
 std::string format_ok_pose(const godo::rt::LastPose& p);
 
-// Format the `get_last_scan` response (Track D). Field order MUST match
-// the `godo::rt::LastScan` struct field declarations in core/rt_types.hpp;
-// the Python mirror godo-webctl/protocol.py::LAST_SCAN_HEADER_FIELDS is
-// regex-extracted from rt_types.hpp at test time
-// (tests/test_protocol.py::test_last_scan_header_fields_match_cpp_source).
+// Format the `get_last_scan` response (Track D). The wire field NAMES
+// MUST match `godo::rt::LastScan` field declarations in core/rt_types.hpp
+// (drift catch: tests/test_protocol.py::test_last_scan_header_fields_
+// match_cpp_source — set-equality vs. struct names). The wire field
+// ORDER is NOT the struct order: the wire opens with flags + iterations
+// + pose anchor, then `n`, then the two array bodies at the tail. Order
+// is pinned in two places: byte-exact at the C++ side by tests/test_uds_
+// server.cpp::format_ok_scan — byte-exact shape on a default-zero
+// LastScan, and tuple-equal on the Python side by tests/test_protocol.py
+// ::test_last_scan_wire_order_matches_format_ok_scan.
 //
 // Precision split (Track D, mirrors Track B):
 //   - pose anchor (pose_x_m, pose_y_m, pose_yaw_deg) → %.6f (µm / µdeg)

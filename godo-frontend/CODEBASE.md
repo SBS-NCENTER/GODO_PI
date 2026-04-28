@@ -246,6 +246,7 @@ every frame BEFORE pushing to subscribers, so the gate is computed in
 a single clock domain.
 
 Pinned by:
+
 - `tests/unit/lastScan.test.ts::stamps _arrival_ms on every received frame (Mode-A M2)`,
 - `tests/unit/poseCanvasFreshness.test.ts` (data-scan-fresh attribute
   flips when fake timers advance past the freshness window).
@@ -293,6 +294,7 @@ of WAN traffic at 5 Hz; OFF-by-default for any new session is the
 defensive baseline.
 
 Pinned by:
+
 - `tests/unit/lastScan.test.ts::does not start SSE while overlay is off`,
 - `tests/unit/lastScan.test.ts::starts SSE when overlay flips to on`,
 - `tests/unit/lastScan.test.ts::stops SSE when overlay flips back to off`,
@@ -412,8 +414,8 @@ preview proxy needed.
   non-trivial yaw cases + gating + TB1-equivalent positional integrity),
   `poseCanvasFreshness.test.ts` (2 cases — Mode-A M2 patch using
   `vi.useFakeTimers`), `scanToggle.test.ts` (6 cases).
-- `tests/e2e/map.spec.ts` — 4 new playwright cases: toggle visible
-  + defaults off, toggle on shows ≥ 5 dots via `data-scan-count`,
+- `tests/e2e/map.spec.ts` — 4 new playwright cases: toggle visible /
+  defaults off, toggle on shows ≥ 5 dots via `data-scan-count`,
   toggle off clears, sessionStorage persists same-tab reload.
 - `tests/e2e/_stub_server.py` — `_canned_scan()` (5-dot canned shape),
   `/api/last_scan` GET handler (anon), `/api/last_scan/stream` SSE
@@ -445,9 +447,9 @@ preview proxy needed.
 #### Notes
 
 - `LastScan` is canonically defined in `production/RPi5/src/core/
-  rt_types.hpp::struct LastScan`. The TS interface order matches the
+rt_types.hpp::struct LastScan`. The TS interface order matches the
   wire body emitted by `godo-webctl/src/godo_webctl/app.py::
-  _last_scan_view`, which iterates `LAST_SCAN_HEADER_FIELDS`. Drift
+_last_scan_view`, which iterates `LAST_SCAN_HEADER_FIELDS`. Drift
   detected by inspection per invariant (n).
 
 ### 2026-04-29 — Track E Mode-B folds (M4 unit test + lint scaffold)

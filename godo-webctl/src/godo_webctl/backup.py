@@ -28,7 +28,7 @@ import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .protocol import MAX_RENAME_ATTEMPTS
+from .constants import MAX_RENAME_ATTEMPTS
 
 
 class BackupError(Exception):

@@ -36,6 +36,7 @@ from typing import Any
 
 from .protocol import (
     UDS_RESPONSE_READ_BUFSIZE,
+    encode_get_last_pose,
     encode_get_mode,
     encode_ping,
     encode_set_mode,
@@ -89,6 +90,11 @@ class UdsClient:
 
     def set_mode(self, mode: str, timeout: float) -> dict[str, Any]:
         return self._roundtrip(encode_set_mode(mode), timeout)
+
+    def get_last_pose(self, timeout: float) -> dict[str, Any]:
+        """Track B `get_last_pose` round-trip; response shape pinned by
+        ``protocol.LAST_POSE_FIELDS`` (regex-checked against C++)."""
+        return self._roundtrip(encode_get_last_pose(), timeout)
 
     # ---- internals --------------------------------------------------------
 

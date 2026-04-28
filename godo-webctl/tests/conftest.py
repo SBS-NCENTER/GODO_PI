@@ -126,3 +126,30 @@ def tmp_map_pair(tmp_path: Path) -> Path:
         "negate: 0\n"
     )
     return pgm
+
+
+@pytest.fixture
+def tmp_maps_dir(tmp_path: Path) -> Path:
+    """Track E (PR-C) fixture.
+
+    Returns a fresh `maps_dir` pre-populated with two map pairs
+    (`studio_v1.{pgm,yaml}`, `studio_v2.{pgm,yaml}`) and `active.{pgm,yaml}`
+    symlinks pointing at `studio_v1`. Tests that need a different active
+    state should call `maps.set_active` themselves.
+    """
+    import os
+
+    maps_dir = tmp_path / "maps"
+    maps_dir.mkdir(mode=0o750)
+    for name in ("studio_v1", "studio_v2"):
+        pgm = maps_dir / f"{name}.pgm"
+        yaml = maps_dir / f"{name}.yaml"
+        # 4×4 PGM so PIL accepts it as a real netpbm image.
+        pgm.write_bytes(b"P5\n4 4\n255\n" + bytes([128] * 16))
+        yaml.write_text(
+            f"image: {name}.pgm\nresolution: 0.05\norigin: [0,0,0]\n"
+            "occupied_thresh: 0.65\nfree_thresh: 0.196\nnegate: 0\n",
+        )
+    os.symlink("studio_v1.pgm", maps_dir / "active.pgm")
+    os.symlink("studio_v1.yaml", maps_dir / "active.yaml")
+    return maps_dir

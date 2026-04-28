@@ -84,21 +84,23 @@ store into a lib, deliberate and one-way.
 
 ## Module responsibilities
 
-| Module                         | Responsibility                                                                                                             |
-| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------- |
-| `lib/constants.ts`             | SPA-internal Tier-1. **Every numeric literal in `src/` MUST trace here, to `protocol.ts`, or to a local iteration bound.** |
-| `lib/protocol.ts`              | Wire-shape mirror of `godo-webctl/src/godo_webctl/protocol.py` — types, mode names, error codes, LAST_POSE_FIELDS order.   |
-| `lib/router.ts`                | 30-line hash-router. Emits `route` rune; `navigate(path)` updates `location.hash`.                                         |
-| `lib/api.ts`                   | `apiFetch` adds Bearer header from auth store; 401 → clearSession + nav `/login`; non-2xx → throws `ApiError`.             |
-| `lib/sse.ts`                   | `SSEClient` — token-on-URL (Q3), Page Visibility handbrake, expired-token guard before reconnect.                          |
-| `lib/auth.ts`                  | `login/logout/refresh/getClaims/isExpired`. Decode-only on token (server is the SSOT for trust).                           |
-| `lib/format.ts`                | Korean-friendly formatters for topbar countdown + pose readouts.                                                           |
-| `stores/auth.ts`               | Persisted `AuthSession`. Writes from outside limited to `setSession/clearSession`.                                         |
-| `stores/lastPose.ts`           | SSE-fed `LastPose`; refcounts subscribers; polling fallback when SSE drops.                                                |
-| `stores/mode.ts`               | Polls `/api/health` at HEALTH_POLL_MS; supports `setModeOptimistic` after button clicks.                                   |
-| `stores/theme.ts`              | Light/dark theme; persisted in localStorage; sets `data-theme` attribute on `<html>`.                                      |
-| `components/PoseCanvas.svelte` | Canvas with pan/zoom/trail; world↔canvas conversion via `MAP_PIXELS_PER_METER`.                                           |
-| `routes/*.svelte`              | Page composition only — no business logic; orchestrate via stores + lib calls.                                             |
+| Module                           | Responsibility                                                                                                                                                              |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `lib/constants.ts`               | SPA-internal Tier-1. **Every numeric literal in `src/` MUST trace here, to `protocol.ts`, or to a local iteration bound.**                                                  |
+| `lib/protocol.ts`                | Wire-shape mirror of `godo-webctl/src/godo_webctl/protocol.py` — types, mode names, error codes, LAST_POSE_FIELDS order.                                                    |
+| `lib/router.ts`                  | 30-line hash-router. Emits `route` rune; `navigate(path)` updates `location.hash`.                                                                                          |
+| `lib/api.ts`                     | `apiFetch` adds Bearer header from auth store; 401 → clearSession + nav `/login`; non-2xx → throws `ApiError`.                                                              |
+| `lib/sse.ts`                     | `SSEClient` — token-on-URL (Q3), Page Visibility handbrake, expired-token guard before reconnect.                                                                           |
+| `lib/auth.ts`                    | `login/logout/refresh/getClaims/isExpired`. Decode-only on token (server is the SSOT for trust).                                                                            |
+| `lib/format.ts`                  | Korean-friendly formatters for topbar countdown + pose readouts.                                                                                                            |
+| `stores/auth.ts`                 | Persisted `AuthSession`. Writes from outside limited to `setSession/clearSession`.                                                                                          |
+| `stores/lastPose.ts`             | SSE-fed `LastPose`; refcounts subscribers; polling fallback when SSE drops.                                                                                                 |
+| `stores/mode.ts`                 | Polls `/api/health` at HEALTH_POLL_MS; supports `setModeOptimistic` after button clicks.                                                                                    |
+| `stores/theme.ts`                | Light/dark theme; persisted in localStorage; sets `data-theme` attribute on `<html>`.                                                                                       |
+| `components/PoseCanvas.svelte`   | Canvas with pan/zoom/trail; world↔canvas conversion via `MAP_PIXELS_PER_METER`.                                                                                            |
+| `components/MapListPanel.svelte` | Track E (PR-C). Lists every map under `${GODO_WEBCTL_MAPS_DIR}`; admin-gated activate / delete actions; reuses `<ConfirmDialog/>` with the optional `secondaryAction` prop. |
+| `stores/maps.ts`                 | Track E. `Writable<MapEntry[]>` + `refresh()` / `activate(name)` / `remove(name)`. No periodic polling — refresh on mount, post-activate, post-remove only.                 |
+| `routes/*.svelte`                | Page composition only — no business logic; orchestrate via stores + lib calls.                                                                                              |
 
 ## Invariants
 
@@ -191,6 +193,41 @@ backend `uv run pytest` suite. The e2e suite uses the in-tree
 `tests/e2e/_stub_server.py` (stdlib only) so no real RPi backend is
 required to run them.
 
+### (k) Map-name regex mirror (Track E, PR-C)
+
+`MAPS_NAME_REGEX_PATTERN_STR` in `src/lib/protocol.ts` MUST equal the
+backend `MAPS_NAME_REGEX.pattern` from
+`godo-webctl/src/godo_webctl/constants.py`. The frontend uses the
+pattern for client-side `activate(name)` / `remove(name)`
+short-circuiting (so a typo never hits the network). The backend
+re-validates inside `maps.validate_name` (defence-in-depth — same
+regex, different process).
+
+Drift detection: by inspection during code review, plus the backend's
+`tests/test_protocol.py::test_maps_name_regex_pattern_str_mirrors_constants`
+which pins the backend mirror against `constants.py`. The frontend
+mirror cannot be auto-checked at test time; the inspection contract is
+that any change to the regex updates BOTH files in the same commit.
+
+### (l) `<ConfirmDialog/>` accepts an optional `secondaryAction` (Track E, PR-C)
+
+`components/ConfirmDialog.svelte` was extended (NOT replaced) with
+optional props:
+
+- `secondaryAction?: { label, handler } | null` — when set, renders a
+  third button between cancel and confirm. The dialog still renders
+  cancel + primary as before; reuses the same theming / a11y patterns.
+- `showPrimary?: boolean` — when `false`, the primary (`onConfirm`)
+  button is hidden and replaced with a tooltip placeholder. Used by
+  `MapListPanel` to hide the "godo-tracker 재시작" button on
+  non-loopback hostnames per Mode-A M4.
+- `primaryHiddenTooltip?: string` — hover text for the placeholder.
+
+A new `MultiActionDialog` was considered and rejected: the existing
+component is small enough that two more optional props are cheaper
+than a parallel implementation that would have to keep the same
+theming + a11y discipline.
+
 ### (j) Router is home-grown (per N9)
 
 The plan called for `svelte-spa-router@~4`. After install the package's
@@ -268,6 +305,48 @@ so a single stub process is enough to drive playwright. No vite
 preview proxy needed.
 
 ## Change log
+
+### 2026-04-29 — PR-C: Track E (multi-map management)
+
+#### Added
+
+- `src/components/MapListPanel.svelte` — list every map under
+  `${GODO_WEBCTL_MAPS_DIR}`, mark the active row, expose admin-gated
+  `기본으로 지정` + `삭제` buttons. Reuses `<ConfirmDialog/>` with the
+  new `secondaryAction` prop (per invariant (l)). Refresh on mount /
+  post-activate / post-remove only — no polling (per Mode-A N6).
+- `src/stores/maps.ts` — `Writable<MapEntry[]>` + `refresh()` /
+  `activate(name)` / `remove(name)`. Mutations short-circuit
+  client-side via `MAPS_NAME_REGEX_PATTERN_STR`.
+- `src/lib/api.ts::apiDelete` — companion of `apiGet`/`apiPost`.
+- `src/lib/protocol.ts` — 4 new error-code mirrors
+  (`ERR_INVALID_MAP_NAME`, `ERR_MAP_NOT_FOUND`, `ERR_MAP_IS_ACTIVE`,
+  `ERR_MAPS_DIR_MISSING`), `MAPS_NAME_REGEX_PATTERN_STR`, `MapEntry`
+  - `MapListResponse` + `ActivateResponse` interfaces.
+- `tests/unit/maps.test.ts` — 6 vitest cases covering the store
+  contract + client-side validator.
+- `tests/e2e/map.spec.ts` — 3 new playwright cases (list panel,
+  activate flow, delete-disabled-on-active).
+- `tests/e2e/_stub_server.py` — 5 new endpoints, in-memory map state
+  shared across tests, loopback-flag flag (`?stub_loopback=…`) for
+  the M4 non-loopback restart-button test path.
+
+#### Changed
+
+- `src/components/ConfirmDialog.svelte` — extended with optional
+  `secondaryAction`, `showPrimary`, `primaryHiddenTooltip` props
+  (invariant (l)). Cancel + primary still render as before; existing
+  callers unaffected.
+- `src/routes/Map.svelte` — mounts `<MapListPanel/>` above
+  `<PoseCanvas/>`; threads a local `previewUrl` state so clicking a
+  non-active row repaints the canvas with that map (back-compat
+  default `/api/map/image` resolves through the active symlink).
+
+#### Tests
+
+- 35 vitest unit cases (was 29; +6 from `maps.test.ts`).
+- 14 playwright e2e cases (was 11; +3 from `map.spec.ts`).
+- `npm run lint` clean; `npm run build` produces ~22 kB gzipped.
 
 ### 2026-04-28 — PR-B: P0 frontend SPA
 

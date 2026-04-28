@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# godo-maps-migrate — migrate a legacy single-map deployment to the
+# Track E (PR-C) multi-map layout.
+#
+# Usage:  godo-maps-migrate <legacy-pgm-path> [<maps-dir>]
+#         godo-maps-migrate --force <legacy-pgm-path> [<maps-dir>]
+#
+# Default <maps-dir> is /var/lib/godo/maps. The script:
+#   1. ensures <maps-dir> exists at mode 0750,
+#   2. copies <legacy-pgm-path> + its .yaml sibling into <maps-dir>
+#      (preserving the basename — e.g. studio_v1.pgm),
+#   3. creates active.pgm + active.yaml symlinks pointing at the
+#      copies (POSIX rename(2)-atomic).
+#
+# Idempotent: if <maps-dir>/active.pgm already exists, the script
+# refuses unless --force was passed.
+#
+# Example:
+#   sudo godo-maps-migrate /etc/godo/maps/studio_v1.pgm
+#   sudo godo-maps-migrate --force /etc/godo/maps/studio_v1.pgm /var/lib/godo/maps
+
+set -euo pipefail
+
+force=0
+if [[ "${1:-}" == "--force" ]]; then
+  force=1
+  shift
+fi
+
+if [[ $# -lt 1 || $# -gt 2 ]]; then
+  echo "usage: $0 [--force] <legacy-pgm-path> [<maps-dir>]" >&2
+  exit 64  # EX_USAGE
+fi
+
+legacy_pgm="$1"
+maps_dir="${2:-/var/lib/godo/maps}"
+
+if [[ ! -f "$legacy_pgm" ]]; then
+  echo "legacy pgm not found: $legacy_pgm" >&2
+  exit 1
+fi
+
+legacy_yaml="${legacy_pgm%.pgm}.yaml"
+if [[ ! -f "$legacy_yaml" ]]; then
+  echo "legacy yaml sibling not found: $legacy_yaml" >&2
+  exit 1
+fi
+
+stem="$(basename "$legacy_pgm" .pgm)"
+if [[ ! "$stem" =~ ^[a-zA-Z0-9_-]{1,64}$ ]]; then
+  echo "legacy basename does not match map-name regex: $stem" >&2
+  exit 2
+fi
+
+mkdir -p -m 0750 "$maps_dir"
+
+active_pgm="$maps_dir/active.pgm"
+if [[ -e "$active_pgm" || -L "$active_pgm" ]]; then
+  if [[ "$force" -ne 1 ]]; then
+    echo "active.pgm already exists at $active_pgm; pass --force to re-link" >&2
+    exit 3
+  fi
+fi
+
+target_pgm="$maps_dir/${stem}.pgm"
+target_yaml="$maps_dir/${stem}.yaml"
+
+# Copy only if the target does not already exist; never overwrite an
+# operator's hand-migrated file.
+if [[ ! -f "$target_pgm" ]]; then
+  install -m 0644 "$legacy_pgm" "$target_pgm"
+fi
+if [[ ! -f "$target_yaml" ]]; then
+  install -m 0644 "$legacy_yaml" "$target_yaml"
+fi
+
+# `ln -sfT` uses POSIX rename(2) semantics (atomic on the same FS).
+ln -sfT "${stem}.pgm" "$active_pgm"
+ln -sfT "${stem}.yaml" "$maps_dir/active.yaml"
+
+echo "migrated $legacy_pgm -> $maps_dir (active=$stem)"

@@ -57,6 +57,7 @@ from . import activity as activity_mod
 from . import auth as auth_mod
 from . import backup as backup_mod
 from . import map_image as map_image_mod
+from . import maps as maps_mod
 from . import services as services_mod
 from . import sse as sse_mod
 from . import uds_client as uds_mod
@@ -66,13 +67,24 @@ from .constants import (
     JOURNAL_TAIL_DEFAULT_N,
     LOGIN_PASSWORD_MAX_LEN,
     LOGIN_USERNAME_MAX_LEN,
+    MAPS_ACTIVE_BASENAME,
 )
 from .local_only import loopback_only
-from .protocol import LAST_POSE_FIELDS, MODE_IDLE, MODE_LIVE, MODE_ONESHOT
+from .protocol import (
+    ERR_INVALID_MAP_NAME,
+    ERR_MAP_IS_ACTIVE,
+    ERR_MAP_NOT_FOUND,
+    ERR_MAPS_DIR_MISSING,
+    LAST_POSE_FIELDS,
+    MODE_IDLE,
+    MODE_LIVE,
+    MODE_ONESHOT,
+)
 
 _LOG_FORMAT = "%(asctime)s %(levelname)s [godo-webctl] %(message)s"
 _SSE_MEDIA_TYPE = "text/event-stream"
 _PNG_MEDIA_TYPE = "image/png"
+_YAML_MEDIA_TYPE = "text/plain; charset=utf-8"
 
 logger = logging.getLogger("godo_webctl")
 
@@ -120,6 +132,44 @@ def _map_uds_exc_to_response(exc: uds_mod.UdsError) -> JSONResponse:
     )
 
 
+def _map_maps_exc_to_response(exc: Exception) -> JSONResponse:
+    """Local error mapper for `maps.*` exceptions. Kept separate from
+    `_map_uds_exc_to_response` because the two error families do not
+    overlap (CODEBASE.md invariant (c)).
+
+    Track E (PR-C): the reserved-name path (`InvalidName("reserved_name")`)
+    surfaces as `400 invalid_map_name` with `detail="reserved_name"` so
+    the SPA can show a more specific tooltip if it wants to.
+    """
+    if isinstance(exc, maps_mod.InvalidName):
+        body: dict[str, object] = {"ok": False, "err": ERR_INVALID_MAP_NAME}
+        # Pull the bare reason out of the exception args (e.g.
+        # "reserved_name", "path_outside_maps_dir") so the SPA can
+        # disambiguate.
+        if exc.args:
+            body["detail"] = str(exc.args[0])
+        return JSONResponse(body, status_code=HTTPStatus.BAD_REQUEST)
+    if isinstance(exc, maps_mod.MapNotFound):
+        return JSONResponse(
+            {"ok": False, "err": ERR_MAP_NOT_FOUND},
+            status_code=HTTPStatus.NOT_FOUND,
+        )
+    if isinstance(exc, maps_mod.MapIsActive):
+        return JSONResponse(
+            {"ok": False, "err": ERR_MAP_IS_ACTIVE},
+            status_code=HTTPStatus.CONFLICT,
+        )
+    if isinstance(exc, maps_mod.MapsDirMissing):
+        return JSONResponse(
+            {"ok": False, "err": ERR_MAPS_DIR_MISSING},
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+        )
+    return JSONResponse(
+        {"ok": False, "err": "internal_error"},
+        status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+    )
+
+
 def _last_pose_view(resp: dict[str, object]) -> dict[str, object]:
     """Project the UDS reply down to the documented `LastPose` schema.
     Drops `ok` (HTTP-level success); preserves field order via
@@ -137,6 +187,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Secret read once at startup; rotation = `systemctl restart`.
     jwt_secret, user_store = auth_mod.bootstrap(cfg.jwt_secret_path, cfg.users_file)
 
+    # Track E (PR-C): one-shot soft migration from cfg.map_path to
+    # cfg.maps_dir/active.pgm. Idempotent — second boot is a no-op for
+    # the migration but still warns if cfg.map_path is set (per Q-OQ-E4).
+    def _run_legacy_migration() -> None:
+        active_pgm = cfg.maps_dir / f"{MAPS_ACTIVE_BASENAME}.pgm"
+        if active_pgm.exists() or active_pgm.is_symlink():
+            return
+        if cfg.map_path is None or not cfg.map_path.exists():
+            return
+        try:
+            maps_mod.migrate_legacy_active(cfg.maps_dir, cfg.map_path)
+        except (maps_mod.InvalidName, maps_mod.MapNotFound, OSError) as e:
+            logger.error(
+                "maps.legacy_migration_failed: source=%s target=%s err=%s",
+                cfg.map_path,
+                cfg.maps_dir,
+                e,
+            )
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.jwt_secret = jwt_secret
@@ -144,14 +213,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.activity_log = activity_log
         spa_label = "spa_dist" if cfg.spa_dist is not None else "legacy_static"
         logger.info(
-            "starting; host=%s port=%d uds=%s map=%s backup_dir=%s spa=%s",
+            "starting; host=%s port=%d uds=%s maps_dir=%s map=%s backup_dir=%s spa=%s",
             cfg.host,
             cfg.port,
             cfg.uds_socket,
+            cfg.maps_dir,
             cfg.map_path,
             cfg.backup_dir,
             spa_label,
         )
+        _run_legacy_migration()
+        # Per Q-OQ-E4: warn EVERY boot until GODO_WEBCTL_MAP_PATH is
+        # unset. Operators read journals selectively; one-shot warnings
+        # are easy to miss.
+        if cfg.map_path is not None and cfg.map_path.exists():
+            logger.warning(
+                "maps.legacy_map_path_in_use: source=%s target=%s; "
+                "remove GODO_WEBCTL_MAP_PATH env var or run scripts/godo-maps-migrate to clean up",
+                cfg.map_path,
+                cfg.maps_dir,
+            )
         yield
         logger.info("stopping")
 
@@ -260,10 +341,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
     # ---- /api/map/image -------------------------------------------------
+    # Track E (PR-C): resolves through `cfg.maps_dir/active.pgm`. If no
+    # active symlink yet exists, fall back to the legacy `cfg.map_path`
+    # for a one-release deprecation window so existing PoseCanvas calls
+    # do not break on a fresh dev machine.
+    def _resolve_active_pgm() -> Path:
+        active = cfg.maps_dir / f"{MAPS_ACTIVE_BASENAME}.pgm"
+        if active.exists() or active.is_symlink():
+            return active
+        return cfg.map_path
+
     @app.get("/api/map/image")
     async def map_image() -> Response:
         try:
-            png = await asyncio.to_thread(map_image_mod.render_pgm_to_png, cfg.map_path)
+            png = await asyncio.to_thread(
+                map_image_mod.render_pgm_to_png,
+                _resolve_active_pgm(),
+            )
         except map_image_mod.MapImageNotFound:
             return JSONResponse(
                 {"ok": False, "err": "map_path_not_found"},
@@ -275,6 +369,93 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
             )
         return Response(content=png, media_type=_PNG_MEDIA_TYPE)
+
+    # ---- /api/maps (Track E, PR-C) -------------------------------------
+    # Anonymous-readable per Track F (read endpoints are anon, mutations
+    # are admin-gated).
+    @app.get("/api/maps")
+    async def list_maps() -> JSONResponse:
+        try:
+            entries = await asyncio.to_thread(maps_mod.list_pairs, cfg.maps_dir)
+        except maps_mod.MapsDirMissing as e:
+            return _map_maps_exc_to_response(e)
+        return JSONResponse(
+            [e.to_dict() for e in entries],
+            status_code=HTTPStatus.OK,
+        )
+
+    @app.get("/api/maps/{name}/image")
+    async def map_image_named(name: str) -> Response:
+        try:
+            pgm = maps_mod.pgm_for(cfg.maps_dir, name)
+        except maps_mod.InvalidName as e:
+            return _map_maps_exc_to_response(e)
+        if not maps_mod.is_pair_present(cfg.maps_dir, name):
+            return _map_maps_exc_to_response(maps_mod.MapNotFound(name))
+        try:
+            png = await asyncio.to_thread(map_image_mod.render_pgm_to_png, pgm)
+        except map_image_mod.MapImageNotFound:
+            return _map_maps_exc_to_response(maps_mod.MapNotFound(name))
+        except map_image_mod.MapImageInvalid:
+            return JSONResponse(
+                {"ok": False, "err": "map_invalid"},
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+        return Response(content=png, media_type=_PNG_MEDIA_TYPE)
+
+    @app.get("/api/maps/{name}/yaml")
+    async def map_yaml_named(name: str) -> Response:
+        try:
+            yaml_path = maps_mod.yaml_for(cfg.maps_dir, name)
+        except maps_mod.InvalidName as e:
+            return _map_maps_exc_to_response(e)
+        if not maps_mod.is_pair_present(cfg.maps_dir, name):
+            return _map_maps_exc_to_response(maps_mod.MapNotFound(name))
+        try:
+            text = await asyncio.to_thread(yaml_path.read_text, "utf-8")
+        except OSError:
+            return _map_maps_exc_to_response(maps_mod.MapNotFound(name))
+        return Response(content=text, media_type=_YAML_MEDIA_TYPE)
+
+    @app.post("/api/maps/{name}/activate")
+    async def activate_map(
+        name: str,
+        claims: auth_mod.Claims = Depends(auth_mod.require_admin),
+    ) -> JSONResponse:
+        try:
+            await asyncio.to_thread(maps_mod.set_active, cfg.maps_dir, name)
+        except (
+            maps_mod.InvalidName,
+            maps_mod.MapNotFound,
+            maps_mod.MapsDirMissing,
+        ) as e:
+            return _map_maps_exc_to_response(e)
+        # Drop any cached PNG bytes pointing at the previous target so
+        # the next /api/map/image GET re-renders. The realpath cache
+        # key (Track E PR-C cache fix) would also catch this on the
+        # next call, but explicit invalidation is faster + clearer.
+        map_image_mod.invalidate_cache()
+        activity_log.append("map_activate", f"{name} by {claims.username}")
+        return JSONResponse(
+            {"ok": True, "restart_required": True},
+            status_code=HTTPStatus.OK,
+        )
+
+    @app.delete("/api/maps/{name}")
+    async def delete_map(
+        name: str,
+        claims: auth_mod.Claims = Depends(auth_mod.require_admin),
+    ) -> JSONResponse:
+        try:
+            await asyncio.to_thread(maps_mod.delete_pair, cfg.maps_dir, name)
+        except (
+            maps_mod.InvalidName,
+            maps_mod.MapNotFound,
+            maps_mod.MapIsActive,
+        ) as e:
+            return _map_maps_exc_to_response(e)
+        activity_log.append("map_delete", f"{name} by {claims.username}")
+        return JSONResponse({"ok": True}, status_code=HTTPStatus.OK)
 
     # ---- /api/activity --------------------------------------------------
     @app.get("/api/activity")

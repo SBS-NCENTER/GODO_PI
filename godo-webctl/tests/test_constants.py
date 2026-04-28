@@ -77,3 +77,61 @@ def test_sse_uds_timeout_s_pinned() -> None:
 def test_max_rename_attempts_relocated_value_preserved() -> None:
     # Was at protocol.py:78 with value 9; relocation must preserve it.
     assert C.MAX_RENAME_ATTEMPTS == 9
+
+
+# --- Track E (PR-C) — multi-map management constants ---------------------
+
+
+def test_maps_name_max_len_pinned() -> None:
+    # Hard cap shared with the regex below.
+    assert C.MAPS_NAME_MAX_LEN == 64
+
+
+def test_maps_active_basename_pinned() -> None:
+    # Operators see this name in `ls /var/lib/godo/maps/`.
+    assert C.MAPS_ACTIVE_BASENAME == "active"
+
+
+def test_maps_activate_lock_basename_is_hidden() -> None:
+    # Leading dot keeps it out of `list_pairs` enumeration.
+    assert C.MAPS_ACTIVATE_LOCK_BASENAME == ".activate.lock"
+    assert C.MAPS_ACTIVATE_LOCK_BASENAME.startswith(".")
+
+
+def test_maps_name_regex_accepts_typical_stems() -> None:
+    assert C.MAPS_NAME_REGEX.match("studio_v1")
+    assert C.MAPS_NAME_REGEX.match("studio-v1")
+    assert C.MAPS_NAME_REGEX.match("2026-04-28_v3")
+    assert C.MAPS_NAME_REGEX.match("a")
+    assert C.MAPS_NAME_REGEX.match("a" * 64)
+
+
+def test_maps_name_regex_rejects_dotdot() -> None:
+    assert not C.MAPS_NAME_REGEX.match("..")
+
+
+def test_maps_name_regex_rejects_slash() -> None:
+    assert not C.MAPS_NAME_REGEX.match("foo/bar")
+
+
+def test_maps_name_regex_rejects_dot_in_stem() -> None:
+    assert not C.MAPS_NAME_REGEX.match("foo.pgm")
+    assert not C.MAPS_NAME_REGEX.match(".hidden")
+
+
+def test_maps_name_regex_rejects_empty() -> None:
+    assert not C.MAPS_NAME_REGEX.match("")
+
+
+def test_maps_name_regex_rejects_too_long() -> None:
+    assert not C.MAPS_NAME_REGEX.match("a" * 65)
+
+
+def test_maps_name_regex_rejects_null_byte() -> None:
+    assert not C.MAPS_NAME_REGEX.match("foo\x00bar")
+
+
+def test_maps_name_regex_accepts_reserved_active_name() -> None:
+    # Regex itself accepts "active"; the reserved-name check lives at
+    # the maps.py public-function layer (set_active / delete_pair).
+    assert C.MAPS_NAME_REGEX.match("active")

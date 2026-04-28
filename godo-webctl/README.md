@@ -15,7 +15,12 @@ Phase 4-2 D Unix-domain JSON-lines socket at `/run/godo/ctl.sock`.
 | POST | `/api/live`         | Toggle Live ↔ Idle on the tracker (admin) |
 | GET  | `/api/last_pose`    | One-shot pose snapshot (public) |
 | GET  | `/api/last_pose/stream` | SSE: pose @ 5 Hz (public) |
-| GET  | `/api/map/image`    | PGM rendered to PNG (public) |
+| GET  | `/api/map/image`    | PGM rendered to PNG of the **active** map (public) |
+| GET  | `/api/maps`         | List every map pair under `GODO_WEBCTL_MAPS_DIR` (public) |
+| GET  | `/api/maps/<name>/image` | PNG for a specific named map (public) |
+| GET  | `/api/maps/<name>/yaml`  | YAML text for a specific named map (public) |
+| POST | `/api/maps/<name>/activate` | Atomic active-symlink swap (admin) |
+| DELETE | `/api/maps/<name>` | Remove `<name>.pgm` + `<name>.yaml` (admin; 409 on the active map) |
 | GET  | `/api/activity?n=`  | Last N operator actions (public) |
 | POST | `/api/auth/login`   | Issue a JWT (public) |
 | POST | `/api/auth/logout`  | Acknowledge logout (viewer) |
@@ -152,7 +157,8 @@ All values are optional. Defaults shown in the right column.
 | `GODO_WEBCTL_PORT` | `8080` | HTTP port. |
 | `GODO_WEBCTL_UDS_SOCKET` | `/run/godo/ctl.sock` | Tracker UDS. Same-uid clients only (see `production/RPi5/doc/uds_protocol.md` §F). |
 | `GODO_WEBCTL_BACKUP_DIR` | `/var/lib/godo/map-backups` | Where `/api/map/backup` writes timestamped snapshots. |
-| `GODO_WEBCTL_MAP_PATH` | `/etc/godo/maps/studio_v1.pgm` | **MUST include `.pgm` suffix** AND **MUST match the tracker's `GODO_AMCL_MAP_PATH`**. The `.yaml` sibling is derived by stripping `.pgm` (mirrors `occupancy_grid.cpp::yaml_path_for`). |
+| `GODO_WEBCTL_MAP_PATH` | `/etc/godo/maps/studio_v1.pgm` | **DEPRECATED** (Track E, PR-C). One-release back-compat: when set + the file exists AND `${GODO_WEBCTL_MAPS_DIR}/active.pgm` is missing on boot, webctl auto-migrates the legacy pair into `maps_dir` and creates the active symlink. webctl logs WARN every boot until this var is unset. New deployments MUST use `GODO_WEBCTL_MAPS_DIR` and the active-symlink discipline. |
+| `GODO_WEBCTL_MAPS_DIR` | `/var/lib/godo/maps` | Multi-map storage directory (Track E, PR-C). Map pairs are `<name>.pgm` + `<name>.yaml`; active pair selected via `active.pgm` + `active.yaml` symlinks (atomic `os.replace` under `flock`). |
 | `GODO_WEBCTL_HEALTH_UDS_TIMEOUT_S` | `2.0` | Per-syscall UDS timeout for `/api/health`. Worst-case wall-clock ≤ ~6 s under server stall. |
 | `GODO_WEBCTL_CALIBRATE_UDS_TIMEOUT_S` | `30.0` | Per-syscall UDS timeout for `/api/calibrate`. UDS returns immediately (it just latches the mode); 30 s is a safety margin. |
 | `GODO_WEBCTL_JWT_SECRET_PATH` | `/var/lib/godo/auth/jwt_secret` | Where the HS256 secret lives. Lazy-generated 32 random bytes, mode 0600. |
@@ -237,6 +243,74 @@ curl -N "http://127.0.0.1:8080/api/last_pose/stream?token=$TOKEN"
 Polling pauses while the browser tab is hidden (Page Visibility API), so
 an idle tab in the background generates zero traffic.
 
+## Multi-map management (Track E, PR-C)
+
+The mapping Docker pipeline can drop multiple `<name>.{pgm,yaml}` pairs
+into `${GODO_WEBCTL_MAPS_DIR}` (default `/var/lib/godo/maps/`). webctl
+exposes them through 5 endpoints (see the table above) and the SPA
+`MapListPanel` lets the operator activate one or delete an obsolete
+one without SSH.
+
+### Active-symlink discipline
+
+```text
+/var/lib/godo/maps/
+├─ studio_v1.pgm
+├─ studio_v1.yaml
+├─ studio_v2.pgm
+├─ studio_v2.yaml
+├─ active.pgm  → studio_v1.pgm        (relative-target symlink)
+├─ active.yaml → studio_v1.yaml
+└─ .activate.lock                     (advisory flock target)
+```
+
+- **Atomic swap**: `set_active(name)` writes a tempfile-suffixed symlink
+  via `os.symlink(target, .active.<rand>.<ext>.tmp)` then `os.replace`
+  to the canonical `active.<ext>` name. Two POSIX-atomic syscalls; no
+  observable in-between state outside the webctl process.
+- **Concurrent serialization**: both symlinks (PGM + YAML) are swapped
+  under one `flock(LOCK_EX)` on `.activate.lock`. Last-writer-wins.
+- **Self-healing**: every `set_active` sweeps `.active.*.tmp` leftovers
+  from any prior crashed swap before creating its own tmp.
+- **Path-traversal**: `<name>` MUST match `^[a-zA-Z0-9_-]{1,64}$`. The
+  reserved name `"active"` is rejected at the `maps.py` layer (would
+  otherwise collide with the resolver). `realpath` containment runs
+  in every public function so a malicious symlink whose name passes
+  the regex but escapes `maps_dir` is also rejected.
+
+### Tracker restart
+
+The C++ tracker reads `cfg.map_path` once at startup. After a
+`/api/maps/<name>/activate` call, the response carries
+`{"restart_required": true}` and the SPA confirm dialog offers a
+"godo-tracker 재시작" button (loopback-only, calls
+`/api/local/service/godo-tracker/restart`). On a non-loopback host the
+button is hidden — operator must SSH in. The P2 hot-reload class
+(tracker `inotify` + `OccupancyGrid` swap) removes this entirely.
+
+### Recovering a botched activate
+
+The active state is solely the two symlinks. Re-run
+`POST /api/maps/<other>/activate` (or `ln -sfT <name>.pgm
+/var/lib/godo/maps/active.pgm` over SSH) and the next tracker startup
+picks up the new target.
+
+### Migrating a legacy `cfg.map_path` deployment
+
+`scripts/godo-maps-migrate` is the operator one-shot. Boot-time
+auto-migration is also wired (idempotent), but the script is the
+visible-action path:
+
+```bash
+sudo install -m 0755 scripts/godo-maps-migrate /usr/local/bin/
+sudo godo-maps-migrate /etc/godo/maps/studio_v1.pgm
+# → migrated /etc/godo/maps/studio_v1.pgm -> /var/lib/godo/maps (active=studio_v1)
+sudo systemctl restart godo-webctl  # to clear the boot-time deprecation WARN
+```
+
+After migration, unset `GODO_WEBCTL_MAP_PATH` (edit `/etc/godo/webctl.env`)
+to silence the every-boot WARN.
+
 ## Restoring a backup
 
 `/var/lib/godo/map-backups/<timestamp>/` contains the `.pgm` and `.yaml`
@@ -260,6 +334,9 @@ field to match.
 | `backup_dir_unwritable` | webctl runs as a user without `/var/lib/godo` write access | Service unit pins `User=ncenter`; check `ls -ld /var/lib/godo`. |
 | `map_path_not_found` | `GODO_WEBCTL_MAP_PATH` typo or stale install | Confirm the file exists; ensure the env value INCLUDES `.pgm`. |
 | Tracker permission-denied on UDS connect | webctl is running as a different uid than the tracker | Run as the same uid (`ncenter` on news-pi01) until `SocketGroup=godo` lands (Phase 4-2 follow-up). |
+| `EROFS` from `set_active` after overriding `GODO_WEBCTL_MAPS_DIR` | The unit's `ProtectSystem=strict` + `ReadWritePaths=/var/lib/godo` only covers the default. | Add the new path to a unit override: `sudo systemctl edit godo-webctl` → `[Service]\nReadWritePaths=/var/lib/godo /your/maps/dir`, then `sudo systemctl daemon-reload` and `restart`. |
+| `map_is_active` (HTTP 409) on DELETE | Operator clicked Delete on the active row. | Activate a different map first, then delete; the SPA also disables the Delete button on the active row. |
+| `maps.legacy_map_path_in_use` WARN every boot | `GODO_WEBCTL_MAP_PATH` is still set in `/etc/godo/webctl.env`. | After confirming `${GODO_WEBCTL_MAPS_DIR}/active.pgm` exists, comment out (or remove) the `GODO_WEBCTL_MAP_PATH=…` line and restart webctl. |
 
 ## Tests
 

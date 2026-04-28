@@ -82,6 +82,23 @@ def test_encode_get_last_pose_byte_exact() -> None:
     assert P.encode_get_last_pose() == b'{"cmd":"get_last_pose"}\n'
 
 
+# --- Track E (PR-C) — multi-map mirror -----------------------------------
+
+
+def test_track_e_error_codes_pinned() -> None:
+    assert P.ERR_INVALID_MAP_NAME == "invalid_map_name"
+    assert P.ERR_MAP_NOT_FOUND == "map_not_found"
+    assert P.ERR_MAP_IS_ACTIVE == "map_is_active"
+    assert P.ERR_MAPS_DIR_MISSING == "maps_dir_missing"
+
+
+def test_maps_name_regex_pattern_str_mirrors_constants() -> None:
+    from godo_webctl.constants import MAPS_NAME_REGEX
+
+    # SSOT side on the LHS — drift from constants.py is what we catch.
+    assert MAPS_NAME_REGEX.pattern == P.MAPS_NAME_REGEX_PATTERN_STR
+
+
 def test_last_pose_fields_match_cpp_source() -> None:
     """Drift pin: regex-extract field names from format_ok_pose's printf
     format string and assert byte-equal against LAST_POSE_FIELDS.

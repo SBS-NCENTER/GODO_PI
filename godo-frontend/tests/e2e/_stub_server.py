@@ -57,6 +57,25 @@ USERS = {
     "viewer": {"password": "viewer", "role": "viewer"},
 }
 
+# Track E (PR-C) — multi-map state. Stub remembers activate/delete in-
+# memory so repeated calls in one spec see consistent state (per
+# Mode-A note in plan §"_stub_server.py updates").
+MAPS_STATE: dict[str, dict[str, Any]] = {
+    "studio_v1": {"size_bytes": 1024, "mtime_unix": 1700000000.0},
+    "studio_v2": {"size_bytes": 2048, "mtime_unix": 1700000100.0},
+}
+ACTIVE_MAP = {"value": "studio_v1"}
+
+# Per Mode-A M4: a query-string flag flips the loopback gate so e2e can
+# exercise the non-loopback `restart` denial path. Set with
+# `?stub_loopback=false` on the page URL once before navigating to /map.
+STUB_FLAGS: dict[str, bool] = {"loopback": True}
+
+# Track E `name` regex; mirror of MAPS_NAME_REGEX_PATTERN_STR.
+import re as _re
+
+_MAPS_NAME_RE = _re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+
 
 def _b64url_encode(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
@@ -218,6 +237,20 @@ class StubHandler(BaseHTTPRequestHandler):
         parts = path.split("/")
         if len(parts) == 6 and parts[:4] == ["", "api", "local", "service"]:
             _route_service_action(self, parts[4], parts[5])
+            return
+        # Track E (PR-C): /api/maps/<name>/activate
+        if path.startswith("/api/maps/") and path.endswith("/activate"):
+            name = path[len("/api/maps/") : -len("/activate")]
+            _h_maps_activate(self, name)
+            return
+        self._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "err": "not_found"})
+
+    def do_DELETE(self) -> None:  # noqa: N802 - stdlib API
+        path = urlparse(self.path).path
+        # Track E: /api/maps/<name>
+        if path.startswith("/api/maps/"):
+            name = path[len("/api/maps/") :]
+            _h_maps_delete(self, name)
             return
         self._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "err": "not_found"})
 
@@ -400,6 +433,13 @@ def _h_local_journal(req: StubHandler) -> None:
 
 
 def _route_service_action(req: StubHandler, name: str, action: str) -> None:
+    # Mode-A M4: backend gates `/api/local/*` on actual TCP peer IP. The
+    # stub mimics that gate via `STUB_FLAGS["loopback"]` (flipped by the
+    # `?stub_loopback=false` query string flag) so e2e can exercise the
+    # 403 path without spoofing the peer IP.
+    if not STUB_FLAGS["loopback"]:
+        req._send_json(HTTPStatus.FORBIDDEN, {"ok": False, "err": "loopback_only"})
+        return
     c = req._require_admin()
     if c is None:
         return
@@ -411,6 +451,97 @@ def _route_service_action(req: StubHandler, name: str, action: str) -> None:
         return
     _activity_append(f"svc_{action}", f"{name} by {c['sub']}")
     req._send_json(HTTPStatus.OK, {"ok": True, "status": "active"})
+
+
+# --- Track E (PR-C) — multi-map handlers --------------------------------
+
+
+def _maps_list_payload() -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    with LOCK:
+        for name in sorted(MAPS_STATE.keys()):
+            meta = MAPS_STATE[name]
+            rows.append(
+                {
+                    "name": name,
+                    "size_bytes": meta["size_bytes"],
+                    "mtime_unix": meta["mtime_unix"],
+                    "is_active": name == ACTIVE_MAP["value"],
+                },
+            )
+    return rows
+
+
+def _h_maps_list(req: StubHandler) -> None:
+    req._send_json(HTTPStatus.OK, _maps_list_payload())
+
+
+def _h_maps_image(req: StubHandler, name: str) -> None:
+    if not _MAPS_NAME_RE.match(name):
+        req._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "err": "invalid_map_name"})
+        return
+    if name not in MAPS_STATE:
+        req._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "err": "map_not_found"})
+        return
+    req._send_bytes(HTTPStatus.OK, "image/png", _png_1x1())
+
+
+def _h_maps_yaml(req: StubHandler, name: str) -> None:
+    if not _MAPS_NAME_RE.match(name):
+        req._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "err": "invalid_map_name"})
+        return
+    if name not in MAPS_STATE:
+        req._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "err": "map_not_found"})
+        return
+    body = (
+        f"image: {name}.pgm\nresolution: 0.05\norigin: [0,0,0]\n"
+        "occupied_thresh: 0.65\nfree_thresh: 0.196\nnegate: 0\n"
+    ).encode("utf-8")
+    req._send_bytes(HTTPStatus.OK, "text/plain; charset=utf-8", body)
+
+
+def _h_maps_activate(req: StubHandler, name: str) -> None:
+    c = req._require_admin()
+    if c is None:
+        return
+    if name == "active":
+        req._send_json(
+            HTTPStatus.BAD_REQUEST,
+            {"ok": False, "err": "invalid_map_name", "detail": "reserved_name"},
+        )
+        return
+    if not _MAPS_NAME_RE.match(name):
+        req._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "err": "invalid_map_name"})
+        return
+    with LOCK:
+        if name not in MAPS_STATE:
+            req._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "err": "map_not_found"})
+            return
+        ACTIVE_MAP["value"] = name
+    _activity_append("map_activate", f"{name} by {c['sub']}")
+    req._send_json(HTTPStatus.OK, {"ok": True, "restart_required": True})
+
+
+def _h_maps_delete(req: StubHandler, name: str) -> None:
+    c = req._require_admin()
+    if c is None:
+        return
+    if name == "active":
+        req._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "err": "invalid_map_name"})
+        return
+    if not _MAPS_NAME_RE.match(name):
+        req._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "err": "invalid_map_name"})
+        return
+    with LOCK:
+        if name not in MAPS_STATE:
+            req._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "err": "map_not_found"})
+            return
+        if ACTIVE_MAP["value"] == name:
+            req._send_json(HTTPStatus.CONFLICT, {"ok": False, "err": "map_is_active"})
+            return
+        del MAPS_STATE[name]
+    _activity_append("map_delete", f"{name} by {c['sub']}")
+    req._send_json(HTTPStatus.OK, {"ok": True})
 
 
 def _h_system_reboot(req: StubHandler) -> None:
@@ -448,8 +579,22 @@ _orig_do_get = StubHandler.do_GET
 
 def _do_get_with_prefix(self: StubHandler) -> None:
     path = urlparse(self.path).path
+    qs = parse_qs(urlparse(self.path).query)
+    if "stub_loopback" in qs:
+        STUB_FLAGS["loopback"] = qs["stub_loopback"][0].lower() in {"1", "true", "yes"}
     if path.startswith("/api/local/journal/"):
         _h_local_journal(self)
+        return
+    if path == "/api/maps":
+        _h_maps_list(self)
+        return
+    if path.startswith("/api/maps/") and path.endswith("/image"):
+        name = path[len("/api/maps/") : -len("/image")]
+        _h_maps_image(self, name)
+        return
+    if path.startswith("/api/maps/") and path.endswith("/yaml"):
+        name = path[len("/api/maps/") : -len("/yaml")]
+        _h_maps_yaml(self, name)
         return
     _orig_do_get(self)
 

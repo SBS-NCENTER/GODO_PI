@@ -45,6 +45,7 @@ class Settings:
     uds_socket: Path
     backup_dir: Path
     map_path: Path
+    maps_dir: Path
     health_uds_timeout_s: float
     calibrate_uds_timeout_s: float
     jwt_secret_path: Path
@@ -60,6 +61,7 @@ _DEFAULTS: Final[dict[str, str]] = {
     "GODO_WEBCTL_UDS_SOCKET": "/run/godo/ctl.sock",
     "GODO_WEBCTL_BACKUP_DIR": "/var/lib/godo/map-backups",
     "GODO_WEBCTL_MAP_PATH": "/etc/godo/maps/studio_v1.pgm",
+    "GODO_WEBCTL_MAPS_DIR": "/var/lib/godo/maps",
     "GODO_WEBCTL_HEALTH_UDS_TIMEOUT_S": "2.0",
     "GODO_WEBCTL_CALIBRATE_UDS_TIMEOUT_S": "30.0",
     "GODO_WEBCTL_JWT_SECRET_PATH": "/var/lib/godo/auth/jwt_secret",
@@ -75,6 +77,7 @@ _PARSERS: Final[dict[str, Callable[[str], Any]]] = {
     "GODO_WEBCTL_UDS_SOCKET": Path,
     "GODO_WEBCTL_BACKUP_DIR": Path,
     "GODO_WEBCTL_MAP_PATH": Path,
+    "GODO_WEBCTL_MAPS_DIR": Path,
     "GODO_WEBCTL_HEALTH_UDS_TIMEOUT_S": float,
     "GODO_WEBCTL_CALIBRATE_UDS_TIMEOUT_S": float,
     "GODO_WEBCTL_JWT_SECRET_PATH": Path,
@@ -91,6 +94,7 @@ _ENV_TO_FIELD: Final[dict[str, str]] = {
     "GODO_WEBCTL_UDS_SOCKET": "uds_socket",
     "GODO_WEBCTL_BACKUP_DIR": "backup_dir",
     "GODO_WEBCTL_MAP_PATH": "map_path",
+    "GODO_WEBCTL_MAPS_DIR": "maps_dir",
     "GODO_WEBCTL_HEALTH_UDS_TIMEOUT_S": "health_uds_timeout_s",
     "GODO_WEBCTL_CALIBRATE_UDS_TIMEOUT_S": "calibrate_uds_timeout_s",
     "GODO_WEBCTL_JWT_SECRET_PATH": "jwt_secret_path",

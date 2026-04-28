@@ -147,3 +147,10 @@ export async function apiPatch<T>(path: string, body: unknown, init?: RequestIni
   });
   return (await resp.json()) as T;
 }
+
+export async function apiDelete<T>(path: string, init?: RequestInit): Promise<T | null> {
+  const resp = await apiFetch(path, { ...init, method: 'DELETE' });
+  const ctype = resp.headers.get('content-type') || '';
+  if (!ctype.includes('application/json')) return null;
+  return (await resp.json()) as T;
+}

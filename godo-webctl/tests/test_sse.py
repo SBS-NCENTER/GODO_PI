@@ -31,6 +31,7 @@ def _settings() -> Settings:
         uds_socket=Path("/tmp/x"),
         backup_dir=Path("/tmp/bk"),
         map_path=Path("/tmp/m.pgm"),
+        maps_dir=Path("/tmp/maps"),
         health_uds_timeout_s=1.0,
         calibrate_uds_timeout_s=1.0,
         jwt_secret_path=Path("/tmp/j"),

@@ -21,6 +21,7 @@
     { path: '/map', label: 'Map' },
     { path: '/diag', label: 'Diagnostics' },
     { path: '/config', label: 'Config' },
+    { path: '/system', label: 'System' },
   ];
 
   function go(p: string): void {

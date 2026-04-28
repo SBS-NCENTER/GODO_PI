@@ -48,6 +48,7 @@ godo-frontend/
 │   │   ├─ Map.svelte                 # B-MAP
 │   │   ├─ Login.svelte               # B-AUTH
 │   │   ├─ Local.svelte               # B-LOCAL (loopback-gated)
+│   │   ├─ System.svelte              # B-SYSTEM (anon-readable; admin-gated buttons)
 │   │   └─ NotFound.svelte
 │   └─ /styles
 │       ├─ tokens.css                 # CSS variables (light/dark)
@@ -770,3 +771,115 @@ ConfirmDialog}.svelte`.
   the Python NamedTuple at compile time. The runtime schema fetch
   populates the field DATA, but the field TYPES come from this file.
   Drift catch: `tests/unit/protocol.test.ts` constructor pins.
+
+### (v) PR-SYSTEM — `/system` reuses the diag store; no second SSE
+
+`routes/System.svelte` calls `subscribeDiag(fn)` (the same entry point
+`Diagnostics.svelte` uses). The CPU-temperature sparkline reads from
+`diagSparklines.cpu_temp_c`, not from a parallel ring. When both
+`/diag` and `/system` are mounted (e.g. tabbed), `_getSubscriberCount
+ForTests()` reports 2 but invariant (p) keeps the underlying SSE at 1.
+`System.svelte` MUST capture the unsubscribe closure returned by
+`subscribeDiag(fn)` and call it in `onDestroy` (mirror of
+`Diagnostics.svelte:50-54`); failing to do so silently leaks a
+subscriber and defeats invariant (p). A System-side resources-poll on
+`/api/system/resources` is a code-review block.
+
+Pinned by `tests/unit/system.test.ts::renders four panels, registers
+one diag subscriber on mount, and unsubs on unmount` (subscriber count
+== 1 after mount, == 0 after unmount).
+
+### (w) PR-SYSTEM — sparkline window matches `DIAG_SPARKLINE_DEPTH × SSE_TICK_MS`
+
+The System page sparkline label is computed from constants, not
+hardcoded. Current value: `60 × 200 ms = 12000 ms = 12 s`.
+FRONT_DESIGN §C describes B-SYSTEM as having a "5분 graph"; this is
+a deliberate, documented deferral — bumping to 5 min requires growing
+the central `DIAG_SPARKLINE_DEPTH` to 1500 (60 KB total store cost),
+which is cheap but affects `/diag` simultaneously and so is left to
+a deliberate follow-up. The System page MUST NOT carry its own
+parallel deeper ring. Pinned by
+`tests/unit/system.test.ts::sparkline label is derived from
+DIAG_SPARKLINE_DEPTH × SSE_TICK_MS`.
+
+## 2026-04-29 — PR-SYSTEM (Track B-SYSTEM): /system page
+
+### Added
+
+- `src/routes/System.svelte` (~210 LOC) — B-SYSTEM page. Four panels
+  in CSS-grid auto-fit: CPU-temperature sparkline (panel-cpu-temp),
+  Resources mem/disk numbers (panel-resources), Journal tail
+  (panel-journal — reuses `<JournalTail/>`), Power buttons
+  (panel-power — admin-gated reboot/shutdown wrapped by
+  `<ConfirmDialog/>`). Subscribes to the existing `diag` store via
+  `subscribeDiag` (invariant (v)); captures the unsub closure and
+  calls it in `onDestroy` (invariant (v) + N3 fold). The anon-hint
+  string is verbatim mirror of `routes/Local.svelte:169` ("제어 동작은
+  로그인이 필요합니다.") per Mode-A M2 fold.
+- `tests/unit/system.test.ts` (6 cases — see below).
+- `tests/e2e/system.spec.ts` (3 cases — see below).
+
+### Changed
+
+- `src/routes.ts` — register `/system → System.svelte` (1 line +
+  1 import).
+- `src/components/Sidebar.svelte` — append `{ path: '/system', label:
+'System' }` to the `items` array. The Sidebar generates
+  `data-testid="nav-system"` automatically from the lowercased label.
+
+### Tests
+
+- New: `tests/unit/system.test.ts` (6 cases):
+  - `renders four panels, registers one diag subscriber on mount, and
+unsubs on unmount` — N3 fold pin (subscriber count round-trips
+    0 → 1 → 0).
+  - `sparkline label is derived from DIAG_SPARKLINE_DEPTH × SSE_TICK_MS`
+    — T1 fold (no magic literal; survives a future depth bump).
+  - `anon viewer sees disabled reboot + shutdown buttons and the
+verbatim anon-hint` — M2 fold (string verbatim from
+    `routes/Local.svelte:169`).
+  - `admin viewer sees enabled reboot + shutdown buttons (no
+anon-hint)` — anti-tautology partner of (3).
+  - `reboot click opens the confirm dialog; cancel does NOT call
+apiPost` — pivot-on-user-choice pin.
+  - `reboot confirm-confirm calls apiPost('/api/system/reboot')
+exactly once` — M3 fold (anti-typo pin: never `/shutdown`).
+- New: `tests/e2e/system.spec.ts` (3 cases):
+  - `system: happy path renders all four panels with SSE-fed
+resources` — login first (SSEClient token gate), assert
+    sparkline + mem/disk + journal-empty render. Sparkline selector
+    scoped inside `panel-cpu-temp` per N1 fold.
+  - `system: anon viewer sees disabled reboot button + verbatim hint`.
+  - `system: sidebar nav link routes to /system`.
+- `tests/e2e/_stub_server.py` — NO changes (N4 fold: the four
+  endpoints `/api/system/resources`, `/api/logs/tail`,
+  `/api/system/reboot`, `/api/system/shutdown` already exist at
+  lines 825, 827, 872, 873 from PR-DIAG and PR-B).
+
+### Mode-A folds applied
+
+- M1: kept `DIAG_SPARKLINE_DEPTH = 60` (12 s window). FRONT_DESIGN §C
+  "5분" → 12 s deviation called out explicitly; upgrade path is a
+  deliberate one-line constant bump in a follow-up PR that updates
+  both `/diag` and `/system` labels coherently.
+- M2: anon-hint string is verbatim mirror of `routes/Local.svelte:169`.
+- M3: confirm-success unit test added (test 6 — anti-typo pin).
+- N1: e2e sparkline assertion scoped inside `panel-cpu-temp`.
+- N3: `onDestroy` MUST call the `subscribeDiag` unsub closure;
+  unit test 1 asserts subscriber count returns to 0 on unmount.
+- N4: zero changes to `_stub_server.py` (pre-existing stubs verified).
+- T1: sparkline label test reads constants, not literals.
+
+### Bundle size
+
+Pre-PR baseline: `dist/assets/index.js` 74.97 kB / gzip 28.07 kB.
+After PR-SYSTEM: 79.27 kB / gzip 28.95 kB. Delta: +4.30 kB raw /
+**+0.88 kB gzipped** — well under the 2 KB cap.
+
+### Total frontend test count after PR-SYSTEM
+
+`npm run test:unit` 99 → 105 cases. `npm run test:e2e` 30 → 33 cases
+(31 of 33 pass; the pre-existing `config.spec.ts::config: anonymous
+viewer does NOT see the Config nav row` failure from commit `265f5f6`
+— where Config nav was made anon-visible without updating the test
+— is unrelated to this PR and remains red).

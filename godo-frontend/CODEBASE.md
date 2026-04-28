@@ -49,6 +49,7 @@ godo-frontend/
 │   │   ├─ Login.svelte               # B-AUTH
 │   │   ├─ Local.svelte               # B-LOCAL (loopback-gated)
 │   │   ├─ System.svelte              # B-SYSTEM (anon-readable; admin-gated buttons)
+│   │   ├─ Backup.svelte              # B-BACKUP (anon-readable; admin-gated restore)
 │   │   └─ NotFound.svelte
 │   └─ /styles
 │       ├─ tokens.css                 # CSS variables (light/dark)
@@ -883,3 +884,80 @@ After PR-SYSTEM: 79.27 kB / gzip 28.95 kB. Delta: +4.30 kB raw /
 viewer does NOT see the Config nav row` failure from commit `265f5f6`
 — where Config nav was made anon-visible without updating the test
 — is unrelated to this PR and remains red).
+
+### 2026-04-29 — Track B-BACKUP: map-backup history page (P2 Step 2)
+
+#### Added
+
+- `src/routes/Backup.svelte` — `/backup` page. Anon-readable table of
+  every `<ts>` snapshot under `cfg.backup_dir`; admin-gated 복원
+  button per row + `<ConfirmDialog/>` two-line body (per Mode-A N2
+  fold). On success, banner shows `BACKUP_RESTORE_SUCCESS_TOAST`
+  (mirrors Track E activate flow per Mode-A N1 fold). Mounts mirror
+  `MapListPanel.svelte` structure verbatim.
+- `src/lib/constants.ts` — 2 new SSOT constants per Mode-A TB1 fold:
+  - `BACKUP_RESTORE_SUCCESS_TOAST` — the success toast wording;
+    imported by both `Backup.svelte` AND `tests/unit/backup.test.ts`
+    (no literal-string duplication).
+  - `BACKUP_RESTORE_OVERWRITE_WARNING` — the dialog warning line.
+- `src/lib/protocol.ts` — `BackupEntry`, `BackupListResponse`,
+  `RestoreResponse` interfaces + 2 error-code mirrors
+  (`ERR_BACKUP_NOT_FOUND`, `ERR_RESTORE_NAME_CONFLICT`). Mode-A M5
+  fold: only 2 codes (`backup_dir_missing` was dropped — list returns
+  `[]` uniformly).
+- `tests/unit/backup.test.ts` — 6 vitest cases: list-newest-first,
+  anon-disabled, admin-enabled, confirm flow POSTs once, success
+  banner shows imported `BACKUP_RESTORE_SUCCESS_TOAST` (TB1 SSOT
+  pin), 4xx surfaces inline `body.err`.
+- `tests/e2e/backup.spec.ts` — 3 playwright cases: anon table renders
+  with disabled restore, admin restore confirm flow + success toast,
+  sidebar nav row routes to `/backup`.
+- `tests/e2e/_stub_server.py` — list + restore handlers with in-memory
+  `BACKUPS_STATE` (2 canonical-stamp entries seeded). Restore mirrors
+  the backend wire shape: 422 on malformed `<ts>` + 404 on unknown +
+  200 with `{ok, ts, restored}` on success.
+
+#### Changed
+
+- `src/routes.ts` — 1 new line: `'/backup': Backup`.
+- `src/components/Sidebar.svelte` — 1 new row in `items`:
+  `{ path: '/backup', label: 'Backup' }`.
+
+#### Removed
+
+- (none)
+
+#### Tests
+
+- 105 → 111 vitest unit cases (+6 from `backup.test.ts`).
+- 31 → 34 playwright e2e cases (+3 from `backup.spec.ts`). One
+  pre-existing failure (`config.spec.ts: anonymous viewer does NOT
+see the Config nav row`) is unrelated — predated this PR (the
+  earlier `265f5f6 fix(p4.5)` commit made the Config nav anon-visible
+  but left this stale test on disk).
+- `npm run lint` clean; `npm run build` produces 29.97 kB gzipped JS
+  (was 28.95 kB; +1.02 kB delta — well under the +3 KB Mode-A N3
+  budget).
+
+#### No new invariants
+
+Existing coverage suffices:
+
+- (e) no magic numbers — `Backup.svelte` has none (every literal
+  resolves to `lib/constants.ts`, a wire-side string in
+  `lib/protocol.ts`, or a local iteration bound).
+- (j) home-grown router — `/backup` is a static path.
+- (l) `<ConfirmDialog/>` reused for restore confirm.
+
+#### Mode-A folds applied
+
+- M1: backend invariant added as `(t)`.
+- M3: `FRONT_DESIGN.md:505` `viewer` → `anon` brought into alignment
+  with Track F.
+- M5: backend list endpoint returns 200 always; SPA expects empty
+  `items` for both missing-dir and empty-dir cases.
+- N1: success toast wording mirrors Track E (`MapListPanel.svelte:116`).
+- N2: confirm dialog body is two-line (`'<ts>'` line + warning line).
+- TB1: toast strings exported as constants in `lib/constants.ts`;
+  `Backup.svelte` AND `tests/unit/backup.test.ts` import the same
+  symbol.

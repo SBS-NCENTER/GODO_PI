@@ -394,3 +394,31 @@ export interface ActivateResponse {
   ok: true;
   restart_required: true;
 }
+
+// --- Track B-BACKUP — map-backup history wire shapes -----------------
+// Mirror of `godo_webctl.map_backup.BackupEntry.to_dict()` and the
+// HTTP shapes in `godo_webctl.app::map_backup_list` /
+// `map_backup_restore`. Mode-A M5 fold: `list_backups` returns 200
+// always (no `backup_dir_missing` error) — the wire shape is
+// `{items: [...]}` even when the directory is missing.
+
+export interface BackupEntry {
+  ts: string; // canonical "YYYYMMDDTHHMMSSZ"
+  files: string[]; // sorted basenames present in the dir
+  size_bytes: number; // sum of stat.st_size across all files
+}
+
+export interface BackupListResponse {
+  items: BackupEntry[];
+}
+
+export interface RestoreResponse {
+  ok: true;
+  ts: string;
+  restored: string[];
+}
+
+// Track B-BACKUP error codes. Mode-A M5 fold: only 2 codes (no
+// `backup_dir_missing` — list returns [] uniformly).
+export const ERR_BACKUP_NOT_FOUND = 'backup_not_found';
+export const ERR_RESTORE_NAME_CONFLICT = 'restore_name_conflict';

@@ -76,6 +76,25 @@ import re as _re
 
 _MAPS_NAME_RE = _re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
+# Track B-BACKUP — canonical UTC stamp regex; mirror of
+# `godo_webctl.map_backup._TS_REGEX`.
+_BACKUP_TS_RE = _re.compile(r"^[0-9]{8}T[0-9]{6}Z$")
+
+# In-memory backup state. Stub remembers a list of canonical-stamp
+# entries plus an "already restored" set (informational only — restore
+# always succeeds for known stamps, mirroring the real backend's
+# overwrite-by-design contract).
+BACKUPS_STATE: dict[str, dict[str, Any]] = {
+    "20260202T020202Z": {
+        "files": ["studio_v2.pgm", "studio_v2.yaml"],
+        "size_bytes": 4096,
+    },
+    "20260101T010101Z": {
+        "files": ["studio_v1.pgm", "studio_v1.yaml"],
+        "size_bytes": 2048,
+    },
+}
+
 
 def _b64url_encode(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
@@ -242,6 +261,11 @@ class StubHandler(BaseHTTPRequestHandler):
         if path.startswith("/api/maps/") and path.endswith("/activate"):
             name = path[len("/api/maps/") : -len("/activate")]
             _h_maps_activate(self, name)
+            return
+        # Track B-BACKUP: /api/map/backup/<ts>/restore
+        if path.startswith("/api/map/backup/") and path.endswith("/restore"):
+            ts = path[len("/api/map/backup/") : -len("/restore")]
+            _h_backup_restore(self, ts)
             return
         self._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "err": "not_found"})
 
@@ -792,6 +816,53 @@ def _h_maps_delete(req: StubHandler, name: str) -> None:
     req._send_json(HTTPStatus.OK, {"ok": True})
 
 
+# --- Track B-BACKUP — map-backup history handlers ---------------------
+
+
+def _h_backup_list(req: StubHandler) -> None:
+    """Anon-readable list. Mode-A M5: always 200; items=[] when state
+    is empty (mirror of backend `list_backups` returning [] for both
+    missing-dir and empty-dir)."""
+    items: list[dict[str, Any]] = []
+    with LOCK:
+        for ts in sorted(BACKUPS_STATE.keys(), reverse=True):
+            meta = BACKUPS_STATE[ts]
+            items.append(
+                {
+                    "ts": ts,
+                    "files": list(meta["files"]),
+                    "size_bytes": meta["size_bytes"],
+                },
+            )
+    req._send_json(HTTPStatus.OK, {"items": items})
+
+
+def _h_backup_restore(req: StubHandler, ts: str) -> None:
+    """Admin-only restore. Mirrors the backend wire shape:
+    - 422 (or 404) on malformed `<ts>` (FastAPI Path constraint).
+    - 404 on unknown `<ts>` (`backup_not_found`).
+    - 200 with `{ok, ts, restored}` on success.
+    - 401 on anon (handled by `_require_admin`)."""
+    if not _BACKUP_TS_RE.match(ts):
+        # Mirror FastAPI Path(pattern=...) → 422.
+        req._send_json(
+            HTTPStatus.UNPROCESSABLE_ENTITY,
+            {"ok": False, "err": "validation_error"},
+        )
+        return
+    c = req._require_admin()
+    if c is None:
+        return
+    with LOCK:
+        meta = BACKUPS_STATE.get(ts)
+    if meta is None:
+        req._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "err": "backup_not_found"})
+        return
+    restored = list(meta["files"])
+    _activity_append("map_backup_restored", f"{ts} ({len(restored)} files)")
+    req._send_json(HTTPStatus.OK, {"ok": True, "ts": ts, "restored": restored})
+
+
 def _h_system_reboot(req: StubHandler) -> None:
     c = req._require_admin()
     if c is None:
@@ -855,6 +926,9 @@ def _do_get_with_prefix(self: StubHandler) -> None:
     if path.startswith("/api/maps/") and path.endswith("/yaml"):
         name = path[len("/api/maps/") : -len("/yaml")]
         _h_maps_yaml(self, name)
+        return
+    if path == "/api/map/backup/list":
+        _h_backup_list(self)
         return
     _orig_do_get(self)
 

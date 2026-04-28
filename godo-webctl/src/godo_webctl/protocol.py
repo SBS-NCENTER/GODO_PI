@@ -237,6 +237,14 @@ ERR_MAP_NOT_FOUND: Final[str] = "map_not_found"
 ERR_MAP_IS_ACTIVE: Final[str] = "map_is_active"
 ERR_MAPS_DIR_MISSING: Final[str] = "maps_dir_missing"
 
+# --- Track B-BACKUP — map-backup history error codes ---------------------
+# Webctl-internal (no C++ wire counterpart). Mirror in the SPA's
+# `lib/protocol.ts`. Per Mode-A M5 fold there is no `backup_dir_missing`
+# error: `list_backups` returns `[]` for both "dir missing" and "dir
+# exists but empty" so the wire shape is uniformly 200.
+ERR_BACKUP_NOT_FOUND: Final[str] = "backup_not_found"
+ERR_RESTORE_NAME_CONFLICT: Final[str] = "restore_name_conflict"
+
 # Mirror the regex pattern as a string so the SPA can do client-side
 # validation without depending on a Python regex parse. Frontend file:
 # `godo-frontend/src/lib/protocol.ts::MAPS_NAME_REGEX_PATTERN_STR`.

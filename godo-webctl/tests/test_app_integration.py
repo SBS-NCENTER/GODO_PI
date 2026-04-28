@@ -2265,3 +2265,200 @@ async def test_get_restart_pending_true_when_flag_exists(
         r = await cl.get("/api/system/restart_pending")
     assert r.status_code == HTTPStatus.OK
     assert r.json() == {"pending": True}
+
+
+# ============================================================================
+# Track B-BACKUP — /api/map/backup/list + /api/map/backup/<ts>/restore
+# ============================================================================
+
+
+async def test_backup_list_anon_returns_200(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    tmp_backup_dir: Path,
+) -> None:
+    """Track F: /api/map/backup/list is anonymous-readable; no token."""
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_backup_dir,
+    )
+    async with _client(s) as cl:
+        r = await cl.get("/api/map/backup/list")
+    assert r.status_code == HTTPStatus.OK
+    body = r.json()
+    assert "items" in body
+    assert isinstance(body["items"], list)
+
+
+async def test_backup_list_returns_newest_first(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    tmp_backup_dir: Path,
+) -> None:
+    """Wire-shape contract: items[0].ts is the most recent UTC stamp."""
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_backup_dir,
+    )
+    async with _client(s) as cl:
+        r = await cl.get("/api/map/backup/list")
+    assert r.status_code == HTTPStatus.OK
+    items = r.json()["items"]
+    assert len(items) == 2
+    assert items[0]["ts"] == "20260202T020202Z"
+    assert items[1]["ts"] == "20260101T010101Z"
+    assert sorted(items[0]["files"]) == ["studio_v2.pgm", "studio_v2.yaml"]
+
+
+async def test_backup_list_dir_missing_returns_200_empty(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    """Mode-A M5 fold: missing backup dir returns 200 with items=[]
+    (uniform shape — replaces the dropped 503 path)."""
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "no_such_backup_dir",
+    )
+    async with _client(s) as cl:
+        r = await cl.get("/api/map/backup/list")
+    assert r.status_code == HTTPStatus.OK
+    assert r.json() == {"items": []}
+
+
+async def test_backup_restore_admin_returns_200(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    tmp_backup_dir: Path,
+) -> None:
+    """Admin happy path: restore copies the named pair into maps_dir."""
+    maps_dir = tmp_path / "maps"
+    maps_dir.mkdir()
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_backup_dir,
+        maps_dir=maps_dir,
+    )
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post(
+            "/api/map/backup/20260101T010101Z/restore",
+            headers=_auth(token),
+        )
+    assert r.status_code == HTTPStatus.OK
+    body = r.json()
+    assert body["ok"] is True
+    assert body["ts"] == "20260101T010101Z"
+    assert sorted(body["restored"]) == ["studio_v1.pgm", "studio_v1.yaml"]
+    # Files actually present in maps_dir.
+    assert (maps_dir / "studio_v1.pgm").is_file()
+    assert (maps_dir / "studio_v1.yaml").is_file()
+
+
+async def test_backup_restore_unauth_returns_401(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    tmp_backup_dir: Path,
+) -> None:
+    """Track F: anon mutation rejected with 401."""
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_backup_dir,
+    )
+    async with _client(s) as cl:
+        r = await cl.post("/api/map/backup/20260101T010101Z/restore")
+    assert r.status_code == HTTPStatus.UNAUTHORIZED
+    assert r.json()["err"] == "auth_required"
+
+
+async def test_backup_restore_unknown_ts_returns_404(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    tmp_backup_dir: Path,
+) -> None:
+    """Well-formed but non-existent ts → 404 backup_not_found."""
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_backup_dir,
+    )
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post(
+            "/api/map/backup/29991231T235959Z/restore",
+            headers=_auth(token),
+        )
+    assert r.status_code == HTTPStatus.NOT_FOUND
+    assert r.json()["err"] == "backup_not_found"
+
+
+async def test_backup_restore_dot_traversal_returns_4xx(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    tmp_backup_dir: Path,
+) -> None:
+    """Path-traversal corpus for restore: malformed `<ts>` MUST be
+    rejected before any FS touch. FastAPI's `Path(pattern=...)` runs
+    BEFORE the handler (returns 422); some inputs collapse via routing
+    to 404 (e.g. encoded slashes that the router unwraps into a
+    non-matching route). Both outcomes are valid rejections; only a
+    200/2xx on a traversal name would be a real escape."""
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_backup_dir,
+    )
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        for bad in ("..", ".hidden", "foo", "20260101"):
+            r = await cl.post(
+                f"/api/map/backup/{bad}/restore",
+                headers=_auth(token),
+            )
+            # Routing-vs-handler discipline (mirror of Track E
+            # `test_activate_dot_traversal_returns_400`): inputs like
+            # `..` are normalised by httpx/Starlette and may surface
+            # via routing as 404/405 BEFORE reaching the handler;
+            # legal-shape inputs that fail the FastAPI Path(pattern=...)
+            # constraint surface as 422. Either rejection class is
+            # acceptable; only a 200/2xx would be a real escape.
+            assert r.status_code in (
+                HTTPStatus.UNPROCESSABLE_ENTITY,
+                HTTPStatus.NOT_FOUND,
+                HTTPStatus.METHOD_NOT_ALLOWED,
+                HTTPStatus.BAD_REQUEST,
+            ), f"bad ts {bad!r} returned {r.status_code}"
+
+
+async def test_backup_restore_appends_activity_log(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    tmp_backup_dir: Path,
+) -> None:
+    """Mode-A N7 fold: activity-log entry detail is `f"{ts} ({n} files)"`."""
+    maps_dir = tmp_path / "maps"
+    maps_dir.mkdir()
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_backup_dir,
+        maps_dir=maps_dir,
+    )
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        await cl.post(
+            "/api/map/backup/20260101T010101Z/restore",
+            headers=_auth(token),
+        )
+        r = await cl.get("/api/activity?n=10")
+    assert r.status_code == HTTPStatus.OK
+    items = r.json()
+    types_to_details = {e["type"]: e["detail"] for e in items}
+    assert "map_backup_restored" in types_to_details
+    # Format pin: `<ts> (<n> files)` exactly.
+    assert types_to_details["map_backup_restored"] == "20260101T010101Z (2 files)"

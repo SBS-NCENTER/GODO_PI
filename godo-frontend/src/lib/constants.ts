@@ -166,3 +166,17 @@ export const LOGS_TAIL_DEFAULT_N = 50;
 export const JITTER_PANEL_COLOR = '#7e57c2'; // purple
 export const AMCL_RATE_PANEL_COLOR = '#26a69a'; // teal (matches scan dot)
 export const RESOURCES_PANEL_COLOR = '#42a5f5'; // light blue
+
+// --- Track B-BACKUP — map-backup history page strings ----------------
+// Mode-A N1 fold: success toast wording mirrors Track E
+// `MapListPanel.svelte:116` so operators see consistent restart-flow
+// language across both flows. TB1 fold pins this as a constant so
+// `Backup.svelte` AND `tests/unit/backup.test.ts` import the same
+// symbol — no literal-string duplication.
+export const BACKUP_RESTORE_SUCCESS_TOAST =
+  '복원 완료. /map에서 활성화하면 godo-tracker 재시작 후 적용됩니다.';
+
+// Mode-A N2 fold: confirm dialog two-line body. The first line
+// interpolates `<ts>` at render time; the warning line is static.
+// Mirror of `MapListPanel.svelte:262-264` delete-dialog shape.
+export const BACKUP_RESTORE_OVERWRITE_WARNING = '⚠ 기존 동일 이름 맵 페어를 덮어씁니다.';

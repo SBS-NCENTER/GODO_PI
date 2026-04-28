@@ -94,6 +94,24 @@ def test_track_e_error_codes_pinned() -> None:
     assert P.ERR_MAPS_DIR_MISSING == "maps_dir_missing"
 
 
+# --- Track B-BACKUP — map-backup history error codes -------------------
+
+
+def test_track_b_backup_error_codes_pinned() -> None:
+    """Mode-A M5 fold: only 2 new error codes (BACKUP_DIR_MISSING was
+    dropped — list_backups returns [] for both missing-dir and
+    empty-dir cases)."""
+    assert P.ERR_BACKUP_NOT_FOUND == "backup_not_found"
+    assert P.ERR_RESTORE_NAME_CONFLICT == "restore_name_conflict"
+
+
+def test_track_b_backup_no_dir_missing_constant() -> None:
+    """Mode-A M5 fold pin: the `ERR_BACKUP_DIR_MISSING` symbol MUST NOT
+    exist (the wire-shape change collapsed the 503 path to a 200-empty
+    response). A future writer who silently re-adds it fails this test."""
+    assert not hasattr(P, "ERR_BACKUP_DIR_MISSING")
+
+
 def test_maps_name_regex_pattern_str_mirrors_constants() -> None:
     from godo_webctl.constants import MAPS_NAME_REGEX
 

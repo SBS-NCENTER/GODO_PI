@@ -10,6 +10,70 @@
 
 ---
 
+## 2026-04-28
+
+### 오늘의 한 줄 요약
+
+**Phase 4.5 P0 프론트엔드 — 백엔드 PR-A 머지 + SPA PR-B 오픈 + Track F (anon read 모델) fold + Track D/E 명세 확정. Vite+Svelte 5 SPA가 21KB로 떨어졌고 운영자가 LAN 브라우저로 라이브 데이터 모니터링 + 로그인 후 제어가 됨.**
+
+> 기술적 상세는 [PROGRESS.md 2026-04-28 블록](../PROGRESS.md#session-log) 참조.
+
+### 왜 이렇게 결정했는가
+
+#### "anonymous read / login-gated mutation" — 운영 현실에서 나온 요구
+
+당초 PR-A의 auth 모델은 "모든 endpoint require_user, mutation은 require_admin" 이었음. 사용자가 PR-B SPA 라이브 검증 중 확인: "로그인 안 해도 모니터링은 돼야 한다 — 운영자가 자리에서 잠깐 보러 올 때마다 로그인하는 건 비현실적." 이게 Track F의 모티브.
+
+세 가지 선택지:
+- (a) 로그인 후에만 모든 화면 보임 — 채택 안 함 (위 모티브)
+- (b) 일부만 anon, 핵심은 require_user — 절반의 절차, 절반의 보호 (양쪽 모두 손해)
+- (c) **모든 read endpoint anon, mutation은 admin** ★ — read는 LAN 보안 (loopback 게이트는 그대로), mutation은 1차 방어선 (LAN-exposed credential-stuffing 방지엔 bcrypt(12) ≈ 300ms). 채택.
+
+세 가지 게이트가 이제 직교한다:
+1. **Loopback 게이트** (`/api/local/*`) — 키오스크 본체에서만 보임, 인증 무관
+2. **Auth 게이트** (mutation) — admin 토큰 필요, anon은 401
+3. **Role 게이트** — 미래 viewer 사용자 분리 (P2)
+
+backend invariant (n)에 명시 + parametrized test로 모든 mutation endpoint anon 401 검증.
+
+#### Track E를 별도 PR로 분리 — 스코프 디시플린
+
+사용자가 "맵 여러 버전 관리 + 활성 맵 지정 + 삭제 GUI" 요청. 가능한 두 가지 모양:
+- (a) PR-B에 fold — UI는 같은 Map 페이지라 자연스러움
+- (b) **별도 Track E PR** ★ — 채택
+
+이유: PR-B는 이미 Mode-B 통과한 P0 SPA. Track E는 ~650 LOC + 새 storage architecture (`/var/lib/godo/maps/` + `active.pgm` symlink) + 새 systemd `ReadWritePaths` + 매핑 Docker 컨테이너 volume mount 변경 + tracker 재시작 흐름. 다른 PR 단위. 머지 사이즈 깨끗.
+
+planner agent가 ~620줄 plan 생성 (path-traversal 위협 모델, atomic symlink swap 프로토콜, concurrent-activate flock, cache invalidation 키 변경, back-compat 마이그레이션 모두 포함). Mode-A reviewer 재실행 중 — 다음 세션에 결과 받음.
+
+#### Track D (Live LIDAR overlay) — Phase 2 디버그 도구로서의 정체
+
+사용자 요청: B-MAP 페이지에서 "라이다가 지금 보고 있는 점들"을 오버레이 토글로. 새 LIDAR 탭 안 만들고 같은 화면에 통합 결정 — "내 위치 추정이 맞나?"라는 운영자의 mental model에 직접 매핑됨. Pose가 맞으면 scan 점들이 벽선에 정확히 떨어지고, 어긋나면 시각적으로 즉시 보임. **AMCL 수렴 디버깅 도구로서의 가치가 더 큼** — 오늘 사용자가 v2 맵에서 직선만 보이는 걸 직접 확인한 것과 직결.
+
+tracker C++ 변경은 `get_last_scan` UDS handler 추가뿐 (seqlock read 1회, μs-level, hot-path 0 영향). 별도 Track D로 진행, Track E 머지 후.
+
+#### AMCL 수렴 실패 — 시각으로 확인한 root cause
+
+오전 매핑 직후의 AMCL 첫 실 테스트 결과 (xy_std 5.9 m, 10 000 particles × 200 iter 비수렴) 가 오늘 SPA로 시각화된 맵을 통해 확인됨. studio_v2 (107s walk + loop closure) 도 직선 위주, fine feature 부족. T자형 + 거의 직사각형 벽 → likelihood surface 가 평탄 → 거울대칭 위치들이 모두 동등 후보. yaw 가 매번 wildly 다른 값으로 수렴한 이유.
+
+Phase 2 lever (NEXT_SESSION.md 그대로):
+- ICP-based initial pose seed (가장 효과 클 듯)
+- Retro-reflector landmarks at step corners
+- 더 천천히 + 여러 번 walk + slam_toolbox loop_closure_threshold 낮추기
+- LiDAR 20cm offset → pivot center 재정렬 (필수)
+
+알고리즘 작업은 LiDAR 재정렬 후 본격 진입. 오늘은 운영 surface에 집중.
+
+### 운영 현황 (news-pi01, 2026-04-28 종료 시점)
+
+- webctl `0.0.0.0:8080` 구동 중, studio_v2 맵 서빙
+- `~/.local/state/godo/auth/` 에 JWT secret + users.json (sudo 불필요한 dev 셋업)
+- godo-tracker 미구동 (의도된 상태) — banner 정상 표시
+- PR-B (#12) push 완료, 사용자 LAN 검증 후 머지 예정
+- Track E plan + Mode-A reviewer 백그라운드 진행 중
+
+---
+
 ## 2026-04-27
 
 ### 오늘의 한 줄 요약

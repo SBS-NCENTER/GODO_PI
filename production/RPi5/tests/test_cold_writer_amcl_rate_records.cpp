@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "core/config.hpp"
+#include "core/hot_config.hpp"
 #include "core/rt_types.hpp"
 #include "core/seqlock.hpp"
 #include "lidar/sample.hpp"
@@ -92,12 +93,13 @@ TEST_CASE("run_one_iteration increments amcl_rate_accum exactly once") {
     Seqlock<LastPose> last_pose_seq;
     Seqlock<LastScan> last_scan_seq;
     AmclRateAccumulator accum;
+    Seqlock<godo::core::HotConfig> hot_cfg_seq;
 
     const Frame frame = make_synthetic_frame();
     (void)run_one_iteration(cfg, frame, grid, amcl, rng, beams_buf,
                             last_pose, live_first_iter, last_written,
                             target_offset, last_pose_seq, last_scan_seq,
-                            accum);
+                            accum, hot_cfg_seq);
     CHECK(accum.snapshot().count == 1u);
 }
 
@@ -115,12 +117,13 @@ TEST_CASE("run_live_iteration increments amcl_rate_accum exactly once") {
     Seqlock<LastPose> last_pose_seq;
     Seqlock<LastScan> last_scan_seq;
     AmclRateAccumulator accum;
+    Seqlock<godo::core::HotConfig> hot_cfg_seq;
 
     const Frame frame = make_synthetic_frame();
     (void)run_live_iteration(cfg, frame, grid, amcl, rng, beams_buf,
                              last_pose, live_first_iter, last_written,
                              target_offset, last_pose_seq, last_scan_seq,
-                             accum);
+                             accum, hot_cfg_seq);
     CHECK(accum.snapshot().count == 1u);
 }
 
@@ -138,6 +141,7 @@ TEST_CASE("Three back-to-back kernel calls advance count by 3 and last_ns is mon
     Seqlock<LastPose> last_pose_seq;
     Seqlock<LastScan> last_scan_seq;
     AmclRateAccumulator accum;
+    Seqlock<godo::core::HotConfig> hot_cfg_seq;
 
     const Frame frame = make_synthetic_frame();
     std::uint64_t prev_last_ns = 0;
@@ -145,7 +149,7 @@ TEST_CASE("Three back-to-back kernel calls advance count by 3 and last_ns is mon
         (void)run_live_iteration(cfg, frame, grid, amcl, rng, beams_buf,
                                  last_pose, live_first_iter, last_written,
                                  target_offset, last_pose_seq, last_scan_seq,
-                                 accum);
+                                 accum, hot_cfg_seq);
         const auto rec = accum.snapshot();
         CHECK(rec.count == static_cast<std::uint64_t>(i + 1));
         CHECK(rec.last_ns >= prev_last_ns);

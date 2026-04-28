@@ -24,6 +24,7 @@
 
 #include "core/config.hpp"
 #include "core/constants.hpp"
+#include "core/hot_config.hpp"
 #include "core/rt_types.hpp"
 #include "core/seqlock.hpp"
 #include "rt/amcl_rate.hpp"
@@ -108,6 +109,7 @@ TEST_CASE("OneShot publishes LastScan unconditionally with forced=1") {
     Seqlock<LastPose> last_pose_seq;
     Seqlock<LastScan> last_scan_seq;
     AmclRateAccumulator amcl_rate_accum;
+    Seqlock<godo::core::HotConfig> hot_cfg_seq;
 
     // Generation 0 means never published.
     CHECK(last_scan_seq.generation() == 0u);
@@ -117,7 +119,7 @@ TEST_CASE("OneShot publishes LastScan unconditionally with forced=1") {
                                           beams_buf, last_pose,
                                           live_first_iter, last_written,
                                           target_offset, last_pose_seq,
-                                          last_scan_seq, amcl_rate_accum);
+                                          last_scan_seq, amcl_rate_accum, hot_cfg_seq);
 
     CHECK(last_scan_seq.generation() >= 2u);   // store advances by 2
     const LastScan snap = last_scan_seq.load();
@@ -157,12 +159,13 @@ TEST_CASE("Live publishes LastScan unconditionally with forced=0") {
     Seqlock<LastPose> last_pose_seq;
     Seqlock<LastScan> last_scan_seq;
     AmclRateAccumulator amcl_rate_accum;
+    Seqlock<godo::core::HotConfig> hot_cfg_seq;
 
     const Frame frame = make_synthetic_frame(360, 1500.0);
     (void)run_live_iteration(cfg, frame, grid, amcl, rng,
                              beams_buf, last_pose, live_first_iter,
                              last_written, target_offset, last_pose_seq,
-                             last_scan_seq, amcl_rate_accum);
+                             last_scan_seq, amcl_rate_accum, hot_cfg_seq);
 
     const LastScan snap = last_scan_seq.load();
     CHECK(snap.valid == 1);
@@ -187,12 +190,13 @@ TEST_CASE("Deadband-suppressed Offset still publishes LastScan") {
     Seqlock<LastPose> last_pose_seq;
     Seqlock<LastScan> last_scan_seq;
     AmclRateAccumulator amcl_rate_accum;
+    Seqlock<godo::core::HotConfig> hot_cfg_seq;
 
     const Frame frame = make_synthetic_frame(360, 1500.0);
     (void)run_live_iteration(cfg, frame, grid, amcl, rng,
                              beams_buf, last_pose, live_first_iter,
                              last_written, target_offset, last_pose_seq,
-                             last_scan_seq, amcl_rate_accum);
+                             last_scan_seq, amcl_rate_accum, hot_cfg_seq);
     const std::uint64_t target_gen_after_first = target_offset.generation();
     const std::uint64_t scan_gen_after_first   = last_scan_seq.generation();
 
@@ -201,7 +205,7 @@ TEST_CASE("Deadband-suppressed Offset still publishes LastScan") {
     (void)run_live_iteration(cfg, frame, grid, amcl, rng,
                              beams_buf, last_pose, live_first_iter,
                              last_written, target_offset, last_pose_seq,
-                             last_scan_seq, amcl_rate_accum);
+                             last_scan_seq, amcl_rate_accum, hot_cfg_seq);
     CHECK(target_offset.generation() == target_gen_after_first);  // suppressed
     CHECK(last_scan_seq.generation()  > scan_gen_after_first);    // advanced
 }
@@ -228,6 +232,7 @@ TEST_CASE("LastScan.n drops out-of-range samples (matches AMCL beam rule)") {
     Seqlock<LastPose> last_pose_seq;
     Seqlock<LastScan> last_scan_seq;
     AmclRateAccumulator amcl_rate_accum;
+    Seqlock<godo::core::HotConfig> hot_cfg_seq;
 
     Frame frame = make_synthetic_frame(360, 1500.0);
     // Override every other sample to 50 mm (below range_min = 500 mm).
@@ -238,7 +243,7 @@ TEST_CASE("LastScan.n drops out-of-range samples (matches AMCL beam rule)") {
     (void)run_one_iteration(cfg, frame, grid, amcl, rng,
                             beams_buf, last_pose, live_first_iter,
                             last_written, target_offset, last_pose_seq,
-                            last_scan_seq, amcl_rate_accum);
+                            last_scan_seq, amcl_rate_accum, hot_cfg_seq);
 
     const LastScan snap = last_scan_seq.load();
     CHECK(snap.valid == 1);
@@ -266,6 +271,7 @@ TEST_CASE("published_mono_ns advances monotonically across consecutive runs") {
     Seqlock<LastPose> last_pose_seq;
     Seqlock<LastScan> last_scan_seq;
     AmclRateAccumulator amcl_rate_accum;
+    Seqlock<godo::core::HotConfig> hot_cfg_seq;
 
     const Frame frame = make_synthetic_frame(360, 1500.0);
     std::uint64_t prev = 0ULL;
@@ -273,7 +279,7 @@ TEST_CASE("published_mono_ns advances monotonically across consecutive runs") {
         (void)run_one_iteration(cfg, frame, grid, amcl, rng,
                                 beams_buf, last_pose, live_first_iter,
                                 last_written, target_offset, last_pose_seq,
-                                last_scan_seq, amcl_rate_accum);
+                                last_scan_seq, amcl_rate_accum, hot_cfg_seq);
         const std::uint64_t now = last_scan_seq.load().published_mono_ns;
         CHECK(now > prev);
         prev = now;
@@ -295,6 +301,7 @@ TEST_CASE("n=0 corner case (all samples filtered) is well-formed") {
     Seqlock<LastPose> last_pose_seq;
     Seqlock<LastScan> last_scan_seq;
     AmclRateAccumulator amcl_rate_accum;
+    Seqlock<godo::core::HotConfig> hot_cfg_seq;
 
     // All samples have distance_mm = 0.0 (invalid sentinel from the
     // sample.hpp invariant); fill_last_scan must drop every one.
@@ -303,7 +310,7 @@ TEST_CASE("n=0 corner case (all samples filtered) is well-formed") {
     (void)run_one_iteration(cfg, frame, grid, amcl, rng,
                             beams_buf, last_pose, live_first_iter,
                             last_written, target_offset, last_pose_seq,
-                            last_scan_seq, amcl_rate_accum);
+                            last_scan_seq, amcl_rate_accum, hot_cfg_seq);
 
     const LastScan snap = last_scan_seq.load();
     CHECK(snap.valid == 1);    // a publish DID happen

@@ -87,13 +87,24 @@ AmclResult run_one_iteration(const godo::core::Config&         cfg,
                              godo::rt::Seqlock<godo::rt::Offset>& target_offset,
                              godo::rt::Seqlock<godo::rt::LastPose>& last_pose_seq,
                              godo::rt::Seqlock<godo::rt::LastScan>& last_scan_seq,
-                             godo::rt::AmclRateAccumulator&    amcl_rate_accum) {
+                             godo::rt::AmclRateAccumulator&    amcl_rate_accum,
+                             godo::rt::Seqlock<godo::core::HotConfig>& hot_cfg_seq) {
     // 0. PR-DIAG (Mode-A M2): record this AMCL iteration into the rate
     //    accumulator. Single seqlock store; no allocation; only the cold
     //    writer (this function + run_live_iteration) is allowed to call
     //    record(). [amcl-rate-publisher-grep] enforces.
     amcl_rate_accum.record(
         static_cast<std::uint64_t>(godo::rt::monotonic_ns()));
+
+    // 0b. Track B-CONFIG (PR-CONFIG-β): pull the hot-class Tier-2 keys
+    //     from the seqlock once per iteration. Wait-free read (~30 ns).
+    //     `hot.valid == 0` only on a fixture that did not publish; fall
+    //     back to `cfg` so the kernel stays correct under tests.
+    const godo::core::HotConfig hot = hot_cfg_seq.load();
+    const double deadband_mm  = hot.valid ? hot.deadband_mm  : cfg.deadband_mm;
+    const double deadband_deg = hot.valid ? hot.deadband_deg : cfg.deadband_deg;
+    const double yaw_tripwire = hot.valid ? hot.amcl_yaw_tripwire_deg
+                                          : cfg.amcl_yaw_tripwire_deg;
 
     // 1. Decimate the scan into AMCL beams.
     downsample(frame,
@@ -116,13 +127,13 @@ AmclResult run_one_iteration(const godo::core::Config&         cfg,
     // 4. Tripwire — informational only.
     if (apply_yaw_tripwire(result.pose,
                            cfg.amcl_origin_yaw_deg,
-                           cfg.amcl_yaw_tripwire_deg)) {
+                           yaw_tripwire)) {
         std::fprintf(stderr,
             "cold_writer: yaw tripwire fired — pose.yaw=%.3f deg "
             "vs origin.yaw=%.3f deg (tripwire=%.3f deg). Studio base "
             "may have rotated; re-run calibration when convenient.\n",
             result.pose.yaw_deg, cfg.amcl_origin_yaw_deg,
-            cfg.amcl_yaw_tripwire_deg);
+            yaw_tripwire);
     }
 
     // 5. Compute Offset against calibration origin (M3 canonical-360 dyaw).
@@ -142,8 +153,8 @@ AmclResult run_one_iteration(const godo::core::Config&         cfg,
     //    deadband updates cannot slow-drift past the threshold.
     (void)apply_deadband_publish(result.offset,
                                  result.forced,
-                                 cfg.deadband_mm / 1000.0,
-                                 cfg.deadband_deg,
+                                 deadband_mm / 1000.0,
+                                 deadband_deg,
                                  last_written_inout,
                                  target_offset);
 
@@ -199,11 +210,20 @@ AmclResult run_live_iteration(const godo::core::Config&         cfg,
                               godo::rt::Seqlock<godo::rt::Offset>& target_offset,
                               godo::rt::Seqlock<godo::rt::LastPose>& last_pose_seq,
                               godo::rt::Seqlock<godo::rt::LastScan>& last_scan_seq,
-                              godo::rt::AmclRateAccumulator&    amcl_rate_accum) {
+                              godo::rt::AmclRateAccumulator&    amcl_rate_accum,
+                              godo::rt::Seqlock<godo::core::HotConfig>& hot_cfg_seq) {
     // 0. PR-DIAG (Mode-A M2): record this AMCL iteration into the rate
     //    accumulator. Mirrors run_one_iteration's record() pin.
     amcl_rate_accum.record(
         static_cast<std::uint64_t>(godo::rt::monotonic_ns()));
+
+    // 0b. Track B-CONFIG (PR-CONFIG-β): hot-class Tier-2 keys, see
+    //     run_one_iteration for the contract pin.
+    const godo::core::HotConfig hot = hot_cfg_seq.load();
+    const double deadband_mm  = hot.valid ? hot.deadband_mm  : cfg.deadband_mm;
+    const double deadband_deg = hot.valid ? hot.deadband_deg : cfg.deadband_deg;
+    const double yaw_tripwire = hot.valid ? hot.amcl_yaw_tripwire_deg
+                                          : cfg.amcl_yaw_tripwire_deg;
 
     // 1. Decimate the scan into AMCL beams (same shape as OneShot).
     downsample(frame,
@@ -236,13 +256,13 @@ AmclResult run_live_iteration(const godo::core::Config&         cfg,
     // 4. Tripwire — informational only (same as OneShot).
     if (apply_yaw_tripwire(result.pose,
                            cfg.amcl_origin_yaw_deg,
-                           cfg.amcl_yaw_tripwire_deg)) {
+                           yaw_tripwire)) {
         std::fprintf(stderr,
             "cold_writer: yaw tripwire fired (Live) — pose.yaw=%.3f deg "
             "vs origin.yaw=%.3f deg (tripwire=%.3f deg). Studio base "
             "may have rotated; re-run calibration when convenient.\n",
             result.pose.yaw_deg, cfg.amcl_origin_yaw_deg,
-            cfg.amcl_yaw_tripwire_deg);
+            yaw_tripwire);
     }
 
     // 5. Compute Offset against calibration origin (M3 canonical-360 dyaw).
@@ -256,8 +276,8 @@ AmclResult run_live_iteration(const godo::core::Config&         cfg,
     // 6. Publish — deadband filter at the seqlock seam (§6.4.1).
     (void)apply_deadband_publish(result.offset,
                                  result.forced,
-                                 cfg.deadband_mm / 1000.0,
-                                 cfg.deadband_deg,
+                                 deadband_mm / 1000.0,
+                                 deadband_deg,
                                  last_written_inout,
                                  target_offset);
 
@@ -323,6 +343,7 @@ void run_cold_writer(const godo::core::Config&              cfg,
                      godo::rt::Seqlock<godo::rt::LastPose>& last_pose_seq,
                      godo::rt::Seqlock<godo::rt::LastScan>& last_scan_seq,
                      godo::rt::AmclRateAccumulator&         amcl_rate_accum,
+                     godo::rt::Seqlock<godo::core::HotConfig>& hot_cfg_seq,
                      LidarFactory                           lidar_factory) {
     OccupancyGrid grid;
     LikelihoodField lf;
@@ -433,7 +454,7 @@ void run_cold_writer(const godo::core::Config&              cfg,
                                             live_first_iter,
                                             last_written, target_offset,
                                             last_pose_seq, last_scan_seq,
-                                            amcl_rate_accum);
+                                            amcl_rate_accum, hot_cfg_seq);
                 } catch (const std::exception& e) {
                     std::fprintf(stderr,
                         "cold_writer: run_one_iteration threw: %s — "
@@ -506,7 +527,7 @@ void run_cold_writer(const godo::core::Config&              cfg,
                                              live_first_iter,
                                              last_written, target_offset,
                                              last_pose_seq, last_scan_seq,
-                                             amcl_rate_accum);
+                                             amcl_rate_accum, hot_cfg_seq);
                 } catch (const std::exception& e) {
                     std::fprintf(stderr,
                         "cold_writer: run_live_iteration threw: %s — "

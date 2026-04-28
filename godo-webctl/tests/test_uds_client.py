@@ -199,3 +199,59 @@ def test_get_amcl_rate_server_rejected_propagates(fake_uds_server) -> None:
     with pytest.raises(UdsServerRejected) as ei:
         c.get_amcl_rate(timeout=2.0)
     assert ei.value.err == "unknown_cmd"
+
+
+# --- Track B-CONFIG (PR-CONFIG-β) — config UDS round-trips ---------------
+
+
+def test_get_config_round_trip(fake_uds_server) -> None:
+    fake_uds_server.reply(b'{"ok":true,"smoother.deadband_mm":12.5,"network.ue_port":6666}')
+    c = UdsClient(fake_uds_server.path)
+    resp = c.get_config(timeout=2.0)
+    assert resp["ok"] is True
+    assert resp["smoother.deadband_mm"] == 12.5
+    assert fake_uds_server.captured == [b'{"cmd":"get_config"}\n']
+
+
+def test_get_config_schema_round_trip(fake_uds_server) -> None:
+    fake_uds_server.reply(
+        b'{"ok":true,"schema":[{"name":"k","type":"int","min":0,"max":1,'
+        b'"default":"0","reload_class":"hot","description":"d"}]}'
+    )
+    c = UdsClient(fake_uds_server.path)
+    resp = c.get_config_schema(timeout=2.0)
+    assert resp["ok"] is True
+    assert isinstance(resp["schema"], list)
+
+
+def test_set_config_happy(fake_uds_server) -> None:
+    fake_uds_server.reply(b'{"ok":true,"reload_class":"hot"}')
+    c = UdsClient(fake_uds_server.path)
+    resp = c.set_config("smoother.deadband_mm", "12.5", timeout=2.0)
+    assert resp == {"ok": True, "reload_class": "hot"}
+    assert (
+        b'{"cmd":"set_config","key":"smoother.deadband_mm","value":"12.5"}'
+        in fake_uds_server.captured[0]
+    )
+
+
+def test_set_config_bad_key_raises_rejected(fake_uds_server) -> None:
+    from godo_webctl.uds_client import UdsServerRejected
+
+    fake_uds_server.reply(b'{"ok":false,"err":"bad_key"}')
+    c = UdsClient(fake_uds_server.path)
+    with pytest.raises(UdsServerRejected) as ei:
+        c.set_config("no.such.key", "1", timeout=2.0)
+    assert ei.value.err == "bad_key"
+
+
+def test_get_config_socket_missing_raises_unreachable(tmp_path: Path) -> None:
+    c = UdsClient(tmp_path / "nope.sock")
+    with pytest.raises(UdsUnreachable):
+        c.get_config(timeout=1.0)
+
+
+def test_set_config_silent_server_times_out(fake_uds_server) -> None:
+    c = UdsClient(fake_uds_server.path)
+    with pytest.raises(UdsTimeout):
+        c.set_config("k", "v", timeout=0.2)

@@ -427,7 +427,7 @@ User 결정 fold-in: 새 frontend 도입을 계기로 top-level 디렉토리를 
 
 | 결정 | C++ 변경 |
 |---|---|
-| D3 (config PATCH) | UDS `set_config / get_config` 명령 + atomic TOML write + reload-class 처리 |
+| D3 (config PATCH, 있음 PR-CONFIG-α/β) | `core/config_schema.hpp` 의 37-row `constexpr ConfigSchemaRow[]` 가 SSOT; `config/validate.cpp` (type+range), `config/atomic_toml_writer.cpp` (mkstemp+fsync+rename + parent-writable check), `config/apply.cpp::apply_set` (validate→atomic write→ram update→hot/restart-pending publish), `core/hot_config.hpp` 의 `Seqlock<HotConfig>` (cold_writer가 매 iteration `hot_cfg_seq.load()` 후 cfg-fallback), `config/restart_pending.cpp` (sentinel file touch/clear), 3 새 UDS branches (`get_config`, `get_config_schema`, `set_config`), 3 새 build greps |
 | PR-DIAG jitter exposure (있음) | Thread D가 `JitterRing::record(delta_ns)`로 sample을 ring에 적재; `rt/diag_publisher.cpp` (SCHED_OTHER)가 1 Hz로 percentile + summary 계산 후 `Seqlock<JitterSnapshot>`에 publish + UDS `get_jitter` |
 | PR-DIAG amcl_rate exposure (있음) | Cold writer가 매 AMCL iteration마다 `AmclRateAccumulator::record(now_ns)` 호출 (Mode-A M1: `Seqlock<AmclRateRecord>`); diag_publisher가 두-틱 differencing으로 Hz 계산 + UDS `get_amcl_rate` (Mode-A M2 fold rename) |
 | I2 + hot reload | inotify watch on /etc/godo/maps/*.pgm + occupancy_grid atomic swap |
@@ -497,9 +497,10 @@ JWT secret: `/var/lib/godo/auth/jwt_secret` (서버 첫 부팅 시 random 생성
 | `GET /api/system/amcl_rate` | public | P1 (있음) | DIAG | — | `AmclIterationRate` (PR-DIAG schema) | AMCL 반복 cadence (Mode-A M2 fold renamed scan_rate); anon read |
 | `GET /api/system/resources` | public | P1 (있음) | SYSTEM, DIAG | — | `Resources` (PR-DIAG schema) | thermal_zone0 + /proc/meminfo + statvfs; 1s TTL cache; anon read |
 | `GET /api/logs/tail?unit=<svc>&n=<int>` | public | P1 (있음) | DIAG, SYSTEM | — | `[str]` | journalctl --no-pager; allow-list = ALLOWED_SERVICES; anon read |
-| `GET /api/config` | viewer | P1 | CONFIG | — | `{key: value, ...}` | Tier-2 키 전체 |
-| `GET /api/config/schema` | viewer | P1 | CONFIG | — | `{key: {type, range, reload_class, desc}}` | UI 메타 |
-| `PATCH /api/config` | admin | P1 | CONFIG | `{key: value, ...}` | `{applied: [str], pending_restart: [str]}` | UDS set_config + atomic TOML |
+| `GET /api/config` | public | P1 (있음) | CONFIG | — | `{<key>: <value>, ...}` (37 keys) | Tier-2 키 전체; webctl projection through `config_view.project_config_view`; anon read (Track F) |
+| `GET /api/config/schema` | public | P1 (있음) | CONFIG | — | `[{name, type, min, max, default, reload_class, description}]` | 37-row 메타; webctl serves the cached Python parse of `config_schema.hpp`; 60s cache; anon read |
+| `PATCH /api/config` | admin | P1 (있음) | CONFIG | `{key, value}` | `{ok, reload_class}` | 단일 키 only; webctl pre-validates body size + special-char shape; 트래커가 schema 매칭 + atomic TOML write + RAM update + restart-pending flag touch (`reload_class != "hot"` 일 때) |
+| `GET /api/system/restart_pending` | public | P1 (있음) | CONFIG, DASH | — | `{pending: bool}` | 트래커가 set_config 후 touch한 sentinel file 존재 여부; SPA의 RestartPendingBanner 가 구독 |
 | `POST /api/map/edit` | admin | P2 | MAPEDIT | `{ops: [{type, mask}]}` | `{ok, backup_ts}` | numpy/Pillow + auto-backup |
 | `GET /api/map/backup/list` | viewer | P2 | BACKUP | — | `[{ts, files, size}]` | /var/lib/godo/map-backups/ scan |
 | `POST /api/map/backup/<ts>/restore` | admin | P2 | BACKUP | — | `{ok}` | cp + reload |
@@ -526,8 +527,9 @@ JWT secret: `/var/lib/godo/auth/jwt_secret` (서버 첫 부팅 시 random 생성
 | `get_mode` | 4-3 (있음) | `/api/health`, polled | — |
 | `get_last_pose` | TrackB (있음) | `/api/last_pose`, SSE | — |
 | `get_last_scan` | Track D (있음) | `/api/last_scan`, SSE | LastScan struct + format_ok_scan in cold writer + UDS branch |
-| `get_config` | P1 신규 | `/api/config` | tracker exposes Config struct as JSON |
-| `set_config {key, value}` | P1 신규 | `PATCH /api/config` | atomic TOML write + RAM update + reload-class flag |
+| `get_config` | P1 (있음) | `/api/config` | tracker emits Config (37 Tier-2 keys) as JSON via `config/apply_get_all`; webctl rarely calls — Python mirror parses `config_schema.hpp` directly |
+| `get_config_schema` | P1 (있음) | `/api/config/schema` | tracker emits the schema array via `config/apply_get_schema`; same fallback as above |
+| `set_config {key, value}` | P1 (있음) | `PATCH /api/config` | `config/apply.cpp::apply_set` validates + atomic TOML write (`atomic_toml_writer.cpp`) + RAM update under `live_cfg_mtx` + `hot_cfg_seq.store` (Hot class) + `restart_pending::touch_pending_flag` (Restart/Recalibrate class) |
 | `get_jitter` | P1 (있음) | `/api/system/jitter` | RT thread records into `JitterRing`; `rt/diag_publisher.cpp` publishes summary via `Seqlock<JitterSnapshot>` |
 | `get_amcl_rate` | P1 (있음) | `/api/system/amcl_rate` | Cold writer records each AMCL iteration into `AmclRateAccumulator` (Mode-A M1: `Seqlock<AmclRateRecord>`); diag_publisher computes Hz over its 1 s tick (Mode-A M2 renamed scan_rate) |
 
@@ -591,8 +593,19 @@ JWT secret: `/var/lib/godo/auth/jwt_secret` (서버 첫 부팅 시 random 생성
   (Mode-A M1 Seqlock<AmclRateRecord>) + `diag_publisher` (SCHED_OTHER
   thread) + 2 새 UDS 명령 (`get_jitter`, `get_amcl_rate`). 3 새 build
   greps (hot-path-jitter / jitter-publisher / amcl-rate-publisher).
-- B-CONFIG (남음, PR-CONFIG에서) — `PATCH /api/config` + reload-class
-  machinery. PR-DIAG 스코프에서 명시적으로 제외됨 (별도 PR).
+- B-CONFIG (있음, PR-CONFIG-α + PR-CONFIG-β, 2026-04-29 —
+  `feat/p4.5-track-b-config-spa`) — Config editor 페이지. PR-α 는 C++
+  tracker 측 (`core/config_schema.hpp` 37-row 스키마, `config/validate`,
+  `config/atomic_toml_writer`, `config/apply.cpp` apply_set/get,
+  `core/hot_config.hpp` `Seqlock<HotConfig>`, `config/restart_pending`,
+  3 새 UDS 명령 `get_config`/`get_config_schema`/`set_config`,
+  3 새 build greps `[hot-path-config-grep]` /
+  `[hot-config-publisher-grep]` / `[atomic-toml-write-grep]`).
+  PR-β 는 cold_writer reader migration (`hot_cfg_seq.load()` per
+  iteration with cfg-fallback) + webctl 4 새 endpoints (`/api/config`,
+  `/api/config/schema`, `PATCH /api/config`, `/api/system/restart_pending`)
+  + SPA `/config` route + `RestartPendingBanner` (글로벌, App.svelte
+  마운트). 모두 Track F 패턴 (read=anon, mutate=admin).
 - C++ Mode-B 통과 후 머지
 
 ### Phase 4 — P2 구현 (Track C-3, Phase 4.5)

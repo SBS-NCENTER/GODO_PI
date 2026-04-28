@@ -42,6 +42,7 @@
 #include "amcl.hpp"
 #include "amcl_result.hpp"
 #include "core/config.hpp"
+#include "core/hot_config.hpp"
 #include "core/rt_types.hpp"
 #include "core/seqlock.hpp"
 #include "lidar/lidar_source_rplidar.hpp"
@@ -100,6 +101,19 @@ using LidarFactory =
 //     (Track D): the UDS `get_last_scan` reader needs to see every
 //     OneShot/Live completion so the SPA's overlay updates at the cold
 //     writer's natural cadence. Same ordering discipline as last_pose_seq.
+// Track B-CONFIG (PR-CONFIG-β): the kernel reads `hot_cfg_seq.load()`
+// once at the head of each iteration to pick up operator edits to the
+// Hot-class Tier-2 keys (deadband_mm, deadband_deg, amcl_yaw_tripwire_deg)
+// without restart. The non-hot fields of `cfg` (origin, sigma_*, range_*,
+// downsample_stride, etc.) are still read directly because they are
+// `restart` or `recalibrate` class — changes take effect on next boot or
+// next OneShot, not mid-iteration.
+//
+// `hot.valid == 0` is the boot sentinel (Seqlock<HotConfig> default-
+// constructed); the kernel falls back to `cfg.deadband_*` /
+// `cfg.amcl_yaw_tripwire_deg` so the OneShot path stays correct even if
+// the test fixture forgets to publish before calling. Pinned by
+// `test_cold_writer_reads_hot_config.cpp`.
 AmclResult run_one_iteration(const godo::core::Config&         cfg,
                              const godo::lidar::Frame&         frame,
                              const OccupancyGrid&              grid,
@@ -112,7 +126,8 @@ AmclResult run_one_iteration(const godo::core::Config&         cfg,
                              godo::rt::Seqlock<godo::rt::Offset>& target_offset,
                              godo::rt::Seqlock<godo::rt::LastPose>& last_pose_seq,
                              godo::rt::Seqlock<godo::rt::LastScan>& last_scan_seq,
-                             godo::rt::AmclRateAccumulator&    amcl_rate_accum);
+                             godo::rt::AmclRateAccumulator&    amcl_rate_accum,
+                             godo::rt::Seqlock<godo::core::HotConfig>& hot_cfg_seq);
 
 // Per-Live-iteration kernel. Visible for tests so they can drive a
 // deterministic synthetic Frame through the Live AMCL pipeline without
@@ -144,7 +159,8 @@ AmclResult run_live_iteration(const godo::core::Config&         cfg,
                               godo::rt::Seqlock<godo::rt::Offset>& target_offset,
                               godo::rt::Seqlock<godo::rt::LastPose>& last_pose_seq,
                               godo::rt::Seqlock<godo::rt::LastScan>& last_scan_seq,
-                              godo::rt::AmclRateAccumulator&    amcl_rate_accum);
+                              godo::rt::AmclRateAccumulator&    amcl_rate_accum,
+                              godo::rt::Seqlock<godo::core::HotConfig>& hot_cfg_seq);
 
 // Run the cold writer until godo::rt::g_running is false. Idempotent on
 // repeated trigger; safe to call once per process lifetime.
@@ -165,6 +181,7 @@ void run_cold_writer(const godo::core::Config&              cfg,
                      godo::rt::Seqlock<godo::rt::LastPose>& last_pose_seq,
                      godo::rt::Seqlock<godo::rt::LastScan>& last_scan_seq,
                      godo::rt::AmclRateAccumulator&         amcl_rate_accum,
+                     godo::rt::Seqlock<godo::core::HotConfig>& hot_cfg_seq,
                      LidarFactory                           lidar_factory);
 
 }  // namespace godo::localization

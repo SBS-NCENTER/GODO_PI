@@ -61,6 +61,48 @@ CMD_GET_LAST_SCAN: Final[str] = "get_last_scan"
 # the rate is 0 Hz by design).
 CMD_GET_JITTER: Final[str] = "get_jitter"
 CMD_GET_AMCL_RATE: Final[str] = "get_amcl_rate"
+# Track B-CONFIG (PR-CONFIG-β) — config edit pipeline. Wire shape lives
+# in production/RPi5/doc/uds_protocol.md §C.8 / §C.9 / §C.10. The C++
+# tracker's `apply_set` returns `{"ok":true,"reload_class":"hot|restart|recalibrate"}`
+# on success or `{"ok":false,"err":"<code>","detail":"<text>"}` on failure.
+CMD_GET_CONFIG: Final[str] = "get_config"
+CMD_GET_CONFIG_SCHEMA: Final[str] = "get_config_schema"
+CMD_SET_CONFIG: Final[str] = "set_config"
+
+# Reload-class enum strings — mirror json_mini.cpp's `format_ok_config_set`
+# output and config_schema.hpp's `reload_class_to_string`.
+RELOAD_CLASS_HOT: Final[str] = "hot"
+RELOAD_CLASS_RESTART: Final[str] = "restart"
+RELOAD_CLASS_RECALIBRATE: Final[str] = "recalibrate"
+
+VALID_RELOAD_CLASSES: Final[frozenset[str]] = frozenset(
+    {RELOAD_CLASS_HOT, RELOAD_CLASS_RESTART, RELOAD_CLASS_RECALIBRATE},
+)
+
+# Set-config response field order. SOLE Python mirror of the JSON keys
+# emitted by `format_ok_config_set` in json_mini.cpp. `ok` is the JSON-
+# level success flag (UdsServerRejected is raised on `ok: false`); not
+# in this tuple per the same convention as LAST_POSE_FIELDS.
+SET_CONFIG_RESPONSE_FIELDS: Final[tuple[str, ...]] = ("reload_class",)
+
+# Schema row keys (mirrors `format_ok_config_get_schema` per row + the
+# `ConfigSchemaRow` Python NamedTuple in `config_schema.py`). Pinned
+# against the parser by `tests/test_config_schema.py`.
+CONFIG_SCHEMA_ROW_FIELDS: Final[tuple[str, ...]] = (
+    "name",
+    "type",
+    "min",
+    "max",
+    "default",
+    "reload_class",
+    "description",
+)
+
+# Wider read cap for `get_config_schema` whose JSON reply spans ~7 KiB
+# (37 rows × ~200 B). 16 KiB leaves >2× headroom while staying under
+# the C++ scratch ceiling (24 KiB). Other config commands keep the
+# default 4 KiB.
+CONFIG_SCHEMA_RESPONSE_CAP: Final[int] = 16384
 
 # --- Mode names (mirrors json_mini.cpp:119-121 mode_to_string + :127-129) -
 MODE_IDLE: Final[str] = "Idle"  # json_mini.cpp:119, :127
@@ -245,3 +287,42 @@ def encode_get_amcl_rate() -> bytes:
     ``get_scan_rate``) — the metric measures AMCL iteration cadence.
     """
     return b'{"cmd":"get_amcl_rate"}\n'
+
+
+# --- Track B-CONFIG (PR-CONFIG-β) ----------------------------------------
+def encode_get_config() -> bytes:
+    """Canonical wire encoding of the ``get_config`` request."""
+    return b'{"cmd":"get_config"}\n'
+
+
+def encode_get_config_schema() -> bytes:
+    """Canonical wire encoding of the ``get_config_schema`` request."""
+    return b'{"cmd":"get_config_schema"}\n'
+
+
+def encode_set_config(key: str, value: str) -> bytes:
+    """Canonical wire encoding of ``set_config`` for a (key, value) pair.
+
+    Both arguments are forwarded verbatim as JSON strings — the tracker
+    parses them per the schema (Int/Double/String) at validate time.
+    Webctl pre-validation (Mode-A S4 fold) guarantees ASCII shape +
+    body size + single-key form upstream; this encoder trusts both
+    arguments are already validated.
+
+    The wire embeds raw bytes — backslash and double-quote MUST be
+    rejected upstream by `parse_patch_payload` before reaching here.
+    """
+    # Defence-in-depth: reject the two byte values that would break the
+    # tracker's hand-rolled JSON parser (json_mini.cpp tolerates ASCII
+    # only and does not unescape).
+    if any(c in key for c in ('"', "\\", "\n")):
+        raise ValueError(f"invalid character in key: {key!r}")
+    if any(c in value for c in ('"', "\\", "\n")):
+        raise ValueError(f"invalid character in value: {value!r}")
+    return (
+        b'{"cmd":"set_config","key":"'
+        + key.encode("ascii")
+        + b'","value":"'
+        + value.encode("ascii")
+        + b'"}\n'
+    )

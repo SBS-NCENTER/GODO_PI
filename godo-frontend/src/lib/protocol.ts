@@ -309,6 +309,70 @@ export interface ErrResponse {
   detail?: string;
 }
 
+// --- Track B-CONFIG (PR-CONFIG-β) — config edit pipeline ---------------
+// Hand-mirrored from `godo-webctl/src/godo_webctl/config_schema.py`'s
+// `ConfigSchemaRow` NamedTuple + `protocol.py::CONFIG_SCHEMA_ROW_FIELDS`.
+// Drift detected by inspection per godo-frontend/CODEBASE.md invariant.
+
+export const RELOAD_CLASS_HOT = 'hot';
+export const RELOAD_CLASS_RESTART = 'restart';
+export const RELOAD_CLASS_RECALIBRATE = 'recalibrate';
+export type ReloadClass =
+  | typeof RELOAD_CLASS_HOT
+  | typeof RELOAD_CLASS_RESTART
+  | typeof RELOAD_CLASS_RECALIBRATE;
+
+export const VALID_RELOAD_CLASSES: ReadonlySet<ReloadClass> = new Set<ReloadClass>([
+  RELOAD_CLASS_HOT,
+  RELOAD_CLASS_RESTART,
+  RELOAD_CLASS_RECALIBRATE,
+]);
+
+export type ConfigValueType = 'int' | 'double' | 'string';
+
+// One schema row from GET /api/config/schema. Mirror of the C++
+// ConfigSchemaRow (production/RPi5/src/core/config_schema.hpp); drift
+// detected via the regex parser in godo-webctl + manual review here.
+export interface ConfigSchemaRow {
+  name: string;
+  type: ConfigValueType;
+  min: number;
+  max: number;
+  default: string;
+  reload_class: ReloadClass;
+  description: string;
+}
+
+// One key/value entry. The wire JSON-types `value` per the schema's
+// `type`; the SPA carries that distinction through to the editor input.
+export type ConfigValue = number | string | boolean;
+export interface ConfigKV {
+  name: string;
+  value: ConfigValue;
+}
+
+// GET /api/config response — projected dict of `name → value`.
+export type ConfigGetResponse = Record<string, ConfigValue>;
+
+// PATCH /api/config request body. Mode-A S4 fold: webctl pre-checks
+// body size + single-key + JSON well-formedness only; tracker is the
+// canonical validator.
+export interface ConfigPatchBody {
+  key: string;
+  value: ConfigValue;
+}
+
+// PATCH /api/config success response.
+export interface ConfigSetResult {
+  ok: true;
+  reload_class: ReloadClass;
+}
+
+// GET /api/system/restart_pending response.
+export interface RestartPendingResponse {
+  pending: boolean;
+}
+
 // --- Track E (PR-C) — multi-map management wire shapes ---------------
 // JSON shape for one row of GET /api/maps. Mirrors backend
 // `maps.MapEntry.to_dict()` (mtime is float epoch seconds, NOT raw

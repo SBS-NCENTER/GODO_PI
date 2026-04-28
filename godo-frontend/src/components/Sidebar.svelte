@@ -1,10 +1,20 @@
 <script lang="ts">
   import { LOCAL_HOSTNAMES } from '$lib/constants';
+  import { ROLE_ADMIN } from '$lib/protocol';
   import { navigate, route } from '$lib/router';
+  import { auth } from '$stores/auth';
 
   let currentPath = $state('/');
   $effect(() => {
     const unsub = route.subscribe((p) => (currentPath = p));
+    return unsub;
+  });
+
+  let isAdmin = $state(false);
+  $effect(() => {
+    const unsub = auth.subscribe((s) => {
+      isAdmin = s !== null && s.role === ROLE_ADMIN;
+    });
     return unsub;
   });
 
@@ -37,6 +47,18 @@
         </button>
       </li>
     {/each}
+    {#if isAdmin}
+      <li>
+        <button
+          class="nav-link"
+          class:active={currentPath === '/config'}
+          onclick={() => go('/config')}
+          data-testid="nav-config"
+        >
+          Config
+        </button>
+      </li>
+    {/if}
     {#if isLocalHost}
       <li>
         <button

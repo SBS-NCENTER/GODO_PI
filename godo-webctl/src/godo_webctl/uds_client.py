@@ -37,6 +37,8 @@ from typing import Any
 from .protocol import (
     LAST_SCAN_RESPONSE_CAP,
     UDS_RESPONSE_READ_BUFSIZE,
+    encode_get_amcl_rate,
+    encode_get_jitter,
     encode_get_last_pose,
     encode_get_last_scan,
     encode_get_mode,
@@ -109,6 +111,19 @@ class UdsClient:
             timeout,
             response_cap=LAST_SCAN_RESPONSE_CAP,
         )
+
+    def get_jitter(self, timeout: float) -> dict[str, Any]:
+        """PR-DIAG `get_jitter` round-trip; response shape pinned by
+        ``protocol.JITTER_FIELDS`` (regex-checked against
+        json_mini.cpp::format_ok_jitter). Reply is small (~200 B), so
+        the standard 4 KiB read cap is fine."""
+        return self._roundtrip(encode_get_jitter(), timeout)
+
+    def get_amcl_rate(self, timeout: float) -> dict[str, Any]:
+        """PR-DIAG `get_amcl_rate` round-trip; response shape pinned by
+        ``protocol.AMCL_RATE_FIELDS``. Mode-A M2 fold renamed the
+        underlying metric from `scan_rate` to `amcl_rate`."""
+        return self._roundtrip(encode_get_amcl_rate(), timeout)
 
     # ---- internals --------------------------------------------------------
 

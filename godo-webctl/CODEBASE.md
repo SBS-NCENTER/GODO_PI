@@ -115,6 +115,37 @@ LAST_SCAN_RANGES_MAX_PYTHON_MIRROR = 720
 LAST_SCAN_RESPONSE_CAP = 32768    uds_client._roundtrip pass-through;
                                   Track D wider read cap for
                                   get_last_scan (~14 KiB worst case)
+CMD_GET_JITTER = "get_jitter"     uds_server.cpp `get_jitter` branch
+                                  (PR-DIAG; uds_protocol.md §C.6)
+CMD_GET_AMCL_RATE = "get_amcl_rate"
+                                  uds_server.cpp `get_amcl_rate` branch
+                                  (PR-DIAG, Mode-A M2 fold;
+                                  uds_protocol.md §C.7)
+JITTER_FIELDS                     rt_types.hpp::struct JitterSnapshot +
+  = ("valid","p50_ns","p95_ns",   json_mini.cpp::format_ok_jitter
+     "p99_ns","max_ns","mean_ns", (PR-DIAG; field-NAME SSOT is the
+     "sample_count",              struct, field-ORDER SSOT is the
+     "published_mono_ns")         format string. Pinned by
+                                  test_jitter_struct_fields_match_cpp_source
+                                  + test_jitter_fields_match_cpp_source.)
+AMCL_RATE_FIELDS                  rt_types.hpp::struct AmclIterationRate
+  = ("valid","hz",                + json_mini.cpp::format_ok_amcl_rate
+     "last_iteration_mono_ns",    (PR-DIAG, Mode-A M2 fold; same dual-pin
+     "total_iteration_count",     pattern as JITTER_FIELDS — pinned by
+     "published_mono_ns")         test_amcl_rate_struct_fields_match_cpp_source
+                                  + test_amcl_rate_fields_match_cpp_source.)
+RESOURCES_FIELDS                  webctl-only (no C++ counterpart);
+  = ("cpu_temp_c","mem_used_pct", pinned by test_resources_fields_pinned.
+     "mem_total_bytes",
+     "mem_avail_bytes",
+     "disk_used_pct",
+     "disk_total_bytes",
+     "disk_avail_bytes",
+     "published_mono_ns")
+DIAG_FRAME_FIELDS                 SSE multiplexed payload top-level keys;
+  = ("pose","jitter",             pinned by test_diag_frame_fields_pinned.
+     "amcl_rate","resources")     Mode-A M2 fold renamed scan_rate →
+                                  amcl_rate.
 ERR_PARSE_ERROR = "parse_error"   uds_server.cpp:189,196
 ERR_UNKNOWN_CMD = "unknown_cmd"   uds_server.cpp:225
 ERR_BAD_MODE    = "bad_mode"      uds_server.cpp:215
@@ -282,9 +313,11 @@ The auth model splits cleanly along read-vs-write:
 - **Anonymous-readable**: `/api/health`, `/api/last_pose`,
   `/api/last_pose/stream`, `/api/last_scan`, `/api/last_scan/stream`,
   `/api/map/image`, `/api/maps`, `/api/maps/<name>/image`,
-  `/api/maps/<name>/yaml`, `/api/activity`, `/api/local/services`
-  (loopback), `/api/local/services/stream` (loopback),
-  `/api/local/journal/<name>` (loopback).
+  `/api/maps/<name>/yaml`, `/api/activity`, `/api/system/jitter` (PR-DIAG),
+  `/api/system/amcl_rate` (PR-DIAG), `/api/system/resources` (PR-DIAG),
+  `/api/diag/stream` (PR-DIAG, SSE @ 5 Hz), `/api/logs/tail` (PR-DIAG),
+  `/api/local/services` (loopback), `/api/local/services/stream`
+  (loopback), `/api/local/journal/<name>` (loopback).
 - **Login-gated mutations** (`Depends(require_admin)`): `/api/calibrate`,
   `/api/live`, `/api/map/backup`, `/api/maps/<name>/activate`,
   `DELETE /api/maps/<name>`, `/api/local/service/<name>/<action>`
@@ -300,6 +333,38 @@ sees HTTP 403 `loopback_only` regardless of token validity. The SPA
 mirrors this in `App.svelte` (no auth-redirect on the router) and
 `api.ts` (a 401 only triggers a `/login` redirect when the caller had
 a token — anon callers see the raw 401 instead of being bounced).
+
+### (q) PR-DIAG — Resources cache is process-local + 1 s TTL
+
+`resources.snapshot()` (`src/godo_webctl/resources.py`) maintains a
+module-level `_cache: tuple[mono_ns, dict] | None`. Two calls within
+the TTL window return the same dict object (cache hit); calls past TTL
+return a fresh snapshot. Webctl runs single-uvicorn-worker per
+invariant (e), so no inter-worker race. Pinned by
+`test_resources.py::test_cache_hit_within_ttl` +
+`test_cache_miss_after_ttl`.
+
+### (r) PR-DIAG — Logs allow-list reuses `services.ALLOWED_SERVICES`
+
+`logs.py` does NOT define a parallel allow-list — it imports
+`services.ALLOWED_SERVICES` and re-exports the three exception types
+(`UnknownService`, `CommandTimeout`, `CommandFailed`) so callers
+catching `logs.UnknownService` AND `services.UnknownService` hit the
+same handler. Drift is impossible by construction. Pinned by
+`test_logs.py::test_logs_allow_list_is_services_allow_list` +
+`test_exception_types_are_services_aliases`.
+
+### (s) PR-DIAG — DiagFrame is multiplexed (nested), not flattened
+
+`/api/diag/stream` emits a single SSE frame per tick whose payload is
+a 4-key dict: `{pose, jitter, amcl_rate, resources}` (Mode-A M2 fold:
+NOT `scan_rate`). Each sub-payload preserves its own
+`published_mono_ns`; per-sub-panel freshness is gated SPA-side via
+`_arrival_ms` (Track D Mode-A M2 + PR-DIAG N4 fold). Any single
+sub-fetch failure becomes `{"valid": 0, "err": "..."}` for that key —
+the OTHER three sub-payloads still emit. Pinned by
+`tests/test_sse.py::test_diag_stream_*` (cadence + skip-pose-error +
+skip-resources-error + all-four-fail-emits-all-sentinel).
 
 ## Phase 4.5 follow-up candidates
 
@@ -712,3 +777,103 @@ legacy `static/index.html`.
 
 - 3 new cases in `tests/test_protocol.py`. Total webctl test count:
   47 → 50 hardware-free; +1 hardware-required smoke (unchanged).
+
+## 2026-04-29 — PR-DIAG (Track B-DIAG) — Diagnostics endpoints + SSE
+
+### Added
+
+- `src/godo_webctl/protocol.py` — new wire constants:
+  - `CMD_GET_JITTER = "get_jitter"`,
+    `CMD_GET_AMCL_RATE = "get_amcl_rate"` (Mode-A M2 fold renamed).
+  - `JITTER_FIELDS` (8-tuple), `AMCL_RATE_FIELDS` (5-tuple) — regex
+    pinned against C++ struct + format string.
+  - `RESOURCES_FIELDS` (8-tuple, webctl-only — no C++ counterpart).
+  - `DIAG_FRAME_FIELDS = ("pose","jitter","amcl_rate","resources")`.
+  - `encode_get_jitter()` + `encode_get_amcl_rate()` byte-exact encoders.
+- `src/godo_webctl/uds_client.py` — `UdsClient.get_jitter` +
+  `get_amcl_rate` (standard 4 KiB read cap; small replies).
+- `src/godo_webctl/resources.py` (NEW) — `snapshot()` reads
+  `/sys/class/thermal/thermal_zone0/temp`, `/proc/meminfo`, and
+  `os.statvfs(disk_check_path)`. Per-source try/except so missing
+  thermal zone yields `cpu_temp_c=None` rather than 500. 1 s TTL cache.
+  `_reset_cache_for_tests()` test seam.
+- `src/godo_webctl/logs.py` (NEW) — `tail(unit, n)` wraps
+  `journalctl --no-pager -n N -u <svc> --output=cat` via
+  `subprocess.run`. Allow-list IS `services.ALLOWED_SERVICES` (re-export,
+  not duplicate). Argv is a literal Python list. n>cap clamps to
+  `LOGS_TAIL_MAX_N` with WARN log. Re-exports
+  `UnknownService` / `CommandTimeout` / `CommandFailed` from services.
+- `src/godo_webctl/sse.py` — `diag_stream(client, cfg, sleep=...)`:
+  3 parallel UDS calls via `asyncio.gather` (bound on slowest, not sum)
+  + `resources.snapshot()` on a worker thread; each sub-fetch failure
+  becomes `{"valid": 0, "err": "<exc>"}` for that key — others still
+  emit. Heartbeat + cancel-safe lifecycle mirrors
+  `last_pose_stream`/`last_scan_stream`.
+- `src/godo_webctl/app.py` — 5 new endpoints (all anon-readable per
+  Track F):
+  - `GET /api/system/jitter` (single-shot UDS call).
+  - `GET /api/system/amcl_rate` (single-shot UDS call).
+  - `GET /api/system/resources` (process-local 1 s cache; no UDS).
+  - `GET /api/logs/tail?unit=<svc>&n=<int>` (Pydantic
+    `LogsTailQuery(n: int = Field(ge=1, le=LOGS_TAIL_MAX_N))`;
+    allow-list reuses `services.ALLOWED_SERVICES`).
+  - `GET /api/diag/stream` (SSE @ 5 Hz; per-subscriber UdsClient).
+  - Helpers: `_jitter_view` / `_amcl_rate_view` / `_resources_view` /
+    `_map_logs_exc_to_response`.
+- `src/godo_webctl/constants.py` — 5 new Tier-1 constants:
+  `RESOURCES_CACHE_TTL_S = 1.0`, `LOGS_TAIL_MAX_N = 500`,
+  `LOGS_TAIL_DEFAULT_N = 50`, `THERMAL_ZONE_PATH`, `MEMINFO_PATH`.
+- `src/godo_webctl/config.py` — `Settings.disk_check_path: Path`
+  (default `Path("/")`); `GODO_WEBCTL_DISK_CHECK_PATH` env override.
+
+### Changed
+
+- `tests/test_app_integration.py::_settings_for` — accepts
+  `disk_check_path: Path | None`; the two ad-hoc Settings constructions
+  in the migration tests now pass `disk_check_path=Path("/")`.
+- `tests/test_sse.py::_settings()` — extended with
+  `disk_check_path=Path("/")`.
+
+### Tests (new)
+
+- `tests/test_resources.py` (8 cases — happy, missing thermal/meminfo,
+  statvfs failure, all-sources-failing, cache hit < TTL, cache miss >
+  TTL, dict-shape pin against `RESOURCES_FIELDS`).
+- `tests/test_logs.py` (10 cases — happy + argv literal + unknown unit
+  + n=0 + n<0 + n>cap clamps with WARN + timeout + non-zero exit +
+  argv-list-not-shell + allow-list-IS-services + exception-types-are-
+  services-aliases).
+- `tests/test_protocol.py` — 9 new cases (CMD_GET_JITTER /
+  CMD_GET_AMCL_RATE pinned, encode_* byte-exact, JITTER_FIELDS /
+  AMCL_RATE_FIELDS regex-pinned against format strings + struct names,
+  RESOURCES_FIELDS pinned, DIAG_FRAME_FIELDS pinned).
+- `tests/test_uds_client.py` — 6 new cases (get_jitter happy / canonical
+  bytes / server-rejected; get_amcl_rate happy / canonical bytes /
+  server-rejected).
+- `tests/test_sse.py` — 5 new cases for `diag_stream` (5 Hz cadence,
+  skip-pose-error keeps other panels, skip-resources-error keeps three
+  UDS panels, keepalive after heartbeat, cancellation propagates,
+  all-four-fail emits all-sentinel).
+- `tests/test_constants.py` — 5 new constant pins.
+- `tests/test_config.py` — `disk_check_path` default + env override.
+- `tests/test_app_integration.py` — 12 new cases (3 per single-shot
+  endpoint × 4 + diag-stream content-type pin); extended
+  `test_anon_read_endpoints_return_200` parametrization to include the
+  5 new anon endpoints.
+
+### Mode-A folds applied
+
+- M1: `AmclRateAccumulator` uses `Seqlock<AmclRateRecord>` (in C++).
+  Webctl side reads the C++ wire shape unchanged.
+- M2: `scan_rate` → `amcl_rate` everywhere (endpoint URL, command name,
+  field tuple name, SSE frame key).
+- N3: `amcl_rate_seq` is reader-only on `diag_publisher.cpp`
+  (C++-side invariant; webctl mirror is one-way).
+- N4: `Resources.published_mono_ns` is the WEBCTL `time.monotonic_ns()`,
+  NOT comparable to the C++ tracker's CLOCK_MONOTONIC. Documented in
+  `protocol.py` and `resources.py`. SPA freshness uses `_arrival_ms`.
+
+### Total webctl test count
+
+333 hardware-free pytest cases pass (was 286 pre-PR-DIAG). +47 new
+cases. ruff check clean; ruff format clean.

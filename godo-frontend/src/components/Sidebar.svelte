@@ -15,6 +15,7 @@
   const items: NavItem[] = [
     { path: '/', label: 'Dashboard' },
     { path: '/map', label: 'Map' },
+    { path: '/diag', label: 'Diagnostics' },
   ];
 
   function go(p: string): void {

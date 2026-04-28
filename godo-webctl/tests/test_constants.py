@@ -135,3 +135,28 @@ def test_maps_name_regex_accepts_reserved_active_name() -> None:
     # Regex itself accepts "active"; the reserved-name check lives at
     # the maps.py public-function layer (set_active / delete_pair).
     assert C.MAPS_NAME_REGEX.match("active")
+
+
+# --- PR-DIAG (Track B-DIAG) constants ------------------------------------
+
+
+def test_resources_cache_ttl_pinned() -> None:
+    assert C.RESOURCES_CACHE_TTL_S == 1.0
+
+
+def test_logs_tail_max_n_pinned() -> None:
+    assert C.LOGS_TAIL_MAX_N == 500
+
+
+def test_logs_tail_default_n_pinned() -> None:
+    assert C.LOGS_TAIL_DEFAULT_N == 50
+
+
+def test_thermal_zone_path_pinned() -> None:
+    # Standard Linux thermal_zone0 path; deviating from this on RPi 5 would
+    # mean the operator is on a non-standard kernel, which is out of scope.
+    assert C.THERMAL_ZONE_PATH == "/sys/class/thermal/thermal_zone0/temp"
+
+
+def test_meminfo_path_pinned() -> None:
+    assert C.MEMINFO_PATH == "/proc/meminfo"

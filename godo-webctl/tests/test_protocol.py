@@ -195,10 +195,13 @@ def test_last_scan_wire_order_matches_format_ok_scan() -> None:
     func_marker = "format_ok_scan"
     start = src.find(func_marker + "(const godo::rt::LastScan")
     assert start != -1, f"Could not locate '{func_marker}' definition in {_JSON_MINI_CPP}"
-    # End at the closing `}` of format_ok_scan. We use the first
-    # `\nstd::string_view mode_to_string` (the next free function) as
-    # the sentinel; this is robust to in-body braces.
-    end = src.find("\nstd::string_view mode_to_string", start)
+    # End at the next free-function definition after format_ok_scan. After
+    # PR-DIAG that is `format_ok_jitter`; pre-PR-DIAG it was
+    # `mode_to_string`. Either is a fine sentinel — both are unique markers
+    # outside any function body. We try the closer one first.
+    end = src.find("\nstd::string format_ok_jitter", start)
+    if end == -1:
+        end = src.find("\nstd::string_view mode_to_string", start)
     assert end != -1, "Could not locate end of format_ok_scan body"
     body = src[start:end]
     # Find every `\"<key>\":` token in the function body. The format
@@ -222,6 +225,138 @@ def test_last_scan_wire_order_matches_format_ok_scan() -> None:
     assert tuple(fields_in_cpp) == P.LAST_SCAN_HEADER_FIELDS, (
         f"Field-order drift: C++={tuple(fields_in_cpp)} Python={P.LAST_SCAN_HEADER_FIELDS}"
     )
+
+
+# --- PR-DIAG: get_jitter / get_amcl_rate mirror --------------------------
+
+
+def test_cmd_get_jitter_matches_cpp() -> None:
+    # production/RPi5/src/uds/uds_server.cpp `get_jitter` branch.
+    assert P.CMD_GET_JITTER == "get_jitter"
+
+
+def test_cmd_get_amcl_rate_matches_cpp() -> None:
+    # production/RPi5/src/uds/uds_server.cpp `get_amcl_rate` branch.
+    # Mode-A M2 fold: command name is amcl_rate (NOT scan_rate).
+    assert P.CMD_GET_AMCL_RATE == "get_amcl_rate"
+
+
+def test_encode_get_jitter_byte_exact() -> None:
+    assert P.encode_get_jitter() == b'{"cmd":"get_jitter"}\n'
+
+
+def test_encode_get_amcl_rate_byte_exact() -> None:
+    assert P.encode_get_amcl_rate() == b'{"cmd":"get_amcl_rate"}\n'
+
+
+def _extract_format_keys(src: str, fn_marker: str, sentinel: str) -> tuple[str, ...]:
+    """Helper — slice the JSON keys out of a snprintf format string in
+    json_mini.cpp. Used by both the jitter and amcl_rate drift pins."""
+    start = src.find(fn_marker)
+    assert start != -1, f"Could not locate '{fn_marker}' definition"
+    end = src.find(sentinel, start)
+    assert end != -1, f"Could not locate sentinel '{sentinel}' after {fn_marker}"
+    body = src[start:end]
+    field_pattern = re.compile(r'\\"([a-z_0-9]+)\\":')
+    found = field_pattern.findall(body)
+    seen: set[str] = set()
+    out: list[str] = []
+    for name in found:
+        if name == "ok":
+            continue
+        if name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+    return tuple(out)
+
+
+def test_jitter_fields_match_cpp_source() -> None:
+    """PR-DIAG drift pin: regex-extract JSON keys from format_ok_jitter's
+    snprintf format string and assert tuple-equal against JITTER_FIELDS."""
+    src = _JSON_MINI_CPP.read_text(encoding="utf-8")
+    found = _extract_format_keys(
+        src,
+        "format_ok_jitter(const godo::rt::JitterSnapshot",
+        "\nstd::string format_ok_amcl_rate",
+    )
+    assert found == P.JITTER_FIELDS, f"Field-order drift: C++={found} Python={P.JITTER_FIELDS}"
+
+
+def test_amcl_rate_fields_match_cpp_source() -> None:
+    """PR-DIAG drift pin (Mode-A M2): same shape as jitter pin."""
+    src = _JSON_MINI_CPP.read_text(encoding="utf-8")
+    found = _extract_format_keys(
+        src,
+        "format_ok_amcl_rate(const godo::rt::AmclIterationRate",
+        "\nstd::string_view mode_to_string",
+    )
+    assert found == P.AMCL_RATE_FIELDS, (
+        f"Field-order drift: C++={found} Python={P.AMCL_RATE_FIELDS}"
+    )
+
+
+def test_jitter_struct_fields_match_cpp_source() -> None:
+    """Mirror `test_last_scan_header_fields_match_cpp_source` for
+    JitterSnapshot — set-equality between struct names (after pad
+    filter) and the Python tuple."""
+    src = _RT_TYPES_HPP.read_text(encoding="utf-8")
+    start = src.find("struct JitterSnapshot {")
+    assert start != -1, "struct JitterSnapshot not found in rt_types.hpp"
+    end = src.find("};", start)
+    assert end != -1
+    body = src[start:end]
+    field_re = re.compile(
+        r"^\s*(?:std::)?\w+(?:_t)?\s+([a-z_][a-z0-9_]*)\s*(?:\[[^\]]*\])?\s*;",
+        re.MULTILINE,
+    )
+    declared = field_re.findall(body)
+    visible = tuple(name for name in declared if not name.startswith("_pad"))
+    assert set(P.JITTER_FIELDS) == set(visible), (
+        f"Field-name drift: C++={visible} Python={P.JITTER_FIELDS}"
+    )
+
+
+def test_amcl_rate_struct_fields_match_cpp_source() -> None:
+    """Mode-A M2 fold mirror — set-equality vs. AmclIterationRate
+    struct."""
+    src = _RT_TYPES_HPP.read_text(encoding="utf-8")
+    start = src.find("struct AmclIterationRate {")
+    assert start != -1, "struct AmclIterationRate not found in rt_types.hpp"
+    end = src.find("};", start)
+    assert end != -1
+    body = src[start:end]
+    field_re = re.compile(
+        r"^\s*(?:std::)?\w+(?:_t)?\s+([a-z_][a-z0-9_]*)\s*(?:\[[^\]]*\])?\s*;",
+        re.MULTILINE,
+    )
+    declared = field_re.findall(body)
+    visible = tuple(name for name in declared if not name.startswith("_pad"))
+    assert set(P.AMCL_RATE_FIELDS) == set(visible), (
+        f"Field-name drift: C++={visible} Python={P.AMCL_RATE_FIELDS}"
+    )
+
+
+def test_resources_fields_pinned() -> None:
+    """RESOURCES_FIELDS is webctl-only (no C++ counterpart). Pin values
+    + count to catch drift between resources.snapshot() and the SPA's
+    Resources interface."""
+    assert P.RESOURCES_FIELDS == (
+        "cpu_temp_c",
+        "mem_used_pct",
+        "mem_total_bytes",
+        "mem_avail_bytes",
+        "disk_used_pct",
+        "disk_total_bytes",
+        "disk_avail_bytes",
+        "published_mono_ns",
+    )
+
+
+def test_diag_frame_fields_pinned() -> None:
+    """Mode-A M2 fold: top-level keys are `pose / jitter / amcl_rate /
+    resources` (NOT scan_rate)."""
+    assert P.DIAG_FRAME_FIELDS == ("pose", "jitter", "amcl_rate", "resources")
 
 
 def test_last_pose_fields_match_cpp_source() -> None:

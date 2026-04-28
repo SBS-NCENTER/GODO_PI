@@ -680,3 +680,224 @@ TEST_CASE("format_ok_pose reply size is under 512 bytes (F17 budget pin)") {
     const auto first_nl = s.find('\n');
     CHECK(first_nl == s.size() - 1);
 }
+
+// --------------------------------------------------------------
+// PR-DIAG — get_jitter dispatch + format_ok_jitter shape.
+// --------------------------------------------------------------
+
+TEST_CASE("get_jitter returns valid=0 when no publisher tick yet") {
+    TempUdsPath guard(tmp_socket_path("getjitter_invalid"));
+    ServerHarness h;
+    godo::rt::g_running.store(true, std::memory_order_release);
+
+    // No JitterGetter wired (default nullptr) — server replies with
+    // valid=0 sentinel, mirroring get_last_pose null-callback semantics.
+    UdsServer server(
+        guard.path,
+        [&]() { return h.mode_target.load(); },
+        [&](AmclMode m) { h.mode_target.store(m); });
+    REQUIRE_NOTHROW(server.open());
+    h.th = std::thread([&]() { server.run(); });
+
+    int fd = connect_client(guard.path);
+    REQUIRE(fd >= 0);
+    auto resp = send_recv(fd, "{\"cmd\":\"get_jitter\"}\n");
+    ::close(fd);
+    CHECK(resp.find("\"ok\":true") != std::string::npos);
+    CHECK(resp.find("\"valid\":0") != std::string::npos);
+    CHECK(resp.find("\"p50_ns\":0") != std::string::npos);
+    CHECK(resp.find("\"sample_count\":0") != std::string::npos);
+    CHECK(resp.back() == '\n');
+
+    godo::rt::g_running.store(false, std::memory_order_release);
+    h.th.join();
+}
+
+TEST_CASE("get_jitter returns published snapshot verbatim") {
+    TempUdsPath guard(tmp_socket_path("getjitter_synth"));
+    ServerHarness h;
+    godo::rt::g_running.store(true, std::memory_order_release);
+
+    godo::rt::JitterSnapshot synth{};
+    synth.p50_ns            = 4567;
+    synth.p95_ns            = 12345;
+    synth.p99_ns            = 45678;
+    synth.max_ns            = 123456;
+    synth.mean_ns           = 5678;
+    synth.sample_count      = 2048;
+    synth.published_mono_ns = 1234567890123ULL;
+    synth.valid             = 1;
+
+    UdsServer server(
+        guard.path,
+        [&]() { return h.mode_target.load(); },
+        [&](AmclMode m) { h.mode_target.store(m); },
+        nullptr,           // last_pose getter unused
+        nullptr,           // last_scan getter unused
+        [&]() { return synth; });
+    REQUIRE_NOTHROW(server.open());
+    h.th = std::thread([&]() { server.run(); });
+
+    int fd = connect_client(guard.path);
+    REQUIRE(fd >= 0);
+    auto resp = send_recv(fd, "{\"cmd\":\"get_jitter\"}\n");
+    ::close(fd);
+    CHECK(resp.find("\"valid\":1") != std::string::npos);
+    CHECK(resp.find("\"p50_ns\":4567") != std::string::npos);
+    CHECK(resp.find("\"p95_ns\":12345") != std::string::npos);
+    CHECK(resp.find("\"p99_ns\":45678") != std::string::npos);
+    CHECK(resp.find("\"max_ns\":123456") != std::string::npos);
+    CHECK(resp.find("\"mean_ns\":5678") != std::string::npos);
+    CHECK(resp.find("\"sample_count\":2048") != std::string::npos);
+    CHECK(resp.find("\"published_mono_ns\":1234567890123") != std::string::npos);
+
+    godo::rt::g_running.store(false, std::memory_order_release);
+    h.th.join();
+}
+
+TEST_CASE("format_ok_jitter — byte-exact shape on a default-zero JitterSnapshot") {
+    using godo::uds::format_ok_jitter;
+    godo::rt::JitterSnapshot j{};
+    const std::string out = format_ok_jitter(j);
+    CHECK(out ==
+        "{\"ok\":true,\"valid\":0,\"p50_ns\":0,\"p95_ns\":0,"
+        "\"p99_ns\":0,\"max_ns\":0,\"mean_ns\":0,"
+        "\"sample_count\":0,\"published_mono_ns\":0}\n");
+}
+
+TEST_CASE("format_ok_jitter — fits inside JITTER_FORMAT_SCRATCH_BYTES") {
+    using godo::uds::format_ok_jitter;
+    godo::rt::JitterSnapshot j{};
+    j.valid             = 1;
+    j.p50_ns            = 9223372036854775807LL;   // INT64_MAX
+    j.p95_ns            = -9223372036854775807LL - 1;  // INT64_MIN
+    j.p99_ns            = 9223372036854775807LL;
+    j.max_ns            = 9223372036854775807LL;
+    j.mean_ns           = -9223372036854775807LL - 1;
+    j.sample_count      = 18446744073709551615ULL;
+    j.published_mono_ns = 18446744073709551615ULL;
+    const std::string out = format_ok_jitter(j);
+    CHECK(out.size() < static_cast<std::size_t>(godo::constants::JITTER_FORMAT_SCRATCH_BYTES));
+    CHECK(out.back() == '\n');
+}
+
+// --------------------------------------------------------------
+// PR-DIAG — get_amcl_rate dispatch + format_ok_amcl_rate shape.
+// --------------------------------------------------------------
+
+TEST_CASE("get_amcl_rate returns valid=0 when no publisher tick yet") {
+    TempUdsPath guard(tmp_socket_path("getrate_invalid"));
+    ServerHarness h;
+    godo::rt::g_running.store(true, std::memory_order_release);
+
+    UdsServer server(
+        guard.path,
+        [&]() { return h.mode_target.load(); },
+        [&](AmclMode m) { h.mode_target.store(m); });
+    REQUIRE_NOTHROW(server.open());
+    h.th = std::thread([&]() { server.run(); });
+
+    int fd = connect_client(guard.path);
+    REQUIRE(fd >= 0);
+    auto resp = send_recv(fd, "{\"cmd\":\"get_amcl_rate\"}\n");
+    ::close(fd);
+    CHECK(resp.find("\"ok\":true") != std::string::npos);
+    CHECK(resp.find("\"valid\":0") != std::string::npos);
+    CHECK(resp.find("\"hz\":0.000000") != std::string::npos);
+    CHECK(resp.find("\"total_iteration_count\":0") != std::string::npos);
+    CHECK(resp.back() == '\n');
+
+    godo::rt::g_running.store(false, std::memory_order_release);
+    h.th.join();
+}
+
+TEST_CASE("get_amcl_rate returns published snapshot verbatim") {
+    TempUdsPath guard(tmp_socket_path("getrate_synth"));
+    ServerHarness h;
+    godo::rt::g_running.store(true, std::memory_order_release);
+
+    godo::rt::AmclIterationRate synth{};
+    synth.hz                      = 9.987654;
+    synth.last_iteration_mono_ns  = 1234567890123ULL;
+    synth.total_iteration_count   = 5432;
+    synth.published_mono_ns       = 1234567891000ULL;
+    synth.valid                   = 1;
+
+    UdsServer server(
+        guard.path,
+        [&]() { return h.mode_target.load(); },
+        [&](AmclMode m) { h.mode_target.store(m); },
+        nullptr, nullptr, nullptr,
+        [&]() { return synth; });
+    REQUIRE_NOTHROW(server.open());
+    h.th = std::thread([&]() { server.run(); });
+
+    int fd = connect_client(guard.path);
+    REQUIRE(fd >= 0);
+    auto resp = send_recv(fd, "{\"cmd\":\"get_amcl_rate\"}\n");
+    ::close(fd);
+    CHECK(resp.find("\"valid\":1") != std::string::npos);
+    CHECK(resp.find("\"hz\":9.987654") != std::string::npos);
+    CHECK(resp.find("\"last_iteration_mono_ns\":1234567890123") != std::string::npos);
+    CHECK(resp.find("\"total_iteration_count\":5432") != std::string::npos);
+    CHECK(resp.find("\"published_mono_ns\":1234567891000") != std::string::npos);
+
+    godo::rt::g_running.store(false, std::memory_order_release);
+    h.th.join();
+}
+
+TEST_CASE("get_jitter dispatches concurrently with set_mode") {
+    TempUdsPath guard(tmp_socket_path("getjitter_concurrent"));
+    ServerHarness h;
+    godo::rt::g_running.store(true, std::memory_order_release);
+
+    godo::rt::JitterSnapshot synth{};
+    synth.valid    = 1;
+    synth.p50_ns   = 1000;
+    synth.p99_ns   = 50000;
+    synth.max_ns   = 100000;
+    synth.sample_count = 64;
+
+    UdsServer server(
+        guard.path,
+        [&]() { return h.mode_target.load(); },
+        [&](AmclMode m) { h.mode_target.store(m); },
+        nullptr, nullptr,
+        [&]() { return synth; });
+    REQUIRE_NOTHROW(server.open());
+    h.th = std::thread([&]() { server.run(); });
+
+    constexpr int kRounds = 50;
+    std::thread mode_writer([&]() {
+        for (int i = 0; i < kRounds; ++i) {
+            int fd = connect_client(guard.path);
+            if (fd < 0) continue;
+            (void)send_recv(fd, "{\"cmd\":\"set_mode\",\"mode\":\"OneShot\"}\n");
+            ::close(fd);
+        }
+    });
+    std::thread reader([&]() {
+        for (int i = 0; i < kRounds; ++i) {
+            int fd = connect_client(guard.path);
+            if (fd < 0) continue;
+            auto resp = send_recv(fd, "{\"cmd\":\"get_jitter\"}\n");
+            CHECK(resp.find("\"ok\":true") != std::string::npos);
+            ::close(fd);
+        }
+    });
+    mode_writer.join();
+    reader.join();
+
+    godo::rt::g_running.store(false, std::memory_order_release);
+    h.th.join();
+}
+
+TEST_CASE("format_ok_amcl_rate — byte-exact shape on a default-zero record") {
+    using godo::uds::format_ok_amcl_rate;
+    godo::rt::AmclIterationRate r{};
+    const std::string out = format_ok_amcl_rate(r);
+    CHECK(out ==
+        "{\"ok\":true,\"valid\":0,\"hz\":0.000000,"
+        "\"last_iteration_mono_ns\":0,\"total_iteration_count\":0,"
+        "\"published_mono_ns\":0}\n");
+}

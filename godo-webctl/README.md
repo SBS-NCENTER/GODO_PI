@@ -9,10 +9,87 @@ Phase 4-2 D Unix-domain JSON-lines socket at `/run/godo/ctl.sock`.
 
 | Method | Path                | Purpose |
 | --- | --- | --- |
-| GET  | `/api/health`       | Tracker liveness + current AMCL mode |
-| POST | `/api/calibrate`    | Latch `OneShot` on the tracker (returns immediately) |
-| POST | `/api/map/backup`   | Atomic snapshot of `.pgm + .yaml` to `<backup_dir>/<UTC ts>/` |
-| GET  | `/`                 | Static status page (`index.html`) |
+| GET  | `/api/health`       | Tracker liveness + current AMCL mode (public) |
+| POST | `/api/calibrate`    | Latch `OneShot` on the tracker (admin) |
+| POST | `/api/map/backup`   | Atomic snapshot of `.pgm + .yaml` (admin) |
+| POST | `/api/live`         | Toggle Live ↔ Idle on the tracker (admin) |
+| GET  | `/api/last_pose`    | One-shot pose snapshot (viewer) |
+| GET  | `/api/last_pose/stream` | SSE: pose @ 5 Hz (viewer) |
+| GET  | `/api/map/image`    | PGM rendered to PNG (viewer) |
+| GET  | `/api/activity?n=`  | Last N operator actions (viewer) |
+| POST | `/api/auth/login`   | Issue a JWT (public) |
+| POST | `/api/auth/logout`  | Acknowledge logout (viewer) |
+| GET  | `/api/auth/me`      | Decode current token (viewer) |
+| POST | `/api/auth/refresh` | Re-issue a JWT with extended exp (viewer) |
+| GET  | `/api/local/services`        | systemctl status × 3 units (admin, loopback) |
+| POST | `/api/local/service/<name>/<action>` | start \| stop \| restart (admin, loopback) |
+| GET  | `/api/local/journal/<name>?n=` | journalctl tail (admin, loopback) |
+| GET  | `/api/local/services/stream` | SSE: services status @ 1 Hz (admin, loopback) |
+| POST | `/api/system/reboot` | `shutdown -r +0` (admin) |
+| POST | `/api/system/shutdown` | `shutdown -h +0` (admin) |
+| GET  | `/`                 | Static status page (`index.html`) — replaced by SPA when `GODO_WEBCTL_SPA_DIST` is set |
+
+## Auth
+
+PR-A introduces JWT-based auth on every non-`/api/health` endpoint.
+HS256 with a 6 h TTL and a server-side secret persisted at
+`/var/lib/godo/auth/jwt_secret` (mode 0600, lazy-generated 32 random
+bytes on first boot). Restarting `godo-webctl` re-reads the secret;
+deleting the file rotates and invalidates all extant operator sessions.
+
+`users.json` (default `/var/lib/godo/auth/users.json`) is the
+credential store. Hashes are bcrypt at cost factor 12 (~300 ms / login
+on RPi 5 — deliberate friction; do **not** lower without revisiting the
+threat model). On first boot a default admin `ncenter`/`ncenter` is
+lazy-seeded if the file is absent. Change it via:
+
+```bash
+sudo -u ncenter scripts/godo-webctl-passwd \
+  ncenter admin /var/lib/godo/auth/users.json
+```
+
+If `users.json` is hand-edited into invalid JSON, webctl logs at ERROR
+and keeps running — `/api/health` stays 200, but every login returns
+`HTTP 503 {"err":"auth_unavailable"}` so the operator sees the failure
+on the kiosk B-LOCAL page. Recovery: fix the file, then restart webctl.
+
+### Roles
+
+| Role     | Powers |
+| ---      | --- |
+| `viewer` | Read-only: `/api/auth/*`, `/api/health`, `/api/last_pose*`, `/api/map/image`, `/api/activity` |
+| `admin`  | Everything `viewer` can do, plus calibrate, live, map backup, all `/api/local/*`, system reboot/shutdown |
+
+### Default `GODO_WEBCTL_HOST=127.0.0.1` is the firewall
+
+The bind address default is loopback. The weak default seed credential
+is only exploitable by someone already on the host. If you flip
+`GODO_WEBCTL_HOST` to `0.0.0.0` for studio-LAN access, **also** change
+the seed password before exposing the service.
+
+## SSE channels
+
+| Path | Cadence | Auth | Notes |
+| --- | --- | --- | --- |
+| `/api/last_pose/stream` | 5 Hz | viewer | Tracker `get_last_pose` polled per tick. |
+| `/api/local/services/stream` | 1 Hz | admin (loopback) | `systemctl is-active` polled per tick. |
+
+Both channels:
+
+- Emit `: keepalive\n\n` every 15 s of idle stream time.
+- Set `Cache-Control: no-cache` and `X-Accel-Buffering: no` so a future
+  nginx/Caddy fronting the service does not buffer the cadence away.
+- Authenticate via either `Authorization: Bearer <token>` (regular
+  `fetch`) or `?token=<jwt>` query param (browser EventSource cannot
+  set headers). Uvicorn access logs scrub the token query param.
+
+## Local-only routes
+
+`/api/local/*` is gated by a FastAPI dependency that checks the actual
+TCP peer IP (`request.client.host`) against IPv4 `127.0.0.0/8` and
+IPv6 `::1`. `X-Forwarded-For` is **never** honoured (no proxy in our
+deployment). Anything else returns HTTP 403
+`{"err":"loopback_only"}`.
 
 ### `GET /api/health`
 
@@ -62,6 +139,10 @@ All values are optional. Defaults shown in the right column.
 | `GODO_WEBCTL_MAP_PATH` | `/etc/godo/maps/studio_v1.pgm` | **MUST include `.pgm` suffix** AND **MUST match the tracker's `GODO_AMCL_MAP_PATH`**. The `.yaml` sibling is derived by stripping `.pgm` (mirrors `occupancy_grid.cpp::yaml_path_for`). |
 | `GODO_WEBCTL_HEALTH_UDS_TIMEOUT_S` | `2.0` | Per-syscall UDS timeout for `/api/health`. Worst-case wall-clock ≤ ~6 s under server stall. |
 | `GODO_WEBCTL_CALIBRATE_UDS_TIMEOUT_S` | `30.0` | Per-syscall UDS timeout for `/api/calibrate`. UDS returns immediately (it just latches the mode); 30 s is a safety margin. |
+| `GODO_WEBCTL_JWT_SECRET_PATH` | `/var/lib/godo/auth/jwt_secret` | Where the HS256 secret lives. Lazy-generated 32 random bytes, mode 0600. |
+| `GODO_WEBCTL_USERS_FILE` | `/var/lib/godo/auth/users.json` | bcrypt credentials store. Lazy-seeded on first boot. |
+| `GODO_WEBCTL_SPA_DIST` | _unset_ | Path to a built Vite+Svelte `dist/`. When set, served at `/`; when unset, falls back to legacy `static/index.html`. |
+| `GODO_WEBCTL_CHROMIUM_LOOPBACK_ONLY` | `true` | Loopback gate for `/api/local/*`. Do **not** flip without an upstream loopback gate. |
 
 ## Install — dev
 
@@ -98,14 +179,33 @@ tracker via `After=`/`Wants=`.
 ## curl examples
 
 ```bash
+# Public — no auth.
 curl http://127.0.0.1:8080/api/health
 # → {"webctl":"ok","tracker":"ok","mode":"Idle"}
 
-curl -X POST http://127.0.0.1:8080/api/calibrate
+# Auth dance.
+TOKEN=$(curl -sX POST http://127.0.0.1:8080/api/auth/login \
+  -H 'content-type: application/json' \
+  -d '{"username":"ncenter","password":"ncenter"}' | jq -r .token)
+
+curl -X POST http://127.0.0.1:8080/api/calibrate \
+  -H "authorization: Bearer $TOKEN"
 # → {"ok":true}
 
-curl -X POST http://127.0.0.1:8080/api/map/backup
+curl -X POST http://127.0.0.1:8080/api/map/backup \
+  -H "authorization: Bearer $TOKEN"
 # → {"ok":true,"path":"/var/lib/godo/map-backups/20260426T143022Z"}
+
+curl -X POST http://127.0.0.1:8080/api/live \
+  -H "authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"enable":true}'
+# → {"ok":true,"mode":"Live"}
+
+# SSE: token-on-URL because EventSource cannot send headers.
+curl -N "http://127.0.0.1:8080/api/last_pose/stream?token=$TOKEN"
+# data: {"valid":1,"x_m":1.5,...}
+# data: ...
 ```
 
 ## Static page UX

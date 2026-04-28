@@ -474,18 +474,18 @@ JWT secret: `/var/lib/godo/auth/jwt_secret` (서버 첫 부팅 시 random 생성
 | `POST /api/calibrate` | admin | 4-3 (있음) | DASH | — | `{ok: bool}` | UDS set_mode {OneShot} |
 | `POST /api/map/backup` | admin | 4-3 (있음) | BACKUP | — | `{ts: str, path: str}` | atomic 두-단계 copy |
 | `GET /api/last_pose` | viewer | TrackB (있음) | MAP, DIAG | — | `LastPose` (Track B schema) | get_last_pose UDS round-trip |
-| `POST /api/auth/login` | public | P0 | AUTH | `{username, password}` | `{token, exp, role}` | bcrypt 검증 + JWT 발급 |
-| `POST /api/auth/logout` | viewer | P0 | AUTH | — | `{ok}` | localStorage 만료 (서버는 stateless JWT) |
-| `GET /api/auth/me` | viewer | P0 | (전 페이지 상단) | — | `{username, role, exp}` | 토큰 검증 + 만료까지 남은 초 |
-| `POST /api/auth/refresh` | viewer | P0 | (auto) | — | `{token, exp}` | 라우트 이동 시 토큰 갱신 |
-| `POST /api/live` | admin | P0 | DASH | `{enable: bool}` | `{ok, mode}` | UDS set_mode {Live\|Idle} |
-| `GET /api/map/image` | viewer | P0 | MAP | (query: `?map=<name>`) | PNG image binary | PGM → PNG (Pillow), 캐시 5분 |
-| `GET /api/activity?n=<int>` | viewer | P0 | DASH | — | `[{ts, type, detail}]` | webctl 자체 활동 로그 |
-| `GET /api/local/services` | admin (loopback) | P0 | LOCAL | — | `[{name, active, since}]` | systemctl status 3개 |
-| `POST /api/local/service/<name>/<action>` | admin (loopback) | P0 | LOCAL | — | `{ok, status}` | start \| stop \| restart |
-| `GET /api/local/journal/<name>?n=<int>` | admin (loopback) | P0 | LOCAL | — | `[str]` | journalctl tail |
-| `POST /api/system/reboot` | admin | P0 | LOCAL, SYSTEM | — | `{ok}` | shutdown -r now (5s grace) |
-| `POST /api/system/shutdown` | admin | P0 | LOCAL, SYSTEM | — | `{ok}` | shutdown -h now (5s grace) |
+| `POST /api/auth/login` | public | P0 (있음) | AUTH | `{username, password}` | `{token, exp, role}` | bcrypt 검증 + JWT 발급 |
+| `POST /api/auth/logout` | viewer | P0 (있음) | AUTH | — | `{ok}` | localStorage 만료 (서버는 stateless JWT) |
+| `GET /api/auth/me` | viewer | P0 (있음) | (전 페이지 상단) | — | `{username, role, exp}` | 토큰 검증 + 만료까지 남은 초 |
+| `POST /api/auth/refresh` | viewer | P0 (있음) | (auto) | — | `{token, exp}` | 라우트 이동 시 토큰 갱신 |
+| `POST /api/live` | admin | P0 (있음) | DASH | `{enable: bool}` | `{ok, mode}` | UDS set_mode {Live\|Idle} |
+| `GET /api/map/image` | viewer | P0 (있음) | MAP | (query: `?map=<name>`) | PNG image binary | PGM → PNG (Pillow), 캐시 5분 |
+| `GET /api/activity?n=<int>` | viewer | P0 (있음) | DASH | — | `[{ts, type, detail}]` | webctl 자체 활동 로그 |
+| `GET /api/local/services` | admin (loopback) | P0 (있음) | LOCAL | — | `[{name, active, since}]` | systemctl status 3개 |
+| `POST /api/local/service/<name>/<action>` | admin (loopback) | P0 (있음) | LOCAL | — | `{ok, status}` | start \| stop \| restart |
+| `GET /api/local/journal/<name>?n=<int>` | admin (loopback) | P0 (있음) | LOCAL | — | `[str]` | journalctl tail |
+| `POST /api/system/reboot` | admin | P0 (있음) | LOCAL, SYSTEM | — | `{ok}` | shutdown -r now (5s grace) |
+| `POST /api/system/shutdown` | admin | P0 (있음) | LOCAL, SYSTEM | — | `{ok}` | shutdown -h now (5s grace) |
 | `GET /api/system/jitter` | viewer | P1 | DIAG, SYSTEM | — | `{p50, p99, max}` | RT thread jitter snapshot |
 | `GET /api/system/scan_rate` | viewer | P1 | DIAG | — | `{hz, last_scan_ts}` | LiDAR scan rate |
 | `GET /api/system/resources` | viewer | P1 | SYSTEM | — | `{cpu_temp, mem_used, disk_used}` | psutil + /sys read |
@@ -504,9 +504,9 @@ JWT secret: `/var/lib/godo/auth/jwt_secret` (서버 첫 부팅 시 random 생성
 
 | Path | 권한 | Phase | 페이지 | Frame | 설명 |
 |---|---|---|---|---|---|
-| `GET /api/last_pose/stream` | viewer | P0 | MAP | `LastPose` JSON @ 5 Hz | get_last_pose 폴링 → push |
+| `GET /api/last_pose/stream` | viewer | P0 (있음) | MAP | `LastPose` JSON @ 5 Hz | get_last_pose 폴링 → push |
 | `GET /api/diag/stream` | viewer | P1 | DIAG | `{pose, jitter, scan_rate, resources}` @ 5 Hz | 통합 진단 |
-| `GET /api/local/services/stream` | admin (loopback) | P0 | LOCAL | `[{name, active, since}]` @ 1 Hz | 서비스 상태 변화 |
+| `GET /api/local/services/stream` | admin (loopback) | P0 (있음) | LOCAL | `[{name, active, since}]` @ 1 Hz | 서비스 상태 변화 |
 | `GET /api/logs/<svc>/stream` | viewer | P1 | DIAG, SYSTEM | journalctl --follow line-by-line | journald event-driven |
 
 ### 7.3 UDS commands (tracker side)

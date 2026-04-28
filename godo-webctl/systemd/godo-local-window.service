@@ -1,0 +1,34 @@
+[Unit]
+Description=GODO local kiosk window (Chromium pointing at /#/local)
+Documentation=file:///opt/godo-webctl/README.md
+After=graphical.target godo-webctl.service
+Wants=godo-webctl.service
+
+[Service]
+Type=simple
+User=ncenter
+Group=ncenter
+WorkingDirectory=/home/ncenter
+
+# Wait until godo-webctl answers /api/health before launching Chromium.
+# `--max-time` keeps each curl probe bounded; the outer `until` polls.
+# Bookworm's curl already enforces a sane connect timeout default.
+ExecStartPre=/bin/sh -c 'i=0; until curl -sf --max-time 2 http://127.0.0.1:8080/api/health >/dev/null; do i=$((i+1)); if [ $i -gt 60 ]; then echo "godo-webctl not ready after 60 s" >&2; exit 1; fi; sleep 1; done'
+
+# --kiosk locks navigation (per N4); --user-data-dir under /run/user/UID
+# is tmpfs-backed and wiped on reboot so the profile cannot grow
+# unbounded (per N3); --noerrdialogs / --disable-infobars hide the
+# usual first-launch popups that would steal focus on the kiosk.
+ExecStart=/usr/bin/chromium \
+  --kiosk \
+  --app=http://127.0.0.1:8080/#/local \
+  --window-size=1280,800 \
+  --user-data-dir=/run/user/%U/godo-chromium-profile \
+  --noerrdialogs \
+  --disable-infobars
+
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical.target

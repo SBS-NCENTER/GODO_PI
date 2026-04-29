@@ -14,15 +14,30 @@ from .config_schema import ConfigSchemaRow, schema_to_json
 def project_config_view(uds_resp: dict[str, Any]) -> dict[str, Any]:
     """Project the tracker's `get_config` UDS reply down to the wire shape.
 
-    The tracker emits ``{"ok": true, "<key>": <value>, ...}`` — one JSON
-    field per schema row, with the JSON-typed value (int / number /
-    string). We strip the protocol-level ``ok`` field; everything else
-    flows through unchanged.
+    The C++ tracker emits ``{"ok": true, "keys": {<key>: <value>, ...}}``
+    (see `production/RPi5/src/uds/json_mini.cpp::format_ok_get_config`).
+    The wire shape consumed by the SPA (`protocol.ts::ConfigGetResponse`)
+    is the FLAT dict ``{<key>: <value>, ...}``, so we unwrap the `keys`
+    envelope here.
 
-    A single key is dropped (``ok``); the projection is otherwise lossless
-    so the SPA can iterate the dict without knowing the schema.
+    Earlier revisions of this module assumed a flat ``{"ok": true,
+    "<key>": <value>, ...}`` reply and only stripped ``ok`` — which left
+    the SPA's `current["amcl.foo"]` resolving to ``undefined`` and the
+    Config tab rendering "—" for every row even when the tracker was
+    fully online. The C++ side has always wrapped under `keys` (since
+    PR-CONFIG-α), so the projection layer is the right place to bridge
+    the two shapes.
+
+    Returns ``{}`` when:
+      - the response is empty / lacks the ``keys`` field (e.g. a tracker
+        error already mapped to a different code by `_map_uds_exc_to_response`),
+      - or the ``keys`` field is non-dict (defensive — should not happen
+        on a healthy tracker, but we don't crash the projection layer).
     """
-    return {k: v for k, v in uds_resp.items() if k != "ok"}
+    keys = uds_resp.get("keys")
+    if isinstance(keys, dict):
+        return keys
+    return {}
 
 
 def project_schema_view(rows: tuple[ConfigSchemaRow, ...]) -> list[dict[str, object]]:

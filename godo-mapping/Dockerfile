@@ -44,6 +44,30 @@ RUN mkdir -p /opt/ros_overlay/src \
     && /bin/bash -c 'set +u; source /opt/ros/jazzy/setup.bash; set -u; colcon build --merge-install --cmake-args -DCMAKE_BUILD_TYPE=Release' \
     && rm -rf /opt/ros_overlay/build /opt/ros_overlay/log /opt/ros_overlay/src/rplidar_ros/.git
 
+# Build MAPIRlab/rf2o_laser_odometry (ros2 branch) into the SAME colcon
+# overlay used for rplidar_ros, so a single source of /opt/ros_overlay/install
+# exposes both binaries.
+#
+# Why a sed patch: upstream's package.xml is package format 1 with deprecated
+# <run_depend> tags. PR #41 (open, unmerged as of 2026-04-29) migrates to
+# format 3 + <exec_depend>. Modern ament_cmake on Jazzy emits warnings for
+# format 1 but still parses; we apply the migration in-place to silence the
+# warnings AND to defend against a future Jazzy ament that hardens to an
+# error. Two sed lines, hash-pinned via the commit SHA below.
+#
+# Pinned to b38c68e46387b98845ecbfeb6660292f967a00d3 (ros2 HEAD as of
+# 2026-04-29) for reproducibility. If a future upstream commit lands PR #41,
+# drop the sed lines and bump the SHA.
+RUN cd /opt/ros_overlay/src \
+    && git clone https://github.com/MAPIRlab/rf2o_laser_odometry.git \
+    && cd rf2o_laser_odometry \
+    && git checkout b38c68e46387b98845ecbfeb6660292f967a00d3 \
+    && sed -i 's|<package>|<package format="3">|' package.xml \
+    && sed -i 's|<run_depend>|<exec_depend>|g; s|</run_depend>|</exec_depend>|g' package.xml \
+    && cd /opt/ros_overlay \
+    && /bin/bash -c 'set +u; source /opt/ros/jazzy/setup.bash; set -u; colcon build --packages-select rf2o_laser_odometry --merge-install --cmake-args -DCMAKE_BUILD_TYPE=Release' \
+    && rm -rf /opt/ros_overlay/build /opt/ros_overlay/log /opt/ros_overlay/src/rf2o_laser_odometry/.git
+
 WORKDIR /godo-mapping
 
 COPY launch/  /godo-mapping/launch/

@@ -16,8 +16,9 @@ Greenfield: no edits to `production/RPi5/`, `godo-webctl/`,
 godo-mapping/
 ├─ Dockerfile                       # F10 layered: FROM ros:jazzy-ros-base
 ├─ launch/
-│   └─ map.launch.py                # rplidar_c1 + async_slam_toolbox_node
+│   └─ map.launch.py                # rf2o + rplidar_c1 + async_slam_toolbox_node
 ├─ config/
+│   ├─ rf2o.yaml                    # rf2o_laser_odometry parameters (Tier-2)
 │   └─ slam_toolbox_async.yaml      # base_frame=laser, save_map_timeout=10.0
 ├─ entrypoint.sh                    # PID-1 in container; SIGINT/SIGTERM trap
 ├─ scripts/
@@ -42,9 +43,11 @@ godo-mapping/
 
 | Module | Depends on | Responsibility |
 | --- | --- | --- |
-| `Dockerfile` | `ros:jazzy-ros-base` | Defines the SLAM container image; layer order tuned for build cache (apt before COPY). |
-| `launch/map.launch.py` | `rplidar_ros`, `slam_toolbox` | Composes upstream `rplidar_c1_launch.py` with `async_slam_toolbox_node`. No `static_transform_publisher`. |
-| `config/slam_toolbox_async.yaml` | `slam_toolbox` | Tier-2 SLAM parameters with inline rationale on every numeric literal (F3 carve-out). |
+| `Dockerfile` | `ros:jazzy-ros-base` | Defines the SLAM container image; layer order tuned for build cache (apt before COPY). Two colcon overlays into `/opt/ros_overlay`: rplidar_ros (Slamtec ros2 branch) + rf2o_laser_odometry (MAPIRlab ros2 branch, SHA-pinned, package.xml format-3 sed patch). |
+| `launch/map.launch.py` | `rf2o_laser_odometry`, `rplidar_ros`, `slam_toolbox` | Composes `rf2o_laser_odometry_node` + inline rplidar_node (C1) + `async_slam_toolbox_node`. No `static_transform_publisher` (invariant (h)). |
+| `config/rf2o.yaml` | `rf2o_laser_odometry` | Tier-2 rf2o parameters; top-level key `rf2o_laser_odometry:` MUST match launch Node `name=` (see invariant (h)). |
+| `config/slam_toolbox_async.yaml` | `slam_toolbox` | Tier-2 SLAM parameters with inline rationale on every numeric literal (F3 carve-out). Explicit `minimum_travel_distance`/`minimum_travel_heading` keys document reliance on the rf2o-published odom source. |
+| `rf2o_laser_odometry` (runtime, not file) | `/scan`, `tf2_ros` | Scan-to-scan registration; publishes `odom -> laser` TF + `/odom_rf2o` topic. Replaces the static identity TF (invariant (h)). |
 | `entrypoint.sh` | bash, `ros2 launch`, `map_saver_cli` | Container PID-1; traps INT/TERM, invokes `${MAP_SAVER_CMD}`, exits 0. |
 | `scripts/run-mapping.sh` | bash, `docker` | Host-side wrapper; pre-flight checks (collision, stale container, LiDAR present, image present) with pinned English error messages. |
 | `scripts/verify-no-hw.sh` | bash, `python3`, optionally `docker` | `--quick` (lint + ast + test) and `--full` (build + image smoke). |
@@ -66,9 +69,13 @@ verify-no-hw.sh ── docker build ──► (Dockerfile) ──► launch/ + c
 test_entrypoint_trap.sh ──── (no Docker, bash-only) ──►  entrypoint.sh
                                                           │
                                                           ├─ ros2 launch map.launch.py
-                                                          │       ├─ rplidar_c1_launch.py
+                                                          │       ├─ rplidar_ros/rplidar_node (C1, /scan)
+                                                          │       ├─ rf2o_laser_odometry_node
+                                                          │       │   (params from config/rf2o.yaml)
+                                                          │       │   /scan ──► odom→laser TF + /odom_rf2o
                                                           │       └─ slam_toolbox/async_slam_toolbox_node
                                                           │           (params from config/slam_toolbox_async.yaml)
+                                                          │           /scan + odom→laser TF ──► /map + map→odom TF
                                                           │
                                                           └─ on signal: ${MAP_SAVER_CMD}
                                                                           │
@@ -169,6 +176,20 @@ Any Python script under `scripts/` that talks to the tracker UDS MUST
 `from _uds_bridge import UdsBridge` — never copy-paste the class
 inline. Future diagnostic tools (e.g., a hypothetical
 `pose_dump_to_grafana.py`) extend this pattern.
+
+### (h) `odom→laser` TF is rf2o-published, never static
+
+The TF chain `map→odom→laser` requires both edges to be **dynamic and motion-derived** for slam_toolbox's Karto scan-match gate (`minimum_travel_distance: 0.5`, `minimum_travel_heading: 0.5`) to fire on real scan-pose deltas. A static `tf2_ros static_transform_publisher odom→laser` (the 2026-04-28 hotfix that landed in `map.launch.py:44-50`) reports zero motion forever and causes slam_toolbox to integrate exactly one scan and ignore every subsequent one — observed empirically as the 107-occupied-pixel artifact at `maps/0429_2.pgm`.
+
+The mapping launch graph MUST publish `odom→laser` from a scan-derived odometry node:
+
+- Plan A (current): `rf2o_laser_odometry_node` driven by `config/rf2o.yaml`.
+- Plan B (sketch): `ros2_laser_scan_matcher` from AlexKaravaev's port.
+- Plan C (config-only fallback): no external odom node; instead set `minimum_travel_distance: 0.0` and `minimum_travel_heading: 0.0` in `config/slam_toolbox_async.yaml` and accept Karto-only scan-match risk for symmetric / sparse rooms.
+
+A reviewer or maintainer who removes the rf2o (or B/C equivalent) from the launch file MUST replace it with one of the other two paths in the same change. Re-introducing a static identity TF is a hard invariant violation.
+
+**Verification**: `grep -n "static_transform_publisher" godo-mapping/launch/map.launch.py` must return zero hits as of the post-fix commit.
 
 ## Phase 4.5 follow-up candidates
 
@@ -334,3 +355,102 @@ inline. Future diagnostic tools (e.g., a hypothetical
   `production/RPi5/scripts/build.sh` (29 → 30 hardware-free C++
   tests, +1 ordering pin, +4 cases inside `test_uds_server`) — see
   `production/RPi5/CODEBASE.md` Track B change-log.
+
+### 2026-04-29 — Plan-F1 follow-up: rf2o laser odometry replaces identity TF
+
+#### Bug discovery
+
+Operator-collected studio maps (`maps/0429_*.pgm` family, 4 PGM files)
+all showed single-position scan-fan artifacts of 63–114 occupied pixels,
+versus the thousands of pixels expected for a 60-second studio walk with
+loop closure. PGM histogram check on `maps/0429_2.pgm` confirmed
+**107 occupied pixels** total, with all hits in a single fan-shape from
+one position.
+
+#### Root cause
+
+The 2026-04-28 hotfix added a static identity `tf2_ros
+static_transform_publisher` on the `odom -> laser` edge to "close the TF
+chain" without an external odom source. This made slam_toolbox see zero
+motion forever; the Karto `minimum_travel_distance: 0.5` /
+`minimum_travel_heading: 0.5` pre-filter (slam_toolbox upstream Jazzy
+defaults, NOT overridden in the previous YAML) gated out every scan
+after the first, so only one scan ever got integrated.
+
+#### Chosen path: Plan A (rf2o_laser_odometry)
+
+Replace the static identity TF with **rf2o_laser_odometry** consuming
+`/scan` and publishing a true scan-derived `odom -> laser` TF + the
+informational `/odom_rf2o` topic. slam_toolbox now sees motion deltas,
+the gate fires correctly, and per-scan integration resumes. See
+invariant **(h)** above for the full rationale + Plan B / C fallbacks.
+
+Plans B (laser_scan_matcher) and C (drop the gate, accept Karto-only
+scan-match) are documented in `.claude/tmp/plan_mapping_pipeline_fix.md`
+as fallbacks should rf2o turn out to be unsalvageable in HIL — they did
+not need to be exercised because the empirical Plan A build succeeded
+on first attempt.
+
+#### Empirical build outcome
+
+- Dockerfile rf2o overlay: `git clone
+  https://github.com/MAPIRlab/rf2o_laser_odometry.git`
+- SHA pinned: `b38c68e46387b98845ecbfeb6660292f967a00d3` (ros2 HEAD as of
+  2026-04-29)
+- package.xml format-1 → format-3 sed patch applied (PR #41 mitigation)
+- `colcon build --packages-select rf2o_laser_odometry --merge-install
+  --cmake-args -DCMAKE_BUILD_TYPE=Release`
+- Colcon summary: `Summary: 1 package finished [47.3s]` — clean build,
+  no compile warnings or errors emitted to stderr
+- Image: `godo-mapping:dev` (sha256:17e89c84e996…)
+- Smoke check: `ros2 pkg executables rf2o_laser_odometry` prints
+  `rf2o_laser_odometry rf2o_laser_odometry_node` ✓
+
+#### Added
+
+- `config/rf2o.yaml` — Tier-2 rf2o parameters; top-level key
+  `rf2o_laser_odometry:` byte-equal to launch Node `name=` (M1 fold).
+- `Dockerfile` rf2o overlay block — second colcon-overlay layer.
+- `launch/map.launch.py` — new `rf2o` Node block with explicit
+  `name='rf2o_laser_odometry'` (M1) and
+  `parameters=[..., {'use_sim_time': False}]` (M2) defense-in-depth pin.
+- CODEBASE.md invariant (h).
+
+#### Changed
+
+- `launch/map.launch.py` — deleted the `static_odom_to_laser` block;
+  reordered `LaunchDescription` to `[rf2o, rplidar, slam,
+  slam_configure, slam_activate]` so the TF is online before
+  slam_toolbox latches.
+- `config/slam_toolbox_async.yaml` — added explicit
+  `minimum_travel_distance: 0.5` + `minimum_travel_heading: 0.5` keys
+  with rationale comment citing slam_toolbox upstream SSOT path
+  (M5 fold). Values match upstream defaults — no behavior change.
+- `scripts/verify-no-hw.sh` — `--full` now also smoke-tests
+  `ros2 pkg executables rf2o_laser_odometry` inside the built image
+  (S4 fold).
+- `README.md` — 참고 + troubleshooting + directory tree updates.
+
+#### Removed
+
+- `launch/map.launch.py` `static_odom_to_laser` Node (lines 44-50 of
+  pre-fix commit).
+
+#### Tests
+
+- `scripts/verify-no-hw.sh --full` gains one smoke step (rf2o binary
+  reachability via `/opt/ros_overlay/install/setup.bash`).
+- `tests/test_entrypoint_trap.sh` — unchanged; runs in `TEST_MODE=1`
+  which bypasses `ros2 launch` entirely. Still passes.
+- HIL test pending: operator runs the standard 5-step procedure at the
+  studio; pass criterion is **`occupied >= 5000`** in the saved PGM
+  (vs. 107 pre-fix).
+
+#### Rollback
+
+If HIL reveals rf2o divergence on the studio's geometry, the operator
+can ship Plan C (config-only fallback) as a single-file revert:
+- Restore the static identity TF in `launch/map.launch.py`.
+- Set `minimum_travel_distance: 0.0` and `minimum_travel_heading: 0.0`
+  in `config/slam_toolbox_async.yaml`.
+- Document the rollback in invariant (h)'s Plan-C variant text.

@@ -1,13 +1,13 @@
 # godo-mapping launch file.
 #
 # Composes:
-#   - rplidar_ros's `rplidar_composition` node, configured inline for C1
+#   - rf2o_laser_odometry_node (consumes /scan, publishes odom -> laser TF)
+#   - rplidar_ros's `rplidar_node`, configured inline for C1
 #     (publishes /scan, frame_id=laser, 460800 bps)
-#   - slam_toolbox async_slam_toolbox_node (consumes /scan)
+#   - slam_toolbox async_slam_toolbox_node (consumes /scan + odom -> laser TF)
 #
 # Plan F1 — Option A: hand-carried mapping has no robot base. base_frame is
-# 'laser' (set in config/slam_toolbox_async.yaml). NO static_transform_publisher
-# is included anywhere in this launch graph; the single TF chain is odom -> laser.
+# 'laser' (set in config/slam_toolbox_async.yaml).
 #
 # Magic-number policy (plan F3): numeric / string literals in this launch file
 # are Tier-2 SLAM configuration, not §6 magic numbers — but each non-trivial
@@ -18,6 +18,17 @@
 # IncludeLaunchDescription on a non-existent file, we inline the Node call
 # with explicit C1 parameters. Verified by inspecting
 # `/opt/ros/jazzy/share/rplidar_ros/launch/` inside `godo-mapping:dev`.
+#
+# 2026-04-29 update — rf2o laser odometry replaces static identity TF.
+# Root cause: the previous static identity tf2_ros publisher on the
+# odom -> laser edge lied to slam_toolbox about motion. Karto's
+# `minimum_travel_distance: 0.5` / `minimum_travel_heading: 0.5` gate
+# (slam_toolbox upstream defaults) saw zero motion forever, so only the
+# very first scan was integrated and the resulting PGM showed a single-
+# fan artifact (~107 occupied pixels at maps/0429_2.pgm). rf2o consumes
+# /scan, performs scan-to-scan registration, and publishes a true
+# motion-derived `odom -> laser` TF. SSOT for rf2o parameters lives in
+# config/rf2o.yaml. See CODEBASE.md invariant (h).
 
 from launch import LaunchDescription
 from launch.actions import EmitEvent, RegisterEventHandler
@@ -31,22 +42,32 @@ from pathlib import Path
 
 
 def generate_launch_description() -> LaunchDescription:
-    # 2026-04-28: TF chain fix. slam_toolbox in async mode publishes the
-    # `map -> odom` transform itself, but expects an `odom -> base_frame`
-    # transform to already exist for the chain `map -> odom -> base_frame`
-    # to be closed. Without odom source (we are hand-carried, no wheel
-    # encoders), the chain breaks → slam_toolbox never publishes /map →
-    # map_saver_cli times out with 'Failed to spin map subscription'.
+    # rf2o laser odometry — consumes /scan and publishes odom -> laser TF
+    # via scan-to-scan registration. Replaces the 2026-04-28 static
+    # identity publisher whose frozen zero-motion broke slam_toolbox's
+    # Karto minimum_travel_distance gate.
     #
-    # Plan F1 (Option A) sets base_frame=laser. Add a single identity
-    # static publisher `odom -> laser` so the chain closes. This does
-    # NOT introduce a base_link frame; the laser IS the base frame.
-    static_odom_to_laser = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='odom_to_laser_identity',
-        arguments=['0', '0', '0', '0', '0', '0', 'odom', 'laser'],
+    # CRITICAL: the Node `name=` MUST be byte-equal to the top-level
+    # key in config/rf2o.yaml (`rf2o_laser_odometry:`).
+    # Without this, ROS 2's parameter loader silently fails to bind the
+    # YAML and rf2o boots with hardcoded defaults (base_frame_id=base_link,
+    # init_pose_from_topic='/base_pose_ground_truth') — rf2o would then
+    # wait forever for an init pose on a non-existent topic and never
+    # produce odom→laser TF. Exact symmetric failure mode to the bug
+    # we're fixing.
+    #
+    # use_sim_time pinned False explicitly (defense-in-depth, symmetric
+    # to slam_toolbox below). Hardware run, never Gazebo.
+    rf2o_params = str(Path('/godo-mapping/config/rf2o.yaml'))
+    rf2o = Node(
+        package='rf2o_laser_odometry',
+        executable='rf2o_laser_odometry_node',
+        name='rf2o_laser_odometry',
         output='screen',
+        parameters=[
+            rf2o_params,
+            {'use_sim_time': False},
+        ],
     )
 
     # rplidar driver, parameters explicit for the RPLIDAR C1.
@@ -114,7 +135,7 @@ def generate_launch_description() -> LaunchDescription:
     )
 
     return LaunchDescription([
-        static_odom_to_laser,
+        rf2o,
         rplidar,
         slam,
         slam_configure,

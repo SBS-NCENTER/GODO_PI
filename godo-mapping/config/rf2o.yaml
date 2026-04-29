@@ -1,0 +1,20 @@
+# godo-mapping — rf2o_laser_odometry parameters.
+#
+# Magic-number policy (plan F3): rf2o config is Tier-2; each literal is
+# annotated with origin/rationale.
+#
+# Role (post-2026-04-29): rf2o consumes /scan and publishes:
+#   - topic /odom_rf2o (nav_msgs/Odometry) — informational
+#   - TF odom -> laser (frame chain link) — REQUIRED by slam_toolbox
+# This replaces the static-identity odom->laser publisher whose frozen
+# zero-motion lied to slam_toolbox's Karto minimum_travel_distance gate.
+
+rf2o_laser_odometry:
+  ros__parameters:
+    laser_scan_topic: /scan          # rplidar_ros C1 publishes here (SensorDataQoS, best_effort)
+    odom_topic: /odom_rf2o           # upstream convention; do not collide with future external /odom
+    publish_tf: true                 # MUST be true — slam_toolbox needs the TF, not the topic
+    base_frame_id: laser             # Plan F1 Option A: laser IS the base frame
+    odom_frame_id: odom              # matches slam_toolbox_async.yaml::odom_frame
+    init_pose_from_topic: ''         # empty = start at identity; we have no initial-pose source
+    freq: 10.0                       # C1 ~10 Hz scan rate; processing faster wastes CPU

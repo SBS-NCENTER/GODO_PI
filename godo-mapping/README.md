@@ -255,13 +255,28 @@ bash godo-mapping/scripts/verify-no-hw.sh --quick   # ~1초
 bash godo-mapping/scripts/verify-no-hw.sh --full    # ~5분 (Docker 데몬 필요)
 ```
 
+### 지도가 한 프레임짜리로만 저장됨 (≤ 200 occupied pixels)
+
+PGM이 단일 위치에서 찍힌 부채꼴 모양만 담고 있고 occupied 픽셀이 200개 이하라면
+`rf2o_laser_odometry_node`가 죽었거나 publish가 멈춘 경우입니다. 진단:
+
+```bash
+docker exec godo-mapping ros2 topic hz /odom_rf2o     # ~10 Hz가 정상; 0 Hz면 rf2o 사망/침묵
+docker logs godo-mapping 2>&1 | tail -100             # rf2o 크래시 스택트레이스 확인
+```
+
+`/odom_rf2o`가 0 Hz라면 `slam_toolbox`가 `odom -> laser` TF를 못 받아
+`map_saver_cli`가 단일 스캔만 적분하게 됩니다. CODEBASE.md invariant (h) 참조.
+
 ## 디렉터리 구조
 
 ```text
 godo-mapping/
-├─ Dockerfile                    # FROM ros:jazzy-ros-base + 3개 ros 패키지
-├─ launch/map.launch.py          # rplidar_c1 + slam_toolbox async 노드
-├─ config/slam_toolbox_async.yaml # base_frame=laser, save_map_timeout=10.0
+├─ Dockerfile                    # FROM ros:jazzy-ros-base + apt + 2개 colcon overlay (rplidar_ros, rf2o_laser_odometry)
+├─ launch/map.launch.py          # rf2o + rplidar_c1 + slam_toolbox async 노드
+├─ config/
+│   ├─ rf2o.yaml                 # rf2o_laser_odometry 파라미터 (Tier-2)
+│   └─ slam_toolbox_async.yaml   # base_frame=laser, save_map_timeout=10.0
 ├─ entrypoint.sh                 # SIGINT/SIGTERM trap → map_saver_cli
 ├─ scripts/
 │   ├─ run-mapping.sh            # 호스트 docker-run 래퍼
@@ -277,6 +292,9 @@ godo-mapping/
 - 컨테이너 내부 ROS 분리: `production/RPi5/`와 `godo-webctl/`는 ROS를 import하지
   않습니다 (`grep -rn 'rclcpp\|ament' production/RPi5/src/` returns 0).
   `--network=host`는 안전합니다.
+- 컨테이너는 2026-04-29부터 `rf2o_laser_odometry_node`도 함께 띄워서 `/scan`을
+  scan-to-scan registration으로 받아 `odom -> laser` TF를 publish합니다 (구
+  static identity TF의 단일-프레임 매핑 버그 수정). CODEBASE.md invariant (h) 참조.
 - 매핑 결과 SSOT: `production/RPi5/src/localization/occupancy_grid.cpp::load_map`
   (PGM P5 8-bit + flat key:value YAML).
 - 본 도구는 매핑 전용입니다. localization (AMCL)은 production tracker가 매핑된

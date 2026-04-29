@@ -40,6 +40,21 @@ slam_toolbox:
     map_update_interval: 2.0        # seconds between /map publishes; map_saver_cli subscribes here, so this caps the worst-case wait the saver sees on Ctrl+C.
     minimum_time_interval: 0.1      # seconds; minimum between processed scans.
 
+    # ── Karto motion gate ─────────────────────────────────────────────────
+    # These two thresholds form Karto's pre-filter: a new scan is integrated
+    # only if the odom-derived pose has moved at least this much since the
+    # previous integrated scan. Values match the slam_toolbox upstream Jazzy
+    # defaults (verified 2026-04-29 against
+    # https://github.com/SteveMacenski/slam_toolbox/blob/ros2/config/mapper_params_online_async.yaml
+    # — both defaults are 0.5). We pin them explicitly to DOCUMENT our reliance
+    # on a real, motion-derived odom source (rf2o_laser_odometry, see
+    # config/rf2o.yaml + CODEBASE.md invariant (h)). A future maintainer who
+    # deletes rf2o sees these gate values and asks "where does motion come
+    # from?" before re-introducing the identity-TF bug (107-pixel artifact at
+    # maps/0429_2.pgm, 2026-04-29).
+    minimum_travel_distance: 0.5  # m — pre-filter gate against odom motion.
+    minimum_travel_heading: 0.5   # rad — pre-filter gate against odom rotation.
+
     # ── Scan range ────────────────────────────────────────────────────────
     # C1 spec: 0.05 m – 12 m indoor (RPLIDAR_C1.md §2). Clip to spec to
     # reject spurious returns at the edges.

@@ -10,6 +10,86 @@
 
 ---
 
+## 2026-04-30 (새벽 — 00:00 KST → 06:07 KST, 아홉 번째 세션 — PR-A 풀 systemd 스위치오버)
+
+### 한 줄 요약
+
+**PR-A 한 PR (#34, squash-merged `dcded7c`) 안에 systemd 스위치오버 + polkit 게이트 + 운영자 service-management policy + 9개의 부수 버그 fix 가 모두 fold 됨. SPA System tab 의 Start/Stop/Restart 버튼이 마침내 실제로 동작 (이전 HTTP 500 `subprocess_failed`). uptime / memory / env_redacted / env_stale 모두 채워짐. 운영 모델: `godo-irq-pin` + `godo-webctl` 부팅시 자동 시작, `godo-tracker` 는 SPA Start 버튼으로 수동 시작.**
+
+> 기술 상세는 [PROGRESS.md 2026-04-30 early-morning 블록](../PROGRESS.md#session-log) 참조.
+
+### 왜 이렇게 결정했는가
+
+#### Polkit rule 한 줄 → systemd 풀 스위치오버로 scope 폭발
+
+NEXT_SESSION.md 우선순위 #1 = "System tab 서비스 컨트롤" 이었음. 작업 시작 시점엔 ~120 LOC (unit 파일 3개 + polkit rule + installer + tests) 로 추정했는데, repo 정찰 해보니 unit 파일들은 이미 4월 26일 시점에 들어가 있었음. **NEXT_SESSION.md / `project_system_tab_service_control.md` 가 outdated** 였던 것. 이 정찰 결과를 운영자 보고 → "이런 누락사항 발견하면 같이 정리하자" 합의 → 메모리 보정. 이 경험이 새 feedback memory `feedback_codebase_md_freshness.md` 로 영구 기록됨.
+
+실제 PR-A 의 코드 본체는 polkit rule 한 파일 (~50 LOC) 만 빠진 상태였고, 호스트 설치 + 운영 정책 결정이 진짜 작업 비중. 운영자가 "라이브 환경에서는 클라이언트로 웹에 접속해서 사용. 그동안 script 직접 실행은 System tab 이 미완이라 어쩔 수 없이 쓴 임시방편" 이라고 운영 의도 명확히 함 → SPA = 표준 control plane 이라는 architectural decision 이 메모리에 영구 기록 (`project_godo_service_management_model.md`).
+
+#### tracker manual-start 결정의 함의
+
+운영자가 "부팅시 재시작에서 오류가 발생할 여지가 있다면, tracker 프로세스는 웹 페이지에서 원격으로 실행하는 것으로" 결정. 근거: tracker 가 mlock + SCHED_FIFO 50 + CPU 3 pin + RPLIDAR USB 디바이스 의존 → unit 파일 regression 시 부팅 fail-loop 위험 가장 큼. irq-pin + webctl 은 oneshot 이거나 가벼운 ASGI 라 위험 작음.
+
+이 결정이 unit 파일 의존 관계 재구성을 강제함:
+- `godo-webctl.service` 가 `Wants/After=godo-tracker.service` 를 가지면 부팅시 webctl 가 tracker 를 끌어옴 → 정책 위반.
+- `Wants` 제거 + `/run/godo` 디렉토리 ownership flip (이전엔 tracker 의 `RuntimeDirectory=godo` 가 만들었음) → webctl 가 `RuntimeDirectory=godo` + `RuntimeDirectoryPreserve=yes` 들고 부팅, tracker 도 `RuntimeDirectoryPreserve=yes` 추가해서 systemd reference-counting 으로 양쪽 다 stop 해야 디렉토리 사라지게.
+
+webctl 자체로 tracker 없이도 정상 부팅 가능 — `/api/health` 가 `tracker:"unreachable"` 로 응답하고 SPA 는 그걸 그대로 표시 + 운영자가 SPA Start 클릭으로 tracker 부활.
+
+#### HIL 에서 줄줄이 나온 9개 부수 버그를 한 PR 에 fold 한 이유
+
+운영자의 (β) 결정 — "조밀한 작업" 위해 한 PR 에 다 묶기. 분리 PR 들로 가면 매번 컨텍스트 재구성 비용. 이 세션은 운영 의도 (SPA System tab 이 진짜로 동작) 까지 한 번에 닫는 게 가치. 이게 9가지 fix 가 한 PR 에 모인 이유:
+
+1. **Polkit rule** (원래 scope)
+2. **운영자 service-management policy 채택** (architectural)
+3. **/run/godo ownership flip** (정책 의 함의)
+4. **`ReadWritePaths=/var/lib/godo`** 추가 (`restart_pending` ROFS warning fix)
+5. **`/etc/godo/{tracker,webctl}.env` 템플릿 + installer 자동 seed**
+6. **`/boot/firmware/cmdline.txt` 에 `cgroup_enable=memory` 추가** (RPi 5 firmware default 가 `cgroup_disable=memory` 라 cgroup 메모리 controller 차단 — `MemoryAccounting=yes` 만으로는 안 됨. reboot 필요한 host kernel cmdline 변경)
+7. **`godo-irq-pin.sh` device-name lookup**: 부팅 후 IRQ 번호 shift 발견 (SPI 가 IRQ 183 → 182) → hardcoded IRQ 번호 list 가 reboot 마다 fragile. `/proc/interrupts` 를 device-name 으로 매칭하도록 재작성.
+8. **`ActiveEnterTimestampRealtime` → `ActiveEnterTimestampMonotonic`**: systemd 257 (Trixie) 가 Realtime variant 를 노출 안 해서 SPA 에 uptime 이 "—" 였음. `systemctl show --property=` output 에 그 키가 silently 빠지는 패턴 — 진단에 시간 걸림.
+9. **`env_redacted` envfile-based** (was `/proc/<pid>/environ` based): cap-bearing tracker 가 kernel-marked non-dumpable 라 cross-process /proc/*/environ read 가 EPERM. envfile 텍스트 read 로 우회 — 운영자 의도 ("envfile 의 setting 이 진짜 적용됐는지 확인") 와 직접 부합. `env_stale: bool` 필드도 같이 추가 — envfile mtime > active_since_unix → SPA 에 amber "envfile newer — restart pending" 배지.
+
+이 중 #6, #7 은 운영 host 의 실제 reboot 이 필요한 변경. 운영자 "이 와중에 reboot 가자" 결정 → `/boot/firmware/cmdline.txt` 백업 후 `cgroup_enable=memory` append → `systemctl reboot`. Reboot 후 #7 의 IRQ shift 가 즉시 노출됨 (godo-irq-pin.service fail) → device-name lookup 으로 fix → 재배포 → 재검증 통과.
+
+#### Post-merge 발견된 2개 follow-up
+
+운영자 SPA 사용 중 발견:
+
+- **ServiceStatusCard `lastError` UX 버그**: 409 transition error 만 auto-dismiss 하고 다른 에러는 영구 표시. webctl self-restart `subprocess_failed` + tracker restart `request_aborted` 가 sticky-red 로 남음. 모든 에러를 5초 auto-dismiss + service active 시 즉시 클리어 하는 `$effect` 추가. → commit `71f2ef9`.
+- **Config 탭 비어있음**: webctl 의 `config_schema.py::_CPP_SCHEMA_PATH` 가 dev-tree sibling layout 만 가정. PR-A 후 webctl 이 `/opt/godo-webctl/` 로 옮겨지면서 `/opt/production/RPi5/...` 라는 존재 안 하는 path 를 찾아 HTTP 503 `schema_unavailable`. Tier 해결: env var override > dev tree > `/opt/godo-tracker/share/` fallback. installer 가 `config_schema.hpp` 도 `/opt/godo-tracker/share/` 에 복사. → commit `c4f6cce`.
+
+두 follow-up 다 같은 PR-A branch 에 push → squash merge 시 한 commit (`dcded7c`).
+
+#### 운영자 mental model 정정 — SSE / cpu_temp / tracker 응답 배너
+
+세션 끝에 운영자 질문: "webctl 죽었어도 cpu_temp 가 갱신되는데 tracker 데이터 지연 메시지가 떠 있는 게 신기하다." 디버깅으로 데이터 source 분리 확인:
+
+- **cpu_temp 변동**: `/api/diag/stream` SSE — webctl 가 host `/sys/class/thermal/...` 직접 read. tracker 와 무관.
+- **"tracker 응답하지 않습니다" 배너**: `/api/health` polling 의 `tracker: "ok"|"unreachable"` 필드. webctl 의 UDS client 가 `/run/godo/ctl.sock` 에 connect 한 결과.
+
+webctl 부활 후 cpu_temp 는 즉시 valid (host 측정 1줄), 하지만 webctl 의 UDS client 가 tracker 와 reconnect 하는 동안 짧은 fail 윈도우 존재 → 두 indicator 가 일시적으로 충돌하는 것처럼 보였던 것. 실측: webctl restart 1.6초, EventSource default retry 3초 — 합쳐 ~3-4초 sigma. 운영자 mental model 정정 완료.
+
+### 산출물
+
+- 1 PR merged: #34 (`dcded7c`).
+- main = `dcded7c`.
+- Test baselines: backend 502 → 521 (+19), frontend unit 변화 없음 (env_stale stub field 통과).
+- HIL 검증 완료: SPA Start/Stop/Restart 200 OK, env_redacted 채워짐, env_stale touch flip 동작, Config 탭 40 rows 렌더, 부정 케이스 404/400.
+- 새 메모리 entry 2개:
+  - `feedback_codebase_md_freshness.md` — CODEBASE.md SSOT 갱신 discipline.
+  - `project_godo_service_management_model.md` — 운영자 service-management policy.
+
+### 결정 요약
+
+- PR-A scope 가 polkit rule 한 줄 → systemd 풀 스위치오버 + 9개 부수 fix 로 폭발한 건 운영자의 (β) 결정 ("조밀한 작업") 의 결과. 분리 PR 들로 가면 컨텍스트 재구성 비용 컸을 것.
+- `godo-tracker` manual-start 정책은 RT 프로세스의 부팅 fail-loop 위험을 회피하는 보수적 선택. 운영자가 SPA Start 버튼으로 명시적으로 활성화.
+- `/run/godo` 의 RuntimeDirectory ownership 가 webctl 로 flip 됨 — Phase 4-2 D Mode-A amendment S8 ("owned exclusively by tracker") 가 새 정책에 의해 superseded.
+- envfile-based env display + `env_stale` staleness indicator 가 cap-bearing process 의 non-dumpable 제약을 우회하는 architecture 차원 결정. 운영자 의도 ("envfile setting 이 적용됐는지 확인") 와 직접 부합.
+- 다음 세션 우선순위: PR-B (process monitor + extended resources) 가 P0. PR-A 가 풀어준 SPA 운영 모델 위에서 다음 layer 의 가시성.
+
+---
+
 ## 2026-04-29 (저녁~심야 — 16:35 KST → 2026-04-30 00:30 KST, 네 번째~여덟 번째 마라톤 close)
 
 ### 한 줄 요약

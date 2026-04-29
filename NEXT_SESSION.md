@@ -1,33 +1,22 @@
 # Next session — cold-start brief
 
 > Throwaway. Delete the moment the next session picks up the thread.
-> Refreshed 2026-04-30 04:55 KST (PR-A β fully verified post-reboot, including memory cgroup activation + irq-pin device-name lookup fix + envfile-based env display + env_stale staleness indicator; awaiting commit + push + PR).
+> Refreshed 2026-04-30 06:07 KST (ninth-session close — PR #34 squash-merged as `dcded7c`; main is now systemd-managed end-to-end).
 > **AMCL CONVERGENCE SOLVED** (PR #32 — eighth-session marathon close): Track D-5 sigma annealing + auto-minima tracking, k_post 10/10 (was 0/10), σ_xy median 0.009m (was 6.679m).
-> **PR-A FULLY VERIFIED**: full systemd switchover + polkit rule + LAN bind + SPA dist deploy + cgroup_enable=memory cmdline + irq-pin device-name lookup. Operator service-management policy adopted (tracker = manual-start via SPA; irq-pin + webctl auto-start). End-to-end verified post-reboot:
-> - `POST /api/system/service/godo-tracker/{stop,start,restart}` AS admin → HTTP 200 (was HTTP 500 `subprocess_failed`).
-> - `/api/system/services` returns full `active_since_unix` AND `memory_bytes` for tracker + webctl (godo-irq-pin null on memory because oneshot+RemainAfterExit has no live cgroup, expected).
-> - irq-pin survives reboot-time IRQ-number shift (e.g. SPI moved 183 → 182 in this reboot) thanks to device-name lookup.
-> - SPA System tab Environment column populates per-service from EnvironmentFiles= path read (not /proc/<pid>/environ — cap-bearing tracker is non-dumpable). `env_stale` flag flips when operator edits `/etc/godo/<svc>.env`; SPA renders an amber "envfile newer — restart pending" badge.
+> **PR-A LANDED on main** (PR #34, `dcded7c`): full systemd switchover + polkit rule + LAN bind + SPA dist deploy + cgroup_enable=memory cmdline + irq-pin device-name lookup + envfile-based env display + env_stale badge + ServiceStatusCard lastError UX + config_schema path tier resolution. Operator service-management policy adopted (tracker = manual-start via SPA; irq-pin + webctl auto-start). News-pi01 fully systemd-managed; SPA Start/Stop/Restart end-to-end working.
 
-## TL;DR (operator-set priority order, refreshed 2026-04-30 01:30 KST)
+## TL;DR (operator-set priority order, refreshed 2026-04-30 06:07 KST)
 
-1. **★ PR-A commit + push + PR.** All host work + verification done. The
-   single remaining step is git: feature branch → commit → push → open
-   PR. Suggested branch: `feat/pr-a-systemd-polkit-switchover`. Recent
-   commit-message style: Conventional Commits + scope prefix
-   (`feat(systemd): ...`).
-
-   Default admin password `ncenter`/`ncenter` STILL needs
-   `scripts/godo-webctl-passwd` rotation per operator policy — unrelated
-   to PR-A merge but flagged here so it doesn't slip.
-2. **★ PR-B: process monitor + extended resources** — next P0 chunk. New `/api/system/processes` SSE stream (parse `/proc`, GODO whitelist, `duplicate_alert` flag if multiple PIDs match same expected name) + `/api/system/resources/extended` (per-core CPU + GPU + mem + disk). New System sub-tab in SPA. ~550 LOC. Defense-in-depth on top of CLAUDE.md §6's pidfile locking.
+1. **★ PR-B: process monitor + extended resources** — next P0 chunk. New `/api/system/processes` SSE stream (parse `/proc`, GODO whitelist, `duplicate_alert` flag if multiple PIDs match same expected name) + `/api/system/resources/extended` (per-core CPU + GPU + mem + disk). New System sub-tab in SPA. ~550 LOC. Defense-in-depth on top of CLAUDE.md §6's pidfile locking + the polkit-gated service control PR-A just shipped.
    - Spec details: `.claude/memory/project_system_tab_service_control.md`.
 
-3. **★ B-MAPEDIT (queued P0 from prior session, plan ready)** — `.claude/tmp/plan_track_b_mapedit.md` Mode-A folded. Brush erase + atomic save + restart-pending. ~950 LOC single PR. Re-run writer fresh from §8-folded plan; the earlier writer pass (2026-04-29 ~13:00 KST) was discarded clean during the AMCL crisis.
+   **Carryover from PR-A**: default admin password `ncenter`/`ncenter` STILL needs `scripts/godo-webctl-passwd` rotation per operator policy. Flagged here so it doesn't slip — unrelated to PR-B but worth doing on the same news-pi01 visit.
 
-4. **★ B-MAPEDIT-2: origin pick** — operator's new request 2026-04-29 23:45 KST. Click any pixel on the rendered PGM in MapEdit mode → that pixel becomes the new world (0,0). YAML origin field update only — pure translation, no bitmap rewrite. ~90 LOC bolt-on to B-MAPEDIT (or its own small follow-up PR). Use case: operator places a pole at the chroma studio's physical center, scans it, clicks the resulting point on the map → studio center becomes origin. Spec: `.claude/memory/project_map_edit_origin_rotation.md`.
+2. **★ B-MAPEDIT (queued P0 from prior session, plan ready)** — `.claude/tmp/plan_track_b_mapedit.md` Mode-A folded. Brush erase + atomic save + restart-pending. ~950 LOC single PR. Re-run writer fresh from §8-folded plan; the earlier writer pass (2026-04-29 ~13:00 KST) was discarded clean during the AMCL crisis.
 
-5. **★ Pipelined-pattern audit** (Task #9 carryover) — operator-requested systematic audit: where else does the variable-scope / CPU-pipeline pattern apply? Candidates per `.claude/memory/project_pipelined_compute_pattern.md`: SSE producer-consumer (`/api/scan/stream`, `/api/last_pose/stream`), FreeD smoother stages, UE 60Hz publish staging, map activate phased reload, AMCL Live mode tiered confidence monitor. Output: ranked table by (operator benefit, impl cost, RT-safety). Can run in parallel with B-MAPEDIT scoping.
+3. **★ B-MAPEDIT-2: origin pick** — operator's new request 2026-04-29 23:45 KST. Click any pixel on the rendered PGM in MapEdit mode → that pixel becomes the new world (0,0). YAML origin field update only — pure translation, no bitmap rewrite. ~90 LOC bolt-on to B-MAPEDIT (or its own small follow-up PR). Use case: operator places a pole at the chroma studio's physical center, scans it, clicks the resulting point on the map → studio center becomes origin. Spec: `.claude/memory/project_map_edit_origin_rotation.md`.
+
+4. **★ Pipelined-pattern audit** (Task #9 carryover) — operator-requested systematic audit: where else does the variable-scope / CPU-pipeline pattern apply? Candidates per `.claude/memory/project_pipelined_compute_pattern.md`: SSE producer-consumer (`/api/scan/stream`, `/api/last_pose/stream`), FreeD smoother stages, UE 60Hz publish staging, map activate phased reload, AMCL Live mode tiered confidence monitor. Output: ranked table by (operator benefit, impl cost, RT-safety). Can run in parallel with B-MAPEDIT scoping.
 
 6. **B-MAPEDIT-3: map rotation (deferred)** — ~250 LOC, lower marginal value vs LOC. Operator suggested **VideoCore VII GPU acceleration** for matrix ops at this point (RPi 5 GPU mostly idle, single HDMI used). Spec: `.claude/memory/project_videocore_gpu_for_matrix_ops.md`. Recommendation: don't attempt without first measuring CPU baseline + POC dispatch on a single op (likely EDT 1D pass via Vulkan compute). Research-grade work — schedule after Track 5 (UE integration) unless rotation blocks operator.
 
@@ -37,17 +26,13 @@
 
 9. **`test_jitter_ring` flaky test** — observed 1× fail during D-5 build (RT timing-sensitive). Not regression from any code change in this session. Investigate at low priority — likely needs tolerance bump or move to `hardware-required` label.
 
-## Where we are (2026-04-30 00:00 KST — eighth-session close)
+## Where we are (2026-04-30 06:07 KST — ninth-session close)
 
-**main = `194599b`** — five PRs merged this multi-session marathon:
+**main = `dcded7c`** — one PR merged this ninth session, on top of the eighth-session marathon's five (PR #29, #30, #31, #32, #33):
 
 | PR | What | Notes |
 |---|---|---|
-| #29 | Track D — resolution-aware scan overlay (scale + worldToCanvas Y orientation) | HIL visual ✓ |
-| #30 | Track D-2 — SPA scan CW→CCW + lift convergence gate | HIL visual ✓ |
-| #31 | Track D-3 — C++ AMCL CW→CCW boundary fix | merged via Mode-A→Writer→Mode-B; turned out NOT to be the root convergence cause (sigma_hit was), kept as defensive math discipline |
-| #32 | **Track D-5 — coarse-to-fine sigma annealing + auto-minima tracking** ★ | k_post 0/10 → 10/10, σ_xy 6.68 → 0.009 m. **The actual fix.** |
-| #33 | freed-passthrough UDP port 50002 → 50003 hotfix | regressive default; UE host has listener on 50002 |
+| #34 | **PR-A — full systemd switchover + polkit gate** ★ | unblocked SPA Start/Stop/Restart end-to-end; folded 9 bug fixes uncovered during HIL + post-merge UX/config_schema follow-ups |
 
 **Open PRs**: 0.
 
@@ -66,15 +51,18 @@ The bug was misdiagnosed twice before being correctly identified. Timeline:
 
 The auto-minima trick generalizes — operator can SAFELY granularize the schedule without worrying about over-tightening, because the algorithm self-stops at the empirical minimum. Pattern spec'd as a project-wide architectural idiom in `.claude/memory/project_pipelined_compute_pattern.md`.
 
-## Live system on news-pi01 (post-session)
+## Live system on news-pi01 (post ninth-session close)
 
-- **godo-tracker**: PID 2303158 alive. Default 5-phase schedule + auto-minima active. AMCL converges to (1.15, ~0, 173°) on every calibrate. Map = `04.29_v3.pgm`. Pidfile `/run/godo/godo-tracker.pid` clean.
-- **godo-webctl**: confirm running (likely PID 4096542 or thereabouts from prior restart). UDS `/run/godo/ctl.sock` healthy.
-- **`/run/godo/`**: owned by ncenter, populated. Note: `Task #32 systemd units pending` per TL;DR #1 — currently this dir is operator-managed each boot. Service control work fixes that.
-- **Active map**: `04.29_v3.pgm` (loop closure, two-lap walk, 2978 occupied / 60.7% free). Operator notes ±1-2° residual rotation in scan overlay vs walls — slam_toolbox build artifact (LiDAR initial heading wasn't perfectly axis-aligned). NOT a code bug. Operator-acceptable for current ops; addressable by re-mapping with intentional initial heading OR origin pick + rotation feature.
-- **Branch**: `main @ 194599b`, working tree clean.
-- **Tracker binary**: built from `fix/track-d-5-sigma-annealing` (now squashed into `c9b4ba8` on main). Effectively current main code.
+- **godo-irq-pin.service**: enabled, auto-start, IRQ pin via device-name lookup (resilient to reboot-time IRQ-number drift).
+- **godo-webctl.service**: enabled, auto-start, listening 0.0.0.0:8080, serving SPA from `/opt/godo-frontend/dist`. Owns `/run/godo/` via `RuntimeDirectory=godo` + `RuntimeDirectoryPreserve=yes`. Sees envfile via `/etc/godo/webctl.env`.
+- **godo-tracker.service**: installed but NOT enabled per operator service-management policy (manual-start via SPA System tab). Last manual start: AMCL converges to (1.15, ~0, 173°) on every calibrate. Map = `04.29_v3.pgm`.
+- **`/run/godo/`**: owned by webctl now, populated with both pidfiles + (if tracker running) `ctl.sock`. Survives whichever service stops first.
+- **`/etc/godo/`**: `tracker.env` + `webctl.env` seeded by installer; operator-edited values (LAN bind, active map path, SPA dist, config_schema path) persist across reboots.
+- **`/opt/`**: `/opt/godo-tracker/` (binary + helper + `share/config_schema.hpp`), `/opt/godo-webctl/` (rsync'd source + `.venv`), `/opt/godo-frontend/dist/` (SPA bundle).
+- **Active map**: `04.29_v3.pgm` (loop closure, two-lap walk, 2978 occupied / 60.7% free). Operator notes ±1-2° residual rotation in scan overlay vs walls — slam_toolbox build artifact. Addressable by re-mapping with intentional initial heading OR origin pick + rotation feature.
+- **Branch**: `main @ dcded7c`, working tree clean.
 - **LAN-IP path**: blocked at SBS_XR_NEWS AP (client-isolation); Tailscale `100.127.59.15` works.
+- **Default admin password rotation pending**: `scripts/godo-webctl-passwd` to rotate `ncenter`/`ncenter` per operator policy.
 
 ## Throwaway scratch (`.claude/tmp/`)
 
@@ -93,39 +81,41 @@ The auto-minima trick generalizes — operator can SAFELY granularize the schedu
 
 ## Quick memory bookmarks (★ open these first on cold-start)
 
-Eight-session marathon produced six new in-repo memory entries. Open in priority order:
+Eighth + ninth session produced eight new in-repo memory entries. Open in priority order:
 
-1. `.claude/memory/project_amcl_sigma_sweep_2026-04-29.md` — empirical sweep table, convergence cliff, why D-3/D-4 weren't the root cause. Read before touching any AMCL code.
-2. `.claude/memory/project_pipelined_compute_pattern.md` — operator's variable-scope / CPU-pipeline analogy. Architectural idiom for AMCL annealing today + future SSE / FreeD / Live applications. Pinpoints Task #9 audit candidates.
-3. `.claude/memory/project_system_tab_service_control.md` — operator-set P0 next-session work spec. systemd unit files + polkit + process monitor + GPU resource view. Sequencing: PR-A (control) before PR-B (monitor).
-4. `.claude/memory/project_map_edit_origin_rotation.md` — Map Edit feature spec: brush erase (B-MAPEDIT, planned) + origin pick (NEW, ~90 LOC, high-ROI) + rotation (deferred). Studio-center-as-origin via pole-marker workflow.
-5. `.claude/memory/project_videocore_gpu_for_matrix_ops.md` — RPi 5 GPU offload candidates (rotation, EDT, AMCL particle weighting). Don't attempt without baseline measurement + POC.
-6. `.claude/memory/project_rplidar_cw_vs_ros_ccw.md` — D-2/D-3 hypothesis history; was hypothesized as root cause but sweep showed it isn't. Kept as defensive math discipline. Useful retrospective for future debug arcs ("hypothesis vs empirical evidence" pattern).
+1. `.claude/memory/project_godo_service_management_model.md` — operator's policy: SPA is the SOLE start/stop/restart UI; auto-start (irq-pin + webctl) vs manual (tracker). Read before any service-control change.
+2. `.claude/memory/project_system_tab_service_control.md` — PR-B (process monitor + extended resources) spec. PR-A status now SHIPPED.
+3. `.claude/memory/feedback_codebase_md_freshness.md` — every implementation task updates relevant CODEBASE.md before commit/merge/push.
+4. `.claude/memory/project_amcl_sigma_sweep_2026-04-29.md` — empirical sweep table, convergence cliff, why D-3/D-4 weren't the root cause. Read before touching any AMCL code.
+5. `.claude/memory/project_pipelined_compute_pattern.md` — operator's variable-scope / CPU-pipeline analogy. Architectural idiom; pinpoints Task #9 audit candidates.
+6. `.claude/memory/project_map_edit_origin_rotation.md` — Map Edit feature spec: brush erase (B-MAPEDIT, planned) + origin pick (~90 LOC, high-ROI) + rotation (deferred).
+7. `.claude/memory/project_videocore_gpu_for_matrix_ops.md` — RPi 5 GPU offload candidates. Don't attempt without baseline measurement + POC.
+8. `.claude/memory/project_rplidar_cw_vs_ros_ccw.md` — D-2/D-3 hypothesis history; useful retrospective for future debug arcs.
 
-Plus carryover: `project_studio_geometry.md` (T-shape studio + door corners), `project_lens_context.md` (ENG zoom lenses + entrance pupil), `project_repo_topology.md` (SBS-NCENTER/GODO_PI canonical), `feedback_pipeline_short_circuit.md` (≤200 LOC fully-specified work skips planner+Mode-B).
+Plus carryover: `project_studio_geometry.md`, `project_lens_context.md`, `project_repo_topology.md`, `feedback_pipeline_short_circuit.md`.
 
 ## Quick orientation files for next session
 
 1. **CLAUDE.md** §6 Golden Rules + §7 agent pipeline.
 2. **`.claude/memory/MEMORY.md`** — full index of all in-repo memory entries.
-3. **PROGRESS.md** — should gain a 2026-04-29 entry covering the AMCL convergence saga + 5 merged PRs (currently lags by one session — TODO).
-4. **doc/history.md** — ditto.
-5. **`production/RPi5/CODEBASE.md`** invariants tail = `(n)` (Track D-5 sigma annealing).
-6. **`godo-webctl/CODEBASE.md`** invariants tail = `(x)` (admin-non-loopback service-control endpoint, awaits the systemd unit work above to actually function).
+3. **PROGRESS.md** — current through 2026-04-30 ninth-session block.
+4. **doc/history.md** — ditto, Korean narrative.
+5. **`production/RPi5/CODEBASE.md`** invariants tail = `(o) godo-systemctl-polkit-discipline`.
+6. **`godo-webctl/CODEBASE.md`** invariants tail = `(x)` (admin-non-loopback service-control endpoint, NOW functional post-PR-A).
 
-## Tasks alive for next session (from TaskCreate index)
+## Tasks alive for next session
 
-- **#9** (pending) — pipelined-pattern applicability audit. TL;DR item 4.
-- Service control + process monitor (TL;DR item 1) — top priority.
-- B-MAPEDIT writer kickoff (TL;DR item 2).
-- B-MAPEDIT-2 origin pick (TL;DR item 3).
+- **PR-B** (TL;DR item 1) — top priority. process monitor + extended resources.
+- **B-MAPEDIT** writer kickoff (TL;DR item 2).
+- **B-MAPEDIT-2** origin pick (TL;DR item 3).
+- **#9** (pending) — pipelined-pattern applicability audit (TL;DR item 4).
 - (deferred) B-MAPEDIT-3 rotation + GPU POC + Live annealing + parallel annealing.
 - (low priority) `test_jitter_ring` flake fix.
+- (operator pending, unrelated) `scripts/godo-webctl-passwd` rotation of default `ncenter`/`ncenter` admin password.
 
 ## Session-end cleanup
 
-- NEXT_SESSION.md itself: refreshed in place. Drives every cold-start.
-- PROGRESS.md + doc/history.md updated 2026-04-30 00:30 KST with the eighth-session marathon block (the AMCL convergence saga + 5 PRs).
-- SYSTEM_DESIGN.md §5 AMCL: new "Coarse-to-fine sigma_hit annealing (Track D-5)" section covering schedule + auto-minima + Live continuity rebuild.
-- FRONT_DESIGN.md §H Map 뷰어: rows H-Q5 (resolution-aware scale, PR #29) + H-Q6 (scan CW→CCW + gate lifted, PR #30) + H-Q7 (image-refetch on map change, PR #29 M3) added.
-- All three CODEBASE.md files (production/RPi5, godo-webctl, godo-frontend) carry the per-PR change-log entries + new invariants from the merge stream.
+- NEXT_SESSION.md itself: refreshed in place 2026-04-30 06:07 KST. Drives every cold-start.
+- PROGRESS.md + doc/history.md updated 2026-04-30 06:07 KST with the ninth-session block (PR-A full systemd switchover).
+- All three CODEBASE.md files (production/RPi5, godo-webctl, godo-frontend) carry the PR-A change-log entries + new invariant `(o) godo-systemctl-polkit-discipline` (production/RPi5) + frontend SPA addendum on env_stale + lastError UX.
+- `.claude/memory/` gained two new entries: `feedback_codebase_md_freshness.md`, `project_godo_service_management_model.md`. MEMORY.md index updated.

@@ -51,7 +51,10 @@ def generate_launch_description() -> LaunchDescription:
     # key in config/rf2o.yaml (`rf2o_laser_odometry:`).
     # Without this, ROS 2's parameter loader silently fails to bind the
     # YAML and rf2o boots with hardcoded defaults (base_frame_id=base_link,
-    # freq=20.0) — exact symmetric failure mode to the bug we're fixing.
+    # init_pose_from_topic='/base_pose_ground_truth') — rf2o would then
+    # wait forever for an init pose on a non-existent topic and never
+    # produce odom→laser TF. Exact symmetric failure mode to the bug
+    # we're fixing.
     #
     # use_sim_time pinned False explicitly (defense-in-depth, symmetric
     # to slam_toolbox below). Hardware run, never Gazebo.

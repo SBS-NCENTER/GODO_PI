@@ -28,6 +28,7 @@ def _show(
     active_since_unix: int | None = 1714397472,
     memory_bytes: int | None = 53477376,
     env_redacted: dict[str, str] | None = None,
+    env_stale: bool = False,
 ) -> services.ServiceShow:
     return services.ServiceShow(
         name=name,
@@ -37,6 +38,7 @@ def _show(
         active_since_unix=active_since_unix,
         memory_bytes=memory_bytes,
         env_redacted=env_redacted if env_redacted is not None else {},
+        env_stale=env_stale,
     )
 
 

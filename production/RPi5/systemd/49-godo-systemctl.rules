@@ -1,0 +1,48 @@
+// 49-godo-systemctl.rules — polkit JS rule
+//
+// Grants members of the `ncenter` group (operator account on news-pi01)
+// permission to invoke `systemctl {start|stop|restart}` on the three
+// GODO units WITHOUT sudo / WITHOUT a password prompt.
+//
+// This rule is what makes the webctl admin endpoint
+// `POST /api/system/service/{name}/{action}` (Track B-SYSTEM PR-2) and
+// the operator-local handler `POST /api/local/service/{name}/{action}`
+// actually function. Both routes ultimately call
+// `services.control(svc, action)` which runs:
+//
+//     subprocess.run(
+//         ["systemctl", <action>, "--no-pager", <svc>],
+//         ...
+//     )
+//
+// as the unprivileged ncenter user. Without this polkit rule, polkit
+// denies the manage-units action and the subprocess returns non-zero
+// → CommandFailed → HTTP 500 `subprocess_failed`.
+//
+// Filename starts with `49-` so it evaluates BEFORE the distro
+// default `50-default.rules`. The rule only ever returns YES for the
+// matched triple (group + unit + verb); every other path falls through
+// to default-deny semantics. Adding a new GODO service or verb is an
+// explicit edit here in lock-step with `services.py::ALLOWED_SERVICES`
+// / `ALLOWED_ACTIONS` (these three sets must agree — see CODEBASE.md
+// invariant (o)).
+
+polkit.addRule(function(action, subject) {
+    if (action.id !== "org.freedesktop.systemd1.manage-units") {
+        return;
+    }
+    if (!subject.isInGroup("ncenter")) {
+        return;
+    }
+    var unit = action.lookup("unit");
+    if (unit !== "godo-tracker.service" &&
+        unit !== "godo-webctl.service" &&
+        unit !== "godo-irq-pin.service") {
+        return;
+    }
+    var verb = action.lookup("verb");
+    if (verb !== "start" && verb !== "stop" && verb !== "restart") {
+        return;
+    }
+    return polkit.Result.YES;
+});

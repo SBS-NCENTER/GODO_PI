@@ -1272,3 +1272,34 @@ see the Config nav row`) is unrelated to this PR).
 - T4: vitest `vi.useFakeTimers()` asserts EXACTLY 4 fetches in 3500 ms.
 - T5: `vi.getTimerCount() === 0` after last unsub.
 - T6: playwright stub corpus mixes redacted + non-redacted KEYs.
+
+## 2026-04-30 04:55 KST — PR-A SPA addendum: env_stale badge on Environment summary
+
+### Added
+
+- `EnvVarsList.svelte` accepts an optional `stale: boolean` prop. When
+  true, the `<summary>` line renders a small amber "envfile newer —
+  restart pending" badge alongside the `Environment (N)` count.
+  Operator sees at a glance that they edited `/etc/godo/<svc>.env`
+  after the service started, so the displayed env content reflects
+  the staged file but the running process is still on the old values.
+  CSS uses `--color-status-warn` + `--color-status-warn-bg` tokens
+  (with hex fallbacks) so the badge respects theming.
+- `protocol.ts::SYSTEM_SERVICES_FIELDS` extended to 8 entries with
+  `env_stale`. `SystemServiceEntry` interface gains
+  `env_stale: boolean`.
+
+### Changed
+
+- `ServiceStatusCard.svelte` — passes `service.env_stale` through
+  to `<EnvVarsList>` as `stale`.
+- `tests/unit/system.test.ts` + `tests/unit/systemServices.test.ts`
+  + `tests/e2e/_stub_server.py` corpora seeded with `env_stale: False`
+  on every `SystemServiceEntry` so the schema parity check stays green.
+
+### Why a badge instead of a top-level "restart pending" pill
+
+The staleness predicate is per-envfile; only the affected service
+shows a marker. A top-level page-wide "restart pending" pill would
+imply every service is affected. The badge sits next to the count it
+qualifies, which keeps the signal local to its source.

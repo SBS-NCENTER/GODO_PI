@@ -205,7 +205,7 @@ def test_parse_systemctl_show_basic() -> None:
         "ActiveState=active\n"
         "SubState=running\n"
         "MainPID=1234\n"
-        "ActiveEnterTimestampRealtime=1714397472000000\n"
+        "ActiveEnterTimestampMonotonic=2430290856\n"
         "MemoryCurrent=53477376\n"
         "Environment=GODO_LOG_DIR=/var/log/godo\n"
     )
@@ -214,7 +214,7 @@ def test_parse_systemctl_show_basic() -> None:
     assert out["ActiveState"] == "active"
     assert out["SubState"] == "running"
     assert out["MainPID"] == "1234"
-    assert out["ActiveEnterTimestampRealtime"] == "1714397472000000"
+    assert out["ActiveEnterTimestampMonotonic"] == "2430290856"
     assert out["MemoryCurrent"] == "53477376"
     assert out["Environment"] == "GODO_LOG_DIR=/var/log/godo"
 
@@ -313,28 +313,66 @@ def test_redact_env_preserves_unrelated_keys() -> None:
 
 
 def test_service_show_returns_dataclass_shape() -> None:
-    """Build a stub `systemctl show` output and verify ServiceShow fields."""
+    """Build a stub `systemctl show` output and verify ServiceShow fields.
+
+    `ActiveEnterTimestampMonotonic` is microseconds since system boot.
+    Mock `time.monotonic()` and `time.time()` so the unix-epoch
+    derivation is deterministic: if monotonic = 1100s and time = 1714398572,
+    a service that entered active at boot+1000s (mono_us=1_000_000_000)
+    has been up for 100s → unix = 1714398572 - 100 = 1714398472.
+
+    `env_redacted` merges the unit's `Environment=` directive AND the
+    contents of every `EnvironmentFile=`. envfile content is the
+    operator-authored source-of-truth for overrides; reading it is
+    safe (envfile is root:root 0644) AND captures keys that systemd
+    inject into the cap-bearing process which we cannot read via
+    /proc/<pid>/environ.
+    """
     stdout = (
         "Id=godo-tracker.service\n"
         "ActiveState=active\n"
         "SubState=running\n"
         "MainPID=1234\n"
-        "ActiveEnterTimestampRealtime=1714397472000000\n"
+        "ActiveEnterTimestampMonotonic=1000000000\n"
         "MemoryCurrent=53477376\n"
-        'Environment=GODO_LOG_DIR=/var/log/godo "JWT_SECRET=hunter2"\n'
+        'Environment=GODO_LOG_DIR=/var/log/godo "GODO_JWT_SECRET=hunter2"\n'
+        "EnvironmentFiles=/etc/godo/tracker.env (ignore_errors=yes)\n"
     )
-    with mock.patch("godo_webctl.services.subprocess.run") as m:
+    # `/etc/godo/tracker.env` content — shell-style KEY=VALUE per line.
+    envfile_text = (
+        "# operator overrides\n"
+        "GODO_AMCL_MAP_PATH=/var/lib/godo/maps/active.pgm\n"
+        "GODO_UE_HOST=192.168.0.10\n"
+        "\n"
+        "# secret-shaped key gets redacted by redact_env\n"
+        "GODO_API_TOKEN=hunter2\n"
+    )
+    with (
+        mock.patch("godo_webctl.services.subprocess.run") as m,
+        mock.patch("godo_webctl.services.time.monotonic", return_value=1100.0),
+        mock.patch("godo_webctl.services.time.time", return_value=1714398572.0),
+        mock.patch("builtins.open", mock.mock_open(read_data=envfile_text)),
+        mock.patch("godo_webctl.services.os.path.getmtime", return_value=0.0),
+    ):
         m.return_value = _proc(returncode=0, stdout=stdout)
         show = S.service_show("godo-tracker")
     assert show.name == "godo-tracker"
     assert show.active_state == "active"
     assert show.sub_state == "running"
     assert show.main_pid == 1234
-    # Realtime ms / 1000 = unix seconds. 1714397472000000 / 1_000_000.
-    assert show.active_since_unix == 1714397472
+    # Active for 100s; current unix - 100 = unix at activation.
+    assert show.active_since_unix == 1714398472
     assert show.memory_bytes == 53477376
+    # Directive-side keys preserved.
     assert show.env_redacted["GODO_LOG_DIR"] == "/var/log/godo"
-    assert show.env_redacted["JWT_SECRET"] == "<redacted>"
+    assert show.env_redacted["GODO_JWT_SECRET"] == "<redacted>"
+    # envfile-derived keys merged in.
+    assert show.env_redacted["GODO_AMCL_MAP_PATH"] == "/var/lib/godo/maps/active.pgm"
+    assert show.env_redacted["GODO_UE_HOST"] == "192.168.0.10"
+    # Secret-shaped envfile key redacted.
+    assert show.env_redacted["GODO_API_TOKEN"] == "<redacted>"
+    # envfile mtime=0 < active_since_unix → not stale.
+    assert show.env_stale is False
 
 
 def test_service_show_handles_memory_not_set() -> None:
@@ -343,22 +381,190 @@ def test_service_show_handles_memory_not_set() -> None:
         "ActiveState=inactive\n"
         "SubState=dead\n"
         "MainPID=0\n"
-        "ActiveEnterTimestampRealtime=0\n"
+        "ActiveEnterTimestampMonotonic=0\n"
         "MemoryCurrent=[not set]\n"
         "Environment=\n"
+        "EnvironmentFiles=\n"
     )
     with mock.patch("godo_webctl.services.subprocess.run") as m:
         m.return_value = _proc(returncode=0, stdout=stdout)
         show = S.service_show("godo-tracker")
     assert show.main_pid is None  # MainPID=0 surfaces as None
-    assert show.active_since_unix is None  # 0 → None (not actively running)
+    assert show.active_since_unix is None  # mono=0 → None (never active)
     assert show.memory_bytes is None  # [not set] → None
     assert show.env_redacted == {}
+    assert show.env_stale is False  # never active → can't be stale
 
 
 def test_service_show_unknown_service_rejected() -> None:
     with pytest.raises(S.UnknownService):
         S.service_show("not-a-godo-service")
+
+
+# ---- _parse_environment_files_paths --------------------------------------
+
+
+def test_parse_environment_files_paths_single_with_options() -> None:
+    raw = "/etc/godo/tracker.env (ignore_errors=yes)"
+    assert S._parse_environment_files_paths(raw) == ["/etc/godo/tracker.env"]
+
+
+def test_parse_environment_files_paths_multiple() -> None:
+    raw = "/etc/godo/a.env (ignore_errors=yes) /etc/godo/b.env"
+    assert S._parse_environment_files_paths(raw) == [
+        "/etc/godo/a.env",
+        "/etc/godo/b.env",
+    ]
+
+
+def test_parse_environment_files_paths_empty() -> None:
+    assert S._parse_environment_files_paths("") == []
+
+
+# ---- _read_envfile --------------------------------------------------------
+
+
+def test_read_envfile_basic() -> None:
+    text = (
+        "# header comment\n"
+        "GODO_UE_HOST=192.168.0.10\n"
+        "\n"
+        "GODO_AMCL_MAP_PATH=/var/lib/godo/maps/active.pgm\n"
+    )
+    with mock.patch("builtins.open", mock.mock_open(read_data=text)):
+        env = S._read_envfile("/etc/godo/tracker.env")
+    assert env == {
+        "GODO_UE_HOST": "192.168.0.10",
+        "GODO_AMCL_MAP_PATH": "/var/lib/godo/maps/active.pgm",
+    }
+
+
+def test_read_envfile_strips_matching_quotes() -> None:
+    text = 'GODO_QUOTED="value with spaces"\nGODO_SQ=\'singlequoted\'\nGODO_BARE=bare\n'
+    with mock.patch("builtins.open", mock.mock_open(read_data=text)):
+        env = S._read_envfile("/dev/null")
+    assert env["GODO_QUOTED"] == "value with spaces"
+    assert env["GODO_SQ"] == "singlequoted"
+    assert env["GODO_BARE"] == "bare"
+
+
+def test_read_envfile_missing_returns_empty() -> None:
+    """envfile not present → empty dict (don't crash)."""
+    with mock.patch("builtins.open", side_effect=FileNotFoundError):
+        assert S._read_envfile("/etc/godo/missing.env") == {}
+
+
+def test_read_envfile_no_godo_filter_intentional() -> None:
+    """envfile parsing does NOT filter to GODO_* — the operator chose
+    to put the key in the envfile, so it is operationally relevant by
+    definition. `redact_env` masks secret-shaped keys downstream."""
+    text = "FOO=bar\nGODO_X=ok\n"
+    with mock.patch("builtins.open", mock.mock_open(read_data=text)):
+        env = S._read_envfile("/dev/null")
+    assert env == {"FOO": "bar", "GODO_X": "ok"}
+
+
+# ---- _envfile_newer_than_process -----------------------------------------
+
+
+def test_envfile_newer_than_process_true_when_mtime_after() -> None:
+    """envfile mtime > process active_since_unix → stale."""
+    with mock.patch("godo_webctl.services.os.path.getmtime", return_value=2000.0):
+        assert S._envfile_newer_than_process(["/dev/null"], 1500) is True
+
+
+def test_envfile_newer_than_process_false_when_mtime_before() -> None:
+    with mock.patch("godo_webctl.services.os.path.getmtime", return_value=1000.0):
+        assert S._envfile_newer_than_process(["/dev/null"], 1500) is False
+
+
+def test_envfile_newer_than_process_false_when_no_active_since() -> None:
+    """No active timestamp (oneshot pre-active or never started) → False."""
+    assert S._envfile_newer_than_process(["/dev/null"], None) is False
+
+
+def test_envfile_newer_than_process_handles_missing_envfile() -> None:
+    """An envfile that no longer exists is silently skipped — don't crash."""
+    with mock.patch(
+        "godo_webctl.services.os.path.getmtime",
+        side_effect=FileNotFoundError,
+    ):
+        assert S._envfile_newer_than_process(["/dev/null"], 1500) is False
+
+
+def test_envfile_newer_than_process_any_path_triggers() -> None:
+    """If ANY of multiple envfiles has a newer mtime, return True."""
+    seq = iter([1000.0, 9999.0])
+
+    def _fake_mtime(path: str) -> float:
+        return next(seq)
+
+    with mock.patch("godo_webctl.services.os.path.getmtime", side_effect=_fake_mtime):
+        assert (
+            S._envfile_newer_than_process(["/dev/null", "/dev/null"], 1500) is True
+        )
+
+
+# ---- service_show oneshot path -------------------------------------------
+
+
+def test_service_show_oneshot_with_no_envfile_yields_clean_state() -> None:
+    """oneshot godo-irq-pin (Type=oneshot + RemainAfterExit) reports
+    MainPID=0 + empty Environment + no EnvironmentFiles. ServiceShow
+    should round-trip with empty env_redacted + env_stale=False."""
+    stdout = (
+        "Id=godo-irq-pin.service\n"
+        "ActiveState=active\n"
+        "SubState=exited\n"
+        "MainPID=0\n"
+        "ActiveEnterTimestampMonotonic=500000000\n"
+        "MemoryCurrent=[not set]\n"
+        "Environment=\n"
+        "EnvironmentFiles=\n"
+    )
+    with (
+        mock.patch("godo_webctl.services.subprocess.run") as m,
+        mock.patch("godo_webctl.services.time.monotonic", return_value=600.0),
+        mock.patch("godo_webctl.services.time.time", return_value=1714398572.0),
+    ):
+        m.return_value = _proc(returncode=0, stdout=stdout)
+        show = S.service_show("godo-irq-pin")
+    assert show.main_pid is None
+    assert show.env_redacted == {}
+    assert show.env_stale is False
+
+
+def test_service_show_env_stale_true_when_envfile_newer() -> None:
+    """envfile mtime > active_since_unix → env_stale=True. Operator
+    edited /etc/godo/tracker.env after the service started; the SPA
+    will render a 'restart pending' indicator until the next start."""
+    stdout = (
+        "Id=godo-tracker.service\n"
+        "ActiveState=active\n"
+        "SubState=running\n"
+        "MainPID=1234\n"
+        "ActiveEnterTimestampMonotonic=1000000000\n"
+        "MemoryCurrent=53477376\n"
+        "Environment=\n"
+        "EnvironmentFiles=/etc/godo/tracker.env (ignore_errors=yes)\n"
+    )
+    envfile_text = "GODO_AMCL_MAP_PATH=/var/lib/godo/maps/active.pgm\n"
+    # mock.monotonic=1100, time=1714398572 → active_since_unix=1714398472.
+    # Set envfile mtime AFTER that → stale.
+    with (
+        mock.patch("godo_webctl.services.subprocess.run") as m,
+        mock.patch("godo_webctl.services.time.monotonic", return_value=1100.0),
+        mock.patch("godo_webctl.services.time.time", return_value=1714398572.0),
+        mock.patch("builtins.open", mock.mock_open(read_data=envfile_text)),
+        mock.patch(
+            "godo_webctl.services.os.path.getmtime",
+            return_value=1714400000.0,  # > 1714398472
+        ),
+    ):
+        m.return_value = _proc(returncode=0, stdout=stdout)
+        show = S.service_show("godo-tracker")
+    assert show.env_stale is True
+    assert show.env_redacted["GODO_AMCL_MAP_PATH"] == "/var/lib/godo/maps/active.pgm"
 
 
 def test_service_show_invokes_argv_with_property_list() -> None:
@@ -370,7 +576,7 @@ def test_service_show_invokes_argv_with_property_list() -> None:
         S.service_show("godo-tracker")
     expected_property_arg = (
         "--property=Id,ActiveState,SubState,MainPID,"
-        "ActiveEnterTimestampRealtime,MemoryCurrent,Environment"
+        "ActiveEnterTimestampMonotonic,MemoryCurrent,Environment,EnvironmentFiles"
     )
     m.assert_called_once_with(
         ["systemctl", "show", "--no-pager", expected_property_arg, "godo-tracker"],

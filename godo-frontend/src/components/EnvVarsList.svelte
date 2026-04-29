@@ -12,8 +12,16 @@
 
   interface Props {
     env: Record<string, string>;
+    /**
+     * True when at least one EnvironmentFile=mtime is later than the
+     * service's ActiveEnterTimestamp — i.e. the operator edited
+     * /etc/godo/*.env after the service started, so the displayed env
+     * keys reflect the staged file content but the running process
+     * has the old values. Surface this as a "restart pending" badge.
+     */
+    stale?: boolean;
   }
-  let { env }: Props = $props();
+  let { env, stale = false }: Props = $props();
 
   // Sort keys alphabetically so two snapshots that differ only in dict
   // iteration order render identically.
@@ -25,7 +33,14 @@
 </script>
 
 <details class="env-list" data-testid="env-vars-list">
-  <summary class="muted">Environment ({keys.length})</summary>
+  <summary class="muted">
+    Environment ({keys.length})
+    {#if stale}
+      <span class="stale-badge" data-testid="env-stale-badge"
+        >envfile newer — restart pending</span
+      >
+    {/if}
+  </summary>
   {#if keys.length === 0}
     <div class="muted env-empty" data-testid="env-empty">(none)</div>
   {:else}
@@ -79,5 +94,14 @@
   }
   .env-empty {
     margin-top: 6px;
+  }
+  .stale-badge {
+    margin-left: 8px;
+    padding: 2px 6px;
+    font-size: 0.85em;
+    color: var(--color-status-warn, #b45309);
+    background: var(--color-status-warn-bg, rgba(245, 158, 11, 0.12));
+    border-radius: 3px;
+    border: 1px solid var(--color-status-warn, #b45309);
   }
 </style>

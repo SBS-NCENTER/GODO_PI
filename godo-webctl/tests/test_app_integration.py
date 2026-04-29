@@ -2605,6 +2605,7 @@ def _stub_service_show(name: str, *, env: dict[str, str] | None = None) -> Any:
         active_since_unix=1714397472,
         memory_bytes=53477376,
         env_redacted=env if env is not None else {},
+        env_stale=False,
     )
 
 

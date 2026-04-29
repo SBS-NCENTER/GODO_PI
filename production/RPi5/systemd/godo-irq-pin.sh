@@ -7,12 +7,19 @@
 #   - godo-tracker.service ExecStartPost (catches the lazy ttyAMA0
 #     IRQ which only appears after the tracker opens /dev/ttyAMA0).
 #
-# Idempotent: re-running re-applies the same affinities. IRQs not yet
-# registered are skipped silently (verbose output goes to stderr only on
-# the first-pass boot run; ExecStartPost runs in --quiet mode).
+# Idempotent: re-running re-applies the same affinities. IRQs that are
+# not yet registered or that the kernel marks affinity-fixed (e.g.
+# pwr_button GPIO) are skipped silently — the script continues with
+# whatever IS pinnable. `--quiet` suppresses stderr (used by the
+# tracker's ExecStartPost so each restart does not spam the journal).
 #
-# All IRQ numbers are from /proc/interrupts on news-pi01 (RPi 5 BCM2712,
-# Trixie 6.12.75+). Re-snapshot if the kernel or hardware changes.
+# **IRQ numbers are NOT stable across reboots.** Earlier revisions of
+# this script hardcoded IRQ numbers from a single `/proc/interrupts`
+# snapshot; the 2026-04-30 reboot during PR-A surfaced the failure
+# mode (IRQ 183 had moved from `107d004000.spi` to a kernel-fixed
+# `pwr_button` GPIO line, and the affinity write returned EPERM).
+# We now look up IRQ numbers by device name from /proc/interrupts at
+# every boot, so the script is reboot-stable.
 
 set -euo pipefail
 
@@ -24,25 +31,54 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-# Hot-path-relevant IRQs → CPU 0-2.
-# eth0 = 106, ttyAMA0 PL011 = 125, xhci-hcd:usb1 = 131,
-# xhci-hcd:usb3 = 136, dw_axi_dmac_platform = 140,
-# 1f00008000.mailbox = 158.
-HOT_IRQS=(106 131 136 140 158 125)
+# Device names as they appear in the LAST whitespace-separated token of
+# each /proc/interrupts row. We match the trailing token rather than
+# substring so e.g. `mmc0` does not also match a hypothetical
+# `someprefix-mmc0` row.
+#
+# Hot-path-relevant devices → CPU 0-2.
+HOT_DEVICES=(eth0 ttyAMA0 xhci-hcd:usb1 xhci-hcd:usb3 dw_axi_dmac_platform 1f00008000.mailbox)
 # Bursty SD/SPI → CPU 0-1 (tighter pin).
-# mmc0 = 161, mmc1 = 162, 107d004000.spi = 183.
-BURSTY_IRQS=(161 162 183)
+BURSTY_DEVICES=(mmc0 mmc1 107d004000.spi)
+
+# Print the IRQ number whose /proc/interrupts row's trailing token
+# equals $1, or empty string if no match. Single-shot — picks the
+# first match if there are multiple (none expected on this hardware).
+irq_for_device() {
+    local devname="$1"
+    awk -v dev="$devname" '
+        # Skip header line + non-IRQ rows (continued from columns >NF).
+        NR == 1 { next }
+        # Trailing token must equal $devname; the IRQ number is the
+        # first column with a trailing colon. Strip the colon.
+        $NF == dev { irq = $1; sub(":", "", irq); print irq; exit }
+    ' /proc/interrupts
+}
 
 pin() {
-    local irq="$1" cpus="$2"
-    local f="/proc/irq/${irq}/smp_affinity_list"
-    if [[ -w "$f" ]]; then
-        echo "$cpus" > "$f"
-        log "  irq ${irq} → ${cpus}"
+    local devname="$1" cpus="$2"
+    local irq f
+    irq="$(irq_for_device "$devname")"
+    if [[ -z "$irq" ]]; then
+        log "  ${devname} → (not registered yet, skipped)"
+        return 0
+    fi
+    f="/proc/irq/${irq}/smp_affinity_list"
+    if [[ ! -w "$f" ]]; then
+        log "  irq ${irq} (${devname}) → (affinity file not writable, skipped)"
+        return 0
+    fi
+    # The kernel can still reject the write at echo time for
+    # affinity-fixed IRQs (NO_BALANCE / NO_AFFINITY flags) — those
+    # surface as EPERM. Capture and log; don't fail the unit.
+    if echo "$cpus" > "$f" 2>/dev/null; then
+        log "  irq ${irq} (${devname}) → ${cpus}"
+    else
+        log "  irq ${irq} (${devname}) → (kernel rejected affinity write, skipped)"
     fi
 }
 
 log "=== godo-irq-pin (CPU 3 isolation) ==="
-for irq in "${HOT_IRQS[@]}";    do pin "$irq" "0-2"; done
-for irq in "${BURSTY_IRQS[@]}"; do pin "$irq" "0-1"; done
+for dev in "${HOT_DEVICES[@]}";    do pin "$dev" "0-2"; done
+for dev in "${BURSTY_DEVICES[@]}"; do pin "$dev" "0-1"; done
 log "done."

@@ -1,3 +1,4 @@
+- [CODEBASE.md SSOT freshness at task close](feedback_codebase_md_freshness.md) — backend + frontend CODEBASE.md files must reflect the final change shape before any commit/merge/push.
 - [Repo topology and multi-machine workflow](project_repo_topology.md) — SSOT = SBS-NCENTER/GODO_PI (company); chunbay/GODO is a mirror only. Three hosts: Mac, Windows, RPi5 (via SSH).
 - [CLAUDE.md stays concise](feedback_claudemd_concise.md) — CLAUDE.md is a short guide; detailed analyses go into separate reference docs with back-links.
 - [Project overview](project_overview.md) — GODO = RPi 5 single binary (LiDAR localization + FreeD merge + 59.94 fps UDP). Map built once via Docker. Details in SYSTEM_DESIGN.md.
@@ -15,4 +16,5 @@
 - [Pipelined compute pattern](project_pipelined_compute_pattern.md) — Variable-scope / CPU-pipeline analogy proposed by operator: at tick t, tier_k runs (t-k+1)th iteration. N tiers in parallel = K + N - 1 wallclock vs N×K sequential. Apply to AMCL annealing (Track D-5), Live tracker, FreeD smoother, map activate, phase 5 UE tests.
 - [Map editor — origin pick + rotation](project_map_edit_origin_rotation.md) — Map Edit tab needs brush erase (B-MAPEDIT, planned) + origin pick (NEW, click-pixel-as-(0,0), ~90 LOC, high-ROI) + map rotation (deferred, ~250 LOC). Studio center as origin via pole-marker workflow.
 - [System tab — service control + process monitor](project_system_tab_service_control.md) — Operator-priority P0 next session: Start/Stop/Restart buttons actually work (systemd units + polkit) + live process list with duplicate-PID alert + CPU/GPU resource view.
+- [GODO service management model — SPA-controlled systemd](project_godo_service_management_model.md) — Production runs under systemd auto-start; SPA System tab is the SOLE control UI. Script-launch was a temporary stopgap, not the long-term ops pattern.
 - [VideoCore VII GPU for matrix ops](project_videocore_gpu_for_matrix_ops.md) — RPi 5 GPU idle on production (no display). Candidate offloads: map rotation, EDT rebuild, AMCL particle weighting. Need baseline measurement + POC first; research-grade, after B-MAPEDIT-3.

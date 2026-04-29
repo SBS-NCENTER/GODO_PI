@@ -42,6 +42,7 @@ def _degraded_entry(name: str) -> dict[str, Any]:
         "active_since_unix": None,
         "memory_bytes": None,
         "env_redacted": {},
+        "env_stale": False,
     }
 
 
@@ -56,6 +57,7 @@ def _serialize(show: services.ServiceShow) -> dict[str, Any]:
         "active_since_unix": show.active_since_unix,
         "memory_bytes": show.memory_bytes,
         "env_redacted": dict(show.env_redacted),
+        "env_stale": show.env_stale,
     }
 
 

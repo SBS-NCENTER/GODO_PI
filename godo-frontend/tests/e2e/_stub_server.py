@@ -740,6 +740,7 @@ def _canned_system_services() -> list[dict[str, Any]]:
             "active_since_unix": 1714397472,
             "memory_bytes": 4 * 1024 * 1024,
             "env_redacted": {"GODO_LOG_DIR": "/var/log/godo"},
+            "env_stale": False,
         },
         {
             "name": "godo-tracker",
@@ -754,6 +755,7 @@ def _canned_system_services() -> list[dict[str, Any]]:
                 "JWT_SECRET": "<redacted>",
                 "GODO_LOG_DIR": "/var/log/godo",
             },
+            "env_stale": False,
         },
         {
             "name": "godo-webctl",
@@ -763,6 +765,7 @@ def _canned_system_services() -> list[dict[str, Any]]:
             "active_since_unix": 1714397472,
             "memory_bytes": 12 * 1024 * 1024,
             "env_redacted": {"GODO_LOG_DIR": "/var/log/godo"},
+            "env_stale": False,
         },
     ]
 

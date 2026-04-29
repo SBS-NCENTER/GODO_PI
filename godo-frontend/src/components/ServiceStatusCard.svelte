@@ -147,7 +147,7 @@
     </div>
   {/if}
 
-  <EnvVarsList env={service.env_redacted} />
+  <EnvVarsList env={service.env_redacted} stale={service.env_stale} />
 </div>
 
 <style>

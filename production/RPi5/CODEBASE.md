@@ -3201,3 +3201,173 @@ behaviour.
   completion."
 - N5: Sub-check 3 title is "Schedule length 1 runs single-phase
   annealing" + tolerance-only assertion.
+
+## 2026-04-30 00:30 KST — PR-A: full systemd switchover + polkit rule for ncenter-group systemctl access
+
+### Why
+
+`godo-webctl` ships an admin endpoint `POST /api/system/service/{name}/{action}`
+(Track B-SYSTEM PR-2, route at `app.py:1048`) that calls
+`services.control()` which runs:
+
+```python
+subprocess.run(["systemctl", action, "--no-pager", svc], ...)
+```
+
+as the unprivileged `ncenter` user. systemd 257 + polkit 126 (Trixie)
+gate `manage-units` actions through polkit by default, so without an
+explicit allow rule the subprocess fails — the endpoint returns HTTP
+500 `subprocess_failed`. The unit files themselves shipped earlier
+(`godo-tracker.service`, `godo-irq-pin.service`,
+`godo-webctl.service`) but the polkit half of the operator-control
+story was never installed. PR-A closes that.
+
+### Added
+
+- `production/RPi5/systemd/49-godo-systemctl.rules` — polkit JS
+  rule. Grants `ncenter`-group members
+  `org.freedesktop.systemd1.manage-units` only when:
+  - `unit ∈ {godo-tracker, godo-webctl, godo-irq-pin}.service`
+  - `verb ∈ {start, stop, restart}`
+
+  Default-deny semantics elsewhere — the rule never returns NO; it
+  returns YES for the matched triple and falls through otherwise to
+  the distro `50-default.rules`. Filename starts `49-` so it
+  evaluates BEFORE the distro default.
+- `production/RPi5/systemd/godo-tracker.env.example` — template
+  for `/etc/godo/tracker.env`. The single must-set line is
+  `GODO_AMCL_MAP_PATH=/var/lib/godo/maps/active.pgm` (the C++
+  default `/etc/godo/maps/studio_v1.pgm` does not exist on
+  news-pi01); other keys (`GODO_UE_HOST`, etc.) are commented
+  defaults. Track D-5 sigma annealing schedule documented as
+  example.
+- `MemoryAccounting=yes` directive in
+  `godo-tracker.service` + (cross-module)
+  `godo-webctl/systemd/godo-webctl.service`. Necessary AND
+  insufficient: the kernel cmdline `cgroup_disable=memory` (RPi 5
+  firmware default) blocks the cgroup memory controller before
+  any unit-level switch can apply. The PR-A reboot edited
+  `/boot/firmware/cmdline.txt` to append `cgroup_enable=memory`,
+  which overrides the firmware-injected disable (kernel resolves
+  explicit enable wins). Post-reboot
+  `/sys/fs/cgroup/cgroup.controllers` includes `memory`; the SPA
+  System tab now shows live MemoryCurrent for tracker + webctl.
+  godo-irq-pin still shows null because Type=oneshot +
+  RemainAfterExit means there is no live cgroup to query — that
+  is the correct rendering for an oneshot.
+
+### Changed
+
+- `production/RPi5/systemd/install.sh` — six-step installer:
+  1. `/opt/godo-tracker/` rsync (binary + helper)
+  2. systemd units to `/etc/systemd/system/`
+  3. watchdog drop-in to `/etc/systemd/system.conf.d/`
+  4. polkit rule to `/etc/polkit-1/rules.d/` (NEW per PR-A)
+  5. seed `/etc/godo/tracker.env` from template if absent (NEW —
+     preserves any real .env the operator already wrote)
+  6. `daemon-reload`
+
+  polkit 126 picks up rule changes via inotify so no extra reload
+  command is required; we surface a warning if the polkit unit is
+  inactive at install time. New verification block at the end
+  documents the parse-OK gate (`journalctl -u polkit | grep rules`),
+  runtime gate (`systemctl start godo-tracker.service` AS ncenter
+  with no sudo), and SPA HIL — and explicitly notes that
+  `pkcheck --detail` is BLOCKED by polkit 126 for unprivileged
+  callers (early drafts of the verification guide had this wrong).
+- `production/RPi5/systemd/godo-irq-pin.sh` — IRQ-number
+  lookup is now device-name based. The script reads
+  `/proc/interrupts` at runtime and resolves IRQ numbers by
+  matching the trailing-token device descriptor (e.g. `eth0`,
+  `107d004000.spi`, `xhci-hcd:usb1`). Earlier revisions hardcoded
+  IRQ numbers from a single snapshot; the 2026-04-30 PR-A reboot
+  surfaced the failure mode — Linux IRQ numbers shift across
+  reboots if device-registration order changes. Specifically IRQ
+  183 had moved from `107d004000.spi` to a kernel-fixed
+  `pwr_button` GPIO line, and the pin attempt returned EPERM
+  (NO_BALANCE / fixed-affinity flag). The new script also
+  swallows EPERM at the echo step instead of `set -e` failing the
+  unit, so a kernel-rejected affinity write logs and continues.
+  ttyAMA0 lookup remains lazy (the device only registers after
+  the tracker opens `/dev/ttyAMA0`); the ExecStartPost re-pin
+  catches it.
+- `production/RPi5/systemd/godo-tracker.service` —
+  `ReadWritePaths=/run/godo /var/lib/godo` (was `/run/godo` only;
+  `/var/lib/godo` was missing → `restart_pending::clear` hit ROFS
+  warning on the 2026-04-30 first systemd boot).
+  Added `RuntimeDirectoryPreserve=yes` so `/run/godo/` survives
+  tracker stop; the dir is now co-owned with godo-webctl.service
+  (which also declares `RuntimeDirectory=godo`). Updated comment
+  block above the directive cites
+  `.claude/memory/project_godo_service_management_model.md` —
+  Phase 4-2 D Mode-A amendment S8's "owned exclusively by tracker"
+  line is superseded by the new operator service-management
+  policy.
+- `production/RPi5/systemd/README.md` — new `## 7. polkit rule for
+  ncenter-group systemctl access` section. Unit count line at the
+  top updated to "Three units / one drop-in / one polkit rule /
+  one helper script". Verification block uses `journalctl -u
+  polkit` + `systemctl start AS ncenter` instead of the wrong
+  `pkcheck --detail` form; explains why pkcheck doesn't work for
+  unprivileged callers.
+
+### Removed
+
+- (none)
+
+### Tests
+
+- No production C++ test changes; the polkit rule has no C++ surface.
+- The webctl integration test `test_app_integration.py::test_system_service_action_*`
+  monkeypatches `services_mod.control` so it never touches polkit; it
+  stays green and continues to verify the wire-shape contract.
+- HIL verification has two layers:
+  1. **Parse-OK gate** (any user, runs at install time):
+     `sudo journalctl -u polkit -n 5 | grep 'rules'` → expected
+     `Finished loading, compiling and executing 13 rules`. A
+     parse error would surface as a JS syntax error in the same
+     output and the rule would not load.
+  2. **Runtime gate** (operator on news-pi01 AS `ncenter`, NOT
+     through sudo, AFTER `install.sh` puts unit files under
+     `/etc/systemd/system/`): `systemctl start godo-tracker.service`
+     → exit 0 or unit-specific error = polkit gate is open;
+     `Interactive authentication required.` = rule not loaded or
+     subject not in `ncenter` group.
+  3. **End-to-end SPA HIL**: log in as admin → System tab → click
+     Start/Stop/Restart on each of the three services. Pre-rule
+     response was HTTP 500 `{"ok":false,"err":"subprocess_failed",
+     ...}`; post-rule response is HTTP 200 `{"ok":true,"status":
+     "<active|inactive|failed>"}`.
+
+  Note: `pkcheck --action-id ... --detail unit=...` is BLOCKED by
+  polkit 126 (Trixie) for unprivileged callers — only root or the
+  action owner can pass details. This is polkit by design and does
+  NOT indicate a broken rule. Use the systemctl path above as the
+  unprivileged-caller gate test.
+
+### Invariants tightened
+
+- (o) **godo-systemctl-polkit-discipline** — The set of unit names
+  AND verbs allowed by `49-godo-systemctl.rules` MUST stay equal to
+  `services.py::ALLOWED_SERVICES` × `services.py::ALLOWED_ACTIONS`
+  (modulo the `.service` suffix the polkit rule writes out). Adding
+  a new GODO unit or verb is an explicit two-file edit — `services.py`
+  and the polkit rule — in the same PR. The rule's default-deny
+  semantics mean that forgetting the polkit half of the edit does
+  not silently expand authority; it surfaces immediately as
+  `subprocess_failed` on the first operator click. The webctl
+  integration test asserts the wire contract; HIL on news-pi01
+  asserts the polkit gate is open. Both gates must agree.
+
+### Cross-language SSOT (extended)
+
+| Layer | File | Drift catch |
+|---|---|---|
+| Python whitelist | `godo-webctl/src/godo_webctl/services.py::ALLOWED_SERVICES, ALLOWED_ACTIONS` | unit tests pin literal argv `["systemctl", action, "--no-pager", svc]` |
+| polkit rule | `production/RPi5/systemd/49-godo-systemctl.rules` | hand-mirrored allow-list on `(unit, verb)` tuples; HIL `pkcheck` is the only runtime drift catch |
+| systemd unit names | `production/RPi5/systemd/godo-{tracker,irq-pin}.service` + `godo-webctl/systemd/godo-webctl.service` | rule filename + `[Unit] Description=` keep human readers in sync |
+
+The polkit rule is the only layer without an automated parity test —
+adding a fourth GODO unit means editing all three layers. Consider a
+pre-commit grep that pins the unit-name set across the polkit rule
+file + `services.py` if a fourth unit gets added.

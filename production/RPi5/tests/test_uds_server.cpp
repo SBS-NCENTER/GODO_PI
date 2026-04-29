@@ -948,7 +948,7 @@ TEST_CASE("UdsServer::open succeeds when a stale socket exists at the target pat
     h.th.join();
 }
 
-TEST_CASE("Second UdsServer::open on a path already bound throws") {
+TEST_CASE("Second UdsServer::open atomically replaces the path-binding (R7 inverted — pidfile is the gate)") {
     // Pin R7: when the target path is already a LIVE UDS bound by
     // another in-process server, a second open() succeeds at the
     // bind() syscall (different fresh inode via the temp path) BUT

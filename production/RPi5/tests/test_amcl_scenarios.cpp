@@ -250,10 +250,8 @@ TEST_CASE("AMCL Scenario B — small displacement converges with loose seed") {
 
 #include "localization/cold_writer.hpp"
 
-#include <algorithm>
 #include <chrono>
 #include <limits>
-#include <numeric>
 
 using godo::localization::converge_anneal;
 

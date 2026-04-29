@@ -32,7 +32,6 @@ using godo::lidar::Sample;
 using godo::localization::Amcl;
 using godo::localization::build_likelihood_field;
 using godo::localization::downsample;
-using godo::localization::evaluate_scan;
 using godo::localization::LikelihoodField;
 using godo::localization::load_map;
 using godo::localization::OccupancyGrid;

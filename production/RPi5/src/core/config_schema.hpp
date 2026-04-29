@@ -22,7 +22,6 @@
 // table reflow-free so the Python regex parser sees a stable shape.
 
 #include <array>
-#include <cstddef>
 #include <cstdint>
 #include <string_view>
 

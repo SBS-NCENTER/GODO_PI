@@ -461,6 +461,7 @@ export const SYSTEM_SERVICES_FIELDS = [
   'active_since_unix',
   'memory_bytes',
   'env_redacted',
+  'env_stale',
 ] as const;
 
 // One row of `/api/system/services`.
@@ -469,9 +470,10 @@ export interface SystemServiceEntry {
   active_state: string; // "active" | "activating" | ... | "unknown" (degraded)
   sub_state: string; // systemd sub-state ("running", "dead", "auto-restart", ...)
   main_pid: number | null; // null when MainPID=0 or [not set]
-  active_since_unix: number | null; // unix-seconds of ActiveEnterTimestampRealtime; null when not active
+  active_since_unix: number | null; // unix-seconds derived from ActiveEnterTimestampMonotonic; null when not active
   memory_bytes: number | null; // null when MemoryAccounting=no or [not set]
   env_redacted: Record<string, string>; // env-vars with secret-pattern KEYS replaced by `<redacted>`
+  env_stale: boolean; // true when any EnvironmentFile=mtime > active_since_unix (operator edited envfile post-start; restart pending)
 }
 
 // GET /api/system/services response shape.

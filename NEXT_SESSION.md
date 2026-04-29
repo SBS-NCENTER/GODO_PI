@@ -1,29 +1,41 @@
 # Next session — cold-start brief
 
 > Throwaway. Delete the moment the next session picks up the thread.
-> Refreshed 2026-04-30 00:00 KST (post sigma-annealing close — fourth-session through eighth-session marathon ended).
-> **AMCL CONVERGENCE SOLVED** (PR #32): Track D-5 sigma annealing + auto-minima tracking, k_post 10/10 (was 0/10), σ_xy median 0.009m (was 6.679m). Operator HIL passed visually. PR #33 freed-passthrough port hotfix shipped in lockstep.
+> Refreshed 2026-04-30 04:55 KST (PR-A β fully verified post-reboot, including memory cgroup activation + irq-pin device-name lookup fix + envfile-based env display + env_stale staleness indicator; awaiting commit + push + PR).
+> **AMCL CONVERGENCE SOLVED** (PR #32 — eighth-session marathon close): Track D-5 sigma annealing + auto-minima tracking, k_post 10/10 (was 0/10), σ_xy median 0.009m (was 6.679m).
+> **PR-A FULLY VERIFIED**: full systemd switchover + polkit rule + LAN bind + SPA dist deploy + cgroup_enable=memory cmdline + irq-pin device-name lookup. Operator service-management policy adopted (tracker = manual-start via SPA; irq-pin + webctl auto-start). End-to-end verified post-reboot:
+> - `POST /api/system/service/godo-tracker/{stop,start,restart}` AS admin → HTTP 200 (was HTTP 500 `subprocess_failed`).
+> - `/api/system/services` returns full `active_since_unix` AND `memory_bytes` for tracker + webctl (godo-irq-pin null on memory because oneshot+RemainAfterExit has no live cgroup, expected).
+> - irq-pin survives reboot-time IRQ-number shift (e.g. SPI moved 183 → 182 in this reboot) thanks to device-name lookup.
+> - SPA System tab Environment column populates per-service from EnvironmentFiles= path read (not /proc/<pid>/environ — cap-bearing tracker is non-dumpable). `env_stale` flag flips when operator edits `/etc/godo/<svc>.env`; SPA renders an amber "envfile newer — restart pending" badge.
 
-## TL;DR (operator-set priority order, 2026-04-29 24:00 KST close)
+## TL;DR (operator-set priority order, refreshed 2026-04-30 01:30 KST)
 
-1. **★ System tab — service control + process monitor (P0 next-session work)** — operator-prioritized for ops convenience during debug/test cycles. Two PRs likely:
-   - **PR-A: service control** — systemd unit files (`godo-tracker.service` / `godo-webctl.service` / `godo-irq-pin.service`) + polkit policy for `ncenter` group → makes Start/Stop/Restart buttons actually work (PR #27 backend already exists, just fails with `subprocess_failed` because units missing). ~120 LOC + host config. Closes long-standing prior `Task #32` (systemd units) + NEXT_SESSION.md prior #4 (privilege escalation audit).
-   - **PR-B: process monitor + extended resources** — new `/api/system/processes` SSE stream (parse `/proc`, GODO whitelist, `duplicate_alert` flag if multiple PIDs match same expected name) + `/api/system/resources/extended` (per-core CPU + GPU + mem + disk). New System sub-tab in SPA. ~550 LOC. Defense-in-depth on top of CLAUDE.md §6's pidfile locking.
+1. **★ PR-A commit + push + PR.** All host work + verification done. The
+   single remaining step is git: feature branch → commit → push → open
+   PR. Suggested branch: `feat/pr-a-systemd-polkit-switchover`. Recent
+   commit-message style: Conventional Commits + scope prefix
+   (`feat(systemd): ...`).
+
+   Default admin password `ncenter`/`ncenter` STILL needs
+   `scripts/godo-webctl-passwd` rotation per operator policy — unrelated
+   to PR-A merge but flagged here so it doesn't slip.
+2. **★ PR-B: process monitor + extended resources** — next P0 chunk. New `/api/system/processes` SSE stream (parse `/proc`, GODO whitelist, `duplicate_alert` flag if multiple PIDs match same expected name) + `/api/system/resources/extended` (per-core CPU + GPU + mem + disk). New System sub-tab in SPA. ~550 LOC. Defense-in-depth on top of CLAUDE.md §6's pidfile locking.
    - Spec details: `.claude/memory/project_system_tab_service_control.md`.
 
-2. **★ B-MAPEDIT (queued P0 from prior session, plan ready)** — `.claude/tmp/plan_track_b_mapedit.md` Mode-A folded. Brush erase + atomic save + restart-pending. ~950 LOC single PR. Re-run writer fresh from §8-folded plan; the earlier writer pass (2026-04-29 ~13:00 KST) was discarded clean during the AMCL crisis.
+3. **★ B-MAPEDIT (queued P0 from prior session, plan ready)** — `.claude/tmp/plan_track_b_mapedit.md` Mode-A folded. Brush erase + atomic save + restart-pending. ~950 LOC single PR. Re-run writer fresh from §8-folded plan; the earlier writer pass (2026-04-29 ~13:00 KST) was discarded clean during the AMCL crisis.
 
-3. **★ B-MAPEDIT-2: origin pick** — operator's new request 2026-04-29 23:45 KST. Click any pixel on the rendered PGM in MapEdit mode → that pixel becomes the new world (0,0). YAML origin field update only — pure translation, no bitmap rewrite. ~90 LOC bolt-on to B-MAPEDIT (or its own small follow-up PR). Use case: operator places a pole at the chroma studio's physical center, scans it, clicks the resulting point on the map → studio center becomes origin. Spec: `.claude/memory/project_map_edit_origin_rotation.md`.
+4. **★ B-MAPEDIT-2: origin pick** — operator's new request 2026-04-29 23:45 KST. Click any pixel on the rendered PGM in MapEdit mode → that pixel becomes the new world (0,0). YAML origin field update only — pure translation, no bitmap rewrite. ~90 LOC bolt-on to B-MAPEDIT (or its own small follow-up PR). Use case: operator places a pole at the chroma studio's physical center, scans it, clicks the resulting point on the map → studio center becomes origin. Spec: `.claude/memory/project_map_edit_origin_rotation.md`.
 
-4. **★ Pipelined-pattern audit** (Task #9 carryover) — operator-requested systematic audit: where else does the variable-scope / CPU-pipeline pattern apply? Candidates per `.claude/memory/project_pipelined_compute_pattern.md`: SSE producer-consumer (`/api/scan/stream`, `/api/last_pose/stream`), FreeD smoother stages, UE 60Hz publish staging, map activate phased reload, AMCL Live mode tiered confidence monitor. Output: ranked table by (operator benefit, impl cost, RT-safety). Can run in parallel with B-MAPEDIT scoping.
+5. **★ Pipelined-pattern audit** (Task #9 carryover) — operator-requested systematic audit: where else does the variable-scope / CPU-pipeline pattern apply? Candidates per `.claude/memory/project_pipelined_compute_pattern.md`: SSE producer-consumer (`/api/scan/stream`, `/api/last_pose/stream`), FreeD smoother stages, UE 60Hz publish staging, map activate phased reload, AMCL Live mode tiered confidence monitor. Output: ranked table by (operator benefit, impl cost, RT-safety). Can run in parallel with B-MAPEDIT scoping.
 
-5. **B-MAPEDIT-3: map rotation (deferred)** — ~250 LOC, lower marginal value vs LOC. Operator suggested **VideoCore VII GPU acceleration** for matrix ops at this point (RPi 5 GPU mostly idle, single HDMI used). Spec: `.claude/memory/project_videocore_gpu_for_matrix_ops.md`. Recommendation: don't attempt without first measuring CPU baseline + POC dispatch on a single op (likely EDT 1D pass via Vulkan compute). Research-grade work — schedule after Track 5 (UE integration) unless rotation blocks operator.
+6. **B-MAPEDIT-3: map rotation (deferred)** — ~250 LOC, lower marginal value vs LOC. Operator suggested **VideoCore VII GPU acceleration** for matrix ops at this point (RPi 5 GPU mostly idle, single HDMI used). Spec: `.claude/memory/project_videocore_gpu_for_matrix_ops.md`. Recommendation: don't attempt without first measuring CPU baseline + POC dispatch on a single op (likely EDT 1D pass via Vulkan compute). Research-grade work — schedule after Track 5 (UE integration) unless rotation blocks operator.
 
-6. **Track D-5-Live (sigma annealing for Live mode)** — operator hinted Live could also benefit from variable-scope tracking (prev pose narrows search → fewer phases needed). Track D-5 OneShot landed; Live extension is its own plan. Lower priority — Live uses `seed_around` already which is annealing-light.
+7. **Track D-5-Live (sigma annealing for Live mode)** — operator hinted Live could also benefit from variable-scope tracking (prev pose narrows search → fewer phases needed). Track D-5 OneShot landed; Live extension is its own plan. Lower priority — Live uses `seed_around` already which is annealing-light.
 
-7. **Track D-5-P (parallel pipelined annealing)** — research-grade follow-up to Track D-5: multiple AMCL chains running concurrently at different σ values on cores 0/1/2 (CPU 3 RT-isolated). Useful for finding convergence-cliff σ adaptively + disambiguating false basins. Spec scaffolded in `.claude/memory/project_pipelined_compute_pattern.md`.
+8. **Track D-5-P (parallel pipelined annealing)** — research-grade follow-up to Track D-5: multiple AMCL chains running concurrently at different σ values on cores 0/1/2 (CPU 3 RT-isolated). Useful for finding convergence-cliff σ adaptively + disambiguating false basins. Spec scaffolded in `.claude/memory/project_pipelined_compute_pattern.md`.
 
-8. **`test_jitter_ring` flaky test** — observed 1× fail during D-5 build (RT timing-sensitive). Not regression from any code change in this session. Investigate at low priority — likely needs tolerance bump or move to `hardware-required` label.
+9. **`test_jitter_ring` flaky test** — observed 1× fail during D-5 build (RT timing-sensitive). Not regression from any code change in this session. Investigate at low priority — likely needs tolerance bump or move to `hardware-required` label.
 
 ## Where we are (2026-04-30 00:00 KST — eighth-session close)
 

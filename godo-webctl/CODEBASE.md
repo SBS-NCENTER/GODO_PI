@@ -1461,3 +1461,174 @@ NOTE: top-level invariants now reach (t); the post-(s) duplicates inside Track B
 - T2: redaction parametrize includes benign control case.
 - T3: 409 integration tests pin EXACT Korean substring per particle.
 - N5: 6 (svc, transition) tuples literal-pinned in `test_constants.py`.
+
+## 2026-04-30 00:30 KST — PR-A: full systemd switchover + polkit + LAN bind + SPA dist
+
+### Why
+
+Track B-SYSTEM PR-2 (above) shipped `POST /api/system/service/{name}/{action}`
+and its sibling under `/api/local/`, both routed through
+`services.control(svc, action)`. The unit files for the three GODO
+services existed but the polkit rule that lets `ncenter` invoke
+`systemctl start/stop/restart` without sudo did not. Result: every
+admin click returned HTTP 500 `subprocess_failed`. PR-A ships the
+missing polkit rule. No webctl code changes — this is purely a
+host-config delta — but the existing tests pin the wire contract that
+the rule unblocks at runtime.
+
+### Added
+
+- (No new endpoint code; the polkit rule itself lives at
+  `production/RPi5/systemd/49-godo-systemctl.rules` because the
+  tracker's systemd unit files are also there. The webctl
+  `README.md`'s "Install on news-pi01" section now documents
+  the full 6-step PR-A switchover.)
+- `services.py::time` import — the `service_show()` `active_since_unix`
+  derivation now reads `time.monotonic()` + `time.time()` to convert
+  systemd's `ActiveEnterTimestampMonotonic` (microseconds since boot)
+  into a unix epoch.
+- `services.py::os` import — `os.path.getmtime()` powers the new
+  `env_stale` flag (envfile mtime > active_since_unix → restart pending).
+- `config_schema.py::_resolve_schema_path()` — tiered path
+  resolution: `GODO_WEBCTL_CONFIG_SCHEMA_PATH` env override (set in
+  `/etc/godo/webctl.env` on production hosts) > dev-tree sibling
+  layout (`<repo>/godo-webctl` next to `<repo>/production/RPi5`) >
+  `/opt/godo-tracker/share/config_schema.hpp` (production install
+  fallback). Earlier code assumed only the dev-tree layout, so
+  `/api/config/schema` returned HTTP 503 `schema_unavailable` after
+  the PR-A switchover (where `/opt/godo-webctl` is no longer a
+  sibling of any `production/RPi5` directory).
+- `services.py::_parse_environment_files_paths()` — parses the
+  `EnvironmentFiles=...` value of `systemctl show` (whitespace-separated
+  `path (option=...)` entries) into a list of absolute paths.
+- `services.py::_read_envfile()` — parses a systemd-style envfile
+  (shell-like KEY=VALUE per line, `#` comments, matched-quote stripping).
+  Used in place of `/proc/<pid>/environ` reads — cap-bearing processes
+  are non-dumpable so cross-process /proc/*/environ reads return EPERM
+  even for the same user.
+- `services.py::_envfile_newer_than_process()` — staleness predicate.
+  Returns True when any `EnvironmentFile=` mtime is later than the
+  process's `active_since_unix`, surfacing operator envfile edits that
+  have not yet taken effect.
+- `protocol.py::SYSTEM_SERVICES_FIELDS` — 8 fields now (was 7), adding
+  `env_stale`. Pin test in `tests/test_protocol.py` updated.
+- `system_services.py::_serialize` + `_degraded_entry` — wire-shape
+  emit `env_stale` per service.
+
+### Changed
+
+- `services.py::ALLOWED_PROPERTIES` — `ActiveEnterTimestampRealtime`
+  → `ActiveEnterTimestampMonotonic`, AND added `EnvironmentFiles`.
+  systemd 257 (Trixie) does NOT expose `ActiveEnterTimestampRealtime`
+  as a queryable property; the Realtime variant exists in some legacy
+  systemd versions but `systemctl show
+  --property=ActiveEnterTimestampRealtime` returned nothing on Trixie
+  (silent — the property line was simply absent from output, leaving
+  `active_since_unix` always null and the SPA showing "—" for uptime).
+  Migrating to the canonical Monotonic property fixes the data hole.
+  `EnvironmentFiles` is queried so the env source-of-truth (envfile
+  paths the unit declares) is part of the show payload — see the
+  `_read_envfile` change below. The conversion to unix epoch is done
+  in-process via `time.monotonic()` + `time.time()` reads — Linux
+  kernel's CLOCK_MONOTONIC is shared between systemd and Python's
+  `time.monotonic()`, so the elapsed-time delta is exact.
+- `services.py::service_show()`:
+  - Derive `active_since_unix` from monotonic instead of the
+    (non-existent) realtime field. Returns `None` when monotonic
+    value is `0` or `[not set]` (unit was never active).
+  - Build `env_redacted` from the union of the unit's `Environment=`
+    directive AND every `EnvironmentFile=` content. Earlier draft
+    used `/proc/<MainPID>/environ` reads; cap-bearing processes
+    (tracker has CAP_SYS_NICE + CAP_IPC_LOCK) are kernel-marked
+    non-dumpable, blocking same-user /proc reads with EPERM. envfile
+    text content is the operator's authored source-of-truth — staged
+    edits show even on a tracker that has not yet picked them up.
+  - Compute `env_stale` via `_envfile_newer_than_process` — True when
+    any envfile mtime is later than the process's `active_since_unix`.
+- `tests/test_services.py` — 4 tests updated for the new property
+  name + monotonic-based derivation; +9 new tests for envfile-path
+  parsing, envfile read, the staleness predicate, the oneshot path
+  (no envfile, env_stale stays False), and the env_stale=True
+  integration case.
+- `tests/test_protocol.py::test_system_services_fields_pinned` — pin
+  expanded to the 8-field tuple including `env_stale`.
+- `tests/test_system_services.py::_show` helper — accepts an
+  `env_stale` kwarg defaulting to False so existing tests need no
+  per-test edit. The dataclass-time `_ensure_field_order_pin()`
+  catches drift between SYSTEM_SERVICES_FIELDS and ServiceShow.
+- `tests/test_app_integration.py::_stub_service_show` — passes
+  `env_stale=False` to the `ServiceShow` constructor.
+- `godo-webctl/systemd/godo-webctl.service`:
+  - Removed `Wants=godo-tracker.service` from `[Unit]`. Per the
+    operator service-management policy
+    (`.claude/memory/project_godo_service_management_model.md`),
+    tracker is manual-start via the SPA Start button; webctl
+    must NOT pull tracker along at boot. webctl tolerates a
+    tracker-down state cleanly (ctl.sock connect failures
+    surface as "tracker offline" badges in the SPA).
+  - Removed `After=godo-tracker.service`; only `After=network.target`
+    remains.
+  - Added `RuntimeDirectory=godo` + `RuntimeDirectoryMode=0750` +
+    `RuntimeDirectoryPreserve=yes`. With tracker as manual-start,
+    webctl is the auto-start service that owns `/run/godo` across
+    reboots. systemd reference-counts so the dir survives if either
+    service stops (tracker.service also declares the same dir +
+    Preserve=yes).
+  - Added `MemoryAccounting=yes` so `systemctl show
+    --property=MemoryCurrent` returns a real value (was `[not set]`
+    before; SPA showed "—" for memory). Effective once the kernel
+    cmdline allows the cgroup memory controller — see
+    `production/RPi5/CODEBASE.md` for the `cgroup_enable=memory`
+    cmdline edit.
+- `godo-webctl/README.md`:
+  - "Install on news-pi01" rewritten to the 6-step PR-A switchover:
+    pre-req tracker install → /var/lib/godo/maps pre-create →
+    rsync to /opt/godo-webctl (excluding .venv) → uv sync --no-dev
+    → seed /etc/godo/webctl.env (must edit HOST + SPA_DIST) →
+    install + enable unit → deploy frontend dist to
+    /opt/godo-frontend.
+  - New `### /run/godo ownership and webctl-tracker independence`
+    subsection documenting the co-ownership + Preserve=yes contract.
+- `godo-webctl/systemd/godo-webctl.env.example`: pre-existing file,
+  no diff in PR-A. The PR's runtime config (HOST=0.0.0.0,
+  SPA_DIST=/opt/godo-frontend/dist) is set by the operator in
+  `/etc/godo/webctl.env` per the README install steps; the
+  template's commented defaults already document the keys.
+
+### Tests
+
+- No change. `test_app_integration.py::test_post_system_service_*` (8
+  cases) and `test_local_service_*` (3 cases) continue to monkeypatch
+  `godo_webctl.app.services_mod.control`, so they were always green
+  in CI; they are the regression net for the wire shape. The polkit
+  gate + the new RuntimeDirectory contract are HIL-asserted on
+  news-pi01:
+  - `journalctl -u polkit` shows `Finished loading, compiling and
+    executing 13 rules` after install (12 default + ours).
+  - `systemctl start godo-tracker.service` AS `ncenter` (no sudo)
+    returns exit 0; `Interactive authentication required.` would
+    indicate a broken rule.
+  - The webctl admin endpoint exercise (curl AS admin token):
+    `POST /api/system/service/godo-tracker/{stop,start,restart}` →
+    HTTP 200 `{"ok":true,"status":"<active|inactive>"}`. Pre-PR-A
+    same call returned HTTP 500 `subprocess_failed`.
+  - Negative cases also verified end-to-end: `godo-frobnicate/start`
+    → 404 `unknown_service`; `godo-tracker/purge` → 400
+    `unknown_action`. These exercise the FastAPI handler's exception
+    mapping under the polkit gate's happy-path conditions.
+
+### Invariants
+
+- Invariant **(x) admin-non-loopback service-control endpoint** is
+  unchanged at the route layer — the only thing PR-A changes is the
+  runtime precondition that makes its happy path actually reachable.
+  Hosts WITHOUT the polkit rule still observe the documented HTTP 500
+  `subprocess_failed` response; hosts WITH the rule observe HTTP 200
+  `{"ok":true,"status":"active"|"inactive"|"failed"}`. The wire
+  contract is identical in both states.
+- Cross-link: `production/RPi5/CODEBASE.md` invariant **(o)
+  godo-systemctl-polkit-discipline** is the lock-step partner —
+  the unit-name × verb whitelist in the polkit rule MUST equal
+  `services.py::ALLOWED_SERVICES × ALLOWED_ACTIONS`. Adding a fourth
+  GODO unit or fourth verb is a synchronized two-file edit
+  (`services.py` + the polkit rule) per that invariant.

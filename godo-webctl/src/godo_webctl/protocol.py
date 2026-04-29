@@ -257,6 +257,7 @@ SYSTEM_SERVICES_FIELDS: Final[tuple[str, ...]] = (
     "active_since_unix",
     "memory_bytes",
     "env_redacted",
+    "env_stale",
 )
 
 # Substring patterns matched (case-insensitive) against env-var KEY names.

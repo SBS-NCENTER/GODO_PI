@@ -475,10 +475,16 @@ def test_config_schema_response_cap_above_4kb() -> None:
 
 
 def test_system_services_fields_pinned() -> None:
-    """Pin the 7-field tuple verbatim. Drift between this constant and
+    """Pin the 8-field tuple verbatim. Drift between this constant and
     `services.ServiceShow` is also caught by the dataclass-time assertion
     `services._ensure_field_order_pin()` at import; this test is the
-    cross-module SSOT pin."""
+    cross-module SSOT pin.
+
+    `env_stale` was added 2026-04-30 (PR-A): True when any
+    EnvironmentFile='s mtime is later than the service's
+    ActiveEnterTimestamp, signalling the operator made an envfile
+    edit that has not yet taken effect (service restart needed).
+    """
     assert P.SYSTEM_SERVICES_FIELDS == (
         "name",
         "active_state",
@@ -487,6 +493,7 @@ def test_system_services_fields_pinned() -> None:
         "active_since_unix",
         "memory_bytes",
         "env_redacted",
+        "env_stale",
     )
 
 

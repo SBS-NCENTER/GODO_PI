@@ -1,8 +1,15 @@
 [Unit]
-Description=GODO web control plane (operator HTTP for godo-tracker)
-After=godo-tracker.service network.target
-Wants=godo-tracker.service
+Description=GODO web control plane (operator HTTP gateway)
+After=network.target
 Documentation=file:///opt/godo-webctl/README.md
+
+# Note: NO Wants=/Requires= on godo-tracker. Per operator policy
+# (.claude/memory/project_godo_service_management_model.md), the
+# tracker is manual-start only via the SPA System tab — webctl must
+# be able to come up at boot WITHOUT pulling tracker along. webctl
+# tolerates tracker-down: ctl.sock connect failures surface as
+# "tracker offline" badges in the SPA, and the operator clicks Start
+# when they want it live.
 
 [Service]
 Type=simple
@@ -15,12 +22,24 @@ EnvironmentFile=-/etc/godo/webctl.env
 StateDirectory=godo
 StateDirectoryMode=0750
 
-# /run/godo is owned by godo-tracker.service (RuntimeDirectory=godo there).
-# After=/Wants= guarantee the dir exists before webctl tries to open the UDS.
+# /run/godo — UDS socket directory. Both webctl and tracker declare
+# RuntimeDirectory=godo (mode 0750, owner ncenter). systemd
+# reference-counts so the dir survives if either service stops; the
+# explicit RuntimeDirectoryPreserve=yes makes that contract
+# load-bearing rather than coincidental. With tracker as manual-start,
+# webctl is responsible for creating the dir at boot so the operator's
+# first SPA "Start tracker" click finds the right environment.
+RuntimeDirectory=godo
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
 
 ExecStart=/opt/godo-webctl/.venv/bin/python -m godo_webctl
 Restart=on-failure
 RestartSec=2s
+
+# Resource accounting — surfaces MemoryCurrent to `systemctl show`,
+# which the SPA System tab renders.
+MemoryAccounting=yes
 
 # Hardening (conservative — operator-LAN only, no secrets handled).
 NoNewPrivileges=yes

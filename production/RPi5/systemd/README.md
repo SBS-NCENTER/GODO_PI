@@ -8,13 +8,14 @@ listed in `PROGRESS.md`:
 - `godo-tracker.service` (RT process under systemd)
 - Hardware watchdog wiring (`RuntimeWatchdogSec=`)
 
-Three units / one drop-in / one helper script:
+Three units / one drop-in / one polkit rule / one helper script:
 
 ```text
 godo-irq-pin.sh                       Idempotent IRQ-pinning helper
 godo-irq-pin.service                  Boot-time oneshot (calls the helper)
 godo-tracker.service                  RT main process
 system.conf.d/godo-watchdog.conf      systemd PID-1 hardware watchdog
+49-godo-systemctl.rules               polkit rule (ncenter group → start/stop/restart)
 install.sh                            Idempotent operator installer
 ```
 
@@ -202,7 +203,116 @@ If no line appears, the kernel never registered a watchdog device
 
 ---
 
-## 7. Uninstall
+## 7. polkit rule (`49-godo-systemctl.rules`)
+
+The webctl admin endpoint
+`POST /api/system/service/{name}/{action}` (and its operator-local
+sibling under `/api/local/service/`) calls
+`services.control(svc, action)` which runs:
+
+```python
+subprocess.run(["systemctl", action, "--no-pager", svc], ...)
+```
+
+as the unprivileged `ncenter` user. systemd 257 + polkit 126
+(Trixie) gate `manage-units` actions through polkit by default, so
+without an explicit allow rule the subprocess fails with
+`Interactive authentication required.` and the endpoint returns HTTP
+500 `subprocess_failed`.
+
+`49-godo-systemctl.rules` grants the minimum needed:
+
+- subject must be a member of the `ncenter` group;
+- unit must be one of `godo-tracker.service`, `godo-webctl.service`,
+  `godo-irq-pin.service`;
+- verb must be one of `start`, `stop`, `restart`.
+
+Anything else falls through to the distro default (`50-default.rules`).
+The rule file's `49-` prefix forces evaluation BEFORE the default.
+
+### Verifying the rule loaded
+
+Two complementary checks:
+
+**(a) polkit parsed the rule file successfully:**
+
+```bash
+sudo journalctl -u polkit -n 10 | grep 'rules'
+```
+
+Expected line:
+`Finished loading, compiling and executing 13 rules`
+
+The count is `12 default rules + 1 from our 49-godo-systemctl.rules`
+on a stock Trixie host. Any parse error in the .rules file would
+appear as a JS syntax error in the same journal output and the
+service would refuse to load it (the others continue to work).
+
+**(b) Runtime gate works as `ncenter` (must run AFTER unit files
+exist under `/etc/systemd/system/`):**
+
+```bash
+# AS ncenter (NOT through sudo):
+systemctl start godo-tracker.service
+echo $?
+```
+
+- `0` (or a unit-specific error like "Job for godo-tracker.service
+  failed because the control process exited with error code") = polkit
+  gate is open. Our rule worked.
+- `Failed to start godo-tracker.service: Interactive authentication
+  required.` = polkit gate is closed. Either the rule did not load
+  or `ncenter` is not in the `ncenter` group.
+
+### Why `pkcheck --detail unit=...` does NOT work
+
+polkit 126 (Trixie) restricts `CheckAuthorization` calls that pass
+detail values to "trusted callers" — root or the action owner.
+Running `pkcheck --action-id org.freedesktop.systemd1.manage-units
+--process $$ --detail unit godo-tracker.service --detail verb start`
+as `ncenter` returns:
+
+```
+Error checking for authorization ...:
+GDBus.Error:org.freedesktop.PolicyKit1.Error.NotAuthorized:
+Only trusted callers (e.g. uid 0 or an action owner) can use
+CheckAuthorization() and pass details
+```
+
+This is polkit by design (prevents unprivileged callers from
+fingerprinting the rule engine via probe queries). It does NOT mean
+the rule is broken — `systemctl start` works through the systemd
+client → systemd D-Bus API → polkit path, which is the action-owner
+case polkit considers trusted.
+
+Use the two checks above (journal log + actual `systemctl` call) as
+the verification path. The end-to-end SPA HIL — log in admin → System
+tab → click Start/Stop/Restart — exercises the same gate via the
+webctl admin endpoint and is the highest-confidence test (pre-rule:
+HTTP 500 `subprocess_failed`; post-rule: HTTP 200
+`{"ok":true,"status":"active|inactive|failed"}`).
+
+### Why the whitelist is hand-mirrored (not generated)
+
+The unit-name × verb cross-product the rule allows MUST equal
+`services.py::ALLOWED_SERVICES × ALLOWED_ACTIONS` on the webctl side
+(see `production/RPi5/CODEBASE.md` invariant **(o)
+godo-systemctl-polkit-discipline**). Adding a fourth GODO service is
+therefore a synchronized two-file edit. The polkit rule's
+default-deny semantics make a missed edit fail loudly at the first
+operator click rather than silently expanding authority.
+
+### Rolling back
+
+```bash
+sudo rm -f /etc/polkit-1/rules.d/49-godo-systemctl.rules
+# polkit reloads on inotify; no daemon-reload needed. The next
+# systemctl call from ncenter will revert to "auth required".
+```
+
+---
+
+## 8. Uninstall
 
 ```bash
 sudo systemctl disable --now godo-tracker.service
@@ -210,6 +320,7 @@ sudo systemctl disable --now godo-irq-pin.service
 sudo rm -f /etc/systemd/system/godo-tracker.service
 sudo rm -f /etc/systemd/system/godo-irq-pin.service
 sudo rm -f /etc/systemd/system.conf.d/godo-watchdog.conf
+sudo rm -f /etc/polkit-1/rules.d/49-godo-systemctl.rules
 sudo rm -rf /opt/godo-tracker
 sudo systemctl daemon-reload
 sudo systemctl daemon-reexec   # picks up the watchdog removal

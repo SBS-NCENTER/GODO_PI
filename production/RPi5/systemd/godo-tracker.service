@@ -11,11 +11,20 @@ Group=ncenter
 WorkingDirectory=/opt/godo-tracker
 EnvironmentFile=-/etc/godo/tracker.env
 
-# /run/godo/ — UDS socket directory, owned exclusively by this unit per
-# Phase 4-2 D Mode-A amendment S8. webctl's unit OMITS RuntimeDirectory=
-# and depends on us via After=/Wants=godo-tracker.service.
+# /run/godo/ — UDS socket directory. Co-owned with godo-webctl.service
+# via systemd RuntimeDirectory reference-counting; both units declare
+# the same dir + RuntimeDirectoryPreserve=yes so the dir survives
+# tracker stop/restart while webctl stays up.
+#
+# Operator policy (.claude/memory/project_godo_service_management_model.md):
+# tracker is MANUAL-START only via the SPA System tab — webctl is the
+# auto-start service that owns /run/godo across reboots, and the
+# operator brings the tracker up via the polkit-gated webctl admin
+# endpoint. Phase 4-2 D Mode-A amendment S8's "owned exclusively by
+# tracker" assumption is superseded by this policy.
 RuntimeDirectory=godo
 RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
 
 ExecStart=/opt/godo-tracker/godo_tracker_rt
 # Re-pin IRQs that lazy-register only after the tracker opens its
@@ -43,6 +52,13 @@ LimitRTPRIO=99
 # rather than restrictive.
 CPUAffinity=0-3
 
+# Resource accounting — surfaces `MemoryCurrent` to `systemctl show`,
+# which the webctl SPA System tab renders. Without this directive
+# systemd reports `[not set]` and the SPA shows "—". cgroup v2 memory
+# accounting is a kernel-side counter so the read is effectively free
+# (no perf impact on the RT thread).
+MemoryAccounting=yes
+
 # Hardening (conservative — RT process, no secrets, studio LAN only).
 # RestrictRealtime is INTENTIONALLY omitted: SCHED_FIFO is required.
 NoNewPrivileges=yes
@@ -50,12 +66,18 @@ PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
 ReadOnlyPaths=/etc/godo
-ReadWritePaths=/run/godo
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
 RestrictNamespaces=yes
 LockPersonality=yes
+
+# /var/lib/godo also needs to be writable. The tracker writes
+# `/var/lib/godo/restart_pending` clear semantics + reads operator
+# overrides, so adding it to ReadWritePaths plugs the ROFS warning the
+# 2026-04-30 first systemd boot surfaced. The `+` ReadWritePaths line
+# above (just /run/godo) was insufficient.
+ReadWritePaths=/run/godo /var/lib/godo
 
 [Install]
 WantedBy=multi-user.target

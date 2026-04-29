@@ -16,7 +16,9 @@ are extracted so unit tests can exercise them without spawning subprocess.
 
 from __future__ import annotations
 
+import os
 import subprocess
+import time
 from dataclasses import dataclass
 from typing import Final
 
@@ -55,9 +57,10 @@ ALLOWED_PROPERTIES: Final[tuple[str, ...]] = (
     "ActiveState",
     "SubState",
     "MainPID",
-    "ActiveEnterTimestampRealtime",
+    "ActiveEnterTimestampMonotonic",
     "MemoryCurrent",
     "Environment",
+    "EnvironmentFiles",
 )
 
 
@@ -107,9 +110,10 @@ class ServiceShow:
     active_state: str
     sub_state: str
     main_pid: int | None
-    active_since_unix: int | None  # ActiveEnterTimestampRealtime // 1_000_000
+    active_since_unix: int | None  # derived from ActiveEnterTimestampMonotonic
     memory_bytes: int | None  # MemoryCurrent (None if [not set])
     env_redacted: dict[str, str]
+    env_stale: bool  # True when any EnvironmentFile= mtime > active_since_unix
 
 
 def _check_service(svc: str) -> None:
@@ -359,6 +363,94 @@ def redact_env(env: dict[str, str]) -> dict[str, str]:
     return out
 
 
+def _parse_environment_files_paths(value: str) -> list[str]:
+    """Parse the value of `EnvironmentFiles=...` from `systemctl show`.
+
+    Format per `systemd.exec(5)`: a space-separated list where each
+    entry is either a bare path or `path (option=value, ...)`. Multiple
+    `EnvironmentFile=` directives in the unit are concatenated into one
+    `EnvironmentFiles=` line by systemctl. We strip the parenthesised
+    options and return only absolute paths.
+
+    Example input:
+      `/etc/godo/tracker.env (ignore_errors=yes) /etc/godo/extra.env`
+    Output:
+      `['/etc/godo/tracker.env', '/etc/godo/extra.env']`
+    """
+    if not value:
+        return []
+    out: list[str] = []
+    for tok in value.split():
+        if tok.startswith("("):
+            continue
+        # Some shell-like outputs append a comma between entries; tolerate.
+        tok = tok.rstrip(",")
+        if tok.startswith("/"):
+            out.append(tok)
+    return out
+
+
+def _read_envfile(path: str) -> dict[str, str]:
+    """Parse a systemd-style envfile (`EnvironmentFile=` target).
+
+    Per `systemd.exec(5)`: shell-like `KEY=VALUE` per line, `#` comments,
+    blank lines allowed, no shell variable expansion, surrounding
+    matched quotes are stripped. We do NOT filter to GODO_*: the operator
+    chose to put a key in `/etc/godo/*.env`, so it is operationally
+    relevant by definition. `redact_env` still masks secret-shaped
+    keys via the standard pattern list.
+
+    Returns empty dict on read errors (file missing, EPERM, OSError) —
+    the caller treats that as "no envfile-derived overrides".
+    """
+    out: dict[str, str] = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                if not key:
+                    continue
+                value = value.strip()
+                # Strip matching surrounding single or double quotes.
+                if (
+                    len(value) >= 2
+                    and value[0] == value[-1]
+                    and value[0] in ('"', "'")
+                ):
+                    value = value[1:-1]
+                out[key] = value
+    except (FileNotFoundError, PermissionError, OSError, UnicodeDecodeError):
+        return {}
+    return out
+
+
+def _envfile_newer_than_process(
+    envfile_paths: list[str],
+    process_active_since_unix: int | None,
+) -> bool:
+    """True if any envfile's mtime is strictly later than the service's
+    `ActiveEnterTimestamp`. Signals "envfile edited since the running
+    process started — restart needed for the changes to take effect".
+    Returns False when there is no active timestamp (oneshot pre-active,
+    or service never started)."""
+    if process_active_since_unix is None:
+        return False
+    for path in envfile_paths:
+        try:
+            mtime = int(os.path.getmtime(path))
+        except (FileNotFoundError, OSError):
+            continue
+        if mtime > process_active_since_unix:
+            return True
+    return False
+
+
 def _parse_int_or_none(raw: str) -> int | None:
     """Parse a non-negative integer value from a `systemctl show` field.
     Returns None on `[not set]`, empty string, or non-integer."""
@@ -400,11 +492,41 @@ def service_show(svc: str) -> ServiceShow:
     # MainPID=0 means "no main process" — surface as None for the SPA.
     if main_pid == 0:
         main_pid = None
-    realtime_us = _parse_int_or_none(props.get("ActiveEnterTimestampRealtime", ""))
-    active_since_unix = realtime_us // 1_000_000 if realtime_us else None
+    # systemd 257 (Trixie) does NOT expose `ActiveEnterTimestampRealtime`
+    # as a queryable property; the canonical property is
+    # `ActiveEnterTimestampMonotonic` (microseconds since system boot,
+    # same epoch as `clock_gettime(CLOCK_MONOTONIC)` and Python's
+    # `time.monotonic()`). Convert to unix epoch using the kernel's
+    # CLOCK_MONOTONIC ↔ CLOCK_REALTIME relationship measured RIGHT NOW
+    # in this process. Race window between time.time() and
+    # time.monotonic() reads is sub-microsecond — irrelevant at the
+    # 1-second resolution the SPA renders.
+    mono_us = _parse_int_or_none(props.get("ActiveEnterTimestampMonotonic", ""))
+    if mono_us is not None and mono_us > 0:
+        active_enter_mono_s = mono_us / 1_000_000.0
+        elapsed_s = time.monotonic() - active_enter_mono_s
+        active_since_unix = int(time.time() - elapsed_s)
+    else:
+        # mono_us is 0 or [not set] → unit was never active or has no
+        # main-process lifecycle (oneshot pre-RemainAfterExit).
+        active_since_unix = None
     memory_bytes = _parse_int_or_none(props.get("MemoryCurrent", ""))
+    # Environment dict — union of the unit's `Environment=` directive
+    # (rare in this project; almost always empty) and the contents of
+    # every `EnvironmentFile=` the unit declares. We do NOT read
+    # /proc/<MainPID>/environ because cap-bearing processes (e.g. the
+    # tracker with CAP_SYS_NICE + CAP_IPC_LOCK) are kernel-marked
+    # non-dumpable, blocking same-user environ reads — see PR-A
+    # discussion. envfile content is the operator's documented
+    # source-of-truth for the overrides, and `env_stale` below flags
+    # the rare case where the envfile is newer than the running
+    # process (so the SPA can render a "restart pending" indicator).
     env_raw = _parse_environment_value(props.get("Environment", ""))
+    envfile_paths = _parse_environment_files_paths(props.get("EnvironmentFiles", ""))
+    for envfile_path in envfile_paths:
+        env_raw.update(_read_envfile(envfile_path))
     env_redacted = redact_env(env_raw)
+    env_stale = _envfile_newer_than_process(envfile_paths, active_since_unix)
     return ServiceShow(
         name=svc,
         active_state=props.get("ActiveState", "unknown"),
@@ -413,6 +535,7 @@ def service_show(svc: str) -> ServiceShow:
         active_since_unix=active_since_unix,
         memory_bytes=memory_bytes,
         env_redacted=env_redacted,
+        env_stale=env_stale,
     )
 
 

@@ -177,26 +177,74 @@ uv run godo-webctl                     # binds 127.0.0.1:8080 by default
 
 ## Install on news-pi01
 
+The full systemd switchover (PR-A, 2026-04-30) installs three pieces:
+the tracker bundle (`production/RPi5/systemd/install.sh`), the webctl
+bundle (steps below), and the frontend dist. Run the tracker installer
+FIRST so the polkit rule + unit files are in place before webctl
+points its admin endpoint at them.
+
 ```bash
-# 1. Sync the source tree to the system install location.
-sudo rsync -a --delete /home/ncenter/projects/GODO/godo-webctl/ /opt/godo-webctl/
+# 0. Pre-req: tracker installer (creates /opt/godo-tracker/, installs
+#    the polkit rule, seeds /etc/godo/tracker.env). Skip if already done.
+sudo bash /home/ncenter/projects/GODO/production/RPi5/systemd/install.sh
+
+# 1. Pre-create /var/lib/godo/maps. The unit's StateDirectory=godo only
+#    creates /var/lib/godo itself.
+sudo install -d -m 0750 -o ncenter -g ncenter /var/lib/godo
+sudo install -d -m 0750 -o ncenter -g ncenter /var/lib/godo/maps
+
+# 2. Sync the source tree to the system install location. Exclude the
+#    dev-tree .venv (uv sync rebuilds it at /opt/godo-webctl/.venv).
+sudo rsync -a --delete --exclude='.venv' --exclude='__pycache__' \
+  /home/ncenter/projects/GODO/godo-webctl/ /opt/godo-webctl/
 sudo chown -R ncenter:ncenter /opt/godo-webctl
 
-# 2. Create the venv + install runtime deps (no dev deps in production).
+# 3. Create the venv + install runtime deps (no dev deps in production).
 cd /opt/godo-webctl && uv sync --no-dev
 
-# 3. (Optional) Override defaults via the env file.
+# 4. Seed /etc/godo/webctl.env. Set GODO_WEBCTL_HOST=0.0.0.0 (so LAN /
+#    Tailscale clients can reach the SPA) and GODO_WEBCTL_SPA_DIST=
+#    /opt/godo-frontend/dist (after step 6 lands the dist there).
+sudo install -d -m 0755 -o root -g root /etc/godo
 sudo install -m 0644 systemd/godo-webctl.env.example /etc/godo/webctl.env
+sudoedit /etc/godo/webctl.env
 
-# 4. Install + enable the systemd unit.
+# 5. Install + enable the systemd unit.
 sudo install -m 0644 systemd/godo-webctl.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now godo-webctl
+
+# 6. Deploy the frontend dist (Vite+Svelte SPA). The dev tree must
+#    have a current `npm run build` output.
+sudo install -d -m 0755 -o root -g root /opt/godo-frontend
+sudo rsync -a --delete /home/ncenter/projects/GODO/godo-frontend/dist \
+  /opt/godo-frontend/
+sudo chown -R ncenter:ncenter /opt/godo-frontend
+sudo systemctl restart godo-webctl   # picks up GODO_WEBCTL_SPA_DIST
 ```
 
-`/var/lib/godo/` is created by systemd (`StateDirectory=godo`, mode 0750).
-`/run/godo/` is owned by `godo-tracker.service`; webctl waits for the
-tracker via `After=`/`Wants=`.
+After step 6:
+
+- `curl http://127.0.0.1:8080/api/health` returns
+  `{"webctl":"ok","tracker":"unreachable","mode":null}` until the
+  operator clicks Start on the SPA System tab; once tracker is up,
+  the response shifts to `tracker:"ok","mode":"Idle"`.
+- Browse to `http://<LAN-IP-or-Tailscale-name>:8080/` from any
+  client; the SPA loads (default admin credentials are
+  `ncenter`/`ncenter`; change immediately via
+  `scripts/godo-webctl-passwd`).
+
+### `/run/godo` ownership and webctl-tracker independence
+
+Both `godo-webctl.service` and `godo-tracker.service` declare
+`RuntimeDirectory=godo` + `RuntimeDirectoryPreserve=yes`. systemd
+reference-counts ownership so `/run/godo/` survives whichever service
+stops. Per the operator service-management policy
+(`.claude/memory/project_godo_service_management_model.md`), webctl is
+the auto-start service that owns `/run/godo` across reboots; the
+tracker is manual-start via the SPA System tab Start button. webctl
+tolerates `tracker.unreachable` cleanly — `/api/health` reflects the
+state and the SPA renders tracker-down badges accordingly.
 
 ## curl examples
 

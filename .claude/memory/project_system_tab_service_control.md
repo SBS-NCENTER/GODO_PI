@@ -17,16 +17,27 @@ type: project
 
 ## (1) Service control — implementation surface
 
-| Step | Effort | Notes |
-|---|---|---|
-| 1. Write `godo-tracker.service` unit file | low | `Type=simple` Exec=`scripts/run-pi5-tracker-rt.sh`; `RuntimeDirectory=godo` (creates `/run/godo` with right ownership at boot — solves the manual-chown pain from the prior session). User=ncenter. |
-| 2. Write `godo-webctl.service` unit file | low | Type=simple Exec=`uv run -m godo_webctl`. After=`godo-tracker.service`. |
-| 3. Write `godo-irq-pin.service` unit file | low | Type=oneshot, runs `scripts/setup-pi5-rt.sh` IRQ-pin half. RemainAfterExit. |
-| 4. polkit `.rules` file | low | Allow `ncenter` group to `org.freedesktop.systemd1.manage-units` for the three services only. |
-| 5. Install on news-pi01 | manual | Operator copies files to `/etc/systemd/system/` + `/etc/polkit-1/rules.d/` and `systemctl daemon-reload`. One-time. |
-| 6. Tests | medium | webctl integration test — already exists from PR #27 — should now PASS instead of `subprocess_failed`. Add an HIL check that `Start/Stop/Restart` buttons work end-to-end. |
+**Status (2026-04-30 00:30 KST close)**: PR-A SHIPPED in repo. Awaiting
+news-pi01 install + HIL verification.
 
-LOC estimate: ~120 LOC (3 unit files + polkit + a deploy script + test green). NOT a code-heavy task — mostly host config that was deferred from prior sessions (`Task #32` historic).
+Reality vs the original plan: items 1-3 (unit files) had ALREADY landed
+in earlier PRs (`production/RPi5/systemd/` + `godo-webctl/systemd/`).
+The actual scope was just the polkit half + installer wiring.
+
+| Step | Status | Notes |
+|---|---|---|
+| 1. `godo-tracker.service` unit file | shipped pre-PR-A | committed `2026-04-26` per git. RuntimeDirectory=godo + User=ncenter + Ambient caps for SCHED_FIFO. |
+| 2. `godo-webctl.service` unit file | shipped pre-PR-A | committed `2026-04-26`. After=godo-tracker.service. |
+| 3. `godo-irq-pin.service` unit file | shipped pre-PR-A | committed `2026-04-26`. Type=oneshot. |
+| 4. polkit `.rules` file | **PR-A shipped** | `production/RPi5/systemd/49-godo-systemctl.rules` — `ncenter` group, 3 units × 3 verbs (start/stop/restart). |
+| 5. Install on news-pi01 | **awaiting operator** | `sudo bash production/RPi5/systemd/install.sh` (now 5 steps incl. polkit). Verification: `pkcheck --action-id org.freedesktop.systemd1.manage-units --process $$ --detail unit godo-tracker.service --detail verb start` AS ncenter → `OK`. |
+| 6. Tests | shipped pre-PR-A | webctl integration tests `test_post_system_service_*` + `test_local_service_*` mock `services.control` so they were green; the HIL is the new gate. |
+
+LOC actual: ~50 LOC effective (49-rule file + install.sh delta + README §7 + CODEBASE invariant (o)). Way under the original ~120 LOC estimate because the unit files were already there.
+
+Cross-language SSOT: `services.py::ALLOWED_SERVICES × ALLOWED_ACTIONS`
+must equal the (unit, verb) cross-product the polkit rule allows. See
+`production/RPi5/CODEBASE.md` invariant **(o) godo-systemctl-polkit-discipline**.
 
 ## (2) Process monitor — implementation surface
 

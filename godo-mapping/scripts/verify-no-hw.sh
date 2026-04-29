@@ -123,6 +123,16 @@ step "docker run --rm godo-mapping:dev --help"
 docker run --rm godo-mapping:dev --help >/dev/null \
     || fail "container --help smoke failed"
 
+# rf2o reachability smoke (S4 fold, 2026-04-29). Must list
+# `rf2o_laser_odometry_node` so the launch file can spawn it.
+step "docker exec rf2o overlay smoke (ros2 pkg executables rf2o_laser_odometry)"
+rf2o_smoke_out="$(docker run --rm --entrypoint bash godo-mapping:dev -c \
+    'source /opt/ros/jazzy/setup.bash && source /opt/ros_overlay/install/setup.bash && ros2 pkg executables rf2o_laser_odometry')" \
+    || fail "rf2o overlay smoke command failed inside the image"
+if [[ "${rf2o_smoke_out}" != *"rf2o_laser_odometry_node"* ]]; then
+    fail "rf2o overlay smoke did not list rf2o_laser_odometry_node (output: ${rf2o_smoke_out})"
+fi
+
 step "OK (--full)"
 echo
 echo "Reminder: after the FIRST mapping run on real hardware, audit the"

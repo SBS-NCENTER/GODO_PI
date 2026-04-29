@@ -424,6 +424,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     {"ok": False, "err": err},
                     status_code=HTTPStatus.NOT_FOUND,
                 )
+            if err == "concurrent_backup_in_progress":
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "err": err,
+                        "detail": "다른 백업이 진행 중입니다.",
+                    },
+                    status_code=HTTPStatus.CONFLICT,
+                )
             return JSONResponse(
                 {"ok": False, "err": err},
                 status_code=HTTPStatus.INTERNAL_SERVER_ERROR,

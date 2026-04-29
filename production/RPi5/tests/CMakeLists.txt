@@ -365,6 +365,13 @@ target_link_libraries(test_uds_server PRIVATE
 add_test(NAME test_uds_server COMMAND test_uds_server)
 set_tests_properties(test_uds_server PROPERTIES LABELS "hardware-free")
 
+# PR-1 — single-instance discipline (CLAUDE.md §6 + invariant (l)
+# tracker-pidfile-discipline). 6 doctest cases.
+add_executable(test_pidfile test_pidfile.cpp)
+target_link_libraries(test_pidfile PRIVATE doctest::doctest godo_core)
+add_test(NAME test_pidfile COMMAND test_pidfile)
+set_tests_properties(test_pidfile PROPERTIES LABELS "hardware-free")
+
 # ----------------------------------------------------------------------------
 # PR-DIAG (Track B-DIAG) — diagnostics page hardware-free tests.
 # - test_jitter_ring         — 1W/1R round-trip + wraparound + content invariant.

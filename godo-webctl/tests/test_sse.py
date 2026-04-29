@@ -40,6 +40,7 @@ def _settings() -> Settings:
         chromium_loopback_only=True,
         disk_check_path=Path("/"),
         restart_pending_path=Path("/tmp/rp"),
+        pidfile_path=Path("/tmp/pid"),
     )
 
 

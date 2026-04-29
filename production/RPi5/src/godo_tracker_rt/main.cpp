@@ -44,6 +44,7 @@
 #include "core/config.hpp"
 #include "core/constants.hpp"
 #include "core/hot_config.hpp"
+#include "core/pidfile.hpp"
 #include "core/rt_flags.hpp"
 #include "core/rt_types.hpp"
 #include "core/seqlock.hpp"
@@ -308,6 +309,27 @@ int main(int argc, char** argv, char** envp) {
     } catch (const std::exception& e) {
         std::fprintf(stderr, "godo_tracker_rt: %s\n", e.what());
         return 2;
+    }
+
+    // Single-instance discipline (CLAUDE.md §6 + invariant (l)
+    // tracker-pidfile-discipline). Acquire BEFORE any thread spawn /
+    // Seqlock allocation / device open. RT threads NEVER touch the
+    // pidfile FD — this is the boot path only. The lock is owned by
+    // a unique_ptr declared before any thread machinery so the dtor
+    // (Mode-A M6: unlinks BEFORE close) runs on every main() return
+    // path, AFTER all thread joins below.
+    // [rt-pidfile-isolation]
+    std::unique_ptr<godo::core::PidFileLock> pidfile_lock;
+    try {
+        pidfile_lock = std::make_unique<godo::core::PidFileLock>(
+            cfg.tracker_pidfile);
+    } catch (const godo::core::PidFileLockHeld& e) {
+        std::fprintf(stderr, "%s\n", e.what());
+        return 1;
+    } catch (const godo::core::PidFileLockSetupError& e) {
+        std::fprintf(stderr,
+            "godo_tracker_rt: pidfile setup failed: %s\n", e.what());
+        return 1;
     }
 
     std::fprintf(stderr,

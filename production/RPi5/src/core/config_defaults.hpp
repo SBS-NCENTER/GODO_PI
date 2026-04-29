@@ -33,6 +33,15 @@ inline constexpr int              RT_PRIORITY    = 50;
 // IPC.
 inline constexpr std::string_view UDS_SOCKET     = "/run/godo/ctl.sock";
 
+// Single-instance pidfile lock target. main() acquires
+// fcntl(F_SETLK, F_WRLCK) here BEFORE any thread spawn. Path MUST live
+// on a local FS — tmpfs /run/godo is the project default; NFS is
+// unsupported (POSIX advisory lock semantics differ). Override via
+// CLI --pidfile, env GODO_TRACKER_PIDFILE, or TOML key
+// ipc.tracker_pidfile. See production/RPi5/CODEBASE.md invariant (l).
+inline constexpr std::string_view TRACKER_PIDFILE_DEFAULT =
+    "/run/godo/godo-tracker.pid";
+
 // AMCL Tier-2 tunables. Operators override these via TOML / env / CLI;
 // see SYSTEM_DESIGN.md §11.2 and the per-key 8-touchpoint table in
 // .claude/tmp/plan_phase4_2_b.md.

@@ -57,14 +57,18 @@ UdsServer::~UdsServer() {
 }
 
 void UdsServer::open() {
-    // Stale socket from a prior crash — unlink defensively. ENOENT is OK.
-    if (::unlink(socket_path_.c_str()) < 0 && errno != ENOENT) {
-        // Surface the error but continue; bind() will fail with a clearer
-        // message if the path is truly unusable.
-        std::fprintf(stderr,
-            "uds_server::open: unlink('%s') warning: %s\n",
-            socket_path_.c_str(), strerror_safe(errno).c_str());
-    }
+    // Atomic-rename bind: bind to a temp path, then rename(2) over the
+    // target. `rename(2)` is atomic on the same filesystem, so a
+    // concurrent client connecting to the target either sees the OLD
+    // socket OR the NEW socket — never a torn intermediate state. This
+    // eliminates the unlink-then-bind TOCTOU window where another
+    // process could race the bind() between our unlink() and bind().
+    //
+    // Single-instance discipline (CODEBASE invariant (l)) gates this
+    // path on the tracker pidfile lock — only one godo_tracker_rt is
+    // EVER running, so the only TOCTOU at risk would be a manual
+    // ``socat`` binding to /run/godo/ctl.sock during boot. Atomic
+    // rename closes that gap regardless.
 
     listen_fd_ = ::socket(AF_UNIX, SOCK_STREAM, 0);
     if (listen_fd_ < 0) {
@@ -75,13 +79,29 @@ void UdsServer::open() {
 
     sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
+    // Build the temp path: <socket_path_>.<pid>.tmp. Worst case adds
+    // ~16 chars to the basename; we still need to fit inside sun_path.
+    std::string tmp_path = socket_path_ + "." +
+        std::to_string(static_cast<int>(::getpid())) + ".tmp";
+    if (tmp_path.size() >= sizeof(addr.sun_path)) {
+        ::close(listen_fd_);
+        listen_fd_ = -1;
+        throw std::runtime_error(
+            "uds_server::open: socket path too long: " + tmp_path);
+    }
     if (socket_path_.size() >= sizeof(addr.sun_path)) {
         ::close(listen_fd_);
         listen_fd_ = -1;
         throw std::runtime_error(
             "uds_server::open: socket path too long: " + socket_path_);
     }
-    std::memcpy(addr.sun_path, socket_path_.data(), socket_path_.size());
+    // Sweep any stale temp left over from a prior crashed boot.
+    if (::unlink(tmp_path.c_str()) < 0 && errno != ENOENT) {
+        std::fprintf(stderr,
+            "uds_server::open: unlink('%s') stale-temp warning: %s\n",
+            tmp_path.c_str(), strerror_safe(errno).c_str());
+    }
+    std::memcpy(addr.sun_path, tmp_path.data(), tmp_path.size());
 
     if (::bind(listen_fd_, reinterpret_cast<sockaddr*>(&addr),
                sizeof(addr)) < 0) {
@@ -89,8 +109,21 @@ void UdsServer::open() {
         ::close(listen_fd_);
         listen_fd_ = -1;
         throw std::runtime_error(
-            std::string("uds_server::open: bind('") + socket_path_ +
+            std::string("uds_server::open: bind('") + tmp_path +
             "'): " + strerror_safe(e));
+    }
+    // Rename atomically over the target. POSIX rename(2): if the
+    // destination exists, it is replaced atomically; if a concurrent
+    // process holds the destination open, its existing connection is
+    // unaffected (rename rebinds the path, not the inode).
+    if (::rename(tmp_path.c_str(), socket_path_.c_str()) < 0) {
+        const int e = errno;
+        ::unlink(tmp_path.c_str());
+        ::close(listen_fd_);
+        listen_fd_ = -1;
+        throw std::runtime_error(
+            std::string("uds_server::open: rename('") + tmp_path +
+            "' -> '" + socket_path_ + "'): " + strerror_safe(e));
     }
     path_bound_ = true;
 

@@ -786,6 +786,7 @@ async def test_map_image_returns_png(
         ("POST", "/api/system/reboot", None),
         ("POST", "/api/system/shutdown", None),
         ("POST", "/api/local/service/godo-tracker/restart", None),
+        ("POST", "/api/system/service/godo-tracker/restart", None),
     ],
 )
 async def test_mutation_endpoints_unauth_return_401(

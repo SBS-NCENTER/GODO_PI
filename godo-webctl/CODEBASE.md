@@ -429,8 +429,9 @@ FS — tmpfs `/run/godo` is the project default; NFS is unsupported
   by `__main__.main()`; `create_app()` does NOT depend on it.
 - `src/godo_webctl/constants.py` — `BACKUP_LOCK_FILENAME = ".lock"`
   (defence-in-depth target inside `cfg.backup_dir`).
-- `tests/test_pidfile.py` — 11 cases (10 per planner §5 + 1 bonus
-  module-boundary pin).
+- `tests/test_pidfile.py` — 12 cases (10 per planner §5 + 2 bonus
+  module-boundary pins: `test_create_app_does_not_acquire_lock`,
+  `test_main_imports_pidfile_but_app_does_not`).
 - `tests/test_main_lock.py` — 4 subprocess cases including the TB3
   timing assertion (second instance exits in < 2 s, well below uvicorn
   boot).

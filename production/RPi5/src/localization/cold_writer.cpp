@@ -2,9 +2,11 @@
 
 #include <atomic>
 #include <cerrno>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <exception>
+#include <limits>
 
 #include "core/constants.hpp"
 #include "core/rt_flags.hpp"
@@ -13,6 +15,130 @@
 #include "likelihood_field.hpp"
 
 namespace godo::localization {
+
+// Track D-5 — Coarse-to-fine sigma_hit annealing for OneShot AMCL.
+//
+// Schedule length 1 falls through to this same body — runs
+// cfg.amcl_anneal_iters_per_phase iters at the single σ. Operators wanting
+// pre-Track-D-5 behaviour set BOTH amcl.sigma_hit_schedule_m = "0.05"
+// AND amcl.anneal_iters_per_phase = 25.
+//
+// Yaw tripwire intentionally NOT checked here — caller does it once on
+// final result (cold_writer.cpp:128, plan §P4-D5-5). Intermediate-phase
+// poses are not tripwire candidates.
+//
+// 2026-04-29 23:20 KST update — auto-minima tracking with patience-2 early
+// break. Empirical HIL on TS5 chroma studio (5cm-cell map) showed the
+// 5-phase default ending at σ_hit=0.05 over-tightened the likelihood
+// Gaussian into sub-cell discretization, producing σ_xy~0.036m at the
+// final phase even though phase 2 (σ=0.2) had reached σ_xy~0.006m.
+// Solution: track the best (min) σ_xy across phases and return THAT
+// pose, not the final-phase pose. Allow up to 2 consecutive worse-than-
+// best phases before declaring "we've passed the minimum, stop"
+// (patience absorbs single-phase noise spikes; second consecutive bump
+// signals real over-tightening). See .claude/memory/project_amcl_sigma_sweep_2026-04-29.md.
+AmclResult converge_anneal(const godo::core::Config&     cfg,
+                           const std::vector<RangeBeam>& beams,
+                           const OccupancyGrid&          grid,
+                           LikelihoodField&              field_inout,
+                           Amcl&                         amcl,
+                           Pose2D&                       pose_inout,
+                           Rng&                          rng) {
+    int total_iters = 0;
+
+    const auto& schedule = cfg.amcl_sigma_hit_schedule_m;
+    const auto& seed_xy_schedule = cfg.amcl_sigma_seed_xy_schedule_m;
+    const double sigma_0 = (schedule.empty() ? 1.0 : schedule.front());
+
+    // Auto-minima tracking. best_result starts forced-false / xy_std=+inf
+    // so the first phase ALWAYS becomes the new best, even if AMCL reported
+    // a degenerate xy_std on phase 0.
+    AmclResult  best_result{};
+    best_result.forced    = false;
+    best_result.xy_std_m  = std::numeric_limits<double>::infinity();
+    Pose2D      best_pose{};
+    int         bad_streak = 0;
+    constexpr int kPatience = 2;  // 2 consecutive worse phases → stop
+
+    for (std::size_t k = 0; k < schedule.size(); ++k) {
+        const double sigma_k = schedule[k];
+
+        // 1. Rebuild EDT at σ_k. `lf` is reassignable via the static_assert
+        //    pinned in amcl.hpp (Mode-A S4); a throw here would unwind into
+        //    the caller's catch with the field in an unspecified state, but
+        //    since LikelihoodField is nothrow-move-assignable, the basic
+        //    exception guarantee holds.
+        field_inout = build_likelihood_field(grid, sigma_k);
+        amcl.set_field(field_inout);
+
+        // 2. Seed.
+        if (k == 0) {
+            amcl.seed_global(grid, rng);
+        } else {
+            // Per-phase seed_around σ_xy from the explicit schedule (Mode-A
+            // M4 option b). Seed σ_yaw shrinks linearly with σ_k / σ_0 so
+            // the yaw cloud refines in lockstep with the likelihood field's
+            // tightening.
+            const double seed_xy_k  = seed_xy_schedule[k];
+            const double seed_yaw_k = cfg.amcl_sigma_seed_yaw_deg *
+                                      (sigma_k / sigma_0);
+            amcl.seed_around(pose_inout, seed_xy_k, seed_yaw_k, rng);
+        }
+
+        // 3. Inner loop — same early-exit rule as Amcl::converge.
+        AmclResult phase_result{};
+        const int max_iters = cfg.amcl_anneal_iters_per_phase;
+        int iter = 0;
+        for (; iter < max_iters; ++iter) {
+            phase_result = amcl.step(beams, rng);
+            if (phase_result.converged && iter >= 2) {
+                ++iter;
+                break;
+            }
+        }
+
+        // 4. Track minimum + patience-aware early break. Always carry
+        //    pose_inout = current-phase pose to next seed_around (gives
+        //    next σ a chance to recover even if THIS phase was worse).
+        //    Final return is best_result, not last.
+        total_iters += iter;
+        if (phase_result.xy_std_m < best_result.xy_std_m) {
+            best_result = phase_result;
+            best_pose   = phase_result.pose;
+            bad_streak  = 0;
+        } else {
+            ++bad_streak;
+            if (bad_streak >= kPatience) {
+                // Two consecutive phases worse than best — likely past the
+                // minimum (over-tightening into sub-cell discretization or
+                // particle-cloud collapse). Stop here; return best.
+                pose_inout = phase_result.pose;
+                break;
+            }
+        }
+        pose_inout = phase_result.pose;
+    }
+
+    // pose_inout out-param mirrors best_result.pose for caller convenience
+    // (some call sites use the in/out pose, others use the returned struct).
+    pose_inout = best_pose;
+    best_result.iterations = total_iters;
+    return best_result;
+}
+
+// Track D-5 (Q2 / S4) — At OneShot completion, rebuild `lf` back to
+// cfg.amcl_sigma_hit_m and re-point `amcl` at it. Live re-entry then sees
+// the operator-controlled σ field, never the annealing-leftover narrow
+// final-phase field. Cost: one EDT rebuild (~50 ms) on the cold path
+// between OneShot completion and the next Live entry — not on the 10 Hz
+// Live tick.
+void rebuild_lf_for_live(const godo::core::Config& cfg,
+                         const OccupancyGrid&      grid,
+                         LikelihoodField&          lf_inout,
+                         Amcl&                     amcl) {
+    lf_inout = build_likelihood_field(grid, cfg.amcl_sigma_hit_m);
+    amcl.set_field(lf_inout);
+}
 
 namespace {
 
@@ -78,6 +204,7 @@ void fill_last_scan(godo::rt::LastScan& snap,
 AmclResult run_one_iteration(const godo::core::Config&         cfg,
                              const godo::lidar::Frame&         frame,
                              const OccupancyGrid&              grid,
+                             LikelihoodField&                  lf_inout,
                              Amcl&                             amcl,
                              Rng&                              rng,
                              std::vector<RangeBeam>&           beams_buf,
@@ -113,18 +240,21 @@ AmclResult run_one_iteration(const godo::core::Config&         cfg,
                cfg.amcl_range_max_m,
                beams_buf);
 
-    // 2. Phase 4-2 D — OneShot ALWAYS seeds globally. The Phase 4-2 B
-    //    "warm-seed on subsequent calls" branch is removed: an operator-
-    //    triggered calibrate after a base move must not be biased toward
-    //    the pre-move pose. `live_first_iter_inout` is left to its caller-
-    //    set value here and only the Live kernel consults it for its own
-    //    seed branch.
-    amcl.seed_global(grid, rng);
+    // 2. Track D-5 — Coarse-to-fine sigma_hit annealing. Replaces the
+    //    Phase 4-2 D single-shot `seed_global → converge` pair. Phase 0
+    //    seeds globally at wide σ for basin lock; subsequent phases
+    //    seed_around the carried pose and tighten σ down to the
+    //    production default. `lf_inout` is mutated in place across phases;
+    //    we restore it to cfg.amcl_sigma_hit_m below so Live re-entry
+    //    sees the operator-controlled σ field (Q2 / Mode-A S4).
+    Pose2D anneal_pose{};
+    AmclResult result = converge_anneal(cfg, beams_buf, grid,
+                                        lf_inout, amcl, anneal_pose, rng);
 
-    // 3. Iterate to convergence.
-    AmclResult result = amcl.converge(beams_buf, rng);
-
-    // 4. Tripwire — informational only.
+    // 4. Tripwire — informational only. Runs ONCE on the final-phase
+    //    result only (Mode-A M6); intermediate-phase poses are NOT
+    //    tripwire candidates and converge_anneal deliberately does not
+    //    check them.
     if (apply_yaw_tripwire(result.pose,
                            cfg.amcl_origin_yaw_deg,
                            yaw_tripwire)) {
@@ -195,6 +325,13 @@ AmclResult run_one_iteration(const godo::core::Config&         cfg,
     // hygiene (OneShot does not consult the latch for its own seed).
     last_pose_inout = result.pose;
     live_first_iter_inout = false;
+
+    // Track D-5 (Q2) — Restore lf to cfg.amcl_sigma_hit_m so the next
+    // Live entry uses the operator-controlled σ field, not the annealing
+    // schedule's narrow final-phase σ. Cost: one EDT rebuild on the cold
+    // path; off the 10 Hz Live tick.
+    rebuild_lf_for_live(cfg, grid, lf_inout, amcl);
+
     return result;
 }
 
@@ -449,7 +586,7 @@ void run_cold_writer(const godo::core::Config&              cfg,
                     break;
                 }
                 try {
-                    (void)run_one_iteration(cfg, captured, grid, amcl, rng,
+                    (void)run_one_iteration(cfg, captured, grid, lf, amcl, rng,
                                             beams_buf, last_pose,
                                             live_first_iter,
                                             last_written, target_offset,
@@ -459,6 +596,17 @@ void run_cold_writer(const godo::core::Config&              cfg,
                     std::fprintf(stderr,
                         "cold_writer: run_one_iteration threw: %s — "
                         "returning to Idle.\n", e.what());
+                    // Defensive: if converge_anneal threw mid-phase,
+                    // lf may hold an intermediate σ. Restore for Live.
+                    try {
+                        rebuild_lf_for_live(cfg, grid, lf, amcl);
+                    } catch (...) {
+                        // If the rebuild itself fails, log + continue;
+                        // the next OneShot will rebuild from scratch.
+                        std::fprintf(stderr,
+                            "cold_writer: rebuild_lf_for_live recovery "
+                            "failed; lf may be in unspecified state.\n");
+                    }
                 }
                 // SSOT: last_pose_seq.store BEFORE g_amcl_mode = Idle (Track B race pin).
                 // Reader (godo-mapping/scripts/repeatability.py) polls get_mode==Idle

@@ -15,6 +15,7 @@
 #include <doctest/doctest.h>
 
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -81,6 +82,11 @@ Config make_test_config() {
     cfg.amcl_max_iters         = 5;
     cfg.amcl_particles_local_n = 200;
     cfg.amcl_particles_global_n= 200;
+    // Track D-5: collapse to single-phase annealing for test speed.
+    cfg.amcl_sigma_hit_schedule_m  = {0.05};
+    cfg.amcl_sigma_seed_xy_schedule_m =
+        {std::numeric_limits<double>::quiet_NaN()};
+    cfg.amcl_anneal_iters_per_phase = 5;
     cfg.amcl_map_path =
         std::string(GODO_FIXTURES_MAPS_DIR) + "/synthetic_4x4.pgm";
     return cfg;
@@ -109,7 +115,7 @@ TEST_CASE("run_one_iteration — hot.valid==0 falls back to cfg.deadband_*") {
     Seqlock<HotConfig>  hot_cfg_seq;  // valid=0 sentinel.
 
     const Frame frame = make_synthetic_frame();
-    const auto result = run_one_iteration(cfg, frame, grid, amcl, rng,
+    const auto result = run_one_iteration(cfg, frame, grid, lf, amcl, rng,
                                           beams_buf, last_pose,
                                           live_first_iter, last_written,
                                           target_offset, last_pose_seq,
@@ -161,7 +167,7 @@ TEST_CASE("run_one_iteration — hot.valid==1 honours hot.deadband_mm") {
     hot_cfg_seq.store(snap);
 
     const Frame frame = make_synthetic_frame();
-    const auto result = run_one_iteration(cfg, frame, grid, amcl, rng,
+    const auto result = run_one_iteration(cfg, frame, grid, lf, amcl, rng,
                                           beams_buf, last_pose,
                                           live_first_iter, last_written,
                                           target_offset, last_pose_seq,
@@ -213,7 +219,7 @@ TEST_CASE("run_one_iteration — mid-call hot publish takes effect on next iter"
     hot_cfg_seq.store(snap);
 
     const Frame frame = make_synthetic_frame();
-    (void)run_one_iteration(cfg, frame, grid, amcl, rng, beams_buf,
+    (void)run_one_iteration(cfg, frame, grid, lf, amcl, rng, beams_buf,
                             last_pose, live_first_iter, last_written,
                             target_offset, last_pose_seq, last_scan_seq,
                             amcl_rate_accum, hot_cfg_seq);
@@ -228,7 +234,7 @@ TEST_CASE("run_one_iteration — mid-call hot publish takes effect on next iter"
     snap2.valid = 1;
     hot_cfg_seq.store(snap2);
 
-    const auto result2 = run_one_iteration(cfg, frame, grid, amcl, rng,
+    const auto result2 = run_one_iteration(cfg, frame, grid, lf, amcl, rng,
                                            beams_buf, last_pose,
                                            live_first_iter, last_written,
                                            target_offset, last_pose_seq,

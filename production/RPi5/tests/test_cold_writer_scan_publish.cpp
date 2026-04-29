@@ -19,6 +19,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -87,6 +88,11 @@ Config make_test_config(std::uint64_t seed) {
     cfg.amcl_max_iters           = 5;
     cfg.amcl_particles_local_n   = 200;
     cfg.amcl_particles_global_n  = 200;
+    // Track D-5: collapse to single-phase annealing for test speed.
+    cfg.amcl_sigma_hit_schedule_m  = {0.05};
+    cfg.amcl_sigma_seed_xy_schedule_m =
+        {std::numeric_limits<double>::quiet_NaN()};
+    cfg.amcl_anneal_iters_per_phase = 5;
     cfg.amcl_map_path =
         std::string(GODO_FIXTURES_MAPS_DIR) + "/synthetic_4x4.pgm";
     return cfg;
@@ -115,7 +121,7 @@ TEST_CASE("OneShot publishes LastScan unconditionally with forced=1") {
     CHECK(last_scan_seq.generation() == 0u);
 
     const Frame frame = make_synthetic_frame(360, 1500.0);
-    const auto result = run_one_iteration(cfg, frame, grid, amcl, rng,
+    const auto result = run_one_iteration(cfg, frame, grid, lf, amcl, rng,
                                           beams_buf, last_pose,
                                           live_first_iter, last_written,
                                           target_offset, last_pose_seq,
@@ -240,7 +246,7 @@ TEST_CASE("LastScan.n drops out-of-range samples (matches AMCL beam rule)") {
         frame.samples[i].distance_mm = 50.0;
     }
 
-    (void)run_one_iteration(cfg, frame, grid, amcl, rng,
+    (void)run_one_iteration(cfg, frame, grid, lf, amcl, rng,
                             beams_buf, last_pose, live_first_iter,
                             last_written, target_offset, last_pose_seq,
                             last_scan_seq, amcl_rate_accum, hot_cfg_seq);
@@ -276,7 +282,7 @@ TEST_CASE("published_mono_ns advances monotonically across consecutive runs") {
     const Frame frame = make_synthetic_frame(360, 1500.0);
     std::uint64_t prev = 0ULL;
     for (int i = 0; i < 3; ++i) {
-        (void)run_one_iteration(cfg, frame, grid, amcl, rng,
+        (void)run_one_iteration(cfg, frame, grid, lf, amcl, rng,
                                 beams_buf, last_pose, live_first_iter,
                                 last_written, target_offset, last_pose_seq,
                                 last_scan_seq, amcl_rate_accum, hot_cfg_seq);
@@ -307,7 +313,7 @@ TEST_CASE("n=0 corner case (all samples filtered) is well-formed") {
     // sample.hpp invariant); fill_last_scan must drop every one.
     Frame frame = make_synthetic_frame(360, 0.0);
 
-    (void)run_one_iteration(cfg, frame, grid, amcl, rng,
+    (void)run_one_iteration(cfg, frame, grid, lf, amcl, rng,
                             beams_buf, last_pose, live_first_iter,
                             last_written, target_offset, last_pose_seq,
                             last_scan_seq, amcl_rate_accum, hot_cfg_seq);

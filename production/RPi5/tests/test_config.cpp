@@ -4,6 +4,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -560,4 +561,128 @@ TEST_CASE("Config::load — unknown gpio.* TOML key is rejected") {
     Env  env({"GODO_CONFIG_PATH=" + tmp.path.string()});
     CHECK_THROWS_AS(Config::load(argv.argc, argv.argv.data(), env.ptr()),
                     std::runtime_error);
+}
+
+// ---------------------------------------------------------------------------
+// Track D-5 — sigma_hit annealing schedule + seed_xy schedule + iters
+// per phase. Per Mode-A T4: bound bump test (sigma_hit_m=1.5 accepted).
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Config::make_default — wires Track D-5 annealing defaults") {
+    Config c = Config::make_default();
+    REQUIRE(c.amcl_sigma_hit_schedule_m.size() == 5u);
+    CHECK(c.amcl_sigma_hit_schedule_m[0] == 1.0);
+    CHECK(c.amcl_sigma_hit_schedule_m[1] == 0.5);
+    CHECK(c.amcl_sigma_hit_schedule_m[2] == 0.2);
+    CHECK(c.amcl_sigma_hit_schedule_m[3] == 0.1);
+    CHECK(c.amcl_sigma_hit_schedule_m[4] == 0.05);
+    REQUIRE(c.amcl_sigma_seed_xy_schedule_m.size() == 5u);
+    // First entry is the NaN sentinel (phase 0 = seed_global).
+    CHECK(std::isnan(c.amcl_sigma_seed_xy_schedule_m[0]));
+    CHECK(c.amcl_sigma_seed_xy_schedule_m[1] == 0.10);
+    CHECK(c.amcl_sigma_seed_xy_schedule_m[2] == 0.05);
+    CHECK(c.amcl_sigma_seed_xy_schedule_m[3] == 0.03);
+    CHECK(c.amcl_sigma_seed_xy_schedule_m[4] == 0.02);
+    CHECK(c.amcl_anneal_iters_per_phase == 10);
+}
+
+TEST_CASE("Config::load — Track D-5 schedule TOML round-trip (positive)") {
+    auto tmp = write_temp_toml(
+        "[amcl]\n"
+        "sigma_hit_schedule_m = \"2.0,1.0,0.5,0.05\"\n"
+        "sigma_seed_xy_schedule_m = \"-,0.20,0.10,0.05\"\n"
+        "anneal_iters_per_phase = 15\n"
+    );
+    Argv argv({});
+    Env  env({"GODO_CONFIG_PATH=" + tmp.path.string()});
+    Config c = Config::load(argv.argc, argv.argv.data(), env.ptr());
+    REQUIRE(c.amcl_sigma_hit_schedule_m.size() == 4u);
+    CHECK(c.amcl_sigma_hit_schedule_m[0] == 2.0);
+    CHECK(c.amcl_sigma_hit_schedule_m[3] == 0.05);
+    REQUIRE(c.amcl_sigma_seed_xy_schedule_m.size() == 4u);
+    CHECK(std::isnan(c.amcl_sigma_seed_xy_schedule_m[0]));
+    CHECK(c.amcl_sigma_seed_xy_schedule_m[1] == 0.20);
+    CHECK(c.amcl_anneal_iters_per_phase == 15);
+}
+
+TEST_CASE("Config::load — Track D-5 length-1 schedule (single-phase annealing)") {
+    Argv argv({"--amcl-sigma-hit-schedule-m=0.05",
+               "--amcl-sigma-seed-xy-schedule-m=-",
+               "--amcl-anneal-iters-per-phase=25"});
+    Env  env({});
+    Config c = Config::load(argv.argc, argv.argv.data(), env.ptr());
+    REQUIRE(c.amcl_sigma_hit_schedule_m.size() == 1u);
+    CHECK(c.amcl_sigma_hit_schedule_m[0] == 0.05);
+    REQUIRE(c.amcl_sigma_seed_xy_schedule_m.size() == 1u);
+    CHECK(std::isnan(c.amcl_sigma_seed_xy_schedule_m[0]));
+    CHECK(c.amcl_anneal_iters_per_phase == 25);
+}
+
+TEST_CASE("Config::load — Track D-5 non-monotonic schedule rejected") {
+    // Second entry is NOT < first.
+    Argv argv({"--amcl-sigma-hit-schedule-m=0.5,1.0,0.05",
+               "--amcl-sigma-seed-xy-schedule-m=-,0.10,0.05"});
+    Env  env({});
+    CHECK_THROWS_AS(Config::load(argv.argc, argv.argv.data(), env.ptr()),
+                    std::runtime_error);
+}
+
+TEST_CASE("Config::load — Track D-5 schedule out-of-range entry rejected") {
+    // 6.0 exceeds the [0.005, 5.0] bound.
+    Argv argv({"--amcl-sigma-hit-schedule-m=6.0,0.05",
+               "--amcl-sigma-seed-xy-schedule-m=-,0.10"});
+    Env  env({});
+    CHECK_THROWS_AS(Config::load(argv.argc, argv.argv.data(), env.ptr()),
+                    std::runtime_error);
+}
+
+TEST_CASE("Config::load — Track D-5 empty schedule rejected") {
+    auto tmp = write_temp_toml(
+        "[amcl]\n"
+        "sigma_hit_schedule_m = \"\"\n"
+    );
+    Argv argv({});
+    Env  env({"GODO_CONFIG_PATH=" + tmp.path.string()});
+    CHECK_THROWS_AS(Config::load(argv.argc, argv.argv.data(), env.ptr()),
+                    std::runtime_error);
+}
+
+TEST_CASE("Config::load — Track D-5 length mismatch between paired schedules rejected") {
+    Argv argv({"--amcl-sigma-hit-schedule-m=1.0,0.5,0.05",
+               "--amcl-sigma-seed-xy-schedule-m=-,0.10"});
+    Env  env({});
+    CHECK_THROWS_AS(Config::load(argv.argc, argv.argv.data(), env.ptr()),
+                    std::runtime_error);
+}
+
+TEST_CASE("Config::load — Track D-5 sigma_seed_xy_schedule first entry must be sentinel") {
+    Argv argv({"--amcl-sigma-hit-schedule-m=1.0,0.05",
+               "--amcl-sigma-seed-xy-schedule-m=0.10,0.05"});
+    Env  env({});
+    CHECK_THROWS_AS(Config::load(argv.argc, argv.argv.data(), env.ptr()),
+                    std::runtime_error);
+}
+
+TEST_CASE("Config::load — Track D-5 anneal_iters_per_phase = 0 rejected") {
+    Argv argv({"--amcl-anneal-iters-per-phase=0"});
+    Env  env({});
+    CHECK_THROWS_AS(Config::load(argv.argc, argv.argv.data(), env.ptr()),
+                    std::runtime_error);
+}
+
+TEST_CASE("Config::load — Track D-5 sigma_hit_m bound bump (1.5 accepted, 5.01 rejected)") {
+    // Mode-A T4: pin that the bound was actually loosened, not just
+    // left at 1.0 with a typo.
+    {
+        // 1.5 was REJECTED under the old [0.005, 1.0] bound; must now be
+        // accepted under the bumped [0.005, 5.0] bound.
+        Argv argv({"--amcl-sigma-hit-m=1.5"});
+        Env  env({});
+        Config c = Config::load(argv.argc, argv.argv.data(), env.ptr());
+        CHECK(c.amcl_sigma_hit_m == 1.5);
+    }
+    // The schema-side bound is enforced by validate.cpp on apply_set;
+    // Config::load itself only require_positive_double, so 5.01 here is
+    // accepted. The schema-bound check belongs to test_config_validate.
+    // The bound-check pin therefore lives in the schema test itself.
 }

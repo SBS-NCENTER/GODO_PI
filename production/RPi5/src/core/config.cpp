@@ -1,10 +1,13 @@
 #include "config.hpp"
 
+#include <cctype>
 #include <cerrno>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <functional>
+#include <limits>
 #include <optional>
 #include <set>
 #include <stdexcept>
@@ -23,6 +26,13 @@ namespace godo::core {
 namespace {
 
 namespace cfg_defaults = godo::config::defaults;
+
+// Forward declarations for CSV parsers used by apply_toml_file before
+// their definitions (Track D-5).
+std::vector<double> parse_csv_doubles_or_throw(std::string_view src,
+                                               std::string_view key);
+std::vector<double> parse_csv_doubles_with_sentinel_or_throw(
+    std::string_view src, std::string_view key);
 
 // Allowed TOML keys, flat "section.key" form. Unknown → error.
 const std::set<std::string>& allowed_keys() {
@@ -64,6 +74,9 @@ const std::set<std::string>& allowed_keys() {
         "amcl.seed",
         "amcl.sigma_xy_jitter_live_m",
         "amcl.sigma_yaw_jitter_live_deg",
+        "amcl.sigma_hit_schedule_m",
+        "amcl.sigma_seed_xy_schedule_m",
+        "amcl.anneal_iters_per_phase",
         "gpio.calibrate_pin",
         "gpio.live_toggle_pin",
     };
@@ -155,6 +168,20 @@ void apply_toml_file(Config& c, const std::filesystem::path& path) {
     if (auto v = tbl["amcl"]["sigma_xy_jitter_live_m"].value<double>();    v) c.amcl_sigma_xy_jitter_live_m    = *v;
     if (auto v = tbl["amcl"]["sigma_yaw_jitter_live_deg"].value<double>(); v) c.amcl_sigma_yaw_jitter_live_deg = *v;
 
+    // Track D-5 — annealing keys.
+    if (auto v = tbl["amcl"]["sigma_hit_schedule_m"].value<std::string>(); v) {
+        c.amcl_sigma_hit_schedule_m =
+            parse_csv_doubles_or_throw(*v, "amcl.sigma_hit_schedule_m");
+    }
+    if (auto v = tbl["amcl"]["sigma_seed_xy_schedule_m"].value<std::string>(); v) {
+        c.amcl_sigma_seed_xy_schedule_m =
+            parse_csv_doubles_with_sentinel_or_throw(*v,
+                "amcl.sigma_seed_xy_schedule_m");
+    }
+    if (auto v = tbl["amcl"]["anneal_iters_per_phase"].value<int64_t>();   v) {
+        c.amcl_anneal_iters_per_phase = static_cast<int>(*v);
+    }
+
     if (auto v = tbl["gpio"]["calibrate_pin"].value<int64_t>();    v) c.gpio_calibrate_pin   = static_cast<int>(*v);
     if (auto v = tbl["gpio"]["live_toggle_pin"].value<int64_t>();  v) c.gpio_live_toggle_pin = static_cast<int>(*v);
 }
@@ -234,6 +261,109 @@ double parse_double_or_throw(std::string_view src, std::string_view key) {
     }
 }
 
+// Track D-5 — CSV-of-doubles parser. Trims surrounding whitespace per
+// entry; rejects empty or all-whitespace strings; rejects empty entries
+// (consecutive commas). Used by `amcl.sigma_hit_schedule_m`.
+std::vector<double> parse_csv_doubles_or_throw(std::string_view src,
+                                               std::string_view key) {
+    std::vector<double> out;
+    const std::string s(src);
+    std::string token;
+    auto flush = [&](bool is_last) {
+        // Trim leading/trailing whitespace.
+        std::size_t a = 0, b = token.size();
+        while (a < b && std::isspace(static_cast<unsigned char>(token[a]))) ++a;
+        while (b > a && std::isspace(static_cast<unsigned char>(token[b - 1]))) --b;
+        if (a == b) {
+            throw std::runtime_error(
+                std::string("config: ") + std::string(key) +
+                " = '" + s + "' has an empty entry");
+        }
+        const std::string trimmed = token.substr(a, b - a);
+        out.push_back(parse_double_or_throw(trimmed, key));
+        token.clear();
+        (void)is_last;
+    };
+    bool any = false;
+    for (char c : s) {
+        if (c == ',') {
+            flush(false);
+            any = true;
+        } else {
+            token.push_back(c);
+            any = true;
+        }
+    }
+    if (!any) {
+        throw std::runtime_error(
+            std::string("config: ") + std::string(key) +
+            " must be a non-empty CSV of doubles (got '" + s + "')");
+    }
+    flush(true);
+    return out;
+}
+
+// Track D-5 — Sentinel-aware CSV-of-doubles parser. The first entry MUST
+// be the literal "-" sentinel (phase 0 uses seed_global, not seed_around);
+// the parsed first slot is set to NaN so downstream code can detect "not
+// applicable" without sharing a magic finite value with real data.
+// Entries 1..N-1 must be positive doubles. Used by
+// `amcl.sigma_seed_xy_schedule_m`.
+std::vector<double> parse_csv_doubles_with_sentinel_or_throw(
+    std::string_view src, std::string_view key) {
+    std::vector<double> out;
+    const std::string s(src);
+    std::string token;
+    bool first = true;
+    auto flush = [&]() {
+        std::size_t a = 0, b = token.size();
+        while (a < b && std::isspace(static_cast<unsigned char>(token[a]))) ++a;
+        while (b > a && std::isspace(static_cast<unsigned char>(token[b - 1]))) --b;
+        if (a == b) {
+            throw std::runtime_error(
+                std::string("config: ") + std::string(key) +
+                " = '" + s + "' has an empty entry");
+        }
+        const std::string trimmed = token.substr(a, b - a);
+        if (first) {
+            if (trimmed != "-") {
+                throw std::runtime_error(
+                    std::string("config: ") + std::string(key) +
+                    " first entry must be sentinel '-' (phase 0 uses "
+                    "seed_global); got '" + trimmed + "'");
+            }
+            out.push_back(std::numeric_limits<double>::quiet_NaN());
+            first = false;
+        } else {
+            const double v = parse_double_or_throw(trimmed, key);
+            if (!(v > 0.0)) {
+                throw std::runtime_error(
+                    std::string("config: ") + std::string(key) +
+                    " entry '" + trimmed + "' must be > 0");
+            }
+            out.push_back(v);
+        }
+        token.clear();
+    };
+    bool any = false;
+    for (char c : s) {
+        if (c == ',') {
+            flush();
+            any = true;
+        } else {
+            token.push_back(c);
+            any = true;
+        }
+    }
+    if (!any) {
+        throw std::runtime_error(
+            std::string("config: ") + std::string(key) +
+            " must be a non-empty CSV (got '" + s + "')");
+    }
+    flush();
+    return out;
+}
+
 void apply_env(Config& c, char** envp) {
     if (auto v = env_get(envp, "GODO_UE_HOST"))       c.ue_host = *v;
     if (auto v = env_get(envp, "GODO_UE_PORT"))       c.ue_port = parse_int_or_throw(*v, "GODO_UE_PORT");
@@ -273,6 +403,22 @@ void apply_env(Config& c, char** envp) {
     if (auto v = env_get(envp, "GODO_AMCL_SEED"))                 c.amcl_seed               = parse_u64_or_throw(*v, "GODO_AMCL_SEED");
     if (auto v = env_get(envp, "GODO_AMCL_SIGMA_XY_JITTER_LIVE_M"))    c.amcl_sigma_xy_jitter_live_m    = parse_double_or_throw(*v, "GODO_AMCL_SIGMA_XY_JITTER_LIVE_M");
     if (auto v = env_get(envp, "GODO_AMCL_SIGMA_YAW_JITTER_LIVE_DEG")) c.amcl_sigma_yaw_jitter_live_deg = parse_double_or_throw(*v, "GODO_AMCL_SIGMA_YAW_JITTER_LIVE_DEG");
+
+    // Track D-5 — annealing keys.
+    if (auto v = env_get(envp, "GODO_AMCL_SIGMA_HIT_SCHEDULE_M")) {
+        c.amcl_sigma_hit_schedule_m =
+            parse_csv_doubles_or_throw(*v, "GODO_AMCL_SIGMA_HIT_SCHEDULE_M");
+    }
+    if (auto v = env_get(envp, "GODO_AMCL_SIGMA_SEED_XY_SCHEDULE_M")) {
+        c.amcl_sigma_seed_xy_schedule_m =
+            parse_csv_doubles_with_sentinel_or_throw(*v,
+                "GODO_AMCL_SIGMA_SEED_XY_SCHEDULE_M");
+    }
+    if (auto v = env_get(envp, "GODO_AMCL_ANNEAL_ITERS_PER_PHASE")) {
+        c.amcl_anneal_iters_per_phase =
+            parse_int_or_throw(*v, "GODO_AMCL_ANNEAL_ITERS_PER_PHASE");
+    }
+
     if (auto v = env_get(envp, "GODO_GPIO_CALIBRATE_PIN"))             c.gpio_calibrate_pin             = parse_int_or_throw(*v, "GODO_GPIO_CALIBRATE_PIN");
     if (auto v = env_get(envp, "GODO_GPIO_LIVE_TOGGLE_PIN"))           c.gpio_live_toggle_pin           = parse_int_or_throw(*v, "GODO_GPIO_LIVE_TOGGLE_PIN");
 }
@@ -351,6 +497,9 @@ void apply_cli(Config& c, int argc, char** argv) {
         {"amcl-seed",                [](Config& cc, const std::string& v){ cc.amcl_seed               = parse_u64_or_throw(v, "--amcl-seed"); }},
         {"amcl-sigma-xy-jitter-live-m",    [](Config& cc, const std::string& v){ cc.amcl_sigma_xy_jitter_live_m    = parse_double_or_throw(v, "--amcl-sigma-xy-jitter-live-m"); }},
         {"amcl-sigma-yaw-jitter-live-deg", [](Config& cc, const std::string& v){ cc.amcl_sigma_yaw_jitter_live_deg = parse_double_or_throw(v, "--amcl-sigma-yaw-jitter-live-deg"); }},
+        {"amcl-sigma-hit-schedule-m",      [](Config& cc, const std::string& v){ cc.amcl_sigma_hit_schedule_m      = parse_csv_doubles_or_throw(v, "--amcl-sigma-hit-schedule-m"); }},
+        {"amcl-sigma-seed-xy-schedule-m",  [](Config& cc, const std::string& v){ cc.amcl_sigma_seed_xy_schedule_m  = parse_csv_doubles_with_sentinel_or_throw(v, "--amcl-sigma-seed-xy-schedule-m"); }},
+        {"amcl-anneal-iters-per-phase",    [](Config& cc, const std::string& v){ cc.amcl_anneal_iters_per_phase    = parse_int_or_throw(v, "--amcl-anneal-iters-per-phase"); }},
         {"gpio-calibrate-pin",             [](Config& cc, const std::string& v){ cc.gpio_calibrate_pin             = parse_int_or_throw(v, "--gpio-calibrate-pin"); }},
         {"gpio-live-toggle-pin",           [](Config& cc, const std::string& v){ cc.gpio_live_toggle_pin           = parse_int_or_throw(v, "--gpio-live-toggle-pin"); }},
     };
@@ -430,6 +579,62 @@ void validate_amcl(const Config& c) {
             std::to_string(c.amcl_range_min_m) + ")");
     }
     require_nonneg_double(c.amcl_yaw_tripwire_deg, "amcl_yaw_tripwire_deg");
+
+    // Track D-5 — annealing schedule + seed_xy schedule + iters_per_phase.
+    require_positive_int(c.amcl_anneal_iters_per_phase,
+                         "amcl_anneal_iters_per_phase");
+    if (c.amcl_sigma_hit_schedule_m.empty()) {
+        throw std::runtime_error(
+            "config: amcl_sigma_hit_schedule_m must be non-empty");
+    }
+    constexpr double kSigmaMin = 0.005;
+    constexpr double kSigmaMax = 5.0;
+    for (std::size_t i = 0; i < c.amcl_sigma_hit_schedule_m.size(); ++i) {
+        const double v = c.amcl_sigma_hit_schedule_m[i];
+        if (!(v >= kSigmaMin) || !(v <= kSigmaMax)) {
+            throw std::runtime_error(
+                "config: amcl_sigma_hit_schedule_m[" + std::to_string(i) +
+                "] = " + std::to_string(v) +
+                " out of range [" + std::to_string(kSigmaMin) + ", " +
+                std::to_string(kSigmaMax) + "]");
+        }
+        if (i > 0) {
+            const double prev = c.amcl_sigma_hit_schedule_m[i - 1];
+            if (!(v < prev)) {
+                throw std::runtime_error(
+                    "config: amcl_sigma_hit_schedule_m must be strictly "
+                    "monotonically decreasing; entry " + std::to_string(i) +
+                    " (" + std::to_string(v) + ") is not < entry " +
+                    std::to_string(i - 1) + " (" + std::to_string(prev) + ")");
+            }
+        }
+    }
+    if (c.amcl_sigma_seed_xy_schedule_m.size() !=
+        c.amcl_sigma_hit_schedule_m.size()) {
+        throw std::runtime_error(
+            "config: amcl_sigma_seed_xy_schedule_m length (" +
+            std::to_string(c.amcl_sigma_seed_xy_schedule_m.size()) +
+            ") must match amcl_sigma_hit_schedule_m length (" +
+            std::to_string(c.amcl_sigma_hit_schedule_m.size()) + ")");
+    }
+    // First entry must be the NaN sentinel; entries 1..N-1 must be > 0.
+    if (!c.amcl_sigma_seed_xy_schedule_m.empty()) {
+        if (!std::isnan(c.amcl_sigma_seed_xy_schedule_m[0])) {
+            throw std::runtime_error(
+                "config: amcl_sigma_seed_xy_schedule_m[0] must be sentinel "
+                "'-' (NaN); phase 0 uses seed_global");
+        }
+        for (std::size_t i = 1; i < c.amcl_sigma_seed_xy_schedule_m.size();
+             ++i) {
+            const double v = c.amcl_sigma_seed_xy_schedule_m[i];
+            if (!(v > 0.0)) {
+                throw std::runtime_error(
+                    "config: amcl_sigma_seed_xy_schedule_m[" +
+                    std::to_string(i) + "] = " + std::to_string(v) +
+                    " must be > 0");
+            }
+        }
+    }
 }
 
 // Phase 4-2 D — GPIO pin range check. Pi 5 40-pin header BCM line range
@@ -496,6 +701,16 @@ Config Config::make_default() {
 
     c.gpio_calibrate_pin        = cfg_defaults::GPIO_CALIBRATE_PIN;
     c.gpio_live_toggle_pin      = cfg_defaults::GPIO_LIVE_TOGGLE_PIN;
+
+    // Track D-5 — annealing defaults.
+    c.amcl_sigma_hit_schedule_m =
+        parse_csv_doubles_or_throw(cfg_defaults::AMCL_SIGMA_HIT_SCHEDULE_M,
+                                   "AMCL_SIGMA_HIT_SCHEDULE_M");
+    c.amcl_sigma_seed_xy_schedule_m =
+        parse_csv_doubles_with_sentinel_or_throw(
+            cfg_defaults::AMCL_SIGMA_SEED_XY_SCHEDULE_M,
+            "AMCL_SIGMA_SEED_XY_SCHEDULE_M");
+    c.amcl_anneal_iters_per_phase = cfg_defaults::AMCL_ANNEAL_ITERS_PER_PHASE;
 
     return c;
 }

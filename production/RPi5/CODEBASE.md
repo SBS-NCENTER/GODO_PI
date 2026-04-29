@@ -480,6 +480,55 @@ Audit closure (verified 2026-04-29 KST):
 
 HIL convergence-rate protocol: `production/RPi5/doc/convergence_hil.md`.
 
+### (n) Track D-5 — coarse-to-fine sigma_hit annealing for OneShot AMCL
+
+OneShot AMCL anneals σ_hit through `amcl.sigma_hit_schedule_m`; Live mode
+uses the static `cfg.amcl_sigma_hit_m` field, rebuilt on every OneShot
+completion. Phase k>0 reseeds via `cfg.amcl_particles_local_n` and
+`cfg.amcl_sigma_seed_xy_schedule_m[k]` — operators changing these keys
+affect BOTH Live AND OneShot phase k>0. RNG draw sequence is schedule-
+length-dependent; tests assert tolerances, never bit-exact pose values.
+
+Pinned by:
+- `tests/test_amcl_scenarios.cpp::TEST_CASE("AMCL Scenario D — annealing
+  recovers from global ambiguity")` — 3 sub-checks against an asymmetric
+  in-memory grid. The asymmetry property itself is REQUIRE'd at the top
+  of the test (Mode-A T1) so a future fixture tweak that re-symmetrizes
+  the obstacle fails BEFORE running the algorithm-under-test.
+- `tests/test_amcl_components.cpp::TEST_CASE("Amcl::set_field — swap to
+  a narrower σ field changes scan likelihood by closed-form ratio")` —
+  pins that `set_field` actually rebinds and that the EDT's σ→likelihood
+  relationship is exp(-d²/(2σ²)).
+- `tests/test_config.cpp` — 9 cases covering schedule round-trip,
+  monotonicity, range bound, length-1 fallthrough, sentinel-aware
+  seed_xy schedule, length mismatch, sigma_hit_m bound bump 1.0 → 5.0.
+
+Empirical motivation: `.claude/memory/project_amcl_sigma_sweep_2026-04-29.md`
+(σ=0.05 default gives 0/10 convergence on TS5; schedule [1.0, 0.5, 0.2,
+0.1, 0.05] anneals through the convergence cliff at σ≈[0.1, 0.2]).
+
+**Auto-minima tracking (added 2026-04-29 23:20 KST)**: `converge_anneal`
+returns the pose from the phase with MIN `xy_std_m` across the entire
+schedule, not the final-phase pose. Patience-aware early break: 2
+consecutive worse-than-best phases triggers stop (single-phase noise
+bumps tolerated; second consecutive bump signals real over-tightening
+into sub-cell discretization). The default schedule reaches σ=0.05 final
+but auto-minima usually picks phase 2 (σ=0.2) where σ_xy is empirically
+lowest on a 5cm-cell map (HIL k=10/10, σ_xy median 0.009m vs 0.036m
+without minima tracking). Operator can SAFELY granularize the schedule
+without worrying about over-tightening — algorithm finds its own stop.
+The pattern generalizes per `.claude/memory/project_pipelined_compute_pattern.md`.
+
+`Amcl::set_field` is single-thread cold-writer use only — concurrent
+`step()` from another thread is UB. Track D-5-P (parallel) workers must
+serialize via the cold-writer's per-phase loop. Doc-comment-pinned in
+`amcl.hpp`; build-grep `[m1-no-mutex]` ensures the cold writer body
+remains lock-free.
+
+Operator rollback recipe: to revert to pre-Track-D-5 single-σ behaviour,
+set BOTH `amcl.sigma_hit_schedule_m = "0.05"` AND
+`amcl.anneal_iters_per_phase = 25`.
+
 ### Known scaffolding
 
 - (Removed 2026-04-26 with Wave 2.) `thread_stub_cold_writer` and the
@@ -2986,3 +3035,168 @@ this fix lands the C++ side without coordinated wire-format change.
 - T1: second beam at 270° pins both mirror directions.
 - T2: yaw=45° exercises all four rotation-matrix terms.
 - N4: HIL doc filename is `convergence_hil.md` (no per-track prefix).
+
+---
+
+## 2026-04-29 22:30 KST — Track D-5 sigma_hit annealing (OneShot)
+
+### Why
+
+Post-Track-D-3 HIL on news-pi01 (TS5 chroma studio) measured 0/10
+OneShot convergences with the production default `σ_hit = 0.05 m`.
+Empirical sweep (`.claude/memory/project_amcl_sigma_sweep_2026-04-29.md`,
+2026-04-29 21:00 KST) showed a sharp convergence cliff between σ=0.1
+and σ=0.2: σ=1.0 gives 2/10 single-basin, σ=0.2 gives 9/10 across 3
+basins, σ≤0.1 gives 0/10. Single-σ AMCL cannot find a workable
+trade-off — this is fundamental to the likelihood field's geometry, not
+a tuning problem.
+
+Track D-5 anneals σ_hit through `[1.0, 0.5, 0.2, 0.1, 0.05]`: phase 0
+(σ=1.0) globally seeds and locks the unique basin at wide σ; subsequent
+phases narrow σ around the carried pose to refine to cm-scale precision.
+Final-phase σ matches the production default so the SPA/UDS contract
+surface is unchanged. Operator rollback recipe: set BOTH
+`amcl.sigma_hit_schedule_m = "0.05"` AND
+`amcl.anneal_iters_per_phase = 25` to get pre-Track-D-5 single-σ
+behaviour.
+
+### Added
+
+- `src/localization/cold_writer.cpp` —
+  - `converge_anneal()` (public via cold_writer.hpp): file-level
+    anneal helper that rebuilds the LikelihoodField at each phase's σ
+    via `Amcl::set_field`, seeds globally for phase 0 / `seed_around`
+    for phase k>0, and runs up to `cfg.amcl_anneal_iters_per_phase`
+    iters per phase with the existing convergence early-exit.
+  - `rebuild_lf_for_live()` (file-static): restores the persistent
+    LikelihoodField to `cfg.amcl_sigma_hit_m` at OneShot completion so
+    Live re-entry sees the operator-controlled σ field (Q2 / Mode-A
+    S4 fold).
+- `src/localization/amcl.hpp` / `.cpp` — `Amcl::set_field` swap method
+  + thread-safety doc comment (single-thread cold-writer use only;
+  Mode-A M3) + `static_assert(std::is_nothrow_move_assignable_v<
+  LikelihoodField>)` (Mode-A S4) + `field()` getter for tests.
+- `src/core/config_defaults.hpp` — `AMCL_SIGMA_HIT_SCHEDULE_M`,
+  `AMCL_SIGMA_SEED_XY_SCHEDULE_M`, `AMCL_ANNEAL_ITERS_PER_PHASE`.
+- `src/core/config.{hpp,cpp}` — 3 new fields + 2 CSV parsers
+  (`parse_csv_doubles_or_throw`, `parse_csv_doubles_with_sentinel_or_throw`)
+  + TOML/env/CLI handlers + `validate_amcl` cross-field checks
+  (length match, monotonicity, [0.005, 5.0] range, sentinel first).
+- `src/core/config_schema.hpp` — 3 new rows alphabetical
+  (`amcl.anneal_iters_per_phase`, `amcl.sigma_hit_schedule_m`,
+  `amcl.sigma_seed_xy_schedule_m`) + `amcl.sigma_hit_m` upper bound
+  bumped 1.0 → 5.0; `static_assert(CONFIG_SCHEMA.size() == 37)` →
+  `== 40` (Mode-A M1 / N3).
+- `src/config/apply.cpp` — schedule key handlers in
+  `read_effective` / `apply_one` + cross-field validation in
+  `apply_set` so operators get `bad_value` on length-mismatch /
+  non-monotonic / out-of-range schedule edits.
+- `tests/test_amcl_scenarios.cpp::TEST_CASE("AMCL Scenario D —
+  annealing recovers from global ambiguity")` — 3 sub-checks against
+  a programmatic 10×10 m asymmetric grid (L-shape + corner box +
+  pillar + doorway gap). Asymmetry is REQUIRE'd at the test top via
+  the 4-yaw scan-signature check (Mode-A T1) so a future fixture
+  tweak that re-symmetrizes the obstacle fails BEFORE running the
+  algorithm-under-test. Sub-check 2 wall-clock CHECK < 5 s
+  (Mode-A S3).
+- `tests/test_amcl_components.cpp::TEST_CASE("Amcl::set_field — swap
+  to a narrower σ field changes scan likelihood by closed-form ratio
+  (Track D-5)")` — ratio-based pin (Mode-A T5), not just sign.
+- `tests/test_config.cpp` — 9 new cases (defaults, TOML round-trip,
+  length-1 fallthrough, non-monotonic reject, out-of-range reject,
+  empty reject, length mismatch reject, sentinel-first reject,
+  iters_per_phase=0 reject, sigma_hit_m=1.5 accepted under bumped
+  bound — Mode-A T4).
+- `tests/test_config_schema.cpp` — 2 new cases pinning the 3 new
+  rows + the 1.0 → 5.0 sigma_hit_m bound.
+
+### Changed
+
+- `src/localization/cold_writer.{cpp,hpp}::run_one_iteration` — now
+  takes `LikelihoodField& lf_inout` and delegates to
+  `converge_anneal`; rebuilds `lf` to `cfg.amcl_sigma_hit_m` before
+  returning. Yaw tripwire stays OUTSIDE `converge_anneal` (Mode-A
+  M6) — runs once on the final-phase result only; intermediate-phase
+  poses are not tripwire candidates.
+- `src/localization/cold_writer.cpp::run_cold_writer` — passes the
+  persistent `lf` into `run_one_iteration`; defensive
+  `rebuild_lf_for_live` recovery in the OneShot exception handler.
+- `tests/test_cold_writer_*.cpp` (5 files) — updated `run_one_iteration`
+  call sites for the new `lf_inout` parameter; added
+  `cfg.amcl_sigma_hit_schedule_m = {0.05}` + `anneal_iters_per_phase
+  = 1..5` overrides to keep tests fast under the new annealing
+  default.
+- `tests/test_config_apply.cpp` — assertion counts 36 → 39, first key
+  changed to `amcl.anneal_iters_per_phase`.
+- `godo-webctl/src/godo_webctl/config_schema.py` +
+  `godo-webctl/tests/test_config_schema.py` +
+  `tests/test_config_schema_parity.py` +
+  `tests/test_config_view.py` +
+  `tests/test_app_integration.py` — Python schema mirror: row count
+  37 → 40 (cross-language SSOT preserved).
+
+### Removed
+
+- (none)
+
+### Tests
+
+- New: 12 hardware-free cases (1 in test_amcl_scenarios, 1 in
+  test_amcl_components, 9 in test_config, 2 in test_config_schema)
+  + Python parity row-count assertions updated. ctest -L hardware-free
+  → 45/45 PASS.
+- All 9 in-scope build-greps clean (`[m1-no-mutex]`,
+  `[scan-publisher-grep]`, `[hot-path-isolation-grep]`,
+  `[hot-path-jitter-grep]`, `[jitter-publisher-grep]`,
+  `[amcl-rate-publisher-grep]`, `[hot-path-config-grep]`,
+  `[hot-config-publisher-grep]`). The 2 documented advisories
+  (`udp/sender.cpp:103`, `uds/uds_server.cpp:119`) are pre-existing
+  carryover from PR #28/#27 and outside this PR's scope.
+
+### Out of scope (deliberate)
+
+- Pipelined-parallel implementation (Track D-5-P, separate plan).
+- Live-mode annealing (Track D-5-Live, separate plan).
+- Retuning `amcl_sigma_xy_jitter_m` / `_yaw_jitter_deg` (kept at
+  5 mm / 0.5°).
+- `godo-frontend` SPA — no changes; SSE contract unchanged.
+- `XR_FreeD_to_UDP/*` — read-only.
+- Any change to `cold_writer::fill_last_scan` or
+  `lidar_source_rplidar.cpp` (PR #30/#31 wire contract).
+- HIL operator validation (P4-D5-9) — runs post-merge per
+  `doc/convergence_hil.md`; recorded in
+  `test_sessions/TS5/track_d_5_post_anneal.md` after operator runs
+  10 OneShot calibrations on news-pi01.
+
+### Mode-A folds applied (per .claude/tmp/plan_track_d_5_sigma_annealing.md §8)
+
+- M1: schema row count 37 → 40 (3 new rows).
+- M2: 9 named build-greps enumerated in test gates (only the 2
+  pre-existing advisories carry over).
+- M3: `Amcl::set_field` thread-safety pin in `amcl.hpp` doc comment.
+- M4: `seed_around` σ_xy from explicit `sigma_seed_xy_schedule_m`
+  schedule (option b — decoupled from σ_hit*0.5 heuristic).
+- M5: invariant (n) text mentions "Phase k>0 reseeds via
+  `cfg.amcl_particles_local_n`" so operators understand the cross-
+  mode key affects BOTH Live AND OneShot phase k>0.
+- M6: yaw tripwire stays OUTSIDE `converge_anneal`; `cold_writer.cpp:128`
+  fires it once on the final-phase result only.
+- S1: operator rollback recipe documented (above).
+- S2: invariant (n) calls out RNG draw sequence is schedule-length-
+  dependent; tests assert tolerances, never bit-exact pose values.
+- S3: Scenario D sub-check 2 wall-clock CHECK < 5 s.
+- S4: `static_assert(std::is_nothrow_move_assignable_v<LikelihoodField>)`
+  near `set_field` declaration.
+- S5: change-log header timestamped `2026-04-29 22:30 KST`.
+- T1: Scenario D asymmetry REQUIRE step at test top.
+- T2: Sub-check 1 RNG seed pinned to 42 (verified to fail).
+- T3: Sub-check 2 tolerance `xy_err < 0.10 m` (NOT 0.05).
+- T4: `sigma_hit_m=1.5` accepted under bumped bound + bound test in
+  test_config_schema.
+- T5: `set_field` test ratio-based against closed-form
+  exp(-d²·(1/(2σ_n²) - 1/(2σ_w²))).
+- N3: invariant (n) text reflects "OneShot anneals σ_hit; Live uses
+  the static cfg.amcl_sigma_hit_m field, rebuilt on every OneShot
+  completion."
+- N5: Sub-check 3 title is "Schedule length 1 runs single-phase
+  annealing" + tolerance-only assertion.

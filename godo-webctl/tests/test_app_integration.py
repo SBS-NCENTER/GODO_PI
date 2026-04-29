@@ -2230,7 +2230,7 @@ async def test_get_config_schema_returns_37_rows(
     assert r.status_code == HTTPStatus.OK
     rows = r.json()
     assert isinstance(rows, list)
-    assert len(rows) == 37
+    assert len(rows) == 40
     # Each row has the documented keys.
     for row in rows:
         assert {

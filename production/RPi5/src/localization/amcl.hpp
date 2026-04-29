@@ -13,6 +13,7 @@
 // philosophy across the localization module.
 
 #include <cstddef>
+#include <type_traits>
 #include <vector>
 
 #include "amcl_result.hpp"
@@ -24,6 +25,12 @@
 #include "scan_ops.hpp"
 
 namespace godo::localization {
+
+// Track D-5 — `set_field` swaps `field_` between phases of the OneShot
+// anneal loop. Pinned that the swap target is nothrow-move-assignable so
+// `cold_writer::run_one_iteration`'s reuse pattern (`lf =
+// build_likelihood_field(...)` between phases) is exception-safe.
+static_assert(std::is_nothrow_move_assignable_v<LikelihoodField>);
 
 class Amcl {
 public:
@@ -67,6 +74,27 @@ public:
                      double        sigma_xy_m,
                      double        sigma_yaw_deg,
                      Rng&          rng);
+
+    // Track D-5 — Swap the likelihood field used by subsequent step()
+    // calls. The cold writer rebuilds `lf` at successively narrower σ_hit
+    // values for OneShot annealing; this method lets it re-point `field_`
+    // without reconstructing `Amcl` (which would discard the carried
+    // particle cloud).
+    //
+    // Single-thread cold-writer use only. set_field and step are NOT atomic;
+    // calling them concurrently from different threads is UB. Track D-5-P
+    // (parallel) workers must serialize access via the cold-writer's per-
+    // phase loop. See plan §P4-D5-2 (Mode-A M3) and CODEBASE.md invariant (n).
+    void set_field(const LikelihoodField& field) noexcept;
+
+    // Track D-5 — Read access to the currently bound likelihood field. The
+    // cold writer's annealing path captures a reference at OneShot entry
+    // and restores it (via `set_field`) at OneShot completion so Live mode
+    // re-enters with the operator-controlled σ field, never an annealing-
+    // leftover field. Plan §P4-D5-6 + Q2 resolution.
+    [[nodiscard]] const LikelihoodField& field() const noexcept {
+        return *field_;
+    }
 
     // Public stats getters (also used by tests).
     [[nodiscard]] Pose2D weighted_mean() const noexcept;

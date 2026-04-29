@@ -114,9 +114,41 @@ using LidarFactory =
 // `cfg.amcl_yaw_tripwire_deg` so the OneShot path stays correct even if
 // the test fixture forgets to publish before calling. Pinned by
 // `test_cold_writer_reads_hot_config.cpp`.
+// Track D-5 — Coarse-to-fine sigma_hit annealing for OneShot AMCL.
+// Public so tests can drive it directly with synthetic scans (Scenario D
+// in test_amcl_scenarios.cpp).
+//
+// For each entry σ_k in cfg.amcl_sigma_hit_schedule_m:
+//   1. lf_inout = build_likelihood_field(grid, σ_k); amcl.set_field(lf_inout).
+//   2. Phase 0 → seed_global; phase k>0 → seed_around(pose_inout,
+//      cfg.amcl_sigma_seed_xy_schedule_m[k], cfg.amcl_sigma_seed_yaw_deg
+//      * (σ_k / σ_0)).
+//   3. Inner loop: amcl.step(beams, rng) up to cfg.amcl_anneal_iters_per_phase,
+//      with early-exit on (xy_std < cfg.amcl_converge_xy_std_m AND yaw_std
+//      < cfg.amcl_converge_yaw_std_deg AND iters >= 3).
+//   4. pose_inout = result.pose; total_iters += this_phase_iters.
+//
+// Returns the final-phase AmclResult with .iterations = total across phases.
+// Yaw tripwire is intentionally NOT checked here — caller (run_one_iteration)
+// fires it once on the final result. Plan §P4-D5-4, §P4-D5-5 (Mode-A M6).
+AmclResult converge_anneal(const godo::core::Config&     cfg,
+                           const std::vector<RangeBeam>& beams,
+                           const OccupancyGrid&          grid,
+                           LikelihoodField&              lf_inout,
+                           Amcl&                         amcl,
+                           Pose2D&                       pose_inout,
+                           Rng&                          rng);
+
+// Track D-5: `lf_inout` is the persistent likelihood field owned by
+// `run_cold_writer`. The annealing helper (converge_anneal) rebuilds it
+// in place at each phase's σ_hit. Before returning, the kernel restores
+// it to `cfg.amcl_sigma_hit_m` so Live re-entry sees the operator-
+// controlled σ field. Tests pass their own `LikelihoodField lf` and
+// observe the same restoration behaviour.
 AmclResult run_one_iteration(const godo::core::Config&         cfg,
                              const godo::lidar::Frame&         frame,
                              const OccupancyGrid&              grid,
+                             LikelihoodField&                  lf_inout,
                              Amcl&                             amcl,
                              Rng&                              rng,
                              std::vector<RangeBeam>&           beams_buf,

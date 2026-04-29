@@ -17,7 +17,7 @@ Usage::
 
     from godo_webctl.config_schema import load_schema
     rows = load_schema()
-    assert len(rows) == 37
+    assert len(rows) == 40
 """
 
 from __future__ import annotations
@@ -74,7 +74,7 @@ _ROW_RE: Final[re.Pattern[str]] = re.compile(
 # The static_assert pin in the C++ source gives us a compile-time row
 # count. We mirror it here so the loader can early-detect a mismatch and
 # raise a clear error instead of silently shipping a short list.
-EXPECTED_ROW_COUNT: Final[int] = 37
+EXPECTED_ROW_COUNT: Final[int] = 40
 
 _VALUE_TYPE_MAP: Final[dict[str, str]] = {
     "Int": "int",

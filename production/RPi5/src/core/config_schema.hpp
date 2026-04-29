@@ -22,7 +22,6 @@
 // table reflow-free so the Python regex parser sees a stable shape.
 
 #include <array>
-#include <cstddef>
 #include <cstdint>
 #include <string_view>
 
@@ -50,8 +49,10 @@ struct ConfigSchemaRow {
     std::string_view description;
 };
 
-// 37 rows — Mode-A M2 fold. Adding 2 missing seed-σ rows brought the
-// count from 35 to 37 (`amcl.sigma_seed_xy_m`, `amcl.sigma_seed_yaw_deg`).
+// 40 rows — Track D-5 fold. Adding 3 annealing rows brought the count
+// from 37 to 40 (`amcl.anneal_iters_per_phase`, `amcl.sigma_hit_schedule_m`,
+// `amcl.sigma_seed_xy_schedule_m`); also bumped `amcl.sigma_hit_m` upper
+// bound 1.0 → 5.0 so single-σ users can bootstrap wider basins.
 //
 // Ordering: alphabetical by `name`. Section grouping (network, serial,
 // smoother, rt, ipc, amcl, gpio) emerges naturally from the alphabet.
@@ -60,7 +61,8 @@ struct ConfigSchemaRow {
 // run ramp duration changes would race the smoother's state machine.
 
 // clang-format off
-inline constexpr std::array<ConfigSchemaRow, 37> CONFIG_SCHEMA = {{
+inline constexpr std::array<ConfigSchemaRow, 40> CONFIG_SCHEMA = {{
+    {"amcl.anneal_iters_per_phase",     ValueType::Int,    1.0,      200.0,    "10",                             ReloadClass::Recalibrate, "Track D-5: per-phase upper-bound iteration count for sigma annealing."},
     {"amcl.converge_xy_std_m",          ValueType::Double, 0.001,    1.0,      "0.015",                          ReloadClass::Recalibrate, "AMCL converge() xy_std exit threshold (m)."},
     {"amcl.converge_yaw_std_deg",       ValueType::Double, 0.01,     30.0,     "0.3",                            ReloadClass::Recalibrate, "AMCL converge() yaw_std exit threshold (deg)."},
     {"amcl.downsample_stride",          ValueType::Int,    1.0,      16.0,     "2",                              ReloadClass::Recalibrate, "LiDAR beam decimation stride."},
@@ -73,8 +75,10 @@ inline constexpr std::array<ConfigSchemaRow, 37> CONFIG_SCHEMA = {{
     {"amcl.particles_local_n",          ValueType::Int,    50.0,     2000.0,   "500",                            ReloadClass::Recalibrate, "Local-mode particle count."},
     {"amcl.range_max_m",                ValueType::Double, 1.0,      50.0,     "12.0",                           ReloadClass::Recalibrate, "Max beam range (m)."},
     {"amcl.range_min_m",                ValueType::Double, 0.0,      2.0,      "0.15",                           ReloadClass::Recalibrate, "Min beam range (m); discards LiDAR housing returns."},
-    {"amcl.sigma_hit_m",                ValueType::Double, 0.005,    1.0,      "0.05",                           ReloadClass::Recalibrate, "Beam likelihood sigma (m)."},
+    {"amcl.sigma_hit_m",                ValueType::Double, 0.005,    5.0,      "0.05",                           ReloadClass::Recalibrate, "Beam likelihood sigma (m). Bound 5.0 m supports wide basin-lock seeds (Track D-5)."},
+    {"amcl.sigma_hit_schedule_m",       ValueType::String, 0.0,      0.0,      "1.0,0.5,0.2,0.1,0.05",           ReloadClass::Recalibrate, "Track D-5: CSV sigma_hit schedule for OneShot AMCL annealing (monotonically decreasing, each in [0.005, 5.0])."},
     {"amcl.sigma_seed_xy_m",            ValueType::Double, 0.05,     5.0,      "0.1",                            ReloadClass::Recalibrate, "Particle filter seed cloud XY std (m)."},
+    {"amcl.sigma_seed_xy_schedule_m",   ValueType::String, 0.0,      0.0,      "-,0.10,0.05,0.03,0.02",          ReloadClass::Recalibrate, "Track D-5: CSV per-phase seed_around XY std (m); first entry sentinel '-' (phase 0 = seed_global)."},
     {"amcl.sigma_seed_yaw_deg",         ValueType::Double, 1.0,      180.0,    "5.0",                            ReloadClass::Recalibrate, "Particle filter seed cloud yaw std (deg)."},
     {"amcl.sigma_xy_jitter_live_m",     ValueType::Double, 0.001,    0.5,      "0.015",                          ReloadClass::Recalibrate, "Live mode motion-model XY sigma (per-tick injected noise)."},
     {"amcl.sigma_xy_jitter_m",          ValueType::Double, 0.001,    0.5,      "0.005",                          ReloadClass::Recalibrate, "OneShot motion-model XY sigma (m)."},
@@ -101,10 +105,10 @@ inline constexpr std::array<ConfigSchemaRow, 37> CONFIG_SCHEMA = {{
 }};
 // clang-format on
 
-static_assert(CONFIG_SCHEMA.size() == 37,
+static_assert(CONFIG_SCHEMA.size() == 40,
               "CONFIG_SCHEMA row count drifted; update tests + schema mirror");
 
-// O(N) lookup. N=37 keeps this trivially fine; O(log N) binary search is
+// O(N) lookup. N=40 keeps this trivially fine; O(log N) binary search is
 // avoidable churn for a 1-Hz operator-cadence call. Returns nullptr if
 // the key is unknown — callers map this to `bad_key`.
 inline constexpr const ConfigSchemaRow* find(std::string_view key) noexcept {

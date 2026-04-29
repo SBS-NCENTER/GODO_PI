@@ -228,7 +228,7 @@ TEST_CASE("apply_set: write to non-existent parent → write_failed; live_cfg un
     CHECK_FALSE(fs::exists(toml));
 }
 
-TEST_CASE("apply_get_all returns 37 keys, alphabetical, valid JSON-ish") {
+TEST_CASE("apply_get_all returns 40 keys, alphabetical, valid JSON-ish") {
     Config live_cfg = Config::make_default();
     std::mutex mtx;
     const std::string body = apply_get_all(live_cfg, mtx);
@@ -236,7 +236,7 @@ TEST_CASE("apply_get_all returns 37 keys, alphabetical, valid JSON-ish") {
     CHECK_FALSE(body.empty());
     CHECK(body.front() == '{');
     CHECK(body.back()  == '}');
-    // Count commas as "key separators" — exactly 36 between 37 items.
+    // Count commas as "key separators" — exactly 39 between 40 items.
     int commas = 0;
     int depth = 0;
     bool in_str = false;
@@ -248,14 +248,14 @@ TEST_CASE("apply_get_all returns 37 keys, alphabetical, valid JSON-ish") {
             else if (c == ',' && depth == 1) ++commas;
         }
     }
-    CHECK(commas == 36);
-    // First key (alphabetical): "amcl.converge_xy_std_m".
-    CHECK(body.find("\"amcl.converge_xy_std_m\":") != std::string::npos);
+    CHECK(commas == 39);
+    // First key (alphabetical): "amcl.anneal_iters_per_phase" (Track D-5).
+    CHECK(body.find("\"amcl.anneal_iters_per_phase\":") != std::string::npos);
     // Last key (alphabetical): "smoother.t_ramp_ms".
     CHECK(body.find("\"smoother.t_ramp_ms\":") != std::string::npos);
 }
 
-TEST_CASE("apply_get_schema returns 37-element JSON array") {
+TEST_CASE("apply_get_schema returns 40-element JSON array") {
     const std::string body = apply_get_schema();
     CHECK(body.front() == '[');
     CHECK(body.back()  == ']');
@@ -270,7 +270,7 @@ TEST_CASE("apply_get_schema returns 37-element JSON array") {
             else if (c == ',' && depth == 1) ++commas;
         }
     }
-    CHECK(commas == 36);
+    CHECK(commas == 39);
     // Spot-check schema field names.
     CHECK(body.find("\"reload_class\":\"hot\"")         != std::string::npos);
     CHECK(body.find("\"reload_class\":\"restart\"")     != std::string::npos);

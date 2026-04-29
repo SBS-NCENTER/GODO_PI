@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace godo::core {
 
@@ -76,6 +77,21 @@ struct Config {
     // can read them; consumers in src/gpio/ arrive in Wave B).
     int           gpio_calibrate_pin{};
     int           gpio_live_toggle_pin{};
+
+    // Track D-5 — Coarse-to-fine sigma_hit annealing for OneShot AMCL.
+    // `amcl_sigma_hit_schedule_m` lists the per-phase σ values; phase 0 is
+    // wide (basin lock), the last phase is the production σ = amcl_sigma_hit_m.
+    // `amcl_sigma_seed_xy_schedule_m` is length-matched: the first entry is
+    // a sentinel NaN ("-") because phase 0 uses seed_global; entries 1..N-1
+    // are the seed_around σ_xy values for phases 1..N-1.
+    // `amcl_anneal_iters_per_phase` is the per-phase upper-bound iteration
+    // count; default 10. Schedule length 1 falls through to the same path —
+    // operators wanting pre-Track-D-5 behaviour set BOTH
+    // `amcl.sigma_hit_schedule_m = "0.05"` AND
+    // `amcl.anneal_iters_per_phase = 25`.
+    std::vector<double> amcl_sigma_hit_schedule_m;
+    std::vector<double> amcl_sigma_seed_xy_schedule_m;
+    int                 amcl_anneal_iters_per_phase{};
 
     // Build a Config with defaults applied from core/config_defaults.hpp.
     static Config make_default();

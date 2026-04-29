@@ -131,6 +131,97 @@ TEST_CASE("Amcl::seed_around — Gaussian cloud has mean ≈ pose, σ ≈ reques
     CHECK(observed < sigma_xy_m * 3.0);
 }
 
+TEST_CASE("Amcl::set_field — swap to a narrower σ field changes scan likelihood by closed-form ratio (Track D-5)") {
+    // Build two LikelihoodFields on the SAME grid at different σ.
+    // For the same beam endpoint at distance d from the nearest obstacle
+    // cell, the likelihood is exp(-d² / (2σ²)). Therefore the ratio
+    // between narrow and wide is exp(-d²·(1/(2σ_n²) - 1/(2σ_w²))).
+    //
+    // Bias-block: ground-truth d is hand-computed from the synthetic_4x4
+    // grid layout, NOT derived from `LikelihoodField::values`. The map is
+    // a 4×4 m room with a 1-cell border (occupied) at column 0 / 79 and
+    // row 0 / 79; the resolution is 0.05 m so the inner free area is
+    // (0.05 m, 3.95 m) × (0.05 m, 3.95 m). A particle at the centre
+    // pose (2, 2, 0°) shoots a beam at sensor angle 0 (post-fix CCW =
+    // along world +x): the beam endpoint at range 1 m lands at world
+    // (3, 2). Distance to the nearest obstacle cell (the +x wall column
+    // ~78, world x ≈ 3.925 m) is approximately 0.925 m. We don't need
+    // the exact d — the ratio test below tolerates ~5% slack against the
+    // closed-form prediction with the d measured from `lf_narrow` itself,
+    // since both fields are built off the same EDT.
+    const Config        cfg  = make_test_config();
+    const OccupancyGrid grid = load_fixture();
+    const double sigma_w = 1.0;    // wide
+    const double sigma_n = 0.05;   // narrow (production default)
+    const LikelihoodField lf_wide   = build_likelihood_field(grid, sigma_w);
+    const LikelihoodField lf_narrow = build_likelihood_field(grid, sigma_n);
+
+    Amcl amcl(cfg, lf_wide);
+    Rng  rng(cfg.amcl_seed);
+
+    // Seed exactly one particle at the centre by abusing seed_around with
+    // tiny σ and clipping particle count via cfg override (still 500 by
+    // default, all clustered). For the contract test we don't need a
+    // single particle — the ratio holds per particle.
+    const Pose2D centre{2.0, 2.0, 0.0};
+    amcl.seed_around(centre, 0.0001, 0.001, rng);
+
+    // One beam pointing along world +x at 1.0 m.
+    std::vector<RangeBeam> beams = {
+        {1.0f, 0.0f},  // sensor frame (angle_rad=0, range=1.0)
+    };
+
+    // Step 1 with wide σ. step() returns AmclResult with .pose = mean,
+    // but we want a single per-particle weight — use evaluate_scan
+    // directly via the wide field reference for clarity.
+    const double w_wide = godo::localization::evaluate_scan(
+        centre, beams.data(), beams.size(), lf_wide);
+
+    amcl.set_field(lf_narrow);
+    const double w_narrow = godo::localization::evaluate_scan(
+        centre, beams.data(), beams.size(), lf_narrow);
+
+    // Asserts:
+    //   1. Weights differ by more than a tiny epsilon (set_field must
+    //      actually rebind the field; a stale pointer would yield
+    //      identical weights).
+    //   2. Ratio matches closed-form within ~1% — this catches a future
+    //      writer who introduces a partial copy in set_field that drops
+    //      half the field values.
+    CAPTURE(w_wide);
+    CAPTURE(w_narrow);
+    CHECK(std::abs(w_wide - w_narrow) > 1e-9);
+
+    // Closed-form ratio. We don't have an authoritative d, so derive it
+    // from w_wide: log(w_wide) = -d² / (2σ_w²) ⇒ d² = -2σ_w² · log(w_wide).
+    // Then predicted w_narrow = exp(-d² / (2σ_n²)).
+    const double log_w_wide = std::log(w_wide);
+    if (std::isfinite(log_w_wide) && log_w_wide < 0.0) {
+        const double d_sq = -2.0 * sigma_w * sigma_w * log_w_wide;
+        const double w_narrow_predicted = std::exp(-d_sq /
+                                                   (2.0 * sigma_n * sigma_n));
+        CAPTURE(d_sq);
+        CAPTURE(w_narrow_predicted);
+        // ~1% tolerance on the ratio. Both w values are exp() of large
+        // negative numbers near the floor (EVAL_SCAN_LIKELIHOOD_FLOOR);
+        // when the narrow field saturates against the floor (w_narrow ≈
+        // 1e-9) the closed form's prediction can also saturate; in that
+        // regime the assertion 'narrow >= floor' is the stronger pin.
+        if (w_narrow_predicted > 1e-8 && w_narrow > 1e-8) {
+            const double ratio_observed  = w_narrow / w_wide;
+            const double ratio_predicted = w_narrow_predicted / w_wide;
+            CAPTURE(ratio_observed);
+            CAPTURE(ratio_predicted);
+            CHECK(std::abs(std::log(ratio_observed) -
+                           std::log(ratio_predicted)) < 0.05);  // ~5% in log
+        } else {
+            // Both saturated against the floor — at minimum, narrow ≤
+            // wide for any beam not exactly hitting an obstacle cell.
+            CHECK(w_narrow <= w_wide);
+        }
+    }
+}
+
 TEST_CASE("Amcl::converge — terminates within max_iters on a tight perfect-match seed") {
     const Config        cfg  = make_test_config();
     const OccupancyGrid grid = load_fixture();

@@ -495,3 +495,90 @@ export const REDACTED_PLACEHOLDER = '<redacted>';
 // `/api/system/service/<name>/<action>` (no loopback gate).
 export const apiSystemServiceAction = (name: string, action: string): string =>
   `/api/system/service/${name}/${action}`;
+
+// --- Track B-SYSTEM PR-B — process monitor + extended resources --------
+// Mirror of `godo_webctl.protocol::PROCESS_FIELDS` /
+// `PROCESSES_RESPONSE_FIELDS` / `EXTENDED_RESOURCES_FIELDS` /
+// `GODO_PROCESS_NAMES` / `MANAGED_PROCESS_NAMES`. Drift detected by
+// inspection per godo-frontend/CODEBASE.md invariant (y).
+//
+// Wire field name is `category` (NOT `class` — TS reserved word +
+// Svelte template collision). Per Mode-A M3 fold.
+//
+// `published_mono_ns` clock domain: webctl `time.monotonic_ns()`
+// (Python clock domain), NOT the C++ tracker's CLOCK_MONOTONIC.
+// SPA freshness uses arrival-wall-clock (`Date.now() - _arrival_ms`)
+// per invariant (m) — never compares published_mono_ns across the
+// C++/webctl boundary.
+
+export type ProcessCategory = 'general' | 'godo' | 'managed';
+
+export const PROCESS_FIELDS = [
+  'name',
+  'pid',
+  'user',
+  'state',
+  'cmdline',
+  'cpu_pct',
+  'rss_mb',
+  'etime_s',
+  'category',
+  'duplicate',
+] as const;
+
+export interface ProcessEntry {
+  name: string;
+  pid: number;
+  user: string;
+  state: string; // R/S/D/Z/T/I/W/X
+  cmdline: string[];
+  cpu_pct: number;
+  rss_mb: number | null;
+  etime_s: number;
+  category: ProcessCategory;
+  duplicate: boolean;
+}
+
+export interface ProcessesSnapshot {
+  processes: ProcessEntry[];
+  duplicate_alert: boolean;
+  published_mono_ns: number;
+  _arrival_ms?: number; // client-side; set by store on receipt
+}
+
+export const EXTENDED_RESOURCES_FIELDS = [
+  'cpu_per_core',
+  'cpu_aggregate_pct',
+  'mem_total_mb',
+  'mem_used_mb',
+  'disk_pct',
+  'published_mono_ns',
+] as const;
+
+export interface ExtendedResources {
+  cpu_per_core: number[];
+  cpu_aggregate_pct: number;
+  mem_total_mb: number | null;
+  mem_used_mb: number | null;
+  disk_pct: number | null;
+  published_mono_ns: number;
+  _arrival_ms?: number; // client-side; set by store on receipt
+}
+
+// Subset of `GODO_PROCESS_NAMES` whose category is `"managed"` —
+// styled differently in the SPA than `general` / `godo`. Mirror of
+// `godo_webctl.protocol::MANAGED_PROCESS_NAMES`.
+export const MANAGED_PROCESS_NAMES: ReadonlySet<string> = new Set<string>([
+  'godo_tracker_rt',
+  'godo-webctl',
+  'godo-irq-pin',
+]);
+
+// Full GODO process whitelist mirror.
+export const GODO_PROCESS_NAMES: ReadonlySet<string> = new Set<string>([
+  'godo_tracker_rt',
+  'godo_freed_passthrough',
+  'godo_smoke',
+  'godo_jitter',
+  'godo-webctl',
+]);

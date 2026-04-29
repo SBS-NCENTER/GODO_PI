@@ -50,10 +50,13 @@ fi
 
 MAP_NAME="$1"
 
-# Map name sanity — keep filenames safe for shell, YAML, and Windows backups.
-if [[ ! "${MAP_NAME}" =~ ^[A-Za-z0-9._-]+$ ]]; then
-    echo "godo-mapping: map name '${MAP_NAME}' contains invalid characters." >&2
-    echo "  Allowed: letters, digits, '.', '_', '-'." >&2
+# Map name sanity — mirrors `godo_webctl.constants.MAPS_NAME_REGEX` so any
+# name that passes here also passes the webctl /api/maps enumerator.
+# First char may NOT be '.' (rejects '..', '.hidden'); max 64 chars.
+if [[ ! "${MAP_NAME}" =~ ^[A-Za-z0-9_()-][A-Za-z0-9._()-]{0,63}$ ]]; then
+    echo "godo-mapping: map name '${MAP_NAME}' is invalid." >&2
+    echo "  Allowed: letters, digits, '.', '_', '-', '(', ')'." >&2
+    echo "  First char may not be '.'; max 64 chars." >&2
     exit 2
 fi
 

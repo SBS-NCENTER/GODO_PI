@@ -96,15 +96,26 @@ SSE_UDS_TIMEOUT_S: Final[float] = 0.5
 MAX_RENAME_ATTEMPTS: Final[int] = 9
 
 # --- Multi-map management (Track E, PR-C) --------------------------------
-# Map name validator. ASCII only, case-sensitive, no dots / slashes /
-# whitespace. `.pgm` and `.yaml` extensions are appended by the caller —
-# names are stems. The reserved name `"active"` passes this regex (so a
-# router-level mismatch cannot dodge it) and is rejected separately by
-# the public maps.py functions to keep the active-symlink names from
-# colliding with a regular map.
+# Map name validator. ASCII only, case-sensitive. Allowed chars:
+# letters, digits, underscore, hyphen, dot, parentheses. The FIRST char
+# may NOT be a dot — this rejects `..`, `.hidden`, and similar forms that
+# would otherwise traverse / shadow filtered hidden files. `/` and
+# whitespace are forbidden anywhere.
+#
+# The reserved name `"active"` passes this regex (so a router-level
+# mismatch cannot dodge it) and is rejected separately by the public
+# maps.py functions to keep the active-symlink names from colliding with
+# a regular map.
+#
+# `.pgm` / `.yaml` extensions are appended by the caller — names are
+# stems. With dot now allowed inside the stem, `Path.stem` / `Path.suffix`
+# split at the LAST dot (POSIX convention), so `foo.bar.pgm` → stem
+# `foo.bar`, suffix `.pgm`. Operators who mistakenly submit `foo.pgm` as
+# a stem will get a saved pair `foo.pgm.{pgm,yaml}` — semantic warning
+# is the SPA's job, not the regex's.
 MAPS_NAME_MAX_LEN: Final[int] = 64
 MAPS_NAME_REGEX: Final[re.Pattern[str]] = re.compile(
-    r"^[a-zA-Z0-9_-]{1,64}$",
+    r"^[a-zA-Z0-9_()-][a-zA-Z0-9._()-]{0,63}$",
 )
 
 # Reserved basename used for the active-pair symlink pair

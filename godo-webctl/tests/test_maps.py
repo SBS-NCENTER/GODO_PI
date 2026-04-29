@@ -85,9 +85,16 @@ def test_validate_name_rejects_slash() -> None:
         M.validate_name("foo/bar")
 
 
-def test_validate_name_rejects_dot_in_name() -> None:
-    with pytest.raises(M.InvalidName):
-        M.validate_name("foo.pgm")
+def test_validate_name_accepts_dot_inside_stem() -> None:
+    # 2026-04-29: dot is now allowed mid-stem so operators can use
+    # date-style names like "04.29_1". Leading dot remains rejected.
+    M.validate_name("04.29_1")
+    M.validate_name("foo.pgm")  # silly but valid; SPA may warn about ext
+
+
+def test_validate_name_accepts_parens() -> None:
+    M.validate_name("studio(1)")
+    M.validate_name("backup(test)")
 
 
 def test_validate_name_rejects_hidden_dot_prefix() -> None:
@@ -220,10 +227,11 @@ def test_read_active_name_returns_none_for_target_without_pgm_suffix(
 def test_read_active_name_returns_none_for_target_with_bad_stem(
     tmp_path: Path,
 ) -> None:
-    # Symlink target's stem fails MAPS_NAME_REGEX (e.g. it contains a
-    # dot). Returns None rather than raising.
+    # Symlink target's stem fails MAPS_NAME_REGEX (e.g. starts with a
+    # dot, or contains a forbidden char like whitespace). Returns None
+    # rather than raising.
     link = tmp_path / "active.pgm"
-    link.symlink_to("foo.bar.pgm")
+    link.symlink_to(".hidden.pgm")
     assert M.read_active_name(tmp_path) is None
 
 

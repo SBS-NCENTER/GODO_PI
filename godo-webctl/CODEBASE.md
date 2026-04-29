@@ -307,9 +307,12 @@ leftovers from a prior crashed swap are swept at the START of every
 
 ### (q) Map-name regex is a Tier-1 constant; `realpath` containment runs everywhere (Track E, PR-C)
 
-`MAPS_NAME_REGEX = ^[a-zA-Z0-9_-]{1,64}$` lives in `constants.py`
-(Tier-1). Every public `maps.py` function that returns or operates on
-a path validates the name AND runs `os.path.realpath(result).startswith(
+`MAPS_NAME_REGEX = ^[a-zA-Z0-9_()-][a-zA-Z0-9._()-]{0,63}$` lives in
+`constants.py` (Tier-1). Allows letters, digits, `_`, `-`, `.`, `(`,
+`)`; first char may NOT be `.` (rejects `..`, `.hidden`, and the
+project's own `.activate.lock` reserved name). Max 64 chars. Every
+public `maps.py` function that returns or operates on a path validates
+the name AND runs `os.path.realpath(result).startswith(
 os.path.realpath(maps_dir) + os.sep)` — explicit `if not …: raise
 InvalidName("path_outside_maps_dir")`, NEVER `assert` (production may
 run with `-O`). The reserved name `"active"` passes the regex but is

@@ -26,13 +26,20 @@ export interface ScanWorldPoint {
  *
  * Returns an empty array when:
  *   - scan is null,
- *   - scan.valid !== 1,
- *   - scan.pose_valid !== 1 (Mode-A M3 — anchor pose has not converged
- *     yet; rendering would be misleading).
+ *   - scan.valid !== 1.
+ *
+ * The earlier `pose_valid !== 1` gate (Mode-A M3) was lifted 2026-04-29
+ * during PR #29 HIL — the operator needs to see the LiDAR scan shape
+ * BEFORE AMCL converges so they can diagnose pose mismatch visually.
+ * When `pose_valid === 0`, the snapshot's `pose_x_m / pose_y_m /
+ * pose_yaw_deg` are AMCL's current best estimate (may jump between
+ * iterations); rays still trace a coherent shape relative to the
+ * anchor and are useful as a "what does the LiDAR see right now"
+ * diagnostic.
  */
 export function projectScanToWorld(scan: LastScan | null): ScanWorldPoint[] {
   if (!scan) return [];
-  if (scan.valid !== 1 || scan.pose_valid !== 1) return [];
+  if (scan.valid !== 1) return [];
 
   const yawRad = scan.pose_yaw_deg * DEG_TO_RAD;
   const cosYaw = Math.cos(yawRad);
@@ -43,7 +50,12 @@ export function projectScanToWorld(scan: LastScan | null): ScanWorldPoint[] {
   for (let i = 0; i < n; i++) {
     const r = scan.ranges_m[i] ?? 0;
     if (r <= 0) continue;
-    const a = (scan.angles_deg[i] ?? 0) * DEG_TO_RAD;
+    // RPLIDAR C1 emits angles CW-positive from forward (doc/RPLIDAR/RPLIDAR_C1.md
+    // §"θ (0–360°, clockwise)"). The 2D rotation below assumes CCW-positive
+    // angles per REP-103, so negate here. Equivalent C++ AMCL math in
+    // production/RPi5/src/localization/scan_ops.cpp has the same convention
+    // mismatch and is tracked as a separate fix.
+    const a = -(scan.angles_deg[i] ?? 0) * DEG_TO_RAD;
     const lx = r * Math.cos(a);
     const ly = r * Math.sin(a);
     out.push({

@@ -9,3 +9,5 @@
 - [Pipeline short-circuit for small/well-specified work](feedback_pipeline_short_circuit.md) — For ≤200 LOC fully-SSOT-specified work, skip planner AND Mode-B; direct writer → Parent self-verify → commit. Confirmed twice this session (Phase 4-2 C, Phase 4-2 systemd).
 - [doc/history.md location + conventions](reference_history_md.md) — Korean-mixed Phase-level decision narrative at GODO/doc/history.md. Reverse chronological, "왜/무엇" focused. Update at session-end alongside PROGRESS.md + SYSTEM_DESIGN.md.
 - [Emojis allowed in chat](feedback_emoji_allowed.md) — User permitted emojis in user-facing replies (2026-04-28). Code/docs/commits stay emoji-free.
+- [LiDAR overlay should work without tracker](project_lidar_overlay_tracker_decoupling.md) — Future ticket: `/map` overlay currently couples to godo-tracker via scan SSE; operator wants a tracker-down path. Park as Phase 4-2 follow-up.
+- [RPLIDAR CW vs ROS CCW angle bug](project_rplidar_cw_vs_ros_ccw.md) — RPLIDAR C1 emits CW angles; production C++ AMCL `scan_ops.cpp:73-74` does CCW math. Likely root cause of the 1-in-15 AMCL convergence rate. Fix BEFORE Phase 2 param tuning.

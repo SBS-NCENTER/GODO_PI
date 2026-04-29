@@ -45,7 +45,12 @@ void downsample(const godo::lidar::Frame& frame,
         if (r_m < range_min_m || r_m > range_max_m) continue;
         RangeBeam b{};
         b.range_m   = static_cast<float>(r_m);
-        b.angle_rad = static_cast<float>(s.angle_deg * kDegToRad);
+        // CW → CCW boundary: RPLIDAR C1 reports angles clockwise-positive
+        // (doc/RPLIDAR/RPLIDAR_C1.md:128); the AMCL kernel below uses
+        // standard REP-103 CCW math, so we negate exactly here. Wire format
+        // (cold_writer::fill_last_scan) keeps raw CW for the SPA per its
+        // PR #30 contract — see invariant (m) in CODEBASE.md.
+        b.angle_rad = static_cast<float>(-s.angle_deg * kDegToRad);
         out.push_back(b);
     }
 }

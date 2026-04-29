@@ -439,6 +439,47 @@ atomic-rename (bind-temp + `rename(2)`) — eliminates the
 `tests/test_uds_server.cpp`. See CLAUDE.md §6 "Single-instance
 discipline".
 
+### (m) RPLIDAR CW → REP-103 CCW boundary at scan_ops.cpp:48
+
+`scan_ops::downsample` is the **single** point of convention shift
+between the RPLIDAR C1's clockwise-positive sensor angle (per
+`doc/RPLIDAR/RPLIDAR_C1.md:128`) and the AMCL kernel's standard
+REP-103 counter-clockwise math. The shift is one unary minus:
+`b.angle_rad = static_cast<float>(-s.angle_deg * kDegToRad)`. From
+that point on every consumer of `RangeBeam.angle_rad`
+(`scan_ops::evaluate_scan`, future SLAM bridges) reads CCW and
+applies `xs = r·cos(a); ys = r·sin(a)` with no further sign flips.
+
+The wire format (`LastScan.angles_deg` published by
+`cold_writer::fill_last_scan`) is **deliberately unchanged**: it
+continues to emit raw CW degrees so the SPA's PR #30 negation
+(`poseCanvasScanLayer.ts`) remains the single client-side
+convention shift. C++ AMCL math and SPA rendering are decoupled;
+the wire stays raw CW.
+
+Pinned by `tests/test_amcl_components.cpp::TEST_CASE("scan_ops::
+downsample — RPLIDAR CW 90° beam projects to LiDAR's right side
+under fix")` — 7 sub-asserts including a 270° beam (left side) and
+a yaw=45° rotation that exercises every term in the rotation matrix.
+Anyone who undoes the negation in `scan_ops.cpp:48` thinking it's a
+typo will break the test and CI will block them.
+
+Audit closure (verified 2026-04-29 KST):
+
+- **(a) Producers of raw CW**: `lidar_source_rplidar.cpp:152-164`,
+  `sample.hpp` invariants — unchanged.
+- **(b) Raw-CW consumers (passthrough)**: `cold_writer.cpp:62`,
+  `csv_writer.cpp:95`, `sample.hpp:38-39`, all
+  `test_csv_*` / `test_cold_writer_*` / `test_sample_invariants` —
+  unchanged.
+- **(c) AMCL-frame consumer**: `scan_ops.cpp:71` (`evaluate_scan`) —
+  automatically correct after the boundary fix.
+- **(d) Test fixtures self-consistent in CCW frame**:
+  `test_amcl_scenarios.cpp:122` (`synth_beams`),
+  `test_amcl_components.cpp:148-153` (cardinal beams) — unchanged.
+
+HIL convergence-rate protocol: `production/RPi5/doc/convergence_hil.md`.
+
 ### Known scaffolding
 
 - (Removed 2026-04-26 with Wave 2.) `thread_stub_cold_writer` and the
@@ -2839,3 +2880,109 @@ side wait-free).
 - N7: `production/RPi5/systemd/godo-tracker.service` NOT modified.
 - TB1: stale-PID test uses `0x7FFFFFFF`.
 - TB4: doctest case 5 = fork-does-not-inherit-lock (POSIX fcntl).
+
+## 2026-04-29 19:45 KST — Track D-3 (RPLIDAR CW → REP-103 CCW boundary fix)
+
+### Why
+
+Pre-fix HIL session (2026-04-29 19:20 KST, news-pi01 in TS5 chroma
+studio) measured ~1 / 30 OneShot calibrate convergences. Root cause:
+`scan_ops::downsample` was treating the RPLIDAR C1's clockwise-
+positive sensor angle as REP-103 CCW (per
+`doc/RPLIDAR/RPLIDAR_C1.md:128`), so every beam's `ys` term was
+sign-flipped against the map. AMCL was fitting a vertically-mirrored
+scan and the studio's partial long-axis symmetry occasionally let it
+"converge" to a `(px, −py, −yaw)` mirror-image solution — most attempts
+diverged off the map. SPA-side counterpart already shipped in PR #30;
+this fix lands the C++ side without coordinated wire-format change.
+
+### Added
+
+- `src/localization/scan_ops.cpp::downsample()` — 5-line citation
+  comment at the boundary (cites `doc/RPLIDAR/RPLIDAR_C1.md:128`,
+  invariant (m), and the wire-format-stays-CW contract).
+- `tests/test_amcl_components.cpp::TEST_CASE("scan_ops::downsample —
+  RPLIDAR CW 90° beam projects to LiDAR's right side under fix")` —
+  7 sub-asserts pinning the convention shift. Bias-block: world-frame
+  endpoints are computed by hand, NOT by calling `evaluate_scan`, so
+  a bug in the kernel cannot mask a bug in the convention shift.
+  Step 5 plugs `a = beams[0].angle_rad` (post-downsample value, not
+  `90·π/180` re-derived) so a shared bug cannot ride through. Step 6
+  uses yaw=45° to exercise all four terms in the rotation matrix.
+  Step 7 adds a SECOND beam at 270° (LiDAR left side) to pin both
+  mirror directions.
+- `doc/convergence_hil.md` — operator-driven HIL convergence-rate
+  protocol with truth-pose extraction script and accept/marginal/fail
+  decision table.
+
+### Changed
+
+- `src/localization/scan_ops.cpp:48` — `b.angle_rad = -s.angle_deg *
+  kDegToRad` (was `+s.angle_deg * kDegToRad`). Net delta: 1 line of
+  code, +5 lines of comment.
+- `src/localization/scan_ops.hpp:21-26` — `RangeBeam.angle_rad` field
+  comment now says "REP-103 CCW (post-conversion from raw RPLIDAR CW
+  per scan_ops.cpp:48 — see invariant (m) in CODEBASE.md and
+  doc/RPLIDAR/RPLIDAR_C1.md:128). The AMCL kernel converts to map
+  frame using the particle's yaw with standard CCW math." Net delta:
+  comment-only, no ABI change.
+
+### Removed
+
+- (none)
+
+### Tests
+
+- 45 → 45 hardware-free test executables (no new file). The new
+  TEST_CASE lives inside the existing `test_amcl_components` binary;
+  its assertion count went 30 → 37 (+7 sub-asserts in one new case,
+  totalling 5 cases now in `test_amcl_components`). All existing
+  cases unchanged and green.
+- `test_amcl_scenarios::synth_beams` is self-consistent in CCW frame
+  (its ray-cast and the AMCL evaluator share the same convention) so
+  it does not exercise the bug and does not need flipping.
+- `test_cold_writer_*` only assert ranges + counts on `angles_deg`,
+  never signed values; all green unchanged.
+- All four named build-greps clean: `[scan-publisher-grep]`,
+  `[hot-path-isolation-grep]`, `[m1-no-mutex]`, `[rt-alloc-grep]`.
+
+### Wire format unchanged (cross-language SSOT preserved)
+
+- `cold_writer::fill_last_scan` continues to passthrough raw CW
+  `s.angle_deg` to `LastScan.angles_deg`. The SPA's PR #30
+  (`poseCanvasScanLayer.ts`) negates client-side; that contract
+  stays valid. C++ AMCL math and SPA rendering are decoupled.
+
+### Out of scope (deliberate)
+
+- Tier-2 AMCL parameter retuning. Convergence basin shape changes
+  after this fix; sigma / particle-count tuning is a separate Phase 2
+  follow-up. Numeric trigger for retuning ticket: post-OneShot pose
+  drift > 5 cm/s for > 2 s (≥ 4 consecutive 10 Hz `/api/last_pose`
+  samples with `√(Δx² + Δy²) > 5 mm`). See plan §Risks R2.
+- `lidar_source_rplidar.cpp` raw decoding (Option γ rejected: would
+  break PR #30's wire contract and require coordinated SPA deploy).
+- `godo-mapping` (Docker pipeline already correct via `rplidar_ros2`).
+- `godo-frontend` (Track D-2 / PR #30 already covers SPA).
+- `XR_FreeD_to_UDP/*` (read-only).
+
+### Mode-A folds applied
+
+- M1: §Test strategy step 6 endpoint corrected from `(4.0, 7.0)` to
+  `(5.7071, 6.2929)` after switching from yaw=90° to yaw=45° (T2).
+- M2: `scan_ops.hpp` is a comment-only modify (was claimed
+  NO-CHANGE in the original plan; now consistent with the .cpp
+  comment).
+- M3: TEST_CASE step 5 plugs `a = beams[0].angle_rad`, not
+  `90·π/180` re-derived. Bias-block.
+- S1: hpp comment text pinned verbatim.
+- S2: audit closure under invariant (m) names all four categories
+  including `csv_writer.cpp:95` and `sample.hpp:38-39`.
+- S3: HIL truth-pose extraction script spelled out
+  (`x_truth = origin_x + col·resolution`,
+  `y_truth = origin_y + (height − 1 − row)·resolution`).
+- S4: Tier-2 retuning trigger numeric threshold pinned (5 cm/s
+  for > 2 s).
+- T1: second beam at 270° pins both mirror directions.
+- T2: yaw=45° exercises all four rotation-matrix terms.
+- N4: HIL doc filename is `convergence_hil.md` (no per-track prefix).

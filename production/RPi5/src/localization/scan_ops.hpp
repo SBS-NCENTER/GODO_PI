@@ -18,8 +18,11 @@ namespace godo::localization {
 
 // Compact view of one LiDAR beam after downsample / range gate.
 //   range_m: in metres; > 0
-//   angle_rad: sensor-frame bearing in radians (the AMCL kernel converts
-//              to map frame using the particle's yaw)
+//   angle_rad: sensor-frame bearing in radians, REP-103 CCW (post-conversion
+//              from raw RPLIDAR CW per scan_ops.cpp:48 — see invariant (m)
+//              in CODEBASE.md and doc/RPLIDAR/RPLIDAR_C1.md:128). The AMCL
+//              kernel converts to map frame using the particle's yaw with
+//              standard CCW math.
 struct RangeBeam {
     float range_m;
     float angle_rad;

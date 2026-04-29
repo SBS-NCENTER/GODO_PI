@@ -251,7 +251,7 @@ tracker is brought up.
 scripts/run-pi5-freed-passthrough.sh \
     --port /dev/ttyAMA0 \
     --host 10.10.204.184 \
-    --udp-port 50002
+    --udp-port 50003
 ```
 
 Defaults match the values shown above. Other flags: `--baud` (38400),

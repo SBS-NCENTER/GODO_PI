@@ -13,7 +13,8 @@
 #     build/src/godo_freed_passthrough/godo_freed_passthrough.
 #
 # No sudo / setcap needed — this binary uses no RT privileges.
-# All flags pass through unchanged. Defaults: 10.10.204.184:50002.
+# All flags pass through unchanged. Defaults: 10.10.204.184:50003.
+# (50002 is reserved on the UE host listener — see godo_freed_passthrough/main.cpp.)
 
 set -euo pipefail
 

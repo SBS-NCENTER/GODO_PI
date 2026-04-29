@@ -1,23 +1,26 @@
 # Next session — cold-start brief
 
 > Throwaway. Delete the moment the next session picks up the thread.
-> Refreshed 2026-04-29 close. P2 Step 1+2 shipped + stability hardening shipped. PR 2 (service observability) writer + B-MAPEDIT writer queued. User in studio install — Pi may be off when session starts.
+> Refreshed 2026-04-29 second close (after studio install + first AMCL convergence smoke).
+> P2 Step 1+2 + stability hardening + regex fix shipped. AMCL convergence on real studio map verified to FAIL as expected per Phase 2 hardware-gated. PR 2 (service observability) writer + B-MAPEDIT writer queued. **Next session starts in tmux** (agreed).
 
 ## TL;DR (priority order)
 
-1. **★ Setup: tmux wrapper for claude** — agreed 2026-04-29. SSH disconnect kills parent + cascades to background subagents (real loss vector observed). Wrap claude in tmux at session start so SSH can drop without losing in-flight pipeline. Consider `~/.bashrc` snippet for auto-attach to `godo` session.
+1. **★ Setup: tmux wrapper at session start** — agreed 2026-04-29. SSH disconnect cascades to background subagents (real loss vector observed). First step on session start: `tmux new -A -s godo && claude`. Optional auto-attach in ~/.bashrc snippet (already proposed in §"tmux setup" below; do NOT add without explicit confirmation).
 
-2. **★ PR 2: service observability** — plan + Mode-A fold ready at `.claude/tmp/plan_service_observability.md`. Writer kickoff is the FIRST coding task. 408 backend / 117 frontend unit baselines (after merges). Branch from main; ~580 LOC.
+2. **★ PR 2: service observability** — plan + Mode-A fold ready at `.claude/tmp/plan_service_observability.md`. Writer kickoff is the FIRST coding task. **NEW (2026-04-29 user req fold-in)**: extend scope with admin-callable restart action buttons on /system tab (currently /local loopback admin-only) — coordinated with Task #28 polkit rules. See task #19 description for fold notes. Baselines after this session's merges: backend 431 / frontend unit 111. Branch from main; ~580 LOC + 30-60 for action buttons.
 
 3. **★ Phase 4.5 P2 Step 3: B-MAPEDIT** — plan + Mode-A fold ready at `.claude/tmp/plan_track_b_mapedit.md`. Decision LOCKED: I2 + brush + restart-required (no hot reload). Writer kickoff AFTER PR 2 merges. ~950 LOC; single PR.
 
-4. **★ Privilege escalation audit** (Task #28) — webctl Shutdown/Reboot button currently broken (`subprocess_failed` because `ncenter` can't call `shutdown` directly). Polkit + `systemctl poweroff` route recommended; full audit covers shutdown/reboot/service-control/journalctl. Install script automation also needed so bring-up doesn't drift.
+4. **★ Privilege escalation audit** (Task #28) — webctl Shutdown/Reboot button + service-control still broken (`subprocess_failed` because `ncenter` can't call privileged ops). Polkit + `systemctl poweroff/reboot` + `systemctl restart godo-*` recommended. Coordinated with Task #32 systemd unit install + Task #19 PR 2 admin action buttons.
 
-5. **Session-end docs reconciliation** (Task #27) — cascade pass on FRONT_DESIGN.md + 2 CODEBASE.md after all P2 PRs land.
+5. **★ tracker SIGTERM handler** (Task #33, NEW 2026-04-29) — verified gap in PR #25: SIGTERM kills tracker without triggering RAII PidFileLock dtor → pidfile + UDS socket linger on disk (functionally OK, cosmetic). Fix: install SIGTERM/SIGINT handler in main.cpp, mirror godo-webctl pattern. Audit other C++ RAII members.
 
-## Where we are (2026-04-29 close)
+6. **Session-end docs reconciliation** (Task #27) — cascade pass on FRONT_DESIGN.md + 2 CODEBASE.md after all P2 PRs land.
 
-**main = `70a51de`** — Phase 4.5 P2 Step 1 + Step 2 + stability hardening + housekeeping all merged. **5 PRs merged this session**:
+## Where we are (2026-04-29 second close)
+
+**main = `6b26b4a`** — Phase 4.5 P2 Step 1 + Step 2 + stability hardening + regex fix + housekeeping all merged. **6 PRs merged this session**:
 
 | PR | What | LOC |
 |---|---|---|
@@ -25,9 +28,77 @@
 | #22 | agent color casing fix + fail-fast BLOCKED-report discipline | +103 |
 | #23 | B-BACKUP page (/backup) — Phase 4.5 P2 Step 2 | +1641 |
 | #24 | FRONT_DESIGN I-Q1 / §4.2 supersession (I2 + restart-required) | +27 |
-| #25 | single-instance pidfile locks (godo-webctl + godo-tracker) + UDS atomic bind + backup flock + CLAUDE.md §6 rule | +700 |
+| #25 | single-instance pidfile locks + UDS atomic bind + backup flock + CLAUDE.md §6 rule | +700 |
+| #26 | MAPS_NAME_REGEX allow `.`, `(`, `)` (still reject leading `.`) | +100 |
 
 **Open PRs**: 0.
+
+## Studio install + AMCL smoke (2026-04-29)
+
+User installed in studio + powered Pi back on. Workflow exercised:
+1. webctl started via dev script (with `GODO_WEBCTL_PIDFILE=$HOME/.local/state/godo/godo-webctl.pid` inline export).
+2. Two mapping passes via godo-mapping container — `04.29_1` (~103 KB), `04.29_2` (~90 KB). Stops via `docker stop godo-mapping` → SIGTERM trap saves PGM+YAML.
+3. Pre-PR-#26 webctl regex rejected dot-named maps → renamed to `0429_1` / `0429_2` as workaround. After PR #26 merge + webctl restart, regex now allows dot/parens.
+4. Active map = `0429_2` (set via webctl `/map` activate dialog, "재시작하지 않음" path).
+5. godo-tracker started: `build/src/godo_tracker_rt/godo_tracker_rt --amcl-map-path /home/ncenter/projects/GODO/godo-mapping/maps/active.pgm` (UDS + pidfile under `/run/godo/` after one-time `sudo chown ncenter:ncenter /run/godo`).
+6. webctl ↔ tracker handshake OK: `{"webctl":"ok","tracker":"ok","mode":"Idle"}`.
+7. Login admin (ncenter/ncenter) → `POST /api/calibrate` → mode Idle → OneShot → Idle (1 s).
+
+**AMCL result (expected fail)**:
+```
+pose:         x = -3.47 m, y = 1.65 m, yaw = 101.29°
+xy_std:       6.16 m    ← particles essentially uniform across map
+yaw_std:      169.86°   ← yaw essentially uniform circular
+iterations:   25 / 25   ← max iters hit
+converged:    0
+forced:       1
+```
+
+Map area ~20 × 13 m → uniform-spread σ ≈ 5.8 m matches measured 6.16 m → particles failed to cluster. Aligned with Phase 2 hardware-gated state per CLAUDE.md / NEXT_SESSION:
+- LiDAR not at pan-pivot center (20 cm offset).
+- Mapping pass too short / no loop closure.
+- AMCL Tier-2 params not tuned (tightened `amcl_sigma_seed_xy_m`, `amcl_sigma_hit_m` etc.).
+
+**Side observation**: `cold_writer: yaw tripwire fired — pose.yaw=101.288 deg vs origin.yaw=0.000 deg (tripwire=5.000 deg)` log line. The tripwire compares AMCL yaw vs `amcl_origin_yaw_deg` (default 0°). For a fresh map where 0° is not the calibrated origin yaw, this tripwire is spurious. Worth a Tier-2 default review when Phase 2 lands.
+
+## Maps inventory (godo-mapping/maps/)
+
+| Name | Size | Active | Origin (m) | Provenance |
+|---|---|---|---|---|
+| `studio_v1` | 85 KB | no | (older session) | 2026-04-28 |
+| `studio_v2` | 81 KB | no | (older session) | 2026-04-28 |
+| `0429_1` | 103 KB | no | [-11.430, -5.623, 0] | 2026-04-29 first walk |
+| `0429_2` | 90 KB | **yes** | [-10.379, -6.448, 0] | 2026-04-29 second walk |
+
+After PR #26 merged, dot/paren names work too — for next mapping session, can use e.g. `04.29_3` directly.
+
+## tmux setup (cold-start)
+
+```bash
+# At session start on news-pi01:
+tmux new -A -s godo  # -A: attach if exists, else create
+claude               # inside tmux
+
+# Detach with Ctrl+B, D — tmux server keeps claude alive across SSH disconnect
+# Reattach later with: tmux attach -t godo
+```
+
+Optional auto-attach `~/.bashrc` snippet (suggest, don't auto-add):
+```bash
+# Auto-attach to godo tmux session on interactive SSH login
+if [[ -n "$SSH_CONNECTION" && -z "$TMUX" && $- == *i* ]]; then
+    tmux new -A -s godo
+fi
+```
+
+## Live system on news-pi01 (post-session)
+
+- webctl: running (PID 386474/386478). `0.0.0.0:8080`. Pidfile `$HOME/.local/state/godo/godo-webctl.pid`. Log `/tmp/godo-webctl.log`. Started via `bash godo-webctl/scripts/run-pi5-webctl-dev.sh background`.
+- godo-tracker: NOT running (gracefully stopped via SIGTERM at session close; manually cleaned `/run/godo/{ctl.sock,godo-tracker.pid}` due to PR #25 SIGTERM-handler gap, see Task #33).
+- `/run/godo/`: exists, owned by ncenter (one-time `sudo chown` performed this session — survives only until reboot, since /run is tmpfs; will need redo on next boot OR Task #32 systemd installation handles via `RuntimeDirectory=godo`).
+- `~/.bashrc` aliases: `godo-up`, `godo-down` (SIGTERM, updated this session), `godo-log`.
+- Active map: `0429_2.pgm`.
+- LAN-IP path (`192.168.3.22:8080`) blocked at SBS_XR_NEWS AP client-isolation — Tailscale `100.127.59.15:8080` is the working browser path.
 
 **Working tree**: clean on main.
 

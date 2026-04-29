@@ -216,6 +216,23 @@ These rules apply to the Parent orchestrator and all subagents. They are non-neg
 - Global behavioral preferences → update `.claude/memory/` (Parent's responsibility).
 - Never write long analysis directly into `CLAUDE.md`; create a dedicated document and link to it.
 
+### Date + time stamps in date-bearing SSOT entries
+
+The team often runs **multiple sessions per day** (early morning / morning / afternoon / evening / late-night). Date alone is not a unique session identifier — every date-bearing entry MUST carry a KST (GMT+9) **time** in addition to the date so sessions on the same day can be ordered and distinguished.
+
+Format conventions:
+
+- `PROGRESS.md` "Session log" entries: `### 2026-04-29 (afternoon — 14:00–16:34 KST, third close)` or similar bucket+time-range form. The bucket label (early morning / morning / afternoon / evening / late-night) sits next to the explicit KST range.
+- `doc/history.md` per-session blocks: `## 2026-04-29 (오후 — 14:00–16:34 KST, 세 번째 close)` matching the human-readable Korean convention already used (`새벽/오전/오후/저녁/심야`) plus the explicit KST window.
+- `CODEBASE.md` change-log entries: `### 2026-04-29 16:34 KST — <one-line summary>` — point-in-time stamp, not a range, since these mark the moment the invariant text was written.
+- `NEXT_SESSION.md` "third close" / "second close" suffix patterns: include the KST closing time in the header subtitle, e.g., `> Refreshed 2026-04-29 16:34 KST (third close)`.
+- Plan files under `.claude/tmp/`: include KST timestamp in the Mode-A / Mode-B fold sections (`### Mode-A review fold (2026-04-29 14:30 KST)`).
+- Memory files under `.claude/memory/`: when the body cites a date, append the KST time so future-you can disambiguate.
+
+When converting from the host's clock, use `TZ='Asia/Seoul' date '+%Y-%m-%d %H:%M KST'`. The Pi 5 production host is already on KST so `date` returns the right value directly.
+
+Why this matters: a single day frequently spans 2–3 distinct sessions with different scope (operator HIL, planner runs, writer kickoffs). Without time stamps, a future cold-start cannot tell which `2026-04-29` block describes the state being inherited.
+
 ### Memory storage — in-repo, not host cache
 
 GODO is collaborated on via GitHub, so every auto-memory operation

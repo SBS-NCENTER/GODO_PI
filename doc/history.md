@@ -10,7 +10,81 @@
 
 ---
 
-## 2026-04-29
+## 2026-04-29 (오후 — 12:33–16:34 KST, 세 번째 close)
+
+### 한 줄 요약
+
+**Mapping 파이프라인의 fatal bug 가 ~24h 동안 잠복해 있던 것을 발견 + 수정 (PR #28). 동시에 service observability + admin-non-loopback service action endpoint 도 출하 (PR #27). 세션 막바지 (~16:30 KST) 에 SPA scan-overlay 5× 스케일 + Y-flip 추정 버그까지 추가로 진단해서 다음 세션 1순위로 큐잉.**
+
+> 기술적 상세는 [PROGRESS.md 2026-04-29 afternoon 블록](../PROGRESS.md#session-log) 참조.
+
+### 왜 이렇게 결정했는가
+
+#### Mapping bug — Plan A (rf2o) 채택 vs Plan C (config-only) 거부
+
+`launch/map.launch.py:44-50` 의 static identity TF `odom→laser` 가 slam_toolbox 의 `minimum_travel_distance: 0.5` (Jazzy default) 게이트에 odom motion = 0 으로 보고 → 단 1프레임만 통합 → 모든 PGM 이 단일 위치 부채꼴로 저장된 상태. 4개 맵 모두 occupied 63-114 cells (정상 수천 대비) 로 통계 confirm.
+
+세 가지 옵션:
+- **Plan A (rf2o_laser_odometry)**: scan-derived odometry 노드를 colcon overlay 로 빌드 → 진짜 motion 을 publish. 정석. ROS 2 hand-carried 매핑의 canonical pattern.
+- **Plan B (laser_scan_matcher fork)**: AlexKaravaev 포트. 비활성, 백업용.
+- **Plan C (config-only)**: `minimum_travel_distance: 0.0` 으로 게이트 완전 해제. slam_toolbox 내부 Karto scan-matcher 가 모든 motion estimation 을 떠맡음. 단순하지만 featureless 환경에서 발산 위험.
+
+사용자 선택: **"옵션 A 정석대로 가자"**. 이유: long-term stability (`Embedded_CheckPoint` 기준), 향후 다른 스튜디오에서도 robust, scan-matcher 가 main motion estimator 가 아닌 보정 역할로 남는 게 ROS 2 표준. Plan C 는 hotfix fallback 으로 invariant `(h)` 에 명시 보존.
+
+#### M1 fold critical — `name='rf2o_laser_odometry'` byte-equal 강제
+
+Mode-A reviewer 의 가장 중요한 발견: rf2o 노드가 launch Node 에서 `name=` 을 명시 안 하면 ROS 2 가 `CLaserOdometry2DNode` 라는 source default 로 등록 → YAML 의 `rf2o_laser_odometry:` 네임스페이스 키랑 안 맞아서 **파라미터 로딩 silent 실패** → rf2o 가 hardcoded defaults 로 부팅 (`base_frame_id=base_link`, `init_pose_from_topic='/base_pose_ground_truth'`) → init pose 토픽이 없으니 영원히 대기 → odom→laser TF publish 안 함. **우리가 막 빠져나온 함정의 정확히 대칭 실패 모드**.
+
+빌드만 통과해도 런타임에 같은 증상 재발할 수 있던 위험을 plan + DoD 양쪽에 grep verification 으로 박아둠.
+
+#### Build-first gate 도입 (Plan A 가 빌드 안 되면 Plan C 즉시 hotfix)
+
+rf2o ros2 브랜치는 2023-04 이후 활동 없음, GitHub Issue #43 (2026-03-11) "Jazzy 에서 동작 안 함" open, PR #41 (format-1→3 migration) 미머지. 빌드 자체가 위험할 수 있음. 그래서 writer 의 **첫 단계를 Dockerfile edit + docker build 로 한정** — 빌드 실패 시 launch.py / YAML 등 후속 edit 절대 진행 안 함. 빌드 실패 = Plan C 한 파일 변경으로 즉시 same-session hotfix 경로 보장.
+
+결과: 첫 시도에 빌드 통과 (47.3 s, 1 package, no warnings). PR #41 의 정확한 수정을 in-Dockerfile 로 두 줄 sed 로 적용.
+
+#### B-MAPEDIT 의 mid-session 폐기 결정
+
+Mapping bug 발견 시점 (~14:30 KST) 에 B-MAPEDIT writer 는 이미 ~50분 돌면서 ~600 LOC + 수정 21개 파일 + 신규 7개 파일 (`map_edit.py`, `MapEdit.svelte`, `MapMaskCanvas.svelte`, etc.) 작성 완료 상태. 옵션:
+- (a) stash 로 보관 → 매핑 fix 후 복구 시도
+- (b) 그냥 폐기 → 다음 세션에 fresh 로 재실행
+
+사용자 선택: **(b)**. 이유: "나중에 꼬일 것 같아". 매핑 픽스가 underlying assumption (좋은 PGM 의 존재) 을 바꿀 수 있고, B-MAPEDIT 는 진짜 맵 위에서 brush size / mask resolution 등 UX 검토가 필요할 수 있음. Stash 복구 시 conflicts + 재테스트 부담이 fresh 작성보다 클 가능성. 매핑이 진짜 fix 됐으니 다음 세션 cold-start 로 깔끔하게.
+
+#### Track D 스케일 버그 — 즉시 fix 가 아닌 NEXT_SESSION 큐잉
+
+세션 막바지에 발견. 임팩트 큰 UX 버그지만:
+1. Mapping/AMCL critical path 영향 없음 (operator 가 보는 그림만 어긋남, 백엔드 AMCL 은 정확)
+2. AMCL 1/15 수렴이 진짜 production 차단 요소 (Phase 2 hardware-gated)
+3. Track D 스케일 fix 는 명확히 좁힌 버그라 다음 세션 cold-start 에서도 빨리 처리 가능
+
+세션 길이 + 사용자/모델 둘 다 길게 달려옴 + Track D fix 가 평가 기간이 추가로 필요한 (HIL 검증) 작업인 것 고려 → NEXT_SESSION 1순위로 큐잉이 안전.
+
+#### CLAUDE.md §6 — KST 시간대 SSOT 작성 규칙 추가
+
+오늘만 같은 날짜로 3개 close (오전, 오후, 심야) 가 발생. 이런 패턴이 자주 일어나니까 **모든 date-bearing entry 에 KST (GMT+9) 시간 명시 의무화**. CLAUDE.md §6 "Context maintenance" 하위에 새 sub-section 으로 형식 규칙 박아둠 (PROGRESS.md / doc/history.md / CODEBASE.md change-log / NEXT_SESSION.md / plan files / memory files 각각 컨벤션).
+
+### 운영 현황 (news-pi01, 2026-04-29 16:34 KST 종료 시점)
+
+- main = `f311218`. webctl 동작 중 (PID 386478, 12:11 KST 시작).
+- godo-tracker: 사용자의 calibrate 테스트 후 foreground terminal 에 살아있을 가능성 — 다음 세션 시작 시 `pgrep -af godo_tracker_rt` 로 확인.
+- godo-mapping container image 재빌드됨 (rf2o overlay 포함, SHA `92b3076da18e…`).
+- Active map: `04.29_v3.pgm` (두 바퀴 워킹 + loop closure, 14.4×18.2m, 2978 occupied / 60.7% free).
+- 직전 broken map (`0429_2.pgm`) 은 디스크에 남아있지만 active 심볼릭은 새 맵으로 교체됨.
+- LAN-IP 차단 (SBS_XR_NEWS AP client-isolation), Tailscale `100.127.59.15` 만 동작.
+- Tmux session `godo` (created Wed Apr 29 12:33 KST) 여전히 attached.
+
+### 다음 세션 첫 작업 후보
+
+1. **Track D 스케일 + Y-flip fix** (TL;DR #1, ~150-250 LOC) — `MAP_PIXELS_PER_METER` 하드코딩 제거 + YAML resolution SSOT 사용 + 이미지 Y-flip.
+2. **B-MAPEDIT 재실행** (TL;DR #2, ~950 LOC) — `.claude/tmp/plan_track_b_mapedit.md` §8 fold 적용된 plan 그대로.
+3. **AMCL Phase 2 hardware-gated 진단** (TL;DR #3) — LiDAR pivot offset 측정 + AMCL Tier-2 파라미터 튜닝.
+
+순서는 다음 세션 cold-start 에서 NEXT_SESSION.md 보고 결정.
+
+---
+
+## 2026-04-29 (오전 — first close, P1 일괄 배포)
 
 ### 한 줄 요약
 

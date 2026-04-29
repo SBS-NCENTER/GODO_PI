@@ -174,6 +174,47 @@ All host-side bring-up steps complete. See per-step session log entry below. The
 
 ## Session log
 
+### 2026-04-29 (afternoon — 12:33–16:34 KST, third close — mapping fatal bug fix + service observability shipped + Track D scale bug discovered)
+
+Two-PR session that landed (1) Phase 4.5 P2 service observability with admin-non-loopback action endpoint, and (2) a fatal mapping pipeline bug fix that had been silently producing single-frame maps for ~24h. Plus a high-impact diagnosis at session end of a SPA scan-overlay scaling bug that affects every map view.
+
+- **2 PRs merged on main** (final = `f311218`):
+  - **PR #27 → main** (`feat(p4.5): Track B-SYSTEM PR 2 — service observability`, 28 files / +2855 / −25): backend `system_services.py` (cached snapshot, 1 s TTL) + `services.py::ServiceShow` 7-field dataclass + `ServiceTransitionInProgress` exception → 409 Korean detail (`SERVICE_TRANSITION_MESSAGES_KO` per Korean-reading-convention 받침 rule per service: 트래커→가, 웹씨티엘→이, 아이알큐 핀→이) + `parse_systemctl_show` / `redact_env` pure helpers + new admin-non-loopback `POST /api/system/service/{name}/{action}` (mirrors `/api/system/reboot` pattern); frontend `ServiceStatusCard.svelte` (admin-gated action buttons via `$isAdmin`) + `EnvVarsList.svelte` (collapsible env, `(secret)` suffix on redacted) + `serviceStatus.ts` chip-class SSOT + `routes/System.svelte` 5th panel polling at 1 Hz with stale banner. Webctl invariants `(v)` system_services anon-readable + 1 s TTL + env redacted, `(w)` control() refuses start/restart on activating + stop on deactivating with 409 Korean detail, `(x)` `/api/system/service/{name}/{action}` admin-non-loopback. Frontend invariant `(t)` services panel polls at 1 Hz, no SSE. Test deltas: backend 431 → 491 (+60), frontend unit 111 → 143 (+32), e2e +3 cases. Mode-A folds M1-M6 + S1-S7 + N1-N5 + T1-T6 + §8 Option-C addendum (S1 activity_log + S2 504/500 exception mapping + TB1 monkeypatch target). Mode-B reproduced 491 pytest + 143 vitest green; ran live ROS 2 param verification independently. Squash-merged at ~13:25 KST as `49e0ede`.
+  - **PR #28 → main** (`fix(mapping): replace static identity TF with rf2o laser odometry`, 7 files / +255 / −27): root-cause repair of single-fan PGM artifact. `godo-mapping/Dockerfile` adds second colcon overlay block (rf2o ros2 SHA-pinned `b38c68e46387b98845ecbfeb6660292f967a00d3`, package.xml format-1→3 sed patch in-Dockerfile, `--packages-select rf2o_laser_odometry` for incremental build); `launch/map.launch.py` deletes `static_odom_to_laser` block, adds `rf2o` Node with **byte-equal `name='rf2o_laser_odometry'`** matching YAML namespace (M1 critical fold — without this, ROS 2 param loader silently fails and rf2o boots with hardcoded `base_frame_id=base_link` / `init_pose_from_topic='/base_pose_ground_truth'` defaults, producing exact symmetric failure mode); explicit `{'use_sim_time': False}` pin (M2); `config/rf2o.yaml` Tier-2 (7 keys, all annotated); `slam_toolbox_async.yaml` makes upstream-default `minimum_travel_distance: 0.5` + `minimum_travel_heading: 0.5` explicit with comment citing slam_toolbox SSOT URL (M5 documentation-of-load-bearing-defaults); `verify-no-hw.sh --full` adds `ros2 pkg executables rf2o_laser_odometry` smoke (S4); godo-mapping invariant `(h)` `odom→laser` TF is rf2o-published, never static, plus Plan A/B/C decision tree for legitimate fallbacks. Mode-A folds M1-M5 + S1-S4 + N1. Mode-B reproduced docker build identical image SHA `92b3076da18e…`, ran live ROS 2 `ros2 param get /rf2o_laser_odometry base_frame_id` returning `String value is: laser` (override confirmed), audited all 7 source-declared rf2o parameters against YAML (zero unknown / zero missing). Squash-merged at ~16:00 KST as `f311218`.
+
+- **Mapping bug timeline (KST)**:
+  - **~14:30** — user opened `0429_2.pgm` as image, saw single fan-shape from one position despite walking + loop closure. ("이상하다, 분명 이동하면서 지도를 만들었는데...")
+  - **~14:35** — statistical confirmation: 4 maps under `godo-mapping/maps/` showed 63-114 occupied pixels each (vs thousands expected); all single-fan signatures.
+  - **~14:45** — root cause located at `launch/map.launch.py:44-50`: a static identity TF `odom→laser` (added 2026-04-28 to "close the TF chain" without external odom) silently lied to slam_toolbox about motion. slam_toolbox's `minimum_travel_distance: 0.5` (Jazzy default, not overridden in our YAML) gate fired against odom-derived motion = 0; only 1 scan ever integrated.
+  - **~15:00** — Plan A chosen ("정석대로 가자"): rf2o_laser_odometry overlay build + launch rewrite. Plan written to `.claude/tmp/plan_mapping_pipeline_fix.md`, Mode-A folded.
+  - **~15:30** — writer build-first gate passed (rf2o colcon `1 package finished [47.3s]`, no warnings).
+  - **~15:45** — Mode-B reproduced + approved.
+  - **~15:55** — HIL run 1 (`test_rf2o_v.pgm`, ~3 m walk, walkable area limit): occupied 1390 (13× the 107 broken baseline), free 51.7% (vs 5.7%), unknown 47% (vs 94%). User confirmed: "좋아 완전 맞아 저 장소 맞다" — rendered map matches actual studio geometry.
+  - **~16:00** — PR #28 merged.
+  - **~16:05** — HIL run 2 (`04.29_v3.pgm`, two-lap walk + loop closure): 2978 occupied / 60.7% free / 36.5% unknown. Map shape further refined.
+  - **~16:20** — AMCL convergence test on `04.29_v3`: tracker started, calibrate run repeatedly. Converged ~1 in 15 attempts; non-converging cases drift completely outside studio. **Map quality is no longer the bottleneck** — Phase 2 hardware-gated levers (LiDAR pivot offset + AMCL Tier-2 tuning) now isolated as the next blocker.
+  - **~16:30** — Track D scale bug discovered: scan-overlay renders at ~5× the PGM image size + suspected Y-flip (각도 틀어짐). Diagnosed as `MAP_PIXELS_PER_METER = 100` (`godo-frontend/src/lib/constants.ts:98`) hardcoding 0.01 m/cell while our slam_toolbox maps are 0.05 m/cell. PoseCanvas `:165-167` draws image as `naturalWidth × zoom` (no resolution scaling) while `worldToCanvas` `:120` uses the constant. Fix queued for next session as TL;DR #1.
+
+- **Mid-session pivot — B-MAPEDIT pause + clean discard**: at ~13:00 KST a B-MAPEDIT writer pass had been kicked off and ran for ~50 min producing ~600 LOC of source + tests (map_edit.py + MapEdit.svelte + MapMaskCanvas.svelte + brushMask.ts + tests + CODEBASE.md edits + 21 file modifications). The writer reached the commit step but the user discovered the mapping bug while reviewing PGMs and interrupted. Per user direction ("일단 방금 작업했던거는 나중에 꼬일 것 같아. 아깝지만 clean시키고 매핑 먼저 가자"), the partial work was discarded clean (`git checkout .` + `git clean -fd .claude/worktrees/`) — no stash. B-MAPEDIT writer must re-run fresh in next session from the §8-Mode-A-folded plan at `.claude/tmp/plan_track_b_mapedit.md`.
+
+- **CLAUDE.md §6 update**: added "Date + time stamps in date-bearing SSOT entries" rule. Going forward, all `PROGRESS.md` Session log entries / `doc/history.md` blocks / `CODEBASE.md` change-log entries / `NEXT_SESSION.md` close markers / `.claude/tmp/plan_*` Mode-A/B fold sections / `.claude/memory/*` date-bearing memories MUST carry KST (GMT+9) time alongside the date. The Pi 5 production host is on KST so `date` returns the right value directly; on Mac/Windows use `TZ='Asia/Seoul' date '+%Y-%m-%d %H:%M KST'`.
+
+- **Cross-cutting test deltas** (this session):
+  - webctl pytest: 431 → 491 (+60).
+  - frontend vitest: 111 → 143 (+32).
+  - frontend playwright: 33 → 36 (+3).
+  - C++ ctest: unchanged this session (no tracker C++ touched in either PR).
+  - Build greps: unchanged.
+
+- **Live system on news-pi01** (2026-04-29 16:34 KST close):
+  - main = `f311218`, webctl running PID 386478 (started 2026-04-29 12:11 KST).
+  - Tracker test run during this session — currently **may still be running** in user's foreground terminal from the AMCL convergence test (~16:20 KST onward); next session start should `pgrep -af godo_tracker_rt` and either reuse or stop+restart.
+  - godo-mapping container image rebuilt this session with rf2o overlay; image SHA `92b3076da18e…`.
+  - Active map: now `04.29_v3.pgm` (real two-lap walk, replaces broken `0429_2.pgm` symlinks).
+  - `/run/godo/`: still owned by ncenter from earlier session; survives until reboot only.
+  - LAN-IP path blocked at SBS_XR_NEWS AP client-isolation; Tailscale `100.127.59.15` confirmed operational.
+  - Tmux session `godo` (created Wed Apr 29 12:33 KST) currently still attached.
+
 ### 2026-04-29 (Phase 4.5 P0.5 + P1 — Track D + B-DIAG + B-CONFIG α+β shipped, P1 complete)
 
 Massive single-session push: all four queued PRs delivered, reviewed, folded, merged. Phase 4.5 operator surface is now feature-complete through P1 (P2 = B-MAPEDIT / B-SYSTEM / B-BACKUP next session).

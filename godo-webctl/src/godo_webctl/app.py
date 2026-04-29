@@ -211,6 +211,14 @@ def _map_maps_exc_to_response(exc: Exception) -> JSONResponse:
             {"ok": False, "err": ERR_MAPS_DIR_MISSING},
             status_code=HTTPStatus.SERVICE_UNAVAILABLE,
         )
+    if isinstance(exc, maps_mod.PgmHeaderInvalid):
+        # Track D scale fix: a malformed PGM surfaces as 500 map_invalid,
+        # mirroring `map_image_mod.MapImageInvalid`'s shape (the SPA
+        # already handles this code).
+        return JSONResponse(
+            {"ok": False, "err": "map_invalid"},
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+        )
     return JSONResponse(
         {"ok": False, "err": "internal_error"},
         status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
@@ -814,6 +822,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except OSError:
             return _map_maps_exc_to_response(maps_mod.MapNotFound(name))
         return Response(content=text, media_type=_YAML_MEDIA_TYPE)
+
+    @app.get("/api/maps/{name}/dimensions")
+    async def map_dimensions_named(name: str) -> JSONResponse:
+        """Track D scale fix — return PGM image dimensions in JSON.
+
+        Width/height live in the PGM HEADER bytes, not the YAML, so the
+        SPA cannot infer them by extending the YAML parser. Reads at
+        most `PGM_HEADER_MAX_BYTES` from the file (no pixel decode).
+        """
+        try:
+            pgm = maps_mod.pgm_for(cfg.maps_dir, name)
+        except maps_mod.InvalidName as e:
+            return _map_maps_exc_to_response(e)
+        if not maps_mod.is_pair_present(cfg.maps_dir, name):
+            return _map_maps_exc_to_response(maps_mod.MapNotFound(name))
+        try:
+            width, height = await asyncio.to_thread(maps_mod.read_pgm_dimensions, pgm)
+        except maps_mod.PgmHeaderInvalid as e:
+            return _map_maps_exc_to_response(e)
+        except OSError:
+            return _map_maps_exc_to_response(maps_mod.MapNotFound(name))
+        return JSONResponse(
+            {"width": width, "height": height},
+            status_code=HTTPStatus.OK,
+        )
 
     @app.post("/api/maps/{name}/activate")
     async def activate_map(

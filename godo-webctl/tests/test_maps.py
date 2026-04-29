@@ -503,3 +503,81 @@ def test_map_entry_to_dict_uses_mtime_unix_float(tmp_path: Path) -> None:
     assert isinstance(d["mtime_unix"], float)
     # Sanity: mtime_unix should be within a few seconds of now.
     assert abs(float(d["mtime_unix"]) - time.time()) < 60.0
+
+
+# --- read_pgm_dimensions (Track D scale fix) --------------------------
+
+
+def test_read_pgm_dimensions_standard_header(tmp_path: Path) -> None:
+    p = tmp_path / "x.pgm"
+    p.write_bytes(b"P5\n200 100\n255\n" + bytes([0] * 100))
+    assert M.read_pgm_dimensions(p) == (200, 100)
+
+
+def test_read_pgm_dimensions_with_comment_line(tmp_path: Path) -> None:
+    # Netpbm allows comment lines between magic and dimensions.
+    p = tmp_path / "x.pgm"
+    p.write_bytes(b"P5\n# created by slam_toolbox\n40 30\n255\n" + bytes([0] * 50))
+    assert M.read_pgm_dimensions(p) == (40, 30)
+
+
+def test_read_pgm_dimensions_zero_byte_file_raises(tmp_path: Path) -> None:
+    p = tmp_path / "empty.pgm"
+    p.write_bytes(b"")
+    with pytest.raises(M.PgmHeaderInvalid) as exc:
+        M.read_pgm_dimensions(p)
+    assert "missing_p5_magic" in str(exc.value)
+
+
+def test_read_pgm_dimensions_no_p5_magic_raises(tmp_path: Path) -> None:
+    p = tmp_path / "bad.pgm"
+    p.write_bytes(b"NOTP5\n40 30\n255\n")
+    with pytest.raises(M.PgmHeaderInvalid):
+        M.read_pgm_dimensions(p)
+
+
+def test_read_pgm_dimensions_non_numeric_width_raises(tmp_path: Path) -> None:
+    p = tmp_path / "bad.pgm"
+    p.write_bytes(b"P5\nabc 30\n255\n")
+    with pytest.raises(M.PgmHeaderInvalid) as exc:
+        M.read_pgm_dimensions(p)
+    assert "non_numeric" in str(exc.value)
+
+
+def test_read_pgm_dimensions_caps_read_at_pgm_header_max_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mode-A T4: byte-bound pin. The function must consume at most
+    ``PGM_HEADER_MAX_BYTES`` from the file regardless of total size, so
+    a 1 GB sparse PGM does not stream pixel data through Python.
+    """
+    from godo_webctl.constants import PGM_HEADER_MAX_BYTES
+
+    p = tmp_path / "huge.pgm"
+    # Sparse: 1 GB of zero pixels after a tiny header.
+    header = b"P5\n200 100\n255\n"
+    with p.open("wb") as f:
+        f.write(header)
+        f.truncate(len(header) + (1 << 30))
+
+    # Spy on Path.open so we can record the read() byte counts.
+    real_open = Path.open
+    read_sizes: list[int] = []
+
+    def spy_open(self: Path, *args: object, **kwargs: object) -> object:
+        f = real_open(self, *args, **kwargs)
+        real_read = f.read
+
+        def spy_read(n: int = -1) -> bytes:
+            read_sizes.append(n)
+            return real_read(n)
+
+        f.read = spy_read  # type: ignore[method-assign]
+        return f
+
+    monkeypatch.setattr(Path, "open", spy_open)
+
+    assert M.read_pgm_dimensions(p) == (200, 100)
+    # Exactly one read() call, capped at PGM_HEADER_MAX_BYTES.
+    assert read_sizes == [PGM_HEADER_MAX_BYTES]

@@ -15,10 +15,38 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { flushSync, mount, unmount } from 'svelte';
+// Track D scale fix: stub the metadata loader BEFORE importing
+// PoseCanvas. The freshness test wants to control `mapMetadata`
+// directly via the store; PoseCanvas's $effect would otherwise
+// synchronously null the store and fetch into jsdom-stubbed
+// endpoints we don't care about.
+vi.mock('../../src/stores/mapMetadata', async () => {
+  const actual = await vi.importActual<typeof import('../../src/stores/mapMetadata')>(
+    '../../src/stores/mapMetadata',
+  );
+  return {
+    ...actual,
+    loadMapMetadata: vi.fn(async () => {}),
+  };
+});
 import PoseCanvas from '../../src/components/PoseCanvas.svelte';
 import { configureAuth } from '../../src/lib/api';
 import { MAP_SCAN_FRESHNESS_MS } from '../../src/lib/constants';
-import type { LastScan } from '../../src/lib/protocol';
+import type { LastScan, MapMetadata } from '../../src/lib/protocol';
+import { _resetMapMetadataForTests, mapMetadata } from '../../src/stores/mapMetadata';
+
+// Track D scale fix: PoseCanvas's scan overlay is now gated on
+// `mapMetadata` being non-null. Inject an identity metadata snapshot
+// before each mount so the freshness gate can run end-to-end.
+const _IDENTITY_META: MapMetadata = {
+  image: 'studio.pgm',
+  resolution: 0.05,
+  origin: [0, 0, 0],
+  negate: 0,
+  width: 200,
+  height: 100,
+  source_url: '/api/map/image',
+};
 
 interface CleanupFn {
   (): void;
@@ -51,6 +79,8 @@ function makeFake2DContext(): CanvasRenderingContext2D {
 
 beforeEach(() => {
   configureAuth({ getToken: () => 'tok', onUnauthorized: () => {} });
+  _resetMapMetadataForTests();
+  mapMetadata.set(_IDENTITY_META);
   // Stub /api/map/image — return a plain ArrayBuffer-backed Response so
   // the onMount path's `.blob()` call works in jsdom (the Blob+stream
   // path is finicky on this Node version).
@@ -132,6 +162,43 @@ describe('PoseCanvas — Mode-A M2 freshness gate', () => {
 
     const wrap = target.querySelector<HTMLDivElement>('[data-testid="pose-canvas-wrap"]');
     expect(wrap).not.toBeNull();
+    expect(wrap!.getAttribute('data-scan-fresh')).toBe('true');
+  });
+
+  // Mode-A S5 fold: scan arrives at t=0; metadata fetch resolves at
+  // t=400ms; first redraw runs at t=400ms; data-scan-fresh stays true
+  // because Date.now() - 0 = 400 < MAP_SCAN_FRESHNESS_MS (1000).
+  it('Mode-A S5: scan stays fresh when metadata resolves at t=400ms (well within MAP_SCAN_FRESHNESS_MS)', () => {
+    vi.useFakeTimers();
+    const t0 = new Date('2026-04-29T00:00:00Z').getTime();
+    vi.setSystemTime(t0);
+
+    // Start with no metadata so the scan overlay is suppressed.
+    _resetMapMetadataForTests();
+
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+
+    const component = mount(PoseCanvas, {
+      target,
+      props: { pose: null, scan: makeScan(t0), scanOverlayOn: true },
+    });
+    cleanups.push(() => unmount(component));
+    flushSync();
+
+    // Pre-meta: overlay suppressed → data-scan-count = 0.
+    let wrap = target.querySelector<HTMLDivElement>('[data-testid="pose-canvas-wrap"]');
+    expect(wrap!.getAttribute('data-scan-count')).toBe('0');
+
+    // Advance to t=400ms; metadata fetch resolves; redraw runs.
+    vi.advanceTimersByTime(400);
+    mapMetadata.set(_IDENTITY_META);
+    flushSync();
+
+    wrap = target.querySelector<HTMLDivElement>('[data-testid="pose-canvas-wrap"]');
+    // data-scan-count should now be > 0 (overlay was rendered) AND
+    // data-scan-fresh should be "true" because 400 ms < 1000 ms.
+    expect(Number(wrap!.getAttribute('data-scan-count') ?? 0)).toBeGreaterThan(0);
     expect(wrap!.getAttribute('data-scan-fresh')).toBe('true');
   });
 

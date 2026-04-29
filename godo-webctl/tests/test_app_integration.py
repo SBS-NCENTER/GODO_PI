@@ -1328,6 +1328,85 @@ async def test_get_map_yaml_named_bad_name_returns_400(
     assert r.status_code == HTTPStatus.BAD_REQUEST
 
 
+# ---- GET /api/maps/<name>/dimensions (Track D scale fix) ---------------
+
+
+async def test_get_map_dimensions_returns_width_height(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    tmp_maps_dir: Path,
+) -> None:
+    """tmp_maps_dir's PGM is 4×4 — the dimensions endpoint reads the
+    netpbm header (no Pillow) and returns the expected JSON shape."""
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        maps_dir=tmp_maps_dir,
+    )
+    async with _client(s) as cl:
+        r = await cl.get("/api/maps/studio_v1/dimensions")
+    assert r.status_code == HTTPStatus.OK, r.text
+    body = r.json()
+    assert body == {"width": 4, "height": 4}
+
+
+async def test_get_map_dimensions_unknown_returns_404(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    tmp_maps_dir: Path,
+) -> None:
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        maps_dir=tmp_maps_dir,
+    )
+    async with _client(s) as cl:
+        r = await cl.get("/api/maps/studio_vX/dimensions")
+    assert r.status_code == HTTPStatus.NOT_FOUND
+    assert r.json()["err"] == "map_not_found"
+
+
+async def test_get_map_dimensions_invalid_name_returns_400(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    tmp_maps_dir: Path,
+) -> None:
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        maps_dir=tmp_maps_dir,
+    )
+    async with _client(s) as cl:
+        r = await cl.get("/api/maps/.hidden/dimensions")
+    assert r.status_code == HTTPStatus.BAD_REQUEST
+    assert r.json()["err"] == "invalid_map_name"
+
+
+async def test_get_map_dimensions_malformed_pgm_returns_500(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    tmp_maps_dir: Path,
+) -> None:
+    """T5: a PGM lacking the `P5` magic surfaces as 500 map_invalid via
+    `PgmHeaderInvalid` raised in `maps.py` (NOT a reverse import from
+    `map_image.py::MapImageInvalid`)."""
+    bad = tmp_maps_dir / "studio_v1.pgm"
+    bad.write_bytes(b"NOTP5\n4 4\n255\n" + bytes([128] * 16))
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        maps_dir=tmp_maps_dir,
+    )
+    async with _client(s) as cl:
+        r = await cl.get("/api/maps/studio_v1/dimensions")
+    assert r.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
+    assert r.json()["err"] == "map_invalid"
+
+
 # ---- POST /api/maps/<name>/activate (admin) -----------------------------
 
 

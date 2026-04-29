@@ -139,6 +139,42 @@ test('map: toggling scan overlay off clears the dot count to 0', async ({ page }
   );
 });
 
+test('map: scan overlay survives wheel-zoom (Track D scale fix)', async ({ page }) => {
+  // Track D scale fix — toggle overlay ON, wheel-zoom in 3 times,
+  // assert the overlay stays at 5 dots and stays fresh. Pixel-exact
+  // alignment is covered by the deterministic unit math in §C; this
+  // case is end-to-end integration sanity (YAML + dimensions both
+  // fetched, no console errors, dot count stable through zoom).
+  await loginAs(page);
+  await page.goto('/#/map');
+  const toggle = page.locator('[data-testid="scan-toggle-btn"]');
+  await toggle.click();
+  await expect(page.locator('[data-testid="pose-canvas-wrap"]')).toHaveAttribute(
+    'data-scan-count',
+    '5',
+    { timeout: 5000 },
+  );
+
+  // Move into the canvas and wheel-zoom in 3 times.
+  const canvas = page.locator('[data-testid="pose-canvas"]');
+  const box = await canvas.boundingBox();
+  if (!box) throw new Error('canvas not laid out');
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  for (let i = 0; i < 3; i++) {
+    await page.mouse.wheel(0, -100);
+  }
+
+  // After zoom, dot count stays at 5 and overlay stays fresh.
+  await expect(page.locator('[data-testid="pose-canvas-wrap"]')).toHaveAttribute(
+    'data-scan-count',
+    '5',
+  );
+  await expect(page.locator('[data-testid="pose-canvas-wrap"]')).toHaveAttribute(
+    'data-scan-fresh',
+    'true',
+  );
+});
+
 test('map: scan toggle state persists through same-tab reload (sessionStorage)', async ({
   page,
 }) => {

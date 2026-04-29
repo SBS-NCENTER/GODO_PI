@@ -53,6 +53,7 @@ from .constants import (
     MAPS_ACTIVATE_LOCK_BASENAME,
     MAPS_ACTIVE_BASENAME,
     MAPS_NAME_REGEX,
+    PGM_HEADER_MAX_BYTES,
 )
 
 logger = logging.getLogger("godo_webctl.maps")
@@ -83,6 +84,13 @@ class MapIsActive(RuntimeError):
 
 class MapsDirMissing(FileNotFoundError):
     """`maps_dir` itself does not exist."""
+
+
+class PgmHeaderInvalid(ValueError):
+    """Track D scale fix — `read_pgm_dimensions` could not parse the
+    netpbm `P5` header (missing magic, missing width/height tokens, or
+    non-numeric tokens). Lives here (NOT in `map_image.py`) to preserve
+    `maps.py`'s Pillow-free invariant per its module docstring."""
 
 
 # --- Data class ---------------------------------------------------------
@@ -169,6 +177,67 @@ def is_pair_present(maps_dir: Path, name: str) -> bool:
     _check_inside_maps_dir(pgm, maps_dir)
     _check_inside_maps_dir(yaml, maps_dir)
     return True
+
+
+# --- PGM header reader (Track D scale fix) -----------------------------
+
+
+def read_pgm_dimensions(pgm_path: Path) -> tuple[int, int]:
+    """Read the netpbm `P5` text header and return `(width, height)`.
+
+    netpbm `P5` (raw grayscale) header structure (whitespace-separated
+    ASCII):
+
+        P5
+        # optional comment line(s)
+        <width> <height>
+        <maxval>
+        <binary pixel data>
+
+    The header fits comfortably in `PGM_HEADER_MAX_BYTES = 64` bytes for
+    every map we handle (200×200 → "P5\\n200 200\\n255\\n" = 16 bytes).
+    We READ AT MOST that many bytes from the file regardless of total
+    file size — so a 1 GB sparse PGM never streams pixel data through
+    Python.
+
+    Raises:
+        PgmHeaderInvalid — magic missing, dimensions missing/non-numeric.
+        OSError — propagated from `Path.open` / `read` (caller maps).
+    """
+    with pgm_path.open("rb") as f:
+        head = f.read(PGM_HEADER_MAX_BYTES)
+    if not head.startswith(b"P5"):
+        raise PgmHeaderInvalid("missing_p5_magic")
+    # Drop the magic, then split on any whitespace and skip comment
+    # tokens (whole-line `#…\n` chunks).
+    rest = head[2:]
+    tokens: list[bytes] = []
+    i = 0
+    while i < len(rest) and len(tokens) < 2:
+        ch = rest[i : i + 1]
+        if ch in (b" ", b"\t", b"\n", b"\r"):
+            i += 1
+            continue
+        if ch == b"#":
+            # Skip the rest of the comment line.
+            while i < len(rest) and rest[i : i + 1] not in (b"\n", b"\r"):
+                i += 1
+            continue
+        # Read a non-whitespace token.
+        start = i
+        while i < len(rest) and rest[i : i + 1] not in (b" ", b"\t", b"\n", b"\r", b"#"):
+            i += 1
+        tokens.append(rest[start:i])
+    if len(tokens) < 2:
+        raise PgmHeaderInvalid("missing_dimensions")
+    try:
+        width = int(tokens[0])
+        height = int(tokens[1])
+    except ValueError as e:
+        raise PgmHeaderInvalid(f"non_numeric_dimension: {e}") from e
+    if width <= 0 or height <= 0:
+        raise PgmHeaderInvalid(f"non_positive_dimension: {width}x{height}")
+    return (width, height)
 
 
 # --- Active-symlink readers --------------------------------------------

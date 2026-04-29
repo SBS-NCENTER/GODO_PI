@@ -9,7 +9,6 @@
     MAP_HEADING_LINE_WIDTH_PX,
     MAP_MAX_ZOOM,
     MAP_MIN_ZOOM,
-    MAP_PIXELS_PER_METER,
     MAP_POSE_COLOR,
     MAP_POSE_DOT_RADIUS_PX,
     MAP_POSE_HEADING_LEN_PX,
@@ -23,8 +22,9 @@
     MAP_TRAIL_MAX_OPACITY,
     MAP_WHEEL_ZOOM_FACTOR,
   } from '$lib/constants';
-  import type { LastPose, LastScan } from '$lib/protocol';
+  import type { LastPose, LastScan, MapMetadata } from '$lib/protocol';
   import { projectScanToWorld } from '$lib/scanTransform';
+  import { loadMapMetadata, mapMetadata, mapMetadataError } from '$stores/mapMetadata';
 
   interface Props {
     pose: LastPose | null;
@@ -51,6 +51,18 @@
   let dragStartX = 0;
   let dragStartY = 0;
   let hoverWorld = $state<{ x: number; y: number } | null>(null);
+  // Track D scale fix — subscribe to the resolution-aware metadata store.
+  // While `meta === null` we render the map and pose layers (back-compat
+  // for /api/map/image 404 fallback) but suppress the scan overlay (its
+  // pixel math depends on width/height/origin).
+  let meta = $state<MapMetadata | null>(null);
+  let metaError = $state<string | null>(null);
+  const _metaUnsub = mapMetadata.subscribe((v) => {
+    meta = v;
+  });
+  const _metaErrUnsub = mapMetadataError.subscribe((v) => {
+    metaError = v;
+  });
   // Track D — exposed on the wrap div for e2e selector reliability
   // (Q-OQ-D9). Equals the count of scan dots actually rendered last
   // redraw, or 0 when the overlay is off / stale / hidden.
@@ -80,6 +92,8 @@
     void mapImageUrl;
     void scan;
     void scanOverlayOn;
+    void meta;
+    void metaError;
     redraw();
   });
 
@@ -106,20 +120,49 @@
     return loadImage(blobUrl);
   }
 
+  /**
+   * Track D scale fix — resolution-aware world↔canvas conversion.
+   *
+   * Math (per .claude/tmp/plan_track_d_scale_yflip.md §Math):
+   *
+   *   img_col = (wx - origin_x) / resolution
+   *   img_row = (height - 1) - (wy - origin_y) / resolution     ← Y-flip
+   *
+   *   cx = canvas.width  / 2 + panX + (img_col - width  / 2) * zoom
+   *   cy = canvas.height / 2 + panY + (img_row - height / 2) * zoom
+   *
+   * When `meta === null` (loading or fetch failed) we fall back to a
+   * world-origin-centred canvas so the pose dot still renders. Scan
+   * overlay rendering is gated on metadata being present (see redraw).
+   */
   function worldToCanvas(wx: number, wy: number): [number, number] {
     if (!canvas) return [0, 0];
-    // World origin at canvas center; +y world = up.
-    const ppm = zoom * MAP_PIXELS_PER_METER;
-    const cx = canvas.width / 2 + panX + wx * ppm;
-    const cy = canvas.height / 2 + panY - wy * ppm;
+    const m = meta;
+    if (!m) {
+      // Back-compat fallback: a centred Cartesian world frame at 1 px/m
+      // gated only on `zoom`. The pose dot still renders so an operator
+      // sees SOMETHING while metadata is loading. The scan overlay is
+      // suppressed in this branch (see redraw).
+      return [canvas.width / 2 + panX + wx * zoom, canvas.height / 2 + panY - wy * zoom];
+    }
+    const imgCol = (wx - m.origin[0]) / m.resolution;
+    const imgRow = m.height - 1 - (wy - m.origin[1]) / m.resolution;
+    const cx = canvas.width / 2 + panX + (imgCol - m.width / 2) * zoom;
+    const cy = canvas.height / 2 + panY + (imgRow - m.height / 2) * zoom;
     return [cx, cy];
   }
 
   function canvasToWorld(cx: number, cy: number): [number, number] {
     if (!canvas) return [0, 0];
-    const ppm = zoom * MAP_PIXELS_PER_METER;
-    const wx = (cx - canvas.width / 2 - panX) / ppm;
-    const wy = -(cy - canvas.height / 2 - panY) / ppm;
+    const m = meta;
+    if (!m) {
+      return [(cx - canvas.width / 2 - panX) / zoom, -(cy - canvas.height / 2 - panY) / zoom];
+    }
+    // Inverse algebra of worldToCanvas.
+    const imgCol = (cx - canvas.width / 2 - panX) / zoom + m.width / 2;
+    const imgRow = (cy - canvas.height / 2 - panY) / zoom + m.height / 2;
+    const wx = imgCol * m.resolution + m.origin[0];
+    const wy = (m.height - 1 - imgRow) * m.resolution + m.origin[1];
     return [wx, wy];
   }
 
@@ -168,11 +211,13 @@
     }
 
     // Track D — scan overlay layer (between map and trail). Gated on the
-    // operator-controlled `scanOverlayOn` toggle and the freshness
-    // budget (Mode-A M2 — arrival-wall-clock, NOT published_mono_ns).
+    // operator-controlled `scanOverlayOn` toggle, the freshness
+    // budget (Mode-A M2 — arrival-wall-clock, NOT published_mono_ns),
+    // AND the metadata being loaded (Track D scale fix — without
+    // resolution/origin/height the world↔canvas math has no anchor).
     let drawnDots = 0;
     let isFresh = false;
-    if (scanOverlayOn && scan) {
+    if (scanOverlayOn && scan && meta) {
       const arrival = scan._arrival_ms ?? 0;
       isFresh = arrival > 0 && Date.now() - arrival < MAP_SCAN_FRESHNESS_MS;
       if (isFresh) {
@@ -252,6 +297,24 @@
       canvas.width = Math.max(rect.width, MAP_CANVAS_MIN_WIDTH_PX);
       canvas.height = Math.max(rect.height, MAP_CANVAS_MIN_HEIGHT_PX);
     }
+  });
+
+  /**
+   * Track D scale fix (Mode-A M3) — refetch BOTH the bitmap and the
+   * metadata whenever `mapImageUrl` changes. The pre-fix code only
+   * fetched the bitmap inside `onMount`, so a `previewUrl` change in
+   * `MapListPanel` repointed the canvas's coords to the new map but
+   * left the bitmap pointed at the old one (silently mis-rendering).
+   *
+   * Pinned by `tests/unit/poseCanvasImageReload.test.ts`.
+   */
+  $effect(() => {
+    void mapImageUrl;
+    refetchImage();
+    void loadMapMetadata(mapImageUrl);
+  });
+
+  function refetchImage(): void {
     void fetchMapImageAuthed(mapImageUrl)
       .then((i) => {
         img = i;
@@ -268,9 +331,11 @@
         else mapLoadError = '맵 이미지를 불러오지 못했습니다.';
         redraw();
       });
-  });
+  }
 
   onDestroy(() => {
+    _metaUnsub();
+    _metaErrUnsub();
     if (blobUrl !== null) URL.revokeObjectURL(blobUrl);
     blobUrl = null;
     img = null;
@@ -299,6 +364,16 @@
   {/if}
   {#if mapLoadError}
     <div class="map-error muted" data-testid="map-error">{mapLoadError}</div>
+  {/if}
+  {#if metaError}
+    <div class="map-error muted" data-testid="map-meta-error">
+      맵 메타데이터 파싱 실패: {metaError}
+    </div>
+  {/if}
+  {#if meta && meta.origin[2] !== 0}
+    <div class="map-error muted" data-testid="map-theta-warning">
+      이 맵은 회전 정보(theta)를 갖지만 SPA가 회전을 그리지 못합니다 — 좌표가 어긋날 수 있습니다.
+    </div>
   {/if}
 </div>
 

@@ -7,7 +7,7 @@ Two sets:
       that does not have the full repo checked out.
   (b) Real-source — load `production/RPi5/src/core/config_schema.hpp`
       by real path and assert the parsed shape matches the C++ pin
-      (37 rows; per-field types). Mirrors test_protocol.py's
+      (40 rows; per-field types). Mirrors test_protocol.py's
       LAST_POSE_FIELDS pin pattern.
 
 `test_config_schema_parity.py` (separate file) is the cross-language
@@ -23,7 +23,7 @@ import pytest
 from godo_webctl import config_schema as schema_mod
 
 
-def _make_synthetic_source(rows_text: str, expected: int = 37) -> str:
+def _make_synthetic_source(rows_text: str, expected: int = 40) -> str:
     """Wrap a row-text block in a minimal C++ source that the parser
     accepts. We do NOT need the real header structure — only the
     `{"...", ValueType::..., ...}` initializers."""
@@ -93,24 +93,24 @@ def test_parse_three_rows_preserves_order() -> None:
 
 
 def test_parse_rejects_short_row_count(tmp_path: Path) -> None:
-    """The default `EXPECTED_ROW_COUNT` is 37; a 1-row file via the
+    """The default `EXPECTED_ROW_COUNT` is 40; a 1-row file via the
     public path raises."""
     src = _make_synthetic_source(
         '{"a.x", ValueType::Int, 0.0, 10.0, "1", ReloadClass::Hot, "f"},',
-        expected=37,  # the wrapper claims 37, but only 1 row in body
+        expected=40,  # the wrapper claims 40, but only 1 row in body
     )
     src_path = tmp_path / "config_schema.hpp"
     src_path.write_text(src)
     with pytest.raises(schema_mod.ConfigSchemaError) as ei:
         schema_mod.load_schema(source_path=src_path)
     assert "1" in str(ei.value)
-    assert "37" in str(ei.value)
+    assert "40" in str(ei.value)
 
 
-def test_load_schema_real_source_returns_37_rows() -> None:
+def test_load_schema_real_source_returns_40_rows() -> None:
     """TB1 fold: load by real path; pin row count + alphabetical sort."""
     rows = schema_mod.load_schema()
-    assert len(rows) == 37
+    assert len(rows) == 40
     # Alphabetical (matches the C++ pin in config_schema.hpp).
     names = [r.name for r in rows]
     assert names == sorted(names)

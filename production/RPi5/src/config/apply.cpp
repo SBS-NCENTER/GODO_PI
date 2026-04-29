@@ -1,10 +1,14 @@
 #include "apply.hpp"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "atomic_toml_writer.hpp"
 #include "core/time.hpp"
@@ -44,12 +48,117 @@ struct EffectiveValue {
     std::string as_string;
 };
 
+// Track D-5 — Local CSV parsers, mirroring the ones in core/config.cpp.
+// Duplicated (rather than exported) because the config namespace's
+// anonymous-namespace helpers stay private; the alternative would be to
+// expose them via core/config.hpp, churning that header.
+std::vector<double> apply_parse_csv_doubles(std::string_view src) {
+    std::vector<double> out;
+    std::string token;
+    bool any = false;
+    auto flush = [&]() {
+        std::size_t a = 0, b = token.size();
+        while (a < b && std::isspace(static_cast<unsigned char>(token[a]))) ++a;
+        while (b > a && std::isspace(static_cast<unsigned char>(token[b - 1]))) --b;
+        if (a == b) {
+            throw std::runtime_error("schedule has empty entry");
+        }
+        const std::string trimmed = token.substr(a, b - a);
+        char* end = nullptr;
+        const double v = std::strtod(trimmed.c_str(), &end);
+        if (end == nullptr || *end != '\0') {
+            throw std::runtime_error("schedule entry not a valid number: " + trimmed);
+        }
+        out.push_back(v);
+        token.clear();
+    };
+    for (char c : src) {
+        if (c == ',') { flush(); any = true; }
+        else { token.push_back(c); any = true; }
+    }
+    if (!any) throw std::runtime_error("schedule must be non-empty");
+    flush();
+    return out;
+}
+
+std::vector<double> apply_parse_csv_doubles_with_sentinel(std::string_view src) {
+    std::vector<double> out;
+    std::string token;
+    bool any = false;
+    bool first = true;
+    auto flush = [&]() {
+        std::size_t a = 0, b = token.size();
+        while (a < b && std::isspace(static_cast<unsigned char>(token[a]))) ++a;
+        while (b > a && std::isspace(static_cast<unsigned char>(token[b - 1]))) --b;
+        if (a == b) {
+            throw std::runtime_error("schedule has empty entry");
+        }
+        const std::string trimmed = token.substr(a, b - a);
+        if (first) {
+            if (trimmed != "-") {
+                throw std::runtime_error("first entry must be sentinel '-'");
+            }
+            out.push_back(std::numeric_limits<double>::quiet_NaN());
+            first = false;
+        } else {
+            char* end = nullptr;
+            const double v = std::strtod(trimmed.c_str(), &end);
+            if (end == nullptr || *end != '\0') {
+                throw std::runtime_error("schedule entry not a valid number: " + trimmed);
+            }
+            if (!(v > 0.0)) {
+                throw std::runtime_error("schedule entry must be > 0: " + trimmed);
+            }
+            out.push_back(v);
+        }
+        token.clear();
+    };
+    for (char c : src) {
+        if (c == ',') { flush(); any = true; }
+        else { token.push_back(c); any = true; }
+    }
+    if (!any) throw std::runtime_error("schedule must be non-empty");
+    flush();
+    return out;
+}
+
+// Track D-5 — Render an annealing schedule (CSV doubles or sentinel-aware)
+// back to its operator-readable string form. Mirrors the parser side in
+// core/config.cpp's parse_csv_doubles_or_throw /
+// parse_csv_doubles_with_sentinel_or_throw.
+std::string format_schedule_csv(const std::vector<double>& vec) {
+    std::string out;
+    for (std::size_t i = 0; i < vec.size(); ++i) {
+        if (i > 0) out.push_back(',');
+        char buf[64];
+        const int n = std::snprintf(buf, sizeof(buf), "%.9g", vec[i]);
+        if (n > 0) out.append(buf, static_cast<std::size_t>(n));
+    }
+    return out;
+}
+
+std::string format_schedule_csv_sentinel(const std::vector<double>& vec) {
+    std::string out;
+    for (std::size_t i = 0; i < vec.size(); ++i) {
+        if (i > 0) out.push_back(',');
+        if (i == 0 || std::isnan(vec[i])) {
+            out.push_back('-');
+        } else {
+            char buf[64];
+            const int n = std::snprintf(buf, sizeof(buf), "%.9g", vec[i]);
+            if (n > 0) out.append(buf, static_cast<std::size_t>(n));
+        }
+    }
+    return out;
+}
+
 EffectiveValue read_effective(const Config& c, const ConfigSchemaRow& row) {
     EffectiveValue v;
     v.type = row.type;
     const std::string_view k = row.name;
     // Sections by alphabetical name — matches the schema ordering.
-    if      (k == "amcl.converge_xy_std_m")          v.as_double = c.amcl_converge_xy_std_m;
+    if      (k == "amcl.anneal_iters_per_phase")     v.as_int    = c.amcl_anneal_iters_per_phase;
+    else if (k == "amcl.converge_xy_std_m")          v.as_double = c.amcl_converge_xy_std_m;
     else if (k == "amcl.converge_yaw_std_deg")       v.as_double = c.amcl_converge_yaw_std_deg;
     else if (k == "amcl.downsample_stride")          v.as_int    = c.amcl_downsample_stride;
     else if (k == "amcl.map_path")                   v.as_string = c.amcl_map_path;
@@ -62,7 +171,9 @@ EffectiveValue read_effective(const Config& c, const ConfigSchemaRow& row) {
     else if (k == "amcl.range_max_m")                v.as_double = c.amcl_range_max_m;
     else if (k == "amcl.range_min_m")                v.as_double = c.amcl_range_min_m;
     else if (k == "amcl.sigma_hit_m")                v.as_double = c.amcl_sigma_hit_m;
+    else if (k == "amcl.sigma_hit_schedule_m")       v.as_string = format_schedule_csv(c.amcl_sigma_hit_schedule_m);
     else if (k == "amcl.sigma_seed_xy_m")            v.as_double = c.amcl_sigma_seed_xy_m;
+    else if (k == "amcl.sigma_seed_xy_schedule_m")   v.as_string = format_schedule_csv_sentinel(c.amcl_sigma_seed_xy_schedule_m);
     else if (k == "amcl.sigma_seed_yaw_deg")         v.as_double = c.amcl_sigma_seed_yaw_deg;
     else if (k == "amcl.sigma_xy_jitter_live_m")     v.as_double = c.amcl_sigma_xy_jitter_live_m;
     else if (k == "amcl.sigma_xy_jitter_m")          v.as_double = c.amcl_sigma_xy_jitter_m;
@@ -96,7 +207,8 @@ bool apply_one(Config& c,
                const ConfigSchemaRow& row,
                const ValidateResult& vr) {
     const std::string_view k = row.name;
-    if      (k == "amcl.converge_xy_std_m")          c.amcl_converge_xy_std_m          = vr.parsed_double;
+    if      (k == "amcl.anneal_iters_per_phase")     c.amcl_anneal_iters_per_phase     = static_cast<int>(vr.parsed_double);
+    else if (k == "amcl.converge_xy_std_m")          c.amcl_converge_xy_std_m          = vr.parsed_double;
     else if (k == "amcl.converge_yaw_std_deg")       c.amcl_converge_yaw_std_deg       = vr.parsed_double;
     else if (k == "amcl.downsample_stride")          c.amcl_downsample_stride          = static_cast<int>(vr.parsed_double);
     else if (k == "amcl.map_path")                   c.amcl_map_path                   = vr.parsed_string;
@@ -109,7 +221,9 @@ bool apply_one(Config& c,
     else if (k == "amcl.range_max_m")                c.amcl_range_max_m                = vr.parsed_double;
     else if (k == "amcl.range_min_m")                c.amcl_range_min_m                = vr.parsed_double;
     else if (k == "amcl.sigma_hit_m")                c.amcl_sigma_hit_m                = vr.parsed_double;
+    else if (k == "amcl.sigma_hit_schedule_m")       c.amcl_sigma_hit_schedule_m       = apply_parse_csv_doubles(vr.parsed_string);
     else if (k == "amcl.sigma_seed_xy_m")            c.amcl_sigma_seed_xy_m            = vr.parsed_double;
+    else if (k == "amcl.sigma_seed_xy_schedule_m")   c.amcl_sigma_seed_xy_schedule_m   = apply_parse_csv_doubles_with_sentinel(vr.parsed_string);
     else if (k == "amcl.sigma_seed_yaw_deg")         c.amcl_sigma_seed_yaw_deg         = vr.parsed_double;
     else if (k == "amcl.sigma_xy_jitter_live_m")     c.amcl_sigma_xy_jitter_live_m     = vr.parsed_double;
     else if (k == "amcl.sigma_xy_jitter_m")          c.amcl_sigma_xy_jitter_m          = vr.parsed_double;
@@ -229,12 +343,66 @@ ApplyResult apply_set(std::string_view                              key,
     std::lock_guard<std::mutex> lock(live_cfg_mtx);
 
     Config staging = live_cfg;
-    if (!apply_one(staging, *vr.row, vr)) {
-        // Schema↔Config drift — should be caught by parity test.
-        ar.err        = "internal_error";
-        ar.err_detail = "schema row has no Config applicator: ";
-        ar.err_detail.append(vr.row->name);
+    try {
+        if (!apply_one(staging, *vr.row, vr)) {
+            // Schema↔Config drift — should be caught by parity test.
+            ar.err        = "internal_error";
+            ar.err_detail = "schema row has no Config applicator: ";
+            ar.err_detail.append(vr.row->name);
+            return ar;
+        }
+    } catch (const std::exception& e) {
+        // Track D-5: schedule-key parse failures throw out of apply_one.
+        // Map to bad_value so the operator gets an actionable message.
+        ar.err        = "bad_value";
+        ar.err_detail = vr.row->name;
+        ar.err_detail.append(": ");
+        ar.err_detail.append(e.what());
         return ar;
+    }
+
+    // Track D-5: re-validate amcl-schedule cross-field invariants
+    // (length match, monotonicity) before commit. validate_amcl in
+    // core/config.cpp would catch these on the next Config::load, but
+    // operator-set keys must reject inconsistent payloads at apply time.
+    if (vr.row->name == "amcl.sigma_hit_schedule_m" ||
+        vr.row->name == "amcl.sigma_seed_xy_schedule_m") {
+        if (staging.amcl_sigma_hit_schedule_m.size() !=
+            staging.amcl_sigma_seed_xy_schedule_m.size()) {
+            ar.err        = "bad_value";
+            ar.err_detail = vr.row->name;
+            ar.err_detail.append(": schedule length must match the paired "
+                                 "sigma_*_schedule_m key");
+            return ar;
+        }
+        // Monotonic-decreasing check on sigma_hit_schedule.
+        for (std::size_t i = 1;
+             i < staging.amcl_sigma_hit_schedule_m.size();
+             ++i) {
+            const double prev = staging.amcl_sigma_hit_schedule_m[i - 1];
+            const double curr = staging.amcl_sigma_hit_schedule_m[i];
+            if (!(curr < prev)) {
+                ar.err        = "bad_value";
+                ar.err_detail = "amcl.sigma_hit_schedule_m: must be "
+                                "strictly monotonically decreasing";
+                return ar;
+            }
+            if (!(curr >= 0.005) || !(curr <= 5.0)) {
+                ar.err        = "bad_value";
+                ar.err_detail = "amcl.sigma_hit_schedule_m: each entry must "
+                                "be in [0.005, 5.0]";
+                return ar;
+            }
+        }
+        if (!staging.amcl_sigma_hit_schedule_m.empty()) {
+            const double v0 = staging.amcl_sigma_hit_schedule_m[0];
+            if (!(v0 >= 0.005) || !(v0 <= 5.0)) {
+                ar.err        = "bad_value";
+                ar.err_detail = "amcl.sigma_hit_schedule_m: each entry must "
+                                "be in [0.005, 5.0]";
+                return ar;
+            }
+        }
     }
 
     const std::string body = render_toml(staging);

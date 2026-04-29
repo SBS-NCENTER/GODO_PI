@@ -106,6 +106,26 @@ Pre-fix baseline was ~1 / 30 ≈ 3 %; post-fix ≥ 7 / 10 = 70 % is the
 expected step change. Anything in between is informative for Tier-2
 retuning but does not block Track D-3 specifically.
 
+### Track D-5 update (2026-04-29 22:30 KST)
+
+Track D-5 (`fix/track-d-5-sigma-annealing`) introduces coarse-to-fine
+sigma_hit annealing for OneShot AMCL. Empirical motivation: the 21:00
+KST sweep (`.claude/memory/project_amcl_sigma_sweep_2026-04-29.md`)
+showed σ=0.05 default gives 0/10 convergences while σ=1.0 gives 2/10
+single-basin and σ=0.2 gives 9/10 across 3 basins. A single σ cannot
+hit both basin-lock and final-precision simultaneously.
+
+Post-Track-D-5 expected gate: **k_post ≥ 8 / 10** with each converged
+pose's xy_err < 1.0 m. The schedule `[1.0, 0.5, 0.2, 0.1, 0.05]` runs
+phase 0 wide for unique basin lock, then progressively narrows σ down
+to the production default for cm-scale precision. Wall-clock budget
+~750 ms / OneShot.
+
+Operator rollback if Track D-5 regresses: set BOTH
+`amcl.sigma_hit_schedule_m = "0.05"` AND
+`amcl.anneal_iters_per_phase = 25` to restore pre-Track-D-5 single-σ
+behaviour.
+
 ## Tier-2 retuning trigger
 
 Per Track D-3 plan §Risks R2: declare AMCL oscillation if post-OneShot

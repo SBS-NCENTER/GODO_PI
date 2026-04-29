@@ -21,6 +21,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -88,6 +89,11 @@ Config make_test_config(std::uint64_t seed) {
     cfg.amcl_max_iters         = 5;
     cfg.amcl_particles_local_n = 200;
     cfg.amcl_particles_global_n= 200;
+    // Track D-5: collapse to single-phase annealing for test speed.
+    cfg.amcl_sigma_hit_schedule_m  = {0.05};
+    cfg.amcl_sigma_seed_xy_schedule_m =
+        {std::numeric_limits<double>::quiet_NaN()};
+    cfg.amcl_anneal_iters_per_phase = 5;
     cfg.amcl_map_path =
         std::string(GODO_FIXTURES_MAPS_DIR) + "/synthetic_4x4.pgm";
     return cfg;
@@ -121,7 +127,7 @@ TEST_CASE("last_pose_seq_published_before_idle_store") {
     CHECK(last_pose_seq.generation() == 0u);
 
     const Frame frame = make_synthetic_frame(360);
-    (void)run_one_iteration(cfg, frame, grid, amcl, rng, beams_buf,
+    (void)run_one_iteration(cfg, frame, grid, lf, amcl, rng, beams_buf,
                             last_pose, live_first_iter, last_written,
                             target_offset, last_pose_seq, last_scan_seq, amcl_rate_accum, hot_cfg_seq);
 

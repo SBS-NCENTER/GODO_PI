@@ -20,8 +20,8 @@ using godo::core::config_schema::reload_class_to_string;
 using godo::core::config_schema::ValueType;
 using godo::core::config_schema::value_type_to_string;
 
-TEST_CASE("CONFIG_SCHEMA has exactly 37 rows (Mode-A M2)") {
-    CHECK(CONFIG_SCHEMA.size() == 37);
+TEST_CASE("CONFIG_SCHEMA has exactly 40 rows (Track D-5)") {
+    CHECK(CONFIG_SCHEMA.size() == 40);
 }
 
 TEST_CASE("CONFIG_SCHEMA rows are alphabetically ordered by name") {
@@ -96,6 +96,27 @@ TEST_CASE("Mode-A M2: seed-σ rows present (count went 35 → 37)") {
     REQUIRE(seed_yaw != nullptr);
     CHECK(seed_xy->reload_class  == ReloadClass::Recalibrate);
     CHECK(seed_yaw->reload_class == ReloadClass::Recalibrate);
+}
+
+TEST_CASE("Track D-5: annealing rows present (count went 37 → 40)") {
+    const auto* sched     = find("amcl.sigma_hit_schedule_m");
+    const auto* seed_xy_s = find("amcl.sigma_seed_xy_schedule_m");
+    const auto* iters     = find("amcl.anneal_iters_per_phase");
+    REQUIRE(sched     != nullptr);
+    REQUIRE(seed_xy_s != nullptr);
+    REQUIRE(iters     != nullptr);
+    CHECK(sched->type     == ValueType::String);
+    CHECK(seed_xy_s->type == ValueType::String);
+    CHECK(iters->type     == ValueType::Int);
+    CHECK(sched->reload_class     == ReloadClass::Recalibrate);
+    CHECK(seed_xy_s->reload_class == ReloadClass::Recalibrate);
+    CHECK(iters->reload_class     == ReloadClass::Recalibrate);
+}
+
+TEST_CASE("Track D-5: amcl.sigma_hit_m upper bound bumped 1.0 → 5.0") {
+    const auto* row = find("amcl.sigma_hit_m");
+    REQUIRE(row != nullptr);
+    CHECK(row->max_d == 5.0);
 }
 
 TEST_CASE("Each row has a non-empty description and consistent name format") {

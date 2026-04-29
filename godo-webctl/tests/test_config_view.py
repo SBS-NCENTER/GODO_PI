@@ -39,7 +39,7 @@ def test_project_config_view_preserves_value_types() -> None:
 def test_project_schema_view_real_source() -> None:
     rows = schema_mod.load_schema()
     out = view_mod.project_schema_view(rows)
-    assert len(out) == 37
+    assert len(out) == 40
     assert all(isinstance(r, dict) for r in out)
     # Required keys per CONFIG_SCHEMA_ROW_FIELDS.
     for r in out:

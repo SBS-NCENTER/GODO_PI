@@ -8,6 +8,7 @@
 #include <doctest/doctest.h>
 
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -74,6 +75,13 @@ Config make_test_config(int seed) {
     cfg.amcl_particles_global_n= 200;
     cfg.amcl_map_path =
         std::string(GODO_FIXTURES_MAPS_DIR) + "/synthetic_4x4.pgm";
+    // Track D-5: collapse to single-phase annealing for test speed and
+    // for the rate accumulator's "exactly 1 record() per kernel call"
+    // contract — phase count does not affect record() count, but we
+    // keep this small to bound test wall-clock.
+    cfg.amcl_sigma_hit_schedule_m  = {0.05};
+    cfg.amcl_sigma_seed_xy_schedule_m = {std::numeric_limits<double>::quiet_NaN()};
+    cfg.amcl_anneal_iters_per_phase = 1;
     return cfg;
 }
 
@@ -96,7 +104,7 @@ TEST_CASE("run_one_iteration increments amcl_rate_accum exactly once") {
     Seqlock<godo::core::HotConfig> hot_cfg_seq;
 
     const Frame frame = make_synthetic_frame();
-    (void)run_one_iteration(cfg, frame, grid, amcl, rng, beams_buf,
+    (void)run_one_iteration(cfg, frame, grid, lf, amcl, rng, beams_buf,
                             last_pose, live_first_iter, last_written,
                             target_offset, last_pose_seq, last_scan_seq,
                             accum, hot_cfg_seq);

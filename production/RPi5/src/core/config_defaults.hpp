@@ -74,6 +74,23 @@ inline constexpr std::uint64_t    AMCL_SEED                = 0;       // 0 = tim
 inline constexpr double           AMCL_SIGMA_XY_JITTER_LIVE_M    = 0.015;  // 15 mm
 inline constexpr double           AMCL_SIGMA_YAW_JITTER_LIVE_DEG = 1.5;    // 3× OneShot
 
+// Track D-5 — Coarse-to-fine sigma_hit annealing for OneShot AMCL.
+// Schedule starts wide (σ=1.0 locks the basin per the 21:00 KST sweep:
+// 2/10 single-basin) and narrows to the production default σ=0.05 for
+// final cm-scale precision. Empirical motivation:
+// .claude/memory/project_amcl_sigma_sweep_2026-04-29.md.
+//
+// AMCL_SIGMA_SEED_XY_SCHEDULE_M is paired LENGTH-MATCHED with
+// AMCL_SIGMA_HIT_SCHEDULE_M; the first entry is the sentinel "-" because
+// phase 0 uses seed_global (no seed σ). Entries 1..N-1 must be positive
+// doubles. Live mode is unaffected — it uses the static AMCL_SIGMA_HIT_M
+// field, which the cold writer rebuilds at every OneShot completion.
+inline constexpr std::string_view AMCL_SIGMA_HIT_SCHEDULE_M      =
+    "1.0,0.5,0.2,0.1,0.05";
+inline constexpr std::string_view AMCL_SIGMA_SEED_XY_SCHEDULE_M  =
+    "-,0.10,0.05,0.03,0.02";
+inline constexpr int              AMCL_ANNEAL_ITERS_PER_PHASE    = 10;
+
 // Phase 4-2 D — GPIO BCM pin assignments. BCM 16 (calibrate button) and
 // BCM 20 (live-toggle button); active-low against PULL_UP. See
 // production/RPi5/doc/gpio_wiring.md (Wave B).

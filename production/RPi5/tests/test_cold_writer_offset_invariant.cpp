@@ -28,6 +28,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -107,6 +108,10 @@ TEST_CASE("run_one_iteration — published Offset is NaN/Inf-free with canonical
     cfg.amcl_max_iters              = 5;     // keep test fast
     cfg.amcl_particles_local_n      = 200;   // smaller for speed; still > N_eff threshold
     cfg.amcl_particles_global_n     = 200;
+    // Track D-5: collapse to single-phase annealing for test speed.
+    cfg.amcl_sigma_hit_schedule_m   = {0.05};
+    cfg.amcl_sigma_seed_xy_schedule_m = {std::numeric_limits<double>::quiet_NaN()};
+    cfg.amcl_anneal_iters_per_phase = 5;
     cfg.amcl_map_path =
         std::string(GODO_FIXTURES_MAPS_DIR) + "/synthetic_4x4.pgm";
 
@@ -126,7 +131,7 @@ TEST_CASE("run_one_iteration — published Offset is NaN/Inf-free with canonical
     Seqlock<godo::core::HotConfig> hot_cfg_seq;
 
     const Frame frame = make_synthetic_frame(360);
-    const auto result = run_one_iteration(cfg, frame, grid, amcl, rng,
+    const auto result = run_one_iteration(cfg, frame, grid, lf, amcl, rng,
                                           beams_buf, last_pose,
                                           live_first_iter, last_written,
                                           target_offset, last_pose_seq,
@@ -166,20 +171,28 @@ TEST_CASE("run_one_iteration — published Offset is NaN/Inf-free with canonical
 }
 
 TEST_CASE("run_one_iteration — second call still uses seed_global (no warm-seed shortcut)") {
-    // Phase 4-2 D pin: OneShot is unconditionally seed_global. The
+    // Phase 4-2 D pin: OneShot phase 0 is unconditionally seed_global. The
     // pre-Phase-4-2-D behaviour was first call seed_global, subsequent
     // seed_around — which let r2.iterations drop sharply on the second
     // call. Now both runs start from the same global seed cloud, so the
     // iteration counts must stay within ±20% (or ±2 iters, whichever is
     // larger — covers the small-iter floor where 20% rounds to zero).
     //
+    // Track D-5: schedule collapsed to length 1 so phase k>0 (which DOES
+    // seed_around) does not enter the picture; the test continues to pin
+    // the OneShot-phase-0 always-seed_global guarantee.
+    //
     // If a warm-seed regression silently re-introduces seed_around for
-    // OneShot, r2.iterations would collapse and this CHECK would fail.
+    // OneShot phase 0, r2.iterations would collapse and this CHECK
+    // would fail.
     Config cfg = Config::make_default();
     cfg.amcl_seed              = 7;
     cfg.amcl_max_iters         = 5;
     cfg.amcl_particles_local_n = 200;
     cfg.amcl_particles_global_n= 200;
+    cfg.amcl_sigma_hit_schedule_m   = {0.05};
+    cfg.amcl_sigma_seed_xy_schedule_m = {std::numeric_limits<double>::quiet_NaN()};
+    cfg.amcl_anneal_iters_per_phase = 5;
     cfg.amcl_map_path =
         std::string(GODO_FIXTURES_MAPS_DIR) + "/synthetic_4x4.pgm";
 
@@ -199,23 +212,23 @@ TEST_CASE("run_one_iteration — second call still uses seed_global (no warm-see
     Seqlock<godo::core::HotConfig> hot_cfg_seq;
     const Frame    frame = make_synthetic_frame(360);
 
-    const auto r1 = run_one_iteration(cfg, frame, grid, amcl, rng,
+    const auto r1 = run_one_iteration(cfg, frame, grid, lf, amcl, rng,
                                       beams_buf, last_pose, live_first_iter,
                                       last_written, target_offset,
                                       last_pose_seq, last_scan_seq, amcl_rate_accum, hot_cfg_seq);
     CHECK(live_first_iter == false);
     CHECK(r1.iterations >= 1);
-    CHECK(r1.iterations <= cfg.amcl_max_iters);
+    CHECK(r1.iterations <= cfg.amcl_anneal_iters_per_phase);
 
     // Second call: still seed_global per Phase 4-2 D. Iteration count
     // should be within ±20% of r1 (or ±2, whichever is larger).
-    const auto r2 = run_one_iteration(cfg, frame, grid, amcl, rng,
+    const auto r2 = run_one_iteration(cfg, frame, grid, lf, amcl, rng,
                                       beams_buf, last_pose, live_first_iter,
                                       last_written, target_offset,
                                       last_pose_seq, last_scan_seq, amcl_rate_accum, hot_cfg_seq);
     CHECK(live_first_iter == false);
     CHECK(r2.iterations >= 1);
-    CHECK(r2.iterations <= cfg.amcl_max_iters);
+    CHECK(r2.iterations <= cfg.amcl_anneal_iters_per_phase);
     CHECK(std::isfinite(r2.offset.dx));
     CHECK(std::isfinite(r2.offset.dy));
     CHECK(std::isfinite(r2.offset.dyaw));

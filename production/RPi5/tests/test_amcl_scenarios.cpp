@@ -22,12 +22,21 @@
 //      Phase 4-2 D adds a richer fixture or Phase 5 validates against a
 //      real studio map (where the chroma-set / two-doors geometry breaks
 //      the symmetry naturally).
+//   D. Track D-5 — annealing recovers from global ambiguity. Programmatic
+//      asymmetric grid (10×10 m room with an interior L-shaped obstacle)
+//      breaks the rotational symmetry. Pin: single-σ converge() at σ=0.05
+//      cannot recover from a uniform global seed cloud, but the annealing
+//      path (cold_writer.cpp::converge_anneal) does. Sub-checks: (1)
+//      single-σ baseline failure, (2) annealing happy path within tolerance
+//      and 5 s wall-clock, (3) schedule length 1 runs single-phase
+//      annealing.
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -222,3 +231,279 @@ TEST_CASE("AMCL Scenario B — small displacement converges with loose seed") {
 // deviations. Phase 4-2 D revives it once the fixture has an asymmetric
 // feature, OR Phase 5 validates global-seed convergence on the real studio
 // map directly.
+
+// ===========================================================================
+// Scenario D — Track D-5 sigma annealing recovers from global ambiguity.
+// ===========================================================================
+//
+// Programmatic asymmetric grid: 200×200 cells × 0.05 m = 10×10 m room
+// with a single L-shaped interior obstacle (1 m × 2 m rectangle at world
+// (3, 7)) that breaks rotational symmetry. We do NOT load this fixture
+// from disk — it is built in-memory so the asymmetry property can be
+// directly REQUIRE'd at the top of the test (Mode-A T1).
+//
+// Bias-block: the synthetic scans come from `synth_beams` (Bresenham)
+// while AMCL runs through the EDT-derived likelihood field. Tolerances
+// are external absolute thresholds. RNG seed is pinned so the test is
+// reproducible; the seed was selected to reliably FAIL the single-σ
+// baseline so the test pins a concrete failure pattern.
+
+#include "localization/cold_writer.hpp"
+
+#include <algorithm>
+#include <chrono>
+#include <limits>
+#include <numeric>
+
+using godo::localization::converge_anneal;
+
+namespace {
+
+// Build a 200×200 grid (10×10 m at 0.05 m/cell) with multiple interior
+// obstacles arranged asymmetrically + a missing chunk on the south wall
+// to mimic a "doorway". Free cells = 255, occupied = 0. Origin at (0, 0).
+//
+// Asymmetry sources (so AMCL phase 0 can lock the pose, not just the
+// basin set):
+//   (a) L-shaped obstacle in the upper-right.
+//   (b) 1×1 m square obstacle in the lower-left.
+//   (c) 0.5 m doorway gap on the south wall (asymmetric column).
+// Together these make the scene yaw-distinguishable AND xy-distinguishable
+// from arbitrary global seeds.
+OccupancyGrid build_scenario_d_grid() {
+    OccupancyGrid grid;
+    grid.width        = 200;
+    grid.height       = 200;
+    grid.resolution_m = 0.05;
+    grid.origin_x_m   = 0.0;
+    grid.origin_y_m   = 0.0;
+    grid.cells.assign(static_cast<std::size_t>(grid.width) *
+                      static_cast<std::size_t>(grid.height),
+                      static_cast<std::uint8_t>(255));  // all free
+
+    // 1-cell border (walls).
+    for (int x = 0; x < grid.width; ++x) {
+        grid.cells[static_cast<std::size_t>(x)] = 0;
+        grid.cells[static_cast<std::size_t>(grid.height - 1) *
+                   static_cast<std::size_t>(grid.width) +
+                   static_cast<std::size_t>(x)] = 0;
+    }
+    for (int y = 0; y < grid.height; ++y) {
+        grid.cells[static_cast<std::size_t>(y) *
+                   static_cast<std::size_t>(grid.width)] = 0;
+        grid.cells[static_cast<std::size_t>(y) *
+                   static_cast<std::size_t>(grid.width) +
+                   static_cast<std::size_t>(grid.width - 1)] = 0;
+    }
+
+    auto fill_rect = [&](int x0, int x1, int y0, int y1) {
+        for (int y = y0; y < y1; ++y) {
+            for (int x = x0; x < x1; ++x) {
+                grid.cells[static_cast<std::size_t>(y) *
+                           static_cast<std::size_t>(grid.width) +
+                           static_cast<std::size_t>(x)] = 0;
+            }
+        }
+    };
+    auto open_rect = [&](int x0, int x1, int y0, int y1) {
+        for (int y = y0; y < y1; ++y) {
+            for (int x = x0; x < x1; ++x) {
+                grid.cells[static_cast<std::size_t>(y) *
+                           static_cast<std::size_t>(grid.width) +
+                           static_cast<std::size_t>(x)] = 255;
+            }
+        }
+    };
+
+    // (a) Upper-right L-shape obstacle (1 m × 2 m vertical bar + 2 m × 0.5 m
+    //     horizontal bar). Cells: x∈[140..160), y∈[120..160) +
+    //     x∈[140..180), y∈[120..130).
+    fill_rect(140, 160, 120, 160);
+    fill_rect(140, 180, 120, 130);
+    // (b) Lower-left 1×1 m obstacle: x∈[40..60), y∈[40..60).
+    fill_rect(40, 60, 40, 60);
+    // (c) Pillar at (6.5 m, 5 m) — adds a third feature.
+    fill_rect(126, 134, 96, 104);
+    // (d) South-wall doorway at x∈[80..90) (0.5 m wide).
+    open_rect(80, 90, 0, 1);
+
+    return grid;
+}
+
+Config make_scenario_d_config() {
+    Config c = Config::make_default();
+    c.amcl_seed                  = 42;
+    c.amcl_converge_xy_std_m     = 0.05;
+    c.amcl_converge_yaw_std_deg  = 1.0;
+    c.amcl_max_iters             = 20;     // single-σ baseline budget
+    c.amcl_particles_local_n     = 1000;
+    c.amcl_particles_global_n    = 3000;   // enough to hit the truth basin
+    c.amcl_sigma_seed_yaw_deg    = 10.0;
+    return c;
+}
+
+// First-K ranges in beam-INDEX order (NOT sorted) — fixture-asymmetry
+// signature (Mode-A T1). NB: sorting the ranges would mask yaw rotation
+// because rotating the LiDAR yaw only permutes the beam index → range
+// mapping; the multiset of ranges is yaw-invariant. Keeping beam order
+// preserves the rotation phase so signatures at yaw 0/90/180/270° differ
+// when the scene is asymmetric.
+std::vector<double> scan_signature(const std::vector<RangeBeam>& beams,
+                                   std::size_t k) {
+    std::vector<double> ranges;
+    ranges.reserve(beams.size());
+    for (const auto& b : beams) {
+        ranges.push_back(static_cast<double>(b.range_m));
+    }
+    if (ranges.size() > k) ranges.resize(k);
+    return ranges;
+}
+
+bool signatures_differ(const std::vector<double>& a,
+                       const std::vector<double>& b,
+                       double tol = 0.01) {
+    if (a.size() != b.size()) return true;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        if (std::abs(a[i] - b[i]) > tol) return true;
+    }
+    return false;
+}
+
+}  // namespace
+
+TEST_CASE("AMCL Scenario D — annealing recovers from global ambiguity") {
+    const OccupancyGrid grid = build_scenario_d_grid();
+    Config cfg = make_scenario_d_config();
+
+    // Ground truth: a non-symmetric pose where the L-shaped obstacle is
+    // visibly to the upper-right of the LiDAR. Avoids placing the LiDAR
+    // anywhere near the obstacle to keep beam ranges well-defined.
+    const Pose2D truth{2.0, 3.0, 30.0};
+
+    // ---------- Mode-A T1: asymmetry REQUIRE step ----------
+    // Build 4 synthetic scans at xy=truth with yaw ∈ {0°, 90°, 180°, 270°}.
+    // Assert all 4 scan signatures pairwise differ. If a future fixture
+    // tweak re-symmetrizes the obstacle, this REQUIRE fails BEFORE the
+    // annealing test runs.
+    {
+        std::vector<std::vector<double>> sigs;
+        sigs.reserve(4);
+        for (double yaw : {0.0, 90.0, 180.0, 270.0}) {
+            const Pose2D p{truth.x, truth.y, yaw};
+            const auto beams_p = synth_beams(grid, p, 360);
+            REQUIRE(beams_p.size() > 100u);
+            sigs.push_back(scan_signature(beams_p, 10));
+        }
+        for (std::size_t i = 0; i < sigs.size(); ++i) {
+            for (std::size_t j = i + 1; j < sigs.size(); ++j) {
+                CAPTURE(i);
+                CAPTURE(j);
+                REQUIRE(signatures_differ(sigs[i], sigs[j]));
+            }
+        }
+    }
+
+    // Synth a high-density scan at the truth pose for the convergence
+    // sub-checks below. 360 beams ensures the asymmetric obstacle is
+    // sampled.
+    const auto beams = synth_beams(grid, truth, 360);
+    REQUIRE(beams.size() > 200u);
+
+    // ---------- Sub-check 1: single-σ baseline failure (Mode-A T2) ----------
+    // With σ_hit = 0.05 + cfg.amcl_seed = 42, single-σ converge() from a
+    // global seed cloud should fail to land on the truth basin (either
+    // !converged OR xy_err > 1.0 m). Loose negative — pinned to a
+    // verified-failing seed so a future writer cannot trivially pass it
+    // by tightening σ_hit. If the fixture ever changes such that seed=42
+    // converges, try seeds 0, 1, 7, 100; document which fails.
+    {
+        cfg.amcl_seed = 42;
+        const LikelihoodField lf_narrow =
+            build_likelihood_field(grid, 0.05);
+        Amcl amcl(cfg, lf_narrow);
+        Rng  rng(cfg.amcl_seed);
+        amcl.seed_global(grid, rng);
+        const auto result = amcl.converge(beams, rng);
+
+        const double xy_err = std::hypot(result.pose.x - truth.x,
+                                         result.pose.y - truth.y);
+        CAPTURE(result.converged);
+        CAPTURE(result.iterations);
+        CAPTURE(result.pose.x);
+        CAPTURE(result.pose.y);
+        CAPTURE(result.pose.yaw_deg);
+        CAPTURE(xy_err);
+        // Negative assertion — annotated for future debugging if the
+        // fixture changes.
+        const bool failed = (!result.converged) || (xy_err > 1.0);
+        CHECK(failed);
+    }
+
+    // ---------- Sub-check 2: annealing happy path (Mode-A T3) ----------
+    // converge_anneal with schedule [1.0, 0.2, 0.05] should land within
+    // 10 cm of truth. Wall-clock CHECK pinned at 5 s on the 200×200
+    // fixture (Mode-A S3).
+    {
+        cfg.amcl_seed = 42;
+        cfg.amcl_sigma_hit_schedule_m   = {1.0, 0.2, 0.05};
+        cfg.amcl_sigma_seed_xy_schedule_m = {
+            std::numeric_limits<double>::quiet_NaN(),
+            0.10, 0.05,
+        };
+        cfg.amcl_anneal_iters_per_phase = 10;
+
+        // Build lf at the first σ; converge_anneal will rebuild per phase.
+        LikelihoodField lf =
+            build_likelihood_field(grid, cfg.amcl_sigma_hit_schedule_m[0]);
+        Amcl amcl(cfg, lf);
+        Rng  rng(cfg.amcl_seed);
+        Pose2D pose{};
+
+        const auto t0 = std::chrono::steady_clock::now();
+        const auto result = converge_anneal(cfg, beams, grid, lf, amcl,
+                                            pose, rng);
+        const auto elapsed = std::chrono::steady_clock::now() - t0;
+
+        const double xy_err = std::hypot(result.pose.x - truth.x,
+                                         result.pose.y - truth.y);
+        CAPTURE(result.converged);
+        CAPTURE(result.iterations);
+        CAPTURE(result.pose.x);
+        CAPTURE(result.pose.y);
+        CAPTURE(result.pose.yaw_deg);
+        CAPTURE(xy_err);
+        CHECK(result.converged);
+        CHECK(xy_err < 0.10);
+        CHECK(elapsed < std::chrono::seconds(5));
+    }
+
+    // ---------- Sub-check 3: schedule length 1 runs single-phase
+    //             annealing (Mode-A N5) ----------
+    // converge_anneal with schedule [0.05] should run AT MOST
+    // cfg.amcl_anneal_iters_per_phase iterations total. Tolerance-only
+    // assertion — RNG draw sequence is schedule-length-dependent (see
+    // CODEBASE.md invariant (n)).
+    {
+        cfg.amcl_seed = 42;
+        cfg.amcl_sigma_hit_schedule_m   = {0.05};
+        cfg.amcl_sigma_seed_xy_schedule_m = {
+            std::numeric_limits<double>::quiet_NaN(),
+        };
+        cfg.amcl_anneal_iters_per_phase = 7;
+
+        LikelihoodField lf =
+            build_likelihood_field(grid, cfg.amcl_sigma_hit_schedule_m[0]);
+        Amcl amcl(cfg, lf);
+        Rng  rng(cfg.amcl_seed);
+        Pose2D pose{};
+
+        const auto result = converge_anneal(cfg, beams, grid, lf, amcl,
+                                            pose, rng);
+        CAPTURE(result.iterations);
+        CHECK(result.iterations <= cfg.amcl_anneal_iters_per_phase);
+        CHECK(result.iterations >= 1);
+        CHECK(std::isfinite(result.pose.x));
+        CHECK(std::isfinite(result.pose.y));
+        CHECK(std::isfinite(result.pose.yaw_deg));
+    }
+}

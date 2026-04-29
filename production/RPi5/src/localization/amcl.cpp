@@ -26,6 +26,10 @@ double wrap_360(double deg) noexcept {
 
 }  // namespace
 
+void Amcl::set_field(const LikelihoodField& field) noexcept {
+    field_ = &field;
+}
+
 Amcl::Amcl(const godo::core::Config& cfg, const LikelihoodField& field)
     : cfg_(cfg), field_(&field) {
     // Pre-allocate ping-pong buffers + cumsum scratch ONCE. Subsequent

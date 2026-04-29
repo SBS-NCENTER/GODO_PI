@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstring>
 #include <exception>
+#include <limits>
 
 #include "core/constants.hpp"
 #include "core/rt_flags.hpp"
@@ -25,6 +26,17 @@ namespace godo::localization {
 // Yaw tripwire intentionally NOT checked here — caller does it once on
 // final result (cold_writer.cpp:128, plan §P4-D5-5). Intermediate-phase
 // poses are not tripwire candidates.
+//
+// 2026-04-29 23:20 KST update — auto-minima tracking with patience-2 early
+// break. Empirical HIL on TS5 chroma studio (5cm-cell map) showed the
+// 5-phase default ending at σ_hit=0.05 over-tightened the likelihood
+// Gaussian into sub-cell discretization, producing σ_xy~0.036m at the
+// final phase even though phase 2 (σ=0.2) had reached σ_xy~0.006m.
+// Solution: track the best (min) σ_xy across phases and return THAT
+// pose, not the final-phase pose. Allow up to 2 consecutive worse-than-
+// best phases before declaring "we've passed the minimum, stop"
+// (patience absorbs single-phase noise spikes; second consecutive bump
+// signals real over-tightening). See .claude/memory/project_amcl_sigma_sweep_2026-04-29.md.
 AmclResult converge_anneal(const godo::core::Config&     cfg,
                            const std::vector<RangeBeam>& beams,
                            const OccupancyGrid&          grid,
@@ -32,13 +44,21 @@ AmclResult converge_anneal(const godo::core::Config&     cfg,
                            Amcl&                         amcl,
                            Pose2D&                       pose_inout,
                            Rng&                          rng) {
-    AmclResult final_result{};
-    final_result.forced = false;
     int total_iters = 0;
 
     const auto& schedule = cfg.amcl_sigma_hit_schedule_m;
     const auto& seed_xy_schedule = cfg.amcl_sigma_seed_xy_schedule_m;
     const double sigma_0 = (schedule.empty() ? 1.0 : schedule.front());
+
+    // Auto-minima tracking. best_result starts forced-false / xy_std=+inf
+    // so the first phase ALWAYS becomes the new best, even if AMCL reported
+    // a degenerate xy_std on phase 0.
+    AmclResult  best_result{};
+    best_result.forced    = false;
+    best_result.xy_std_m  = std::numeric_limits<double>::infinity();
+    Pose2D      best_pose{};
+    int         bad_streak = 0;
+    constexpr int kPatience = 2;  // 2 consecutive worse phases → stop
 
     for (std::size_t k = 0; k < schedule.size(); ++k) {
         const double sigma_k = schedule[k];
@@ -77,14 +97,33 @@ AmclResult converge_anneal(const godo::core::Config&     cfg,
             }
         }
 
-        // 4. Carry pose to next phase; accumulate iterations.
-        pose_inout    = phase_result.pose;
-        total_iters  += iter;
-        final_result  = phase_result;
+        // 4. Track minimum + patience-aware early break. Always carry
+        //    pose_inout = current-phase pose to next seed_around (gives
+        //    next σ a chance to recover even if THIS phase was worse).
+        //    Final return is best_result, not last.
+        total_iters += iter;
+        if (phase_result.xy_std_m < best_result.xy_std_m) {
+            best_result = phase_result;
+            best_pose   = phase_result.pose;
+            bad_streak  = 0;
+        } else {
+            ++bad_streak;
+            if (bad_streak >= kPatience) {
+                // Two consecutive phases worse than best — likely past the
+                // minimum (over-tightening into sub-cell discretization or
+                // particle-cloud collapse). Stop here; return best.
+                pose_inout = phase_result.pose;
+                break;
+            }
+        }
+        pose_inout = phase_result.pose;
     }
 
-    final_result.iterations = total_iters;
-    return final_result;
+    // pose_inout out-param mirrors best_result.pose for caller convenience
+    // (some call sites use the in/out pose, others use the returned struct).
+    pose_inout = best_pose;
+    best_result.iterations = total_iters;
+    return best_result;
 }
 
 // Track D-5 (Q2 / S4) — At OneShot completion, rebuild `lf` back to

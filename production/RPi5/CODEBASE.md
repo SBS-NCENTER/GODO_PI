@@ -507,6 +507,18 @@ Empirical motivation: `.claude/memory/project_amcl_sigma_sweep_2026-04-29.md`
 (σ=0.05 default gives 0/10 convergence on TS5; schedule [1.0, 0.5, 0.2,
 0.1, 0.05] anneals through the convergence cliff at σ≈[0.1, 0.2]).
 
+**Auto-minima tracking (added 2026-04-29 23:20 KST)**: `converge_anneal`
+returns the pose from the phase with MIN `xy_std_m` across the entire
+schedule, not the final-phase pose. Patience-aware early break: 2
+consecutive worse-than-best phases triggers stop (single-phase noise
+bumps tolerated; second consecutive bump signals real over-tightening
+into sub-cell discretization). The default schedule reaches σ=0.05 final
+but auto-minima usually picks phase 2 (σ=0.2) where σ_xy is empirically
+lowest on a 5cm-cell map (HIL k=10/10, σ_xy median 0.009m vs 0.036m
+without minima tracking). Operator can SAFELY granularize the schedule
+without worrying about over-tightening — algorithm finds its own stop.
+The pattern generalizes per `.claude/memory/project_pipelined_compute_pattern.md`.
+
 `Amcl::set_field` is single-thread cold-writer use only — concurrent
 `step()` from another thread is UB. Track D-5-P (parallel) workers must
 serialize via the cold-writer's per-phase loop. Doc-comment-pinned in

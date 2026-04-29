@@ -1,116 +1,119 @@
 # Next session — cold-start brief
 
 > Throwaway. Delete the moment the next session picks up the thread.
-> Refreshed 2026-04-29 16:34 KST (afternoon session — third close, ~12:33–16:34 KST).
-> **Mapping pipeline is now correct** (PR #28). rf2o laser odometry replaced the static identity TF that had been silently breaking every map for ~24h. **Service observability shipped** (PR #27). B-MAPEDIT was paused mid-session (writer's partial output discarded clean) when the mapping bug surfaced; it's queued for next-session pickup as the first coding task. **Late-session discovery (~16:30 KST)**: scan-overlay 5× scale + suspected Y-flip bug in PoseCanvas — diagnosed but not yet fixed; planner spec drafted in head, queued as Track D fix.
+> Refreshed 2026-04-30 00:00 KST (post sigma-annealing close — fourth-session through eighth-session marathon ended).
+> **AMCL CONVERGENCE SOLVED** (PR #32): Track D-5 sigma annealing + auto-minima tracking, k_post 10/10 (was 0/10), σ_xy median 0.009m (was 6.679m). Operator HIL passed visually. PR #33 freed-passthrough port hotfix shipped in lockstep.
 
-## TL;DR (priority order)
+## TL;DR (operator-set priority order, 2026-04-29 24:00 KST close)
 
-1. **★ Track D scale + Y-flip fix (NEW, 2026-04-29 16:30 KST discovery)** — small, focused, blocks operator trust in `/map` overlay. **Bug**: `MAP_PIXELS_PER_METER = 100` (`godo-frontend/src/lib/constants.ts:98`) hardcodes 0.01 m/cell, but our slam_toolbox maps are 0.05 m/cell → scan overlay renders at **5×** the PGM image size. PoseCanvas at `:165-167` draws the image as `naturalWidth × zoom` (no resolution scaling), while `worldToCanvas` at `:120` uses `MAP_PIXELS_PER_METER`. Suspected secondary bug: PGM Y-axis goes down (image convention) but world Y goes up (ROS convention) → image is vertically mirrored vs scan rays without explicit flip. **Fix path**: SPA must derive pixels-per-meter from YAML `resolution` field (SSOT), and apply Y-flip on image draw OR on world transform. Webctl already has `GET /api/maps/{name}/yaml` (`app.py:804`) — SPA can fetch + parse client-side, OR add `GET /api/map/metadata` returning JSON `{resolution, origin, width, height}`. ~150-250 LOC: PoseCanvas image-draw rewrite + new metadata fetch + scanTransform.ts test fixes + `MAP_PIXELS_PER_METER` constant deletion.
+1. **★ System tab — service control + process monitor (P0 next-session work)** — operator-prioritized for ops convenience during debug/test cycles. Two PRs likely:
+   - **PR-A: service control** — systemd unit files (`godo-tracker.service` / `godo-webctl.service` / `godo-irq-pin.service`) + polkit policy for `ncenter` group → makes Start/Stop/Restart buttons actually work (PR #27 backend already exists, just fails with `subprocess_failed` because units missing). ~120 LOC + host config. Closes long-standing prior `Task #32` (systemd units) + NEXT_SESSION.md prior #4 (privilege escalation audit).
+   - **PR-B: process monitor + extended resources** — new `/api/system/processes` SSE stream (parse `/proc`, GODO whitelist, `duplicate_alert` flag if multiple PIDs match same expected name) + `/api/system/resources/extended` (per-core CPU + GPU + mem + disk). New System sub-tab in SPA. ~550 LOC. Defense-in-depth on top of CLAUDE.md §6's pidfile locking.
+   - Spec details: `.claude/memory/project_system_tab_service_control.md`.
 
-2. **★ Phase 4.5 P2 Step 3: B-MAPEDIT** — plan + Mode-A fold ready at `.claude/tmp/plan_track_b_mapedit.md`. **Mode-A fold §8 already applied** (M1-M3 + S1-S3 + T1-T4 + N1-N3, including invariant letter shift to webctl `(y)` + frontend `(u)` after PR #27 landed). Writer kickoff branch from `f311218`. ~950 LOC; single PR. Now meaningful because the underlying map is real. **Note**: an earlier writer pass (2026-04-29 ~13:00 KST) wrote ~600 LOC of source + tests but was paused mid-stream when the mapping bug surfaced; that work was discarded clean (`git checkout .` + `git clean -fd`) — no stash. Re-run writer fresh from the §8-folded plan.
+2. **★ B-MAPEDIT (queued P0 from prior session, plan ready)** — `.claude/tmp/plan_track_b_mapedit.md` Mode-A folded. Brush erase + atomic save + restart-pending. ~950 LOC single PR. Re-run writer fresh from §8-folded plan; the earlier writer pass (2026-04-29 ~13:00 KST) was discarded clean during the AMCL crisis.
 
-3. **★ AMCL re-test on real map (Phase 2 hardware-gated check)** — Track D scale fix unblocks visual debugging of AMCL pose accuracy. Empirical observation 2026-04-29 ~16:00 KST: with the new `04.29_v3.pgm` (two-lap walk + loop closure, 2978 occupied / 60.7% free), AMCL `calibrate` converges roughly **1 in 15 attempts** when LiDAR is at first-scan position. When it doesn't converge, pose lands completely outside the studio. This pattern (sporadic convergence, drift to map periphery) is the classic Phase 2 hardware-gated signature: LiDAR pivot offset (currently ~20 cm off-axis) + un-tuned AMCL Tier-2 params. The good news: the **map quality is no longer the bottleneck** — that was the question PR #28 answered. The next blocker is on the hardware/algorithm axis.
+3. **★ B-MAPEDIT-2: origin pick** — operator's new request 2026-04-29 23:45 KST. Click any pixel on the rendered PGM in MapEdit mode → that pixel becomes the new world (0,0). YAML origin field update only — pure translation, no bitmap rewrite. ~90 LOC bolt-on to B-MAPEDIT (or its own small follow-up PR). Use case: operator places a pole at the chroma studio's physical center, scans it, clicks the resulting point on the map → studio center becomes origin. Spec: `.claude/memory/project_map_edit_origin_rotation.md`.
 
-4. **★ Privilege escalation audit** (Task #28 from prior session) — webctl Shutdown/Reboot button + service-control still broken (`subprocess_failed` because `ncenter` can't call privileged ops). Polkit + `systemctl poweroff/reboot` + `systemctl restart godo-*` recommended. Now also coordinated with PR #27's new admin-non-loopback `POST /api/system/service/{name}/{action}` endpoint (subprocess fails until polkit lands; auth + transition gate already work).
+4. **★ Pipelined-pattern audit** (Task #9 carryover) — operator-requested systematic audit: where else does the variable-scope / CPU-pipeline pattern apply? Candidates per `.claude/memory/project_pipelined_compute_pattern.md`: SSE producer-consumer (`/api/scan/stream`, `/api/last_pose/stream`), FreeD smoother stages, UE 60Hz publish staging, map activate phased reload, AMCL Live mode tiered confidence monitor. Output: ranked table by (operator benefit, impl cost, RT-safety). Can run in parallel with B-MAPEDIT scoping.
 
-5. **★ tracker SIGTERM handler** (Task #33 from prior session) — verified gap in PR #25: SIGTERM kills tracker without triggering RAII PidFileLock dtor → pidfile + UDS socket linger on disk (functionally OK, cosmetic). Fix: install SIGTERM/SIGINT handler in main.cpp, mirror godo-webctl pattern.
+5. **B-MAPEDIT-3: map rotation (deferred)** — ~250 LOC, lower marginal value vs LOC. Operator suggested **VideoCore VII GPU acceleration** for matrix ops at this point (RPi 5 GPU mostly idle, single HDMI used). Spec: `.claude/memory/project_videocore_gpu_for_matrix_ops.md`. Recommendation: don't attempt without first measuring CPU baseline + POC dispatch on a single op (likely EDT 1D pass via Vulkan compute). Research-grade work — schedule after Track 5 (UE integration) unless rotation blocks operator.
 
-6. **rf2o follow-up watch** — upstream `MAPIRlab/rf2o_laser_odometry` PR #41 (package.xml format-3 migration) still open. When it merges, drop the in-Dockerfile sed patch and bump SHA in `godo-mapping/Dockerfile`. No urgency.
+6. **Track D-5-Live (sigma annealing for Live mode)** — operator hinted Live could also benefit from variable-scope tracking (prev pose narrows search → fewer phases needed). Track D-5 OneShot landed; Live extension is its own plan. Lower priority — Live uses `seed_around` already which is annealing-light.
 
-7. **Live mode (Phase 4-2 D)** — operator confirmed today: `/map` Live toggle has no effect (pose stays outside studio + scan overlay never renders in Live mode). This is **expected**: CLAUDE.md §1 row 4 explicitly says "Implementation deferred to Phase 4-2 D". UI ships the toggle as future-stub. Defer to its own milestone after AMCL Phase 2 fix.
+7. **Track D-5-P (parallel pipelined annealing)** — research-grade follow-up to Track D-5: multiple AMCL chains running concurrently at different σ values on cores 0/1/2 (CPU 3 RT-isolated). Useful for finding convergence-cliff σ adaptively + disambiguating false basins. Spec scaffolded in `.claude/memory/project_pipelined_compute_pattern.md`.
 
-8. **Session-end docs reconciliation** (Task #27 from prior session) — cascade pass on FRONT_DESIGN.md + 2 CODEBASE.md after B-MAPEDIT lands.
+8. **`test_jitter_ring` flaky test** — observed 1× fail during D-5 build (RT timing-sensitive). Not regression from any code change in this session. Investigate at low priority — likely needs tolerance bump or move to `hardware-required` label.
 
-## Where we are (2026-04-29 16:34 KST — third close, afternoon session)
+## Where we are (2026-04-30 00:00 KST — eighth-session close)
 
-**main = `f311218`** — PR #27 service observability + PR #28 mapping fatal bug fix merged. **2 PRs merged this (third) session**:
+**main = `194599b`** — five PRs merged this multi-session marathon:
 
-| PR | What | LOC | Notes |
-|---|---|---|---|
-| #27 | Track B-SYSTEM PR 2 — service observability + admin-non-loopback service action endpoint | +2855 | Mode-A folds M1-M6 + S1-S7 + N1-N5 + T1-T6 + §8 (Option C admin endpoint) S1+S2+TB1. webctl invariants (v)+(w)+(x). Frontend (t). |
-| #28 | replace static identity TF with rf2o laser odometry | +255 | Fatal mapping bug fix. Mode-A folds M1-M5 + S1-S4 + N1. godo-mapping invariant (h). HIL validated. |
+| PR | What | Notes |
+|---|---|---|
+| #29 | Track D — resolution-aware scan overlay (scale + worldToCanvas Y orientation) | HIL visual ✓ |
+| #30 | Track D-2 — SPA scan CW→CCW + lift convergence gate | HIL visual ✓ |
+| #31 | Track D-3 — C++ AMCL CW→CCW boundary fix | merged via Mode-A→Writer→Mode-B; turned out NOT to be the root convergence cause (sigma_hit was), kept as defensive math discipline |
+| #32 | **Track D-5 — coarse-to-fine sigma annealing + auto-minima tracking** ★ | k_post 0/10 → 10/10, σ_xy 6.68 → 0.009 m. **The actual fix.** |
+| #33 | freed-passthrough UDP port 50002 → 50003 hotfix | regressive default; UE host has listener on 50002 |
 
 **Open PRs**: 0.
 
-## Mapping fatal bug timeline (2026-04-29 afternoon)
+## Sigma annealing timeline (2026-04-29 21:00–23:30 KST, the marathon arc)
 
-The bug was hidden for ~24h. Diagnosis + fix arc, in this session's KST timeline:
+The bug was misdiagnosed twice before being correctly identified. Timeline:
 
-1. **~14:30 KST — Discovery**: user opened `0429_2.pgm` as image, saw a single fan-shape from one position despite walking + loop closure. ("이상하다, 분명 이동하면서 지도를 만들었는데...")
-2. **~14:35 KST — Statistical confirmation**: 4 maps under `godo-mapping/maps/` showed 63-114 occupied pixels each (vs thousands expected), all single-fan signatures.
-3. **~14:45 KST — Root cause** (`godo-mapping/launch/map.launch.py:44-50`): a static identity TF `odom→laser` (added 2026-04-28 to "close the TF chain" without external odom) silently lied to slam_toolbox about motion. slam_toolbox's `minimum_travel_distance: 0.5` (Jazzy default) gate fired against odom-derived motion = 0; only 1 scan ever integrated.
-4. **~15:00 KST — Plan A chosen** ("정석대로 가자"): rf2o_laser_odometry overlay build + launch rewrite. Plan written to `.claude/tmp/plan_mapping_pipeline_fix.md`, Mode-A folded M1-M5 + S1-S4 + N1.
-5. **~15:30 KST — Writer build-first gate passed**: rf2o ros2 SHA `b38c68e4…`, colcon `1 package finished [47.3s]`, no warnings. Dockerfile + launch.py + rf2o.yaml + slam_toolbox YAML doc + CODEBASE.md (h) + README.md edits all green. PR #28 opened.
-6. **~15:45 KST — Mode-B reproduced**: docker build green (image SHA `92b3076da18e…`), live ROS 2 param binding confirmed (`base_frame_id=laser` overrides constructor default `base_link`), all 7 source-declared rf2o parameters match YAML keys verbatim.
-7. **~15:55 KST — HIL run 1**: user walked ~3m (walkable area limit), `test_rf2o_v.pgm` shows: occupied 1390 (13× the 107 broken baseline), free 51.7% (9× the 5.7% broken baseline), unknown 47% (vs 94% broken). Visual: rectangular room outline + corners + doorway/passage at bottom + secondary section at top-right. **User confirmed: "좋아 완전 맞아 저 장소 맞다"** — rendered map matches actual studio geometry.
-8. **~16:00 KST — PR #28 merged** as `f311218`.
-9. **~16:05 KST — HIL run 2 (`04.29_v3`, two-lap walk)**: 2978 occupied, 60.7% free, 36.5% unknown. Map shape further refined — corner/passage features more confidently localized due to repeat-visit averaging.
-10. **~16:20 KST — AMCL convergence test on `04.29_v3`**: tracker started, calibrate run repeatedly. Converged ~1 in 15 attempts. When non-converging, pose drifts completely outside studio. Confirms map quality is no longer the bottleneck — Phase 2 hardware-gated levers now isolated as the actual blocker (LiDAR pivot offset + AMCL Tier-2 tuning).
-11. **~16:30 KST — Track D bug discovered**: while the user was visually validating AMCL, scan-overlay showed at ~5× scale + rotated relative to the PGM. Diagnosed as `MAP_PIXELS_PER_METER = 100` hardcoding 0.01 m/cell vs actual 0.05 m/cell. Fix queued for next session.
+1. **~12:30 KST** — Operator HIL on PR #29 surfaces "overlay 5× scale + suspected Y-flip". Fixed via Track D-2 (SPA scan negate) and Track D-3 (C++ AMCL scan negate) + Track D-4 attempt (load_map row flip — turned out NOT needed and was reverted before merge).
+2. **~19:20 KST** — Post Track D-2/D-3 deploy: σ_xy 6.7m persistently, k_post 0/10. Hypothesized as remaining map-row-order bug. Track D-4 implemented + tested → no improvement → reverted.
+3. **~20:30 KST** — Decision tree: "if D-3+D-4 don't help, what does?" Operator suggested checking sigma_hit. Empirical sweep ran across σ ∈ {1.0, 0.5, 0.2, 0.1, 0.05}.
+4. **~21:00 KST** — **Sweep verdict**: σ=0.2 = 9/10 converge but 3 basins; σ=1.0 = 2/10 single basin. Convergence cliff between 0.1 and 0.2. **sigma_hit tightness = real root cause.** D-3/D-4 were red herrings (D-3 still merged as defensive math; D-4 unmerged). Saved as `project_amcl_sigma_sweep_2026-04-29.md`.
+5. **~21:30 KST** — Operator proposed annealing schedule: wide → narrow. Plan written, Mode-A reviewed, Writer implemented, PR #32 opened with default schedule `[1.0, 0.5, 0.2, 0.1, 0.05]`.
+6. **~22:30 KST** — HIL on PR #32: k_post 0/10, σ_xy median 0.036m. Annealing finds basin (single-basin lock confirmed) but final phase σ=0.05 over-tightens into sub-cell discretization noise. Manual override `[1.0, 0.5, 0.2]` gives k_post 10/10.
+7. **~23:00 KST** — Operator suggested **auto-minima tracking + patience-2 early break**. Implemented in `cold_writer.cpp::converge_anneal`, committed `7b5aec0`. **HIL: k_post 10/10, σ_xy median 0.009m, single basin** (1.15, ~0, yaw 173°).
+8. **~23:30 KST** — PR #32 merged + PR #33 hotfix merged. Eight-session marathon close.
 
-The 5000-occupied target from the original plan was calibrated for a 20×13m studio with a full walk; the actual walkable area is ~3m radius, so 1390 cells representing the room perimeter (run 1) is consistent with a successful 3m walk. Run 2's two-lap walk pushed it to 2978. Visual confirmation supersedes the numeric threshold.
-
-## tmux setup (cold-start)
-
-Same as prior session — `tmux new -A -s godo && claude` at session start. Currently still running inside tmux session `godo` (created Wed Apr 29 12:33). Optional auto-attach `~/.bashrc` snippet still suggested but not added without confirmation.
+The auto-minima trick generalizes — operator can SAFELY granularize the schedule without worrying about over-tightening, because the algorithm self-stops at the empirical minimum. Pattern spec'd as a project-wide architectural idiom in `.claude/memory/project_pipelined_compute_pattern.md`.
 
 ## Live system on news-pi01 (post-session)
 
-- webctl: running (started 2026-04-29 12:11). PID changes per session — check `cat ~/.local/state/godo/godo-webctl.pid`. Log `/tmp/godo-webctl.log`. Pidfile under `$HOME/.local/state/godo/` (not `/run/godo/` until systemd unit lands per Task #32).
-- godo-tracker: NOT running (gracefully stopped at end of prior session).
-- `/run/godo/`: exists, owned by ncenter (one-time `sudo chown` from prior session). Survives reboot only via systemd RuntimeDirectory; manual chown needed after boot until Task #32.
-- godo-mapping container image: rebuilt this session with rf2o overlay. New image SHA `92b3076da18e…` (caches cleanly; see PR #28 CODEBASE.md change-log for the build summary).
-- `~/.bashrc` venv auto-activate observed for godo-webctl (suspected from prior `.bashrc` setup; not touched this session).
-- Active map: still `0429_2.pgm` (the broken one!). Tracker config can stay pointed there — it loads at boot and won't regen on its own. Operator should regenerate a real map (e.g., `0429_3` via the fixed pipeline) before doing the AMCL re-test from TL;DR #4.
-- LAN-IP path blocked at SBS_XR_NEWS AP client-isolation; Tailscale `100.127.59.15` still works. Pi tailscale IP confirmed `100.127.59.15`.
-
-**Working tree**: clean on main `f311218`.
-
-## B-MAPEDIT writer kickoff brief (for next session, just paste into Agent dispatch)
-
-Plan is in `.claude/tmp/plan_track_b_mapedit.md`. §1-§7 is the body, §8 is the Mode-A fold (M1 webctl invariant `(y)`, M2 activity log type `"map_edit"`, M3 restart-pending writer/reader split prose, S1-S3 atomic-write + backup_ts disk match + restart_required value pin, T1-T4 greyscale boundary + content-length-before-decode + sentinel-not-on-failure + DPR mask-array index, N1-N3 cosmetic).
-
-Branch from main `f311218`. Single PR, ~950 LOC budget (likely ~1050 per Mode-A N3 estimate). Tracker C++ untouched. Pillow already transitive — `pyproject.toml` unchanged. Decision LOCKED: I2 + brush + restart-required (no hot reload).
-
-Pre-existing baselines after PR #27 + #28 (third close):
-- Backend: 491 passed, 1 skipped.
-- Frontend unit: 143 passed.
-- Frontend e2e: 36 passing (1 pre-existing config.spec.ts unrelated).
-
-## Quick orientation files
-
-1. **CLAUDE.md** §6 Golden Rules + §7 agent pipeline.
-2. **PROGRESS.md** — should gain a 2026-04-29 entry for the mapping fix saga + PR #27/#28.
-3. **doc/history.md** — likewise.
-4. **FRONT_DESIGN.md** — §I-Q1 + §4.2 supersession blocks (PR #24) still pending fold-into-main-text after B-MAPEDIT.
-5. **godo-webctl/CODEBASE.md** invariants (a)–(x) live; B-MAPEDIT will add `(y)`.
-6. **godo-frontend/CODEBASE.md** invariants (a)–(i)/(j out-of-order)/(k)–(q)/(t)/(v)/(w) live; B-MAPEDIT will add `(u)`.
-7. **godo-mapping/CODEBASE.md** invariants (a)–(h) live; (h) is the new "odom→laser TF is rf2o-published, never static" rule that locks in PR #28's fix and lists Plan B/C as legitimate fallbacks.
-8. **production/RPi5/CODEBASE.md** invariants (a)–(l) — unchanged this session.
+- **godo-tracker**: PID 2303158 alive. Default 5-phase schedule + auto-minima active. AMCL converges to (1.15, ~0, 173°) on every calibrate. Map = `04.29_v3.pgm`. Pidfile `/run/godo/godo-tracker.pid` clean.
+- **godo-webctl**: confirm running (likely PID 4096542 or thereabouts from prior restart). UDS `/run/godo/ctl.sock` healthy.
+- **`/run/godo/`**: owned by ncenter, populated. Note: `Task #32 systemd units pending` per TL;DR #1 — currently this dir is operator-managed each boot. Service control work fixes that.
+- **Active map**: `04.29_v3.pgm` (loop closure, two-lap walk, 2978 occupied / 60.7% free). Operator notes ±1-2° residual rotation in scan overlay vs walls — slam_toolbox build artifact (LiDAR initial heading wasn't perfectly axis-aligned). NOT a code bug. Operator-acceptable for current ops; addressable by re-mapping with intentional initial heading OR origin pick + rotation feature.
+- **Branch**: `main @ 194599b`, working tree clean.
+- **Tracker binary**: built from `fix/track-d-5-sigma-annealing` (now squashed into `c9b4ba8` on main). Effectively current main code.
+- **LAN-IP path**: blocked at SBS_XR_NEWS AP (client-isolation); Tailscale `100.127.59.15` works.
 
 ## Throwaway scratch (`.claude/tmp/`)
 
 **Keep until B-MAPEDIT ships**:
-- `plan_track_b_mapedit.md` — Mode-A folded, ready for writer (next-session task).
+- `plan_track_b_mapedit.md` — Mode-A folded, ready for writer (next-session task #2).
 
 **Keep for one more cycle, then prune**:
 - `plan_service_observability.md` — PR #27 reference (shipped).
-- `plan_mapping_pipeline_fix.md` — PR #28 reference (shipped). Includes Mode-A fold + the empirical-build-first decision tree that proved valuable.
+- `plan_mapping_pipeline_fix.md` — PR #28 reference (shipped).
+- `plan_track_d_scale_yflip.md` — PR #29 reference (shipped).
+- `plan_track_d_3_cpp_amcl_cw_ccw.md` — PR #31 reference (shipped).
+- `plan_track_d_5_sigma_annealing.md` — PR #32 reference (shipped). Contains the planning history including misidentified root causes — useful trail for future debug-arc retrospectives.
 
 **Delete when convenient**:
-- Anything pre-2026-04-29 not in the above list.
+- Anything pre-2026-04-29 not above.
 
-## Tasks alive for next session
+## Quick memory bookmarks (★ open these first on cold-start)
 
-- **#3** (pending) — B-MAPEDIT writer kickoff (THE first coding task). Plan + §8 fold ready.
-- Privilege escalation audit (polkit) — coordinated with PR #27's admin endpoint.
-- tracker SIGTERM handler (audit other RAII members in main.cpp).
-- AMCL re-test on a fresh real map (regen via fixed pipeline first).
-- Session-end docs cascade after B-MAPEDIT ships.
+Eight-session marathon produced six new in-repo memory entries. Open in priority order:
+
+1. `.claude/memory/project_amcl_sigma_sweep_2026-04-29.md` — empirical sweep table, convergence cliff, why D-3/D-4 weren't the root cause. Read before touching any AMCL code.
+2. `.claude/memory/project_pipelined_compute_pattern.md` — operator's variable-scope / CPU-pipeline analogy. Architectural idiom for AMCL annealing today + future SSE / FreeD / Live applications. Pinpoints Task #9 audit candidates.
+3. `.claude/memory/project_system_tab_service_control.md` — operator-set P0 next-session work spec. systemd unit files + polkit + process monitor + GPU resource view. Sequencing: PR-A (control) before PR-B (monitor).
+4. `.claude/memory/project_map_edit_origin_rotation.md` — Map Edit feature spec: brush erase (B-MAPEDIT, planned) + origin pick (NEW, ~90 LOC, high-ROI) + rotation (deferred). Studio-center-as-origin via pole-marker workflow.
+5. `.claude/memory/project_videocore_gpu_for_matrix_ops.md` — RPi 5 GPU offload candidates (rotation, EDT, AMCL particle weighting). Don't attempt without baseline measurement + POC.
+6. `.claude/memory/project_rplidar_cw_vs_ros_ccw.md` — D-2/D-3 hypothesis history; was hypothesized as root cause but sweep showed it isn't. Kept as defensive math discipline. Useful retrospective for future debug arcs ("hypothesis vs empirical evidence" pattern).
+
+Plus carryover: `project_studio_geometry.md` (T-shape studio + door corners), `project_lens_context.md` (ENG zoom lenses + entrance pupil), `project_repo_topology.md` (SBS-NCENTER/GODO_PI canonical), `feedback_pipeline_short_circuit.md` (≤200 LOC fully-specified work skips planner+Mode-B).
+
+## Quick orientation files for next session
+
+1. **CLAUDE.md** §6 Golden Rules + §7 agent pipeline.
+2. **`.claude/memory/MEMORY.md`** — full index of all in-repo memory entries.
+3. **PROGRESS.md** — should gain a 2026-04-29 entry covering the AMCL convergence saga + 5 merged PRs (currently lags by one session — TODO).
+4. **doc/history.md** — ditto.
+5. **`production/RPi5/CODEBASE.md`** invariants tail = `(n)` (Track D-5 sigma annealing).
+6. **`godo-webctl/CODEBASE.md`** invariants tail = `(x)` (admin-non-loopback service-control endpoint, awaits the systemd unit work above to actually function).
+
+## Tasks alive for next session (from TaskCreate index)
+
+- **#9** (pending) — pipelined-pattern applicability audit. TL;DR item 4.
+- Service control + process monitor (TL;DR item 1) — top priority.
+- B-MAPEDIT writer kickoff (TL;DR item 2).
+- B-MAPEDIT-2 origin pick (TL;DR item 3).
+- (deferred) B-MAPEDIT-3 rotation + GPU POC + Live annealing + parallel annealing.
+- (low priority) `test_jitter_ring` flake fix.
 
 ## Session-end cleanup
 
-NEXT_SESSION.md itself: refresh in place each session; never delete (drives every cold-start).
-
-PROGRESS.md + doc/history.md updates: still TODO before final session close — should now include the mapping fix saga as its own section.
+- NEXT_SESSION.md itself: refreshed in place. Drives every cold-start.
+- PROGRESS.md + doc/history.md updated 2026-04-30 00:30 KST with the eighth-session marathon block (the AMCL convergence saga + 5 PRs).
+- SYSTEM_DESIGN.md §5 AMCL: new "Coarse-to-fine sigma_hit annealing (Track D-5)" section covering schedule + auto-minima + Live continuity rebuild.
+- FRONT_DESIGN.md §H Map 뷰어: rows H-Q5 (resolution-aware scale, PR #29) + H-Q6 (scan CW→CCW + gate lifted, PR #30) + H-Q7 (image-refetch on map change, PR #29 M3) added.
+- All three CODEBASE.md files (production/RPi5, godo-webctl, godo-frontend) carry the per-PR change-log entries + new invariants from the merge stream.

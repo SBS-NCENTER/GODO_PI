@@ -311,6 +311,35 @@ converged ⇔ (xy_std_m < amcl_converge_xy_std_m) AND
             iters ≥ 3        # min iterations to avoid converging on the seed
 ```
 
+### Coarse-to-fine sigma_hit annealing (Track D-5, 2026-04-29)
+
+The single-σ approach above hits a wall on real maps: with `cfg.amcl_sigma_hit_m` tight enough for ROS-spec cm-scale precision (e.g. 0.05 m), 5000 random global particles have near-zero probability of seeding within the Gaussian's useful range — likelihoods come out near-uniform, AMCL never discriminates. Empirical sweep on TS5 chroma studio (5cm-cell 04.29_v3 map) showed σ=0.05 default gave 0/10 convergence; σ=1.0 gave 2/10 single-basin; σ=0.2 gave 9/10 across 3 basins (studio symmetry creates ambiguity at narrow σ alone).
+
+Production OneShot now anneals through a configurable schedule:
+
+```
+amcl.sigma_hit_schedule_m       = "1.0,0.5,0.2,0.1,0.05"      # σ_hit per phase
+amcl.sigma_seed_xy_schedule_m   = "-,0.10,0.05,0.03,0.02"    # seed_around σ_xy per phase k>0; '-' = phase-0 sentinel
+amcl.anneal_iters_per_phase     = 10                          # max iters per phase
+```
+
+Per-phase loop in `cold_writer.cpp::converge_anneal`:
+1. `lf = build_likelihood_field(grid, σ_k);  amcl.set_field(lf);`
+2. Phase 0: `amcl.seed_global` (5000 particles); phase k>0: `amcl.seed_around(carried_pose, σ_xy_k, σ_yaw_k)` (500 particles, σ_yaw shrinks linearly with σ_k/σ_0).
+3. Run ≤ K iters with the existing `iters≥3 && converged` early-exit.
+
+**Auto-minima tracking + patience-2 early break**: track best (min) `xy_std_m` across all phases; return THAT pose, not the final-phase pose. If 2 consecutive phases produce worse-than-best xy_std, break early (single-phase noise tolerated, second consecutive bump signals over-tightening into sub-cell discretization). Operator can SAFELY granularize the schedule without over-tightening.
+
+HIL post-Track-D-5: k_post = 10/10, σ_xy median 0.009 m, single-basin lock (1.15, ~0, 173°) on every calibrate. The default 5-phase schedule is wide enough to cover the cliff at σ ≈ 0.1↔0.2 and auto-minima picks the empirical minimum (typically phase 2 = σ=0.2 on this map).
+
+After OneShot completes, `lf` is rebuilt back to `cfg.amcl_sigma_hit_m` so Live mode re-entry sees the operator-controlled σ field, never the annealing-leftover narrow final-phase field.
+
+The pattern generalizes per `.claude/memory/project_pipelined_compute_pattern.md` — pipelined-parallel variants (multiple concurrent AMCL chains at different σ tiers, picking the best result) are scaffolded as Track D-5-P future work.
+
+### Yaw safety tripwire (post-Track-D-5)
+
+The tripwire fires ONCE on the final result of `converge_anneal` (intermediate-phase poses are not tripwire candidates — the schedule's wider phases produce intentionally noisy poses that would spam stderr if checked).
+
 ### Yaw safety tripwire
 
 Lives in the cold-writer wrapper, NOT in `Amcl` itself. Anchor is `cfg.amcl_origin_yaw_deg` (the calibration origin), not the previous AMCL output:

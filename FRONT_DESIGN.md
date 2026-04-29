@@ -196,6 +196,9 @@ UDS reply ok / err (atomic-write 실패 시 reject, RAM도 안 바뀜)
 | H-Q2 transport | **SSE primary + polling fallback** (분석 §4.1 — WS는 우리 use case에 불필요). 크롬 메모리 절약 모드에서 탭 활성화 시 즉시 1회 polling 후 SSE 재연결. |
 | H-Q3 trail | **1초** (5 Hz × 1s = 5점) — C-Q1 결정과 일치 |
 | H-Q4 pinch-zoom | 지원 (모바일 우선; 라이브러리: hammerjs 또는 minimal pointer event 핸들러) |
+| H-Q5 scale (Track D, 2026-04-29) | **resolution-aware via mapMetadata store**. 초기 구현은 `MAP_PIXELS_PER_METER = 100` 하드코드 (0.01 m/cell 가정) 였는데 실제 slam_toolbox 맵은 0.05 m/cell이라 5× 어긋남. PR #29 (Track D)에서 const 삭제 + `/api/maps/{name}/yaml` (기존) + `/api/maps/{name}/dimensions` (신규, PGM header 파싱) fetch 후 `worldToCanvas` 가 `metadata.resolution / origin / height` 사용. Image draw는 `naturalWidth × zoom`, world↔canvas는 `imgRow = (height-1) - (wy - origin_y) / resolution` 한 줄에 Y-flip 격리 (ROS map_server convention: origin=bottom-left pixel). 새 invariant `(x)` 결정. |
+| H-Q6 scan overlay (Track D-2, 2026-04-29) | **`projectScanToWorld`가 RPLIDAR CW raw 각도를 negate 해서 REP-103 CCW로 변환** (`doc/RPLIDAR/RPLIDAR_C1.md:128`). 동시에 Mode-A M3의 `pose_valid !== 1` gate 제거 — operator가 AMCL 컨버전스 전에도 LiDAR 스캔 모양을 visual debug 가능 (chicken-and-egg 해소). PoseCanvas는 `mapMetadata` 와 `lastScan` 둘 다 기다린 후 redraw. 시각 검증: scan 점이 PGM 벽선과 정확히 align. |
+| H-Q7 image-refetch on map change (PR #29 M3) | `mapImageUrl` prop 변경 시 reactive `$effect`로 bitmap 자동 re-fetch. 그 전엔 `onMount` 시점에만 fetch라서 preview swap 시 새 좌표 + 옛 비트맵 합성되는 silent half-fix 였음. |
 
 ### I. Map editor — §4.2 분석 후 결정
 

@@ -10,6 +10,68 @@
 
 ---
 
+## 2026-04-29 (저녁~심야 — 16:35 KST → 2026-04-30 00:30 KST, 네 번째~여덟 번째 마라톤 close)
+
+### 한 줄 요약
+
+**AMCL 컨버전스 0% → 100% 해결 (PR #32). 5-PR 마라톤 (Track D 스케일/Y-flip → SPA CW→CCW → C++ AMCL CW→CCW → sigma annealing → freed-passthrough port hotfix). 두 번의 misdiagnosis (D-3 angle convention, D-4 map row order) 끝에 진짜 root cause = `AMCL_SIGMA_HIT_M=0.05` 가 너무 타이트해서 5000개 random particle 중 어느 것도 ±5cm 내 anchor 못 잡음을 empirical sweep 으로 확인. Coarse-to-fine sigma annealing + auto-minima tracking 으로 k_post 10/10 / σ_xy median 0.009m 달성. 운영자 시각 검증 통과.**
+
+> 기술 상세는 [PROGRESS.md 2026-04-29 evening through midnight 블록](../PROGRESS.md#session-log) 참조. Empirical sweep 데이터는 `.claude/memory/project_amcl_sigma_sweep_2026-04-29.md` 참조.
+
+### 왜 이렇게 결정했는가
+
+#### 5번 가설 갈아엎은 그 디버그 아크
+
+오늘 misdiagnosis 가 두 번 이어진 후 진짜 원인 도달까지의 흐름:
+
+1. **PR #29 후 (Track D scale fix)**: 운영자 HIL 시각 검증 → "오버레이 5× 크기는 맞췄는데 상하반전됨". → Y-flip 가설.
+2. **PR #30 (Track D-2 SPA CW→CCW)**: SPA 의 `projectScanToWorld` 가 RPLIDAR 의 raw CW 각도를 표준 CCW 수학 (`r*sin(a)`) 그대로 써서 ly 부호 반전. doc/RPLIDAR/RPLIDAR_C1.md:128 의 "θ (0–360°, clockwise)" 가 single source of truth. SPA 한 줄 fix → 운영자 확인: "스캔 모양 자체는 지도랑 딱 맞는다" — single-basin shape lock OK 인데 pose 는 매번 ~5.5m 어긋남.
+3. **PR #31 (Track D-3 C++ AMCL CW→CCW)**: SPA 와 같은 fix 를 production C++ AMCL 에도 적용. **이걸로 컨버전스 1-in-15 → 100% 될 거라 예상.** Mode-A APPROVE-WITH-FOLD + Writer + Mode-B APPROVE → merge → HIL → **σ_xy 6.7m 동일, k_post 0/10**. 가설 ❌.
+4. **Track D-4 시도 (map row order)**: `occupancy_grid::load_map` 이 PGM bytes 를 raw 로 저장 (row 0 = image top), 그런데 `evaluate_scan` 의 `cy = (yw - origin_y)/res` 는 ROS convention 상 cy=0 = world bottom 가정. 둘이 어긋나서 매번 잘못된 셀 읽고 있음 → Y-mirror. row-flip 추가 → HIL 동일 σ ~6.7m. 가설 ❌. (D-4 unmerged; D-3 merged 유지 — 수학 discipline 차원).
+5. **Sigma sweep (~21:00 KST, 결정적 데이터)**: σ_hit 5개 값 (1.0, 0.5, 0.2, 0.1, 0.05) 에서 각 10번 calibrate → σ=0.2 alone 이 9/10 / σ_xy median 0.006m, σ=1.0 이 2/10 / single basin, σ=0.1 / 0.05 가 0/10. **Convergence cliff 가 0.1 ↔ 0.2 사이**. → 진짜 원인 = sigma_hit 가 5cm 짜리 cell map 에서 5000개 random particle 이 ±5cm 안에 들 확률을 보장하지 못해서 likelihood 가 거의 uniform 이 됨 → AMCL 변별 못함.
+6. **사용자 제안한 coarse-to-fine annealing**: σ=1.0 으로 single basin lock 후 σ=0.5 → 0.2 → 0.1 → 0.05 로 좁혀가기. PR #32 default schedule `[1.0, 0.5, 0.2, 0.1, 0.05]`. 첫 HIL → k_post 0/10 / σ median 0.036m. Annealing 이 single basin 은 잡았는데 final phase σ=0.05 가 sub-cell 영역 (Gaussian 너비 5cm = cell 너비) 에서 over-tight 되어 particle 더 못 좁힘. 수동 override `[1.0, 0.5, 0.2]` → k_post 10/10 / σ median 0.012m.
+7. **사용자 제안한 auto-minima tracking + patience-2 early break**: schedule 은 cliff 너머까지 가게 하고, 각 phase 마다 best (min) σ_xy 추적, 2 consecutive worse-than-best phases 면 break, return best (not last). Default 5-phase 그대로 두어도 알아서 phase 2 (σ=0.2) 에서 멈춤. HIL → **k_post 10/10 / σ median 0.009m** (수동 3-phase override 보다도 좋음). Schedule 을 자유롭게 granularize 해도 안전 — 알고리즘이 self-stop.
+
+#### 사용자가 제안한 architectural pattern — 가변 스코프 / CPU 파이프라인
+
+> "약간 우리 가변 스코프같은거지. 빠른 속도의 물체는 줌아웃, 느린 속도의 물체는 줌인 해서 더 자세히 볼 수 있는 것."
+> "cpu의 파이프라인처럼 계산 하는거야."
+
+이번 annealing 은 sequential 구현. Future work: parallel pipelined version (cores 0/1/2 에 σ_k tier 별로 N개 chain 동시 실행, K+N-1 ticks 만에 끝남 — Track D-5-P). 같은 패턴이 SSE 송출, FreeD smoother, Live tracker 등에도 적용 가능 — 다음 세션 audit 항목 (Task #9). Spec 은 `.claude/memory/project_pipelined_compute_pattern.md`.
+
+#### Map editor 차기 작업 우선순위
+
+운영자가 세션 close 직전 추가 요청:
+- **Origin pick** (~90 LOC, 고-ROI): 운영자가 스튜디오 중앙에 막대 세우고 → 스캔에 점으로 잡힘 → SPA `/map` 편집 모드에서 그 점 클릭 → world (0,0) 으로 설정. YAML origin 한 줄 갱신. 평행이동만 필요.
+- **Map rotation** (~250 LOC, 보류): YAML origin theta 활용 + SPA/C++ 양쪽 회전 행렬 적용. 운영자가 RPi5 의 VideoCore VII GPU 활용 가능성 제기 (HDMI 1개만 사용하니 GPU 자원 남음). 아키텍처적으로 흥미로운 angle 이지만 baseline measurement + POC 먼저 — research-grade.
+
+Spec 정리: `.claude/memory/project_map_edit_origin_rotation.md`, `.claude/memory/project_videocore_gpu_for_matrix_ops.md`.
+
+#### 운영자가 정한 다음 세션 우선순위
+
+1. System 탭 — Start/Stop/Restart 버튼 실제로 동작하게 (systemd units + polkit) + 프로세스 모니터링 (htop/ps -ef 상응 + duplicate-PID alert + CPU/GPU 사용률).
+2. B-MAPEDIT (브러시 erase, plan ready).
+3. B-MAPEDIT-2 origin pick.
+4. Pipelined-pattern audit.
+5. B-MAPEDIT-3 rotation + GPU POC.
+
+### 산출물
+
+- 5 PRs merged: #29 #30 #31 #32 #33.
+- main = `194599b`.
+- Test baselines: backend 491→502 (+11), frontend unit 143→165 (+22), e2e 36→37 (+1).
+- HIL 검증 완료: tracker 가 default schedule + auto-minima 로 매번 (1.15, ~0, 173°) 수렴, σ_xy median 0.009m. 운영자 visual confirm.
+
+### 결정 요약
+
+- D-2 / D-3 (CW→CCW 부호 fix) 는 hypothesized root cause 였으나 sweep 으로 부정됨. defensive math discipline 으로 main 에 유지 — 향후 코드 가독성 차원.
+- D-4 (load_map row-flip) 는 마찬가지로 영향 없어서 unmerged. 작업 트리에서만 시도 후 revert.
+- D-5 (sigma annealing + auto-minima) 가 진짜 fix. Single-basin lock + cell-resolution-aware self-stopping.
+- 운영자가 제안한 design idea (annealing schedule, auto-minima, pipelined pattern, GPU 활용) 가 architectural 으로 핵심. 메모리에 4개 entry 신규 작성.
+- 다음 세션 우선순위: System tab 서비스 컨트롤 + 프로세스 모니터 (operational convenience 가 가장 큰 즉각 가치).
+
+---
+
 ## 2026-04-29 (오후 — 12:33–16:34 KST, 세 번째 close)
 
 ### 한 줄 요약

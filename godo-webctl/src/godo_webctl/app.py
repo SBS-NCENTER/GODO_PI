@@ -1073,10 +1073,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # snapshot" use case (e.g. take-screenshot-now).
     #
     # Process list contains every live PID classified into general / godo /
-    # managed; kernel threads (cmdline empty) are excluded. Note: this
-    # endpoint creates a fresh `ProcessSampler` per call, so cpu_pct is
-    # 0.0 for every row (no prior tick); the SSE stream is the only path
-    # that surfaces meaningful cpu_pct deltas.
+    # managed; kernel threads (cmdline empty) are excluded. The endpoint
+    # holds a closure-captured singleton `ProcessSampler` so successive
+    # one-shot calls (e.g. `curl --interval`) accumulate prior-tick state
+    # and surface meaningful cpu_pct deltas after the second call. The
+    # very first call after webctl boot returns `cpu_pct=0.0` for every
+    # row (no prior tick); subsequent calls compute the per-PID delta
+    # against the previous one-shot snapshot. The SSE sibling stream uses
+    # an INDEPENDENT per-stream sampler (created in `processes_stream`)
+    # so per-stream cancellation doesn't leak prior-tick state into the
+    # next subscriber. Sampler dict ops are GIL-atomic; concurrent
+    # one-shot callers see approximate-but-non-crashy cpu_pct values.
     _processes_one_shot = processes_mod.ProcessSampler()
 
     @app.get("/api/system/processes")

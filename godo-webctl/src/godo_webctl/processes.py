@@ -438,10 +438,15 @@ class ProcessSampler:
     ``cpu_pct=0.0`` for every PID by design (R5 — operator UI showing
     0% for one second after stream open is acceptable).
 
-    NOT thread-safe; the SSE producer task runs single-threaded under
-    asyncio. Holding it module-level would break per-stream isolation
-    (each subscriber needs an independent sampler so a previously-
-    cancelled stream's stale prior-tick map doesn't leak into the next).
+    NOT thread-safe in the strict sense; the SSE producer task runs
+    single-threaded under asyncio so per-stream isolation is provided
+    by giving each subscriber its own sampler instance. The one-shot
+    `GET /api/system/processes` handler shares a single sampler across
+    concurrent requests via `asyncio.to_thread` — Python dict ops are
+    GIL-atomic so the worst case under concurrency is approximate
+    cpu_pct (no torn reads / no crash); see `app.py` `_processes_one_shot`.
+    A new SSE subscriber MUST construct its own sampler so a previously-
+    cancelled stream's stale prior-tick map doesn't leak into the next.
     """
 
     def __init__(self, proc_root: str = PROC_PATH) -> None:

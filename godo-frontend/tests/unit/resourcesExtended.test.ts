@@ -117,7 +117,7 @@ describe('resourcesExtended store', () => {
     vi.useRealTimers();
   });
 
-  it('null GPU-style fields render as null (no crash)', async () => {
+  it('nullable numeric fields render as null (no crash)', async () => {
     const mod = await loadModule();
     let captured: { mem_total_mb: number | null } | null = null;
     const unsub = mod.subscribeResourcesExtended((s) => (captured = s));

@@ -943,7 +943,8 @@ godo_freed_passthrough
 
 - `src/godo_freed_passthrough/main.cpp` — minimal FreeD serial → UDP
   forwarder. Defaults `--port /dev/ttyAMA0 --baud 38400 --host
-  10.10.204.184 --udp-port 50002 --rate-hz 0`. Spawns one worker thread
+  10.10.204.184 --udp-port 50003 --rate-hz 0` (50002 collides with the
+  UE host's listener — see main.cpp head comment). Spawns one worker thread
   running `freed::SerialReader::run()` against a local
   `Seqlock<FreedPacket>`. Main thread runs one of two send loops:
   - **As-arrives** (`--rate-hz 0`, default): poll `latest.generation()`

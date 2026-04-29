@@ -25,7 +25,11 @@
 //   - mlockall / SCHED_FIFO / CPU pinning / cap_sys_nice (the tracker does).
 //
 // Defaults match the production wiring (production/RPi5/doc/freed_wiring.md):
-//   --port /dev/ttyAMA0  --baud 38400  --host 10.10.204.184  --udp-port 50002
+//   --port /dev/ttyAMA0  --baud 38400  --host 10.10.204.184  --udp-port 50003
+// NOTE: 50002 is reserved on the UE host for an existing listener; sending
+// to 50002 would collide. The default landed at 50002 in 22b4097 and
+// regressed back; this default must stay at 50003 unless the UE host's
+// listener inventory changes.
 
 #include <cerrno>
 #include <climits>
@@ -57,7 +61,7 @@ struct Args {
     std::string port      = "/dev/ttyAMA0";
     int         baud      = 38400;
     std::string host      = "10.10.204.184";
-    int         udp_port  = 50002;
+    int         udp_port  = 50003;  // 50002 collides with UE host listener
     int         stats_sec = 1;
     bool        quiet     = false;
     double      rate_hz   = 0.0;   // 0 = as-arrives; >0 = paced
@@ -71,7 +75,7 @@ void print_help() {
         "  --port <dev>       serial device     (default: /dev/ttyAMA0)\n"
         "  --baud <n>         serial baud rate  (default: 38400)\n"
         "  --host <ip>        UDP target host   (default: 10.10.204.184)\n"
-        "  --udp-port <n>     UDP target port   (default: 50002)\n"
+        "  --udp-port <n>     UDP target port   (default: 50003)\n"
         "  --rate-hz <f>      paced send rate; 0 = as-arrives (default: 0)\n"
         "                     example: --rate-hz 59.94 for steady FreeD cadence\n"
         "  --stats-sec <n>    stats interval seconds, 0 disables (default: 1)\n"

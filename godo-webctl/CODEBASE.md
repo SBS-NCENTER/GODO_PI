@@ -1489,6 +1489,15 @@ the rule unblocks at runtime.
   into a unix epoch.
 - `services.py::os` import — `os.path.getmtime()` powers the new
   `env_stale` flag (envfile mtime > active_since_unix → restart pending).
+- `config_schema.py::_resolve_schema_path()` — tiered path
+  resolution: `GODO_WEBCTL_CONFIG_SCHEMA_PATH` env override (set in
+  `/etc/godo/webctl.env` on production hosts) > dev-tree sibling
+  layout (`<repo>/godo-webctl` next to `<repo>/production/RPi5`) >
+  `/opt/godo-tracker/share/config_schema.hpp` (production install
+  fallback). Earlier code assumed only the dev-tree layout, so
+  `/api/config/schema` returned HTTP 503 `schema_unavailable` after
+  the PR-A switchover (where `/opt/godo-webctl` is no longer a
+  sibling of any `production/RPi5` directory).
 - `services.py::_parse_environment_files_paths()` — parses the
   `EnvironmentFiles=...` value of `systemctl show` (whitespace-separated
   `path (option=...)` entries) into a list of absolute paths.

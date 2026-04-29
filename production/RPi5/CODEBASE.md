@@ -3275,6 +3275,16 @@ story was never installed. PR-A closes that.
   with no sudo), and SPA HIL — and explicitly notes that
   `pkcheck --detail` is BLOCKED by polkit 126 for unprivileged
   callers (early drafts of the verification guide had this wrong).
+- `production/RPi5/systemd/install.sh` step [1/6] now also installs
+  `production/RPi5/src/core/config_schema.hpp` to
+  `/opt/godo-tracker/share/config_schema.hpp`. This is the
+  cross-language SSOT path the webctl Config tab parser reads;
+  pre-PR-A the dev-tree sibling layout assumption produced HTTP
+  503 `schema_unavailable` after webctl moved to `/opt/godo-webctl`.
+  Re-running install.sh after a tracker rebuild refreshes both the
+  binary AND the schema mirror in lock-step, so a schema row added
+  to the C++ source automatically reaches the SPA on the next
+  install pass.
 - `production/RPi5/systemd/godo-irq-pin.sh` — IRQ-number
   lookup is now device-name based. The script reads
   `/proc/interrupts` at runtime and resolves IRQ numbers by

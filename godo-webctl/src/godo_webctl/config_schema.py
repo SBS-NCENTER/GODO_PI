@@ -48,13 +48,47 @@ class ConfigSchemaRow(NamedTuple):
     description: str
 
 
-# Path resolution: relative to repo root via this file's location.
-# `<repo>/godo-webctl/src/godo_webctl/config_schema.py` →
-# `<repo>/production/RPi5/src/core/config_schema.hpp`.
-_REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[3]
-_CPP_SCHEMA_PATH: Final[Path] = (
-    _REPO_ROOT / "production" / "RPi5" / "src" / "core" / "config_schema.hpp"
+# Path resolution: tiered.
+#
+# 1. `GODO_WEBCTL_CONFIG_SCHEMA_PATH` env var, if set — operator override.
+#    The systemd unit's EnvironmentFile=/etc/godo/webctl.env carries this
+#    on production hosts, where the dev-tree layout assumption below
+#    fails (godo-webctl is at /opt/godo-webctl while the tracker source
+#    has been copied separately to /opt/godo-tracker/share/).
+# 2. Dev-tree sibling layout — `<repo>/godo-webctl/...` and
+#    `<repo>/production/RPi5/...` cohabit. This is the path on
+#    contributor machines (Mac/Windows/Linux dev hosts).
+# 3. `/opt/godo-tracker/share/config_schema.hpp` — production install
+#    convention (see `production/RPi5/systemd/install.sh`). Used only
+#    if (1) is unset, so the env override remains authoritative.
+import os
+
+_DEV_TREE_PATH: Final[Path] = (
+    Path(__file__).resolve().parents[3]
+    / "production" / "RPi5" / "src" / "core" / "config_schema.hpp"
 )
+_PROD_FALLBACK_PATH: Final[Path] = Path(
+    "/opt/godo-tracker/share/config_schema.hpp",
+)
+
+
+def _resolve_schema_path() -> Path:
+    """Return the first existing candidate from (env var, dev tree, prod
+    fallback). The fallback chain matters: dev hosts expect dev-tree
+    discovery to "just work" without setting an env var, while prod
+    hosts can either set the env var explicitly or land on the
+    `/opt/godo-tracker/share/` convention. Returns the env-var path
+    even if non-existent (so the error message names what the
+    operator configured)."""
+    override = os.environ.get("GODO_WEBCTL_CONFIG_SCHEMA_PATH")
+    if override:
+        return Path(override)
+    if _DEV_TREE_PATH.exists():
+        return _DEV_TREE_PATH
+    return _PROD_FALLBACK_PATH
+
+
+_CPP_SCHEMA_PATH: Final[Path] = _resolve_schema_path()
 
 # Row matcher. The C++ array layout is one initializer per line:
 #   {"key.name", ValueType::Double, 0.0, 1.0, "0.5", ReloadClass::Hot, "desc"},
@@ -139,8 +173,11 @@ def load_schema(source_path: Path | None = None) -> tuple[ConfigSchemaRow, ...]:
 
     if not _CPP_SCHEMA_PATH.exists():
         raise ConfigSchemaError(
-            f"C++ schema source not found at {_CPP_SCHEMA_PATH}; check "
-            "the repo layout (godo-webctl is a sibling of production/RPi5)",
+            f"C++ schema source not found at {_CPP_SCHEMA_PATH}. Set "
+            "GODO_WEBCTL_CONFIG_SCHEMA_PATH to override, or ensure the dev "
+            "tree layout (godo-webctl is a sibling of production/RPi5) "
+            "or the production install (`/opt/godo-tracker/share/"
+            "config_schema.hpp` from `production/RPi5/systemd/install.sh`).",
         )
     text = _CPP_SCHEMA_PATH.read_text(encoding="utf-8")
     rows = _parse_source(text)

@@ -37,8 +37,17 @@ fi
 
 echo "[1/6] Installing /opt/godo-tracker/"
 install -d -m 0755 -o root -g root /opt/godo-tracker
+install -d -m 0755 -o root -g root /opt/godo-tracker/share
 install -m 0755 -o root -g root "$BIN_SRC"                          /opt/godo-tracker/godo_tracker_rt
 install -m 0755 -o root -g root "$SCRIPT_DIR/godo-irq-pin.sh"       /opt/godo-tracker/godo-irq-pin.sh
+# Cross-language SSOT — webctl parses this header to render the SPA
+# Config tab. /opt/godo-tracker/share/ is the production-side mirror
+# of the dev tree's `production/RPi5/src/core/config_schema.hpp`.
+# webctl points at it via GODO_WEBCTL_CONFIG_SCHEMA_PATH (set in
+# /etc/godo/webctl.env). Re-running install.sh after a tracker rebuild
+# refreshes both the binary AND the schema mirror.
+install -m 0644 -o root -g root "$RPI5_DIR/src/core/config_schema.hpp" \
+                                /opt/godo-tracker/share/config_schema.hpp
 
 echo "[2/6] Installing systemd units to /etc/systemd/system/"
 install -m 0644 "$SCRIPT_DIR/godo-irq-pin.service"  /etc/systemd/system/godo-irq-pin.service

@@ -281,6 +281,105 @@ REDACTED_PLACEHOLDER: Final[str] = "<redacted>"
 ERR_SERVICE_STARTING: Final[str] = "service_starting"
 ERR_SERVICE_STOPPING: Final[str] = "service_stopping"
 
+# --- Track B-SYSTEM PR-B — process monitor + extended resources ----------
+# Process-name whitelist used for classification (NOT for filtering: PR-B
+# enumerates EVERY live PID and classifies per-row). Each name matches an
+# argv[0] basename from `/proc/<pid>/cmdline`, with one exception:
+# `godo-webctl` is matched via argv[1..] containing `godo_webctl` because
+# its argv[0] is `python` / `uvicorn`. See `processes.py::parse_pid_cmdline`
+# docstring + `tests/test_processes.py::test_parse_pid_cmdline_godo_webctl_*`.
+#
+# Drift catch — `tests/test_protocol.py::test_godo_process_names_match_cmake_executables`
+# regex-extracts `add_executable(<name>` from each
+# `production/RPi5/src/*/CMakeLists.txt` and asserts the C++ subset of
+# this set equals `{godo_tracker_rt, godo_freed_passthrough, godo_smoke,
+# godo_jitter}`. The `godo-webctl` literal is webctl-internal and pinned
+# separately.
+GODO_PROCESS_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        "godo_tracker_rt",  # production/RPi5/src/godo_tracker_rt/CMakeLists.txt:1
+        "godo_freed_passthrough",  # production/RPi5/src/godo_freed_passthrough/CMakeLists.txt:1
+        "godo_smoke",  # production/RPi5/src/godo_smoke/CMakeLists.txt:8
+        "godo_jitter",  # production/RPi5/src/godo_jitter/CMakeLists.txt:1
+        "godo-webctl",  # python -m godo_webctl, matched via argv[1..]
+    },
+)
+
+# Subset of GODO_PROCESS_NAMES that maps to `services.ALLOWED_SERVICES`
+# units. Asymmetry vs. `services.ALLOWED_SERVICES`: this set is the
+# PROCESS-LIST view (argv-derived basenames), not the SYSTEMD-UNIT view
+# (`godo-tracker.service`, etc.):
+#
+# - `godo-tracker.service` runs the `godo_tracker_rt` binary
+#   → `MANAGED_PROCESS_NAMES` carries `godo_tracker_rt` (binary).
+#   → `ALLOWED_SERVICES` carries `godo-tracker` (unit).
+# - `godo-webctl.service` runs `python -m godo_webctl`
+#   → both sets carry `godo-webctl` (matched via argv[1..] in the
+#     process list; identical token in the systemd unit).
+# - `godo-irq-pin.service` is `Type=oneshot`
+#   → never live in the process list; the literal is here so the
+#     classifier still flags it `managed` if a future operator
+#     enables `RemainAfterExit=yes` on that unit.
+#
+# Pinned by `tests/test_protocol.py::test_managed_process_names_cardinality`.
+MANAGED_PROCESS_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        "godo_tracker_rt",
+        "godo-webctl",
+        "godo-irq-pin",
+    },
+)
+
+# `/api/system/processes` per-row schema. Row category ∈ {"general",
+# "godo", "managed"} per `processes.classify_pid`. `published_mono_ns` on
+# the parent envelope is the WEBCTL `time.monotonic_ns()` (Python clock
+# domain), NOT the C++ tracker's CLOCK_MONOTONIC; SPA freshness gates use
+# arrival-wall-clock (`Date.now() - _arrival_ms`) per Track D Mode-A M2
+# (mirrored above for `RESOURCES_FIELDS`).
+#
+# Pinned by `tests/test_protocol.py::test_process_fields_pinned`.
+PROCESS_FIELDS: Final[tuple[str, ...]] = (
+    "name",
+    "pid",
+    "user",
+    "state",
+    "cmdline",
+    "cpu_pct",
+    "rss_mb",
+    "etime_s",
+    "category",
+    "duplicate",
+)
+
+# Top-level envelope of `/api/system/processes`. `duplicate_alert` is the
+# OR of the per-row `duplicate` flags — convenience for the SPA banner.
+PROCESSES_RESPONSE_FIELDS: Final[tuple[str, ...]] = (
+    "processes",
+    "duplicate_alert",
+    "published_mono_ns",
+)
+
+# `/api/system/resources/extended` schema. Six fields: per-core CPU list,
+# aggregate CPU pct, mem total/used (MiB), disk pct, published_mono_ns.
+# GPU fields are intentionally absent (per operator decision 2026-04-30
+# 06:38 KST — V3D `gpu_busy_percent` is unreliable on Trixie firmware,
+# CPU temp is already surfaced by the existing System tab CPU-temp
+# sparkline panel via `RESOURCES_FIELDS.cpu_temp_c`).
+#
+# Same `published_mono_ns` clock-domain note as `RESOURCES_FIELDS` /
+# `PROCESS_FIELDS` above: Python `time.monotonic_ns()`, SPA freshness
+# uses arrival-wall-clock.
+#
+# Pinned by `tests/test_protocol.py::test_extended_resources_fields_pinned`.
+EXTENDED_RESOURCES_FIELDS: Final[tuple[str, ...]] = (
+    "cpu_per_core",
+    "cpu_aggregate_pct",
+    "mem_total_mb",
+    "mem_used_mb",
+    "disk_pct",
+    "published_mono_ns",
+)
+
 # Mirror the regex pattern as a string so the SPA can do client-side
 # validation without depending on a Python regex parse. Frontend file:
 # `godo-frontend/src/lib/protocol.ts::MAPS_NAME_REGEX_PATTERN_STR`.

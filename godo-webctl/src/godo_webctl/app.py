@@ -64,7 +64,9 @@ from . import logs as logs_mod
 from . import map_backup as map_backup_mod
 from . import map_image as map_image_mod
 from . import maps as maps_mod
+from . import processes as processes_mod
 from . import resources as resources_mod
+from . import resources_extended as resources_extended_mod
 from . import restart_pending as restart_pending_mod
 from . import services as services_mod
 from . import sse as sse_mod
@@ -97,12 +99,14 @@ from .protocol import (
     ERR_RESTORE_NAME_CONFLICT,
     ERR_SERVICE_STARTING,
     ERR_SERVICE_STOPPING,
+    EXTENDED_RESOURCES_FIELDS,
     JITTER_FIELDS,
     LAST_POSE_FIELDS,
     LAST_SCAN_HEADER_FIELDS,
     MODE_IDLE,
     MODE_LIVE,
     MODE_ONESHOT,
+    PROCESS_FIELDS,
     RESOURCES_FIELDS,
 )
 
@@ -280,6 +284,29 @@ def _resources_view(snap: dict[str, object]) -> dict[str, object]:
     """PR-DIAG — webctl-only Resources schema; pure projection through
     RESOURCES_FIELDS so the wire shape is byte-stable across calls."""
     return {field: snap.get(field) for field in RESOURCES_FIELDS}
+
+
+def _processes_view(snap: dict[str, object]) -> dict[str, object]:
+    """PR-B — projection through PROCESSES_RESPONSE_FIELDS (envelope) +
+    PROCESS_FIELDS (per row). The sampler's row order (sorted by
+    cpu_pct desc) is preserved."""
+    rows = snap.get("processes")
+    out_rows: list[dict[str, object]] = []
+    if isinstance(rows, list):
+        for row in rows:
+            if isinstance(row, dict):
+                out_rows.append({field: row.get(field) for field in PROCESS_FIELDS})
+    return {
+        "processes": out_rows,
+        "duplicate_alert": snap.get("duplicate_alert", False),
+        "published_mono_ns": snap.get("published_mono_ns"),
+    }
+
+
+def _extended_resources_view(snap: dict[str, object]) -> dict[str, object]:
+    """PR-B — projection through EXTENDED_RESOURCES_FIELDS so the wire
+    shape is byte-stable."""
+    return {field: snap.get(field) for field in EXTENDED_RESOURCES_FIELDS}
 
 
 def _service_transition_response(exc: services_mod.ServiceTransitionInProgress) -> JSONResponse:
@@ -1039,6 +1066,52 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def system_services_endpoint() -> JSONResponse:
         items = await asyncio.to_thread(system_services_mod.snapshot)
         return JSONResponse({"services": items}, status_code=HTTPStatus.OK)
+
+    # ---- /api/system/processes (PR-B, anon read) -------------------------
+    # One-shot snapshot. SPA's primary path is the SSE sibling below; the
+    # GET exists for `curl`-debuggability and the operator's "one fresh
+    # snapshot" use case (e.g. take-screenshot-now).
+    #
+    # Process list contains every live PID classified into general / godo /
+    # managed; kernel threads (cmdline empty) are excluded. Note: this
+    # endpoint creates a fresh `ProcessSampler` per call, so cpu_pct is
+    # 0.0 for every row (no prior tick); the SSE stream is the only path
+    # that surfaces meaningful cpu_pct deltas.
+    _processes_one_shot = processes_mod.ProcessSampler()
+
+    @app.get("/api/system/processes")
+    async def system_processes_endpoint() -> JSONResponse:
+        snap = await asyncio.to_thread(_processes_one_shot.sample)
+        return JSONResponse(_processes_view(snap), status_code=HTTPStatus.OK)
+
+    @app.get("/api/system/processes/stream")
+    async def system_processes_stream() -> StreamingResponse:
+        return StreamingResponse(
+            sse_mod.processes_stream(cfg),
+            media_type=_SSE_MEDIA_TYPE,
+            headers=sse_mod.SSE_RESPONSE_HEADERS,
+        )
+
+    # ---- /api/system/resources/extended (PR-B, anon read) ---------------
+    # Per-core CPU + mem (MiB) + disk pct snapshot. GPU intentionally
+    # omitted (per operator decision 2026-04-30 06:38 KST). Same one-shot
+    # vs. SSE pattern as `/api/system/processes`.
+    _resources_extended_one_shot = resources_extended_mod.ResourcesExtendedSampler(
+        disk_check_path=str(cfg.disk_check_path),
+    )
+
+    @app.get("/api/system/resources/extended")
+    async def system_resources_extended_endpoint() -> JSONResponse:
+        snap = await asyncio.to_thread(_resources_extended_one_shot.sample)
+        return JSONResponse(_extended_resources_view(snap), status_code=HTTPStatus.OK)
+
+    @app.get("/api/system/resources/extended/stream")
+    async def system_resources_extended_stream() -> StreamingResponse:
+        return StreamingResponse(
+            sse_mod.resources_extended_stream(cfg),
+            media_type=_SSE_MEDIA_TYPE,
+            headers=sse_mod.SSE_RESPONSE_HEADERS,
+        )
 
     # ---- /api/system/service/{name}/{action} (Track B-SYSTEM PR-2, admin) -
     # Mirrors `/api/system/reboot`'s admin-non-loopback pattern: JWT-authed

@@ -2964,3 +2964,274 @@ async def test_post_system_service_subprocess_failed_returns_500(
             )
     assert r.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
     assert r.json()["err"] == "subprocess_failed"
+
+
+# ---- PR-B: /api/system/processes ----------------------------------------
+
+
+async def test_get_system_processes_anon_returns_200(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    """Anon-readable per CODEBASE invariant (n). Wire shape projected
+    through `PROCESSES_RESPONSE_FIELDS`."""
+    from godo_webctl.protocol import PROCESSES_RESPONSE_FIELDS
+
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    async with _client(s) as cl:
+        r = await cl.get("/api/system/processes")
+    assert r.status_code == HTTPStatus.OK
+    body = r.json()
+    for field in PROCESSES_RESPONSE_FIELDS:
+        assert field in body
+    assert isinstance(body["processes"], list)
+    assert isinstance(body["duplicate_alert"], bool)
+
+
+async def test_get_system_processes_with_admin_token_also_works(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.get("/api/system/processes", headers=_auth(token))
+    assert r.status_code == HTTPStatus.OK
+
+
+async def test_get_system_processes_per_row_shape_pinned(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    """Mode-A S1 fold: each row matches `PROCESS_FIELDS` exactly. We
+    monkeypatch `ProcessSampler.sample` to a known shape so the test
+    is deterministic across hosts (real /proc walks differ)."""
+    from godo_webctl.protocol import PROCESS_FIELDS
+
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    fake_snap = {
+        "processes": [
+            {
+                "name": "godo_smoke",
+                "pid": 100,
+                "user": "ncenter",
+                "state": "S",
+                "cmdline": ["godo_smoke"],
+                "cpu_pct": 0.0,
+                "rss_mb": 2.0,
+                "etime_s": 5,
+                "category": "godo",
+                "duplicate": False,
+            },
+        ],
+        "duplicate_alert": False,
+        "published_mono_ns": 1,
+    }
+    with mock.patch(
+        "godo_webctl.processes.ProcessSampler.sample",
+        return_value=fake_snap,
+    ):
+        async with _client(s) as cl:
+            r = await cl.get("/api/system/processes")
+    assert r.status_code == HTTPStatus.OK
+    body = r.json()
+    rows = body["processes"]
+    assert len(rows) == 1
+    row = rows[0]
+    for f in PROCESS_FIELDS:
+        assert f in row, f"missing {f}"
+
+
+async def test_get_system_processes_duplicate_alert_propagates(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    fake_snap = {
+        "processes": [
+            {
+                "name": "godo_tracker_rt",
+                "pid": 100,
+                "user": "ncenter",
+                "state": "S",
+                "cmdline": ["godo_tracker_rt"],
+                "cpu_pct": 0.0,
+                "rss_mb": 50.0,
+                "etime_s": 1,
+                "category": "managed",
+                "duplicate": True,
+            },
+            {
+                "name": "godo_tracker_rt",
+                "pid": 101,
+                "user": "ncenter",
+                "state": "S",
+                "cmdline": ["godo_tracker_rt"],
+                "cpu_pct": 0.0,
+                "rss_mb": 50.0,
+                "etime_s": 1,
+                "category": "managed",
+                "duplicate": True,
+            },
+        ],
+        "duplicate_alert": True,
+        "published_mono_ns": 1,
+    }
+    with mock.patch(
+        "godo_webctl.processes.ProcessSampler.sample",
+        return_value=fake_snap,
+    ):
+        async with _client(s) as cl:
+            r = await cl.get("/api/system/processes")
+    body = r.json()
+    assert body["duplicate_alert"] is True
+
+
+async def test_get_system_processes_ignores_unknown_query_params(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    """Mode-A S1 fold (S1 backend half): the SPA filter is client-side;
+    a future writer adding `?filter=...` server-side fails contract.
+    The current handler accepts no query params — confirm an extra one
+    is silently ignored (FastAPI returns 200 with the unfiltered body).
+    """
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    async with _client(s) as cl:
+        r = await cl.get("/api/system/processes?filter=nonsense")
+    assert r.status_code == HTTPStatus.OK
+
+
+async def test_get_system_processes_stream_smoke(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    """Smoke pattern (mirror of `test_diag_stream_anon_returns_event_stream`):
+    open the stream with a short read timeout, bail after the first
+    chunk. SSE generators don't terminate naturally."""
+    import asyncio as _asyncio
+
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+
+    async def _peek() -> tuple[int, str]:
+        async with (
+            _client(s) as cl,
+            cl.stream("GET", "/api/system/processes/stream", timeout=2.0) as resp,
+        ):
+            status = resp.status_code
+            ctype = resp.headers.get("content-type", "")
+            async for _chunk in resp.aiter_bytes():
+                return status, ctype
+            return status, ctype
+
+    try:
+        status, ctype = await _asyncio.wait_for(_peek(), timeout=3.0)
+    except TimeoutError:
+        return  # connect succeeded, body-read timed out — acceptable
+    assert status == HTTPStatus.OK
+    assert "text/event-stream" in ctype
+
+
+# ---- PR-B: /api/system/resources/extended ------------------------------
+
+
+async def test_get_system_resources_extended_anon_returns_200(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    from godo_webctl.protocol import EXTENDED_RESOURCES_FIELDS
+
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        disk_check_path=tmp_path,
+    )
+    async with _client(s) as cl:
+        r = await cl.get("/api/system/resources/extended")
+    assert r.status_code == HTTPStatus.OK
+    body = r.json()
+    for field in EXTENDED_RESOURCES_FIELDS:
+        assert field in body
+    assert isinstance(body["cpu_per_core"], list)
+
+
+async def test_get_system_resources_extended_with_no_meminfo_returns_null_mem(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    """Per-source resilience: if `_read_meminfo_total_avail` raises
+    (which it doesn't normally, but we simulate it via monkeypatch),
+    the snapshot still yields with mem fields null."""
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        disk_check_path=tmp_path,
+    )
+    with mock.patch(
+        "godo_webctl.resources_extended._read_meminfo_total_avail",
+        return_value=(None, None),
+    ):
+        async with _client(s) as cl:
+            r = await cl.get("/api/system/resources/extended")
+    assert r.status_code == HTTPStatus.OK
+    body = r.json()
+    assert body["mem_total_mb"] is None
+    assert body["mem_used_mb"] is None
+
+
+async def test_get_system_resources_extended_stream_smoke(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    import asyncio as _asyncio
+
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        disk_check_path=tmp_path,
+    )
+
+    async def _peek() -> tuple[int, str]:
+        async with (
+            _client(s) as cl,
+            cl.stream("GET", "/api/system/resources/extended/stream", timeout=2.0) as resp,
+        ):
+            status = resp.status_code
+            ctype = resp.headers.get("content-type", "")
+            async for _chunk in resp.aiter_bytes():
+                return status, ctype
+            return status, ctype
+
+    try:
+        status, ctype = await _asyncio.wait_for(_peek(), timeout=3.0)
+    except TimeoutError:
+        return
+    assert status == HTTPStatus.OK
+    assert "text/event-stream" in ctype

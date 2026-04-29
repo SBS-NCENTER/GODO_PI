@@ -503,6 +503,74 @@ Pinned by:
 - `tests/test_app_integration.py::test_get_map_dimensions_*` (4 cases:
   happy + 404 + 400 + 500 malformed).
 
+### (z) Track B-SYSTEM PR-B — process monitor + extended resources are stdlib-only `/proc` parsers
+
+`processes.py` and `resources_extended.py` enumerate live PIDs and
+read `/proc/stat` + `/proc/meminfo` + `os.statvfs` directly. **No
+`subprocess` (no `ps -ef`, no `vcgencmd`). No `psutil`.** A future
+writer reaching for either fails Mode-B.
+
+Discipline rationale:
+
+1. **Single-instance**: the new SSE generators run inside the existing
+   webctl uvicorn worker (invariant (e)) — no new pidfile, no new
+   daemon. Single-instance discipline is inherited.
+2. **Anon-readable** (invariant (n)): both `/api/system/processes{,/stream}`
+   and `/api/system/resources/extended{,/stream}` are read endpoints,
+   no JWT required. `/proc/<pid>/cmdline` is already world-readable on
+   Linux so this is not a new disclosure surface; operators should
+   close the SPA Processes sub-tab on every client before running a
+   transient command with secrets in argv (acknowledged limitation,
+   deferred). See `processes.py` module docstring.
+3. **All-PID classifier** (NOT whitelist filter): per operator decision
+   2026-04-30 06:38 KST, every live PID surfaces with a wire-side
+   `category ∈ {"general", "godo", "managed"}` field. Kernel threads
+   (cmdline empty) are excluded from the row list — they would inflate
+   the table to ~200 rows of `[ksoftirqd]`-style entries.
+4. **Binary-vs-unit asymmetry pinned**:
+   `protocol.MANAGED_PROCESS_NAMES` (process-name view) differs from
+   `services.ALLOWED_SERVICES` (systemd-unit view) by exactly the
+   substitution `godo-tracker → godo_tracker_rt`. The asymmetry is
+   real (`godo-tracker.service` runs the `godo_tracker_rt` binary)
+   and pinned by
+   `tests/test_protocol.py::test_managed_process_names_cardinality`.
+5. **`godo-webctl` argv exception**: matched via argv[1..] containing
+   the `godo_webctl` token (because argv[0] is `python` / `uvicorn`).
+   See `processes.parse_pid_cmdline` + tests
+   `test_parse_pid_cmdline_godo_webctl_python_argv` /
+   `test_parse_pid_cmdline_uvicorn_godo_webctl`.
+6. **GPU intentionally out of scope** (operator decision): V3D
+   `gpu_busy_percent` is unreliable on Trixie firmware (raspberrypi/linux
+   #7230) and CPU temp is already surfaced by `RESOURCES_FIELDS.cpu_temp_c`.
+   No `vcgencmd` / DRM sysfs reads in this PR. Re-evaluate when V3D
+   busy% upstream lands.
+7. **Cross-language SSOT** for the C++ subset of `GODO_PROCESS_NAMES`:
+   regex-extracted `add_executable(<name>` lines from each
+   `production/RPi5/src/*/CMakeLists.txt` must equal
+   `{godo_tracker_rt, godo_freed_passthrough, godo_smoke, godo_jitter}`.
+   A future writer adding a binary without updating the whitelist fails
+   `tests/test_protocol.py::test_godo_process_names_match_cmake_executables`.
+8. **`published_mono_ns` clock domain**: same as `RESOURCES_FIELDS` —
+   webctl `time.monotonic_ns()` (Python clock domain), NOT C++
+   tracker's CLOCK_MONOTONIC. SPA freshness uses arrival-wall-clock
+   (`Date.now() - _arrival_ms` per frontend invariant (m)).
+
+Pinned by:
+
+- `tests/test_protocol.py::test_process_fields_pinned` (10 fields).
+- `tests/test_protocol.py::test_processes_response_fields_pinned` (3 fields).
+- `tests/test_protocol.py::test_extended_resources_fields_pinned` (6 fields).
+- `tests/test_protocol.py::test_godo_process_names_match_cmake_executables`.
+- `tests/test_protocol.py::test_managed_process_names_cardinality`.
+- `tests/test_processes.py` (38 cases: parsers, paren-in-comm fixture,
+  cpu_pct algebraic edges, classify, sampler first-tick / duplicate /
+  user-resolve / kernel-thread).
+- `tests/test_resources_extended.py` (20 cases: per-core delta, meminfo,
+  disk pct, partial-failure resilience).
+- `tests/test_sse.py::test_processes_stream_*` + `test_resources_extended_stream_*`.
+- `tests/test_app_integration.py::test_get_system_processes_*` +
+  `test_get_system_resources_extended_*`.
+
 ### (x) Track B-SYSTEM PR-2 — `POST /api/system/service/{name}/{action}` is admin-non-loopback
 
 Mirrors the `/api/system/reboot` admin-non-loopback pattern:
@@ -544,6 +612,80 @@ unit 404 + 409 transition + 504 timeout + 500 failed).
   different uid.
 
 ## Change log
+
+### 2026-04-30 14:00 KST — Track B-SYSTEM PR-B (backend) — process monitor + extended resources
+
+#### Added
+
+- `src/godo_webctl/processes.py` — stdlib `/proc` walker.
+  `parse_proc_stat_total_jiffies`, `parse_pid_stat` (rfind-')')
+  paren-handling), `parse_pid_status_rss_kb`, `parse_pid_status_uid`,
+  `parse_pid_cmdline` (NUL-split + `godo-webctl` argv exception),
+  `cpu_pct_from_deltas` (multi-core uncapped), `classify_pid`,
+  `enumerate_all_pids`, `class ProcessSampler`. Module-level
+  `_uid_cache` per Mode-A N2 fold. Module docstring carries an
+  "Expected cost" stanza per Mode-A M9 fold (5–15 ms CPU per tick on
+  cores 0–2, <2 MB resident). ~430 LOC.
+- `src/godo_webctl/resources_extended.py` — stdlib per-core CPU delta
+  + `/proc/meminfo` + `os.statvfs`. `class CoreJiffies`,
+  `_read_cpu_per_core_jiffies`, `per_core_pct_from_deltas`,
+  `_read_meminfo_total_avail`, `_read_disk_pct`,
+  `class ResourcesExtendedSampler`. NO GPU paths (operator decision).
+  Deliberately NOT re-export-merged with `resources.py` per Track E
+  uncoupled-leaves discipline. ~225 LOC.
+- `src/godo_webctl/protocol.py` —
+  `GODO_PROCESS_NAMES` (5-element frozenset),
+  `MANAGED_PROCESS_NAMES` (3-element frozenset),
+  `PROCESS_FIELDS` (10 fields incl. `category`),
+  `PROCESSES_RESPONSE_FIELDS` (3 fields),
+  `EXTENDED_RESOURCES_FIELDS` (6 fields, GPU absent).
+- `src/godo_webctl/constants.py` — `PROC_PATH`, `PROC_STAT_PATH`,
+  `SSE_PROCESSES_TICK_S`, `SSE_RESOURCES_EXTENDED_TICK_S`.
+- `src/godo_webctl/sse.py` — `processes_stream`, `resources_extended_stream`
+  generators with per-subscriber sampler injection (mirror of
+  `RecordingSleep` test pattern in `last_pose_stream`).
+- `src/godo_webctl/app.py` — `_processes_view`, `_extended_resources_view`
+  projections; 4 new GET handlers:
+  `/api/system/processes`, `/api/system/processes/stream`,
+  `/api/system/resources/extended`, `/api/system/resources/extended/stream`.
+- `tests/test_processes.py` — 38 cases.
+- `tests/test_resources_extended.py` — 20 cases.
+- `tests/test_protocol.py` — 5 PR-B pin cases.
+- `tests/test_sse.py` — 6 PR-B SSE cases.
+- `tests/test_app_integration.py` — 9 PR-B integration cases (anon +
+  admin + duplicate-alert propagation + per-row schema +
+  query-params-ignored + 2 stream smokes + 2 resources cases).
+
+#### Changed
+
+- Invariant (z) added (see above).
+
+#### Removed
+
+- (none)
+
+#### Tests
+
+- 501 → 594 hardware-free pytest (+93 from this PR-B backend half;
+  combined Python new cases 78 incl. the 15 sub-protocol/sse pins).
+- `ruff check` clean on PR-B paths (one pre-existing E402 in
+  `config_schema.py` unchanged).
+- `ruff format` applied across modified files.
+
+#### Mode-A folds applied
+
+- Final fold (07:09 KST) — body's GPU references treated as dead text;
+  six-field `EXTENDED_RESOURCES_FIELDS`. M3 — wire field is
+  `category` everywhere. M4 — `enumerate_all_pids` (not
+  `enumerate_godo_pids`); classifier consumes `GODO_PROCESS_NAMES` +
+  `MANAGED_PROCESS_NAMES`. M7 — `(Web Content))` paren-in-comm
+  fixture in `test_parse_pid_stat_handles_paren_in_comm`. M8 —
+  three explicit cpu_pct edge tests
+  (`zero_total_delta_returns_zero`,
+  `negative_delta_floors_to_zero`,
+  `does_not_clamp_at_100_for_multicore`). M9 — "Expected cost"
+  stanzas in both module docstrings. N2 — module-level `_uid_cache`.
+  N3 — `os.scandir` over `os.listdir`.
 
 ### 2026-04-30 17:30 KST — Track D scale + Y-flip fix
 

@@ -408,3 +408,132 @@ def test_sse_response_headers_pinned() -> None:
     """N5: defensive against a future reverse-proxy buffering SSE."""
     assert sse.SSE_RESPONSE_HEADERS["Cache-Control"] == "no-cache"
     assert sse.SSE_RESPONSE_HEADERS["X-Accel-Buffering"] == "no"
+
+
+# ---- PR-B: processes_stream ----------------------------------------------
+
+
+def _fake_process_sample() -> dict[str, object]:
+    return {
+        "processes": [
+            {
+                "name": "godo_smoke",
+                "pid": 100,
+                "user": "ncenter",
+                "state": "S",
+                "cmdline": ["godo_smoke"],
+                "cpu_pct": 0.0,
+                "rss_mb": 2.0,
+                "etime_s": 5,
+                "category": "godo",
+                "duplicate": False,
+            },
+        ],
+        "duplicate_alert": False,
+        "published_mono_ns": 1,
+    }
+
+
+async def test_processes_stream_emits_1hz_sleep_sequence() -> None:
+    from godo_webctl import processes
+    from godo_webctl.constants import SSE_PROCESSES_TICK_S
+
+    sleep = RecordingSleep(max_calls=3)
+    sampler = mock.MagicMock(spec=processes.ProcessSampler)
+    sampler.sample.return_value = _fake_process_sample()
+    chunks = await _drain(
+        sse.processes_stream(_settings(), sampler=sampler, sleep=sleep),
+    )
+    assert sleep.calls == [SSE_PROCESSES_TICK_S, SSE_PROCESSES_TICK_S, SSE_PROCESSES_TICK_S]
+    assert any(c.startswith(b"data:") and b"duplicate_alert" in c for c in chunks)
+
+
+async def test_processes_stream_skips_frame_on_sample_error() -> None:
+    from godo_webctl import processes
+    from godo_webctl.constants import SSE_PROCESSES_TICK_S
+
+    sleep = RecordingSleep(max_calls=2)
+    sampler = mock.MagicMock(spec=processes.ProcessSampler)
+    sampler.sample.side_effect = OSError("proc gone")
+    chunks = await _drain(
+        sse.processes_stream(_settings(), sampler=sampler, sleep=sleep),
+    )
+    assert sleep.calls == [SSE_PROCESSES_TICK_S, SSE_PROCESSES_TICK_S]
+    assert all(not c.startswith(b"data:") for c in chunks)
+
+
+async def test_processes_stream_cancellation_propagates() -> None:
+    from godo_webctl import processes
+
+    async def cancel_immediately(_d: float) -> None:
+        raise asyncio.CancelledError()
+
+    sampler = mock.MagicMock(spec=processes.ProcessSampler)
+    sampler.sample.return_value = _fake_process_sample()
+    with pytest.raises(asyncio.CancelledError):
+        async for _ in sse.processes_stream(_settings(), sampler=sampler, sleep=cancel_immediately):
+            pass
+
+
+# ---- PR-B: resources_extended_stream -------------------------------------
+
+
+def _fake_extended_sample() -> dict[str, object]:
+    return {
+        "cpu_per_core": [10.0, 20.0, 30.0, 40.0],
+        "cpu_aggregate_pct": 25.0,
+        "mem_total_mb": 8000.0,
+        "mem_used_mb": 2000.0,
+        "disk_pct": 50.0,
+        "published_mono_ns": 1,
+    }
+
+
+async def test_resources_extended_stream_emits_per_core_list() -> None:
+    from godo_webctl import resources_extended
+    from godo_webctl.constants import SSE_RESOURCES_EXTENDED_TICK_S
+
+    sleep = RecordingSleep(max_calls=2)
+    sampler = mock.MagicMock(spec=resources_extended.ResourcesExtendedSampler)
+    sampler.sample.return_value = _fake_extended_sample()
+    chunks = await _drain(
+        sse.resources_extended_stream(_settings(), sampler=sampler, sleep=sleep),
+    )
+    assert sleep.calls == [SSE_RESOURCES_EXTENDED_TICK_S, SSE_RESOURCES_EXTENDED_TICK_S]
+    data = [c for c in chunks if c.startswith(b"data:")]
+    assert len(data) >= 1
+    import json
+
+    body = json.loads(data[0][len(b"data: ") :].decode().rstrip("\n"))
+    assert isinstance(body["cpu_per_core"], list)
+    assert len(body["cpu_per_core"]) == 4
+
+
+async def test_resources_extended_stream_skips_on_partial_failure() -> None:
+    from godo_webctl import resources_extended
+
+    sleep = RecordingSleep(max_calls=1)
+    sampler = mock.MagicMock(spec=resources_extended.ResourcesExtendedSampler)
+    sampler.sample.side_effect = OSError("boom")
+    chunks = await _drain(
+        sse.resources_extended_stream(_settings(), sampler=sampler, sleep=sleep),
+    )
+    # No frames emitted; loop continues for one tick before recorder cancels.
+    assert all(not c.startswith(b"data:") for c in chunks)
+
+
+async def test_resources_extended_stream_cancellation_propagates() -> None:
+    from godo_webctl import resources_extended
+
+    async def cancel_immediately(_d: float) -> None:
+        raise asyncio.CancelledError()
+
+    sampler = mock.MagicMock(spec=resources_extended.ResourcesExtendedSampler)
+    sampler.sample.return_value = _fake_extended_sample()
+    with pytest.raises(asyncio.CancelledError):
+        async for _ in sse.resources_extended_stream(
+            _settings(),
+            sampler=sampler,
+            sleep=cancel_immediately,
+        ):
+            pass

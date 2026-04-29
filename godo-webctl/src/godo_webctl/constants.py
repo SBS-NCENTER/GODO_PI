@@ -205,6 +205,25 @@ BACKUP_LOCK_FILENAME: Final[str] = ".lock"
 # endpoint always returns 200.
 SYSTEM_SERVICES_CACHE_TTL_S: Final[float] = 1.0
 
+# --- PR-B (Track B-SYSTEM PR-B) — process monitor + extended resources ---
+# Filesystem root for `/proc` walks. Pinned here so tests can monkeypatch
+# it onto a tmp_path-anchored fake `/proc` tree without touching real
+# kernel state.
+PROC_PATH: Final[str] = "/proc"
+
+# `/proc/stat` aggregate-CPU + per-core jiffy counters. Read by both
+# `processes.ProcessSampler` (aggregate "total CPU jiffies" denominator)
+# and `resources_extended.ResourcesExtendedSampler` (per-core delta).
+PROC_STAT_PATH: Final[str] = "/proc/stat"
+
+# SSE tick for `/api/system/processes/stream` and
+# `/api/system/resources/extended/stream`. 1 Hz matches the operator's
+# debug-loop cadence (htop refreshes at ~1.5 s by default; we use 1 s
+# to feel slightly more responsive while still being sub-htop on
+# `/proc` syscalls — see processes.py "Expected cost").
+SSE_PROCESSES_TICK_S: Final[float] = 1.0
+SSE_RESOURCES_EXTENDED_TICK_S: Final[float] = 1.0
+
 # Korean transition-warning strings keyed by `(svc, transition)`. Used
 # by the 409-translation arm of `local_service_action` and
 # `system_service_action` (both share `services.control()` underneath).

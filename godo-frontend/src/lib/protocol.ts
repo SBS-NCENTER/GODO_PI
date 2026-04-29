@@ -137,7 +137,7 @@ export const ERR_MAPS_DIR_MISSING = 'maps_dir_missing';
 // MUST equal `godo_webctl.constants.MAPS_NAME_REGEX.pattern` —
 // drift detected by inspection per godo-frontend/CODEBASE.md
 // invariant (k).
-export const MAPS_NAME_REGEX_PATTERN_STR = '^[a-zA-Z0-9_-]{1,64}$';
+export const MAPS_NAME_REGEX_PATTERN_STR = '^[a-zA-Z0-9_()-][a-zA-Z0-9._()-]{0,63}$';
 
 // --- PR-DIAG (Track B-DIAG) — diagnostics page wire shapes ---------------
 // `JitterSnapshot` / `AmclIterationRate` / `Resources` / `DiagFrame` mirror

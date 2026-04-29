@@ -106,17 +106,31 @@ def test_maps_name_regex_accepts_typical_stems() -> None:
     assert C.MAPS_NAME_REGEX.match("a" * 64)
 
 
-def test_maps_name_regex_rejects_dotdot() -> None:
+def test_maps_name_regex_accepts_dot_inside_stem() -> None:
+    # Operator-friendly date-style names like "04.29_1", "v1.2", "1.0(rc)".
+    assert C.MAPS_NAME_REGEX.match("04.29_1")
+    assert C.MAPS_NAME_REGEX.match("v1.2")
+    assert C.MAPS_NAME_REGEX.match("a.b.c")
+
+
+def test_maps_name_regex_accepts_parens() -> None:
+    assert C.MAPS_NAME_REGEX.match("studio(1)")
+    assert C.MAPS_NAME_REGEX.match("backup(test)")
+    assert C.MAPS_NAME_REGEX.match("(prefix)tail")
+
+
+def test_maps_name_regex_rejects_leading_dot() -> None:
+    # Hidden-file forms and traversal-shaped inputs all start with '.';
+    # the first-char restriction in the regex blocks them.
+    assert not C.MAPS_NAME_REGEX.match(".")
     assert not C.MAPS_NAME_REGEX.match("..")
+    assert not C.MAPS_NAME_REGEX.match(".hidden")
+    assert not C.MAPS_NAME_REGEX.match(".activate.lock")
 
 
 def test_maps_name_regex_rejects_slash() -> None:
     assert not C.MAPS_NAME_REGEX.match("foo/bar")
-
-
-def test_maps_name_regex_rejects_dot_in_stem() -> None:
-    assert not C.MAPS_NAME_REGEX.match("foo.pgm")
-    assert not C.MAPS_NAME_REGEX.match(".hidden")
+    assert not C.MAPS_NAME_REGEX.match("../etc/passwd")
 
 
 def test_maps_name_regex_rejects_empty() -> None:
@@ -125,10 +139,21 @@ def test_maps_name_regex_rejects_empty() -> None:
 
 def test_maps_name_regex_rejects_too_long() -> None:
     assert not C.MAPS_NAME_REGEX.match("a" * 65)
+    # Length cap also applies to dot-bearing names.
+    assert not C.MAPS_NAME_REGEX.match("a" + ".a" * 32)  # 65 chars
 
 
 def test_maps_name_regex_rejects_null_byte() -> None:
     assert not C.MAPS_NAME_REGEX.match("foo\x00bar")
+
+
+def test_maps_name_regex_rejects_whitespace_and_unallowed() -> None:
+    # Whitespace, glob, shell metas — all forbidden anywhere in the stem.
+    assert not C.MAPS_NAME_REGEX.match("foo bar")
+    assert not C.MAPS_NAME_REGEX.match("foo\tbar")
+    assert not C.MAPS_NAME_REGEX.match("foo*bar")
+    assert not C.MAPS_NAME_REGEX.match("foo;bar")
+    assert not C.MAPS_NAME_REGEX.match("한글")
 
 
 def test_maps_name_regex_accepts_reserved_active_name() -> None:

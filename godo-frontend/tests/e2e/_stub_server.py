@@ -74,7 +74,7 @@ STUB_FLAGS: dict[str, bool] = {"loopback": True}
 # Track E `name` regex; mirror of MAPS_NAME_REGEX_PATTERN_STR.
 import re as _re
 
-_MAPS_NAME_RE = _re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+_MAPS_NAME_RE = _re.compile(r"^[a-zA-Z0-9_()-][a-zA-Z0-9._()-]{0,63}$")
 
 # Track B-BACKUP — canonical UTC stamp regex; mirror of
 # `godo_webctl.map_backup._TS_REGEX`.

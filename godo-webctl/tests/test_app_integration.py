@@ -1243,10 +1243,12 @@ async def test_get_map_image_named_dot_traversal_returns_400(
     )
     async with _client(s) as cl:
         # FastAPI routes `/api/maps/..%2Fetc/image` differently from
-        # `/api/maps/foo.pgm/image` — both must be rejected. We pick a
-        # name that the router will pass to the handler (no slashes),
-        # confirming the validator rejects it at the maps.py layer.
-        r = await cl.get("/api/maps/foo.pgm/image")
+        # `/api/maps/<bad-name>/image` — both must be rejected. We pick a
+        # leading-dot name (still rejected by MAPS_NAME_REGEX after the
+        # 2026-04-29 dot-in-stem allow) that the router passes through
+        # to the handler, confirming the validator rejects it at the
+        # maps.py layer rather than the router.
+        r = await cl.get("/api/maps/.hidden/image")
     assert r.status_code == HTTPStatus.BAD_REQUEST
     assert r.json()["err"] == "invalid_map_name"
 
@@ -1422,14 +1424,15 @@ async def test_activate_dot_traversal_returns_400(
     tmp_maps_dir: Path,
 ) -> None:
     """Path-traversal corpus for /activate: `..%2Fetc%2Fpasswd` (URL-encoded
-    slash) and `foo.pgm` (literal dot escape). The first variant is
+    slash) and `.hidden` (leading-dot escape). The first variant is
     decoded by httpx/Starlette path normalization; depending on the
     runtime, the URL collapses to a route that does not match the
     `/api/maps/{name}/activate` template at all, surfacing as 404 (no
     route) or 405 (parent path matched with a different method). Either
     routing-layer rejection is acceptable; only a 200/2xx on a traversal
-    name would be a real escape. The literal `foo.pgm` variant DOES
-    reach the handler (no slash) and must 400 via the regex."""
+    name would be a real escape. The literal `.hidden` variant DOES
+    reach the handler (no slash) and must 400 via the regex (leading
+    dot is the post-2026-04-29 traversal sentinel)."""
     s = _settings_for(
         uds_socket=tmp_path / "u.sock",
         map_path=tmp_map_pair,
@@ -1449,9 +1452,9 @@ async def test_activate_dot_traversal_returns_400(
         ), r1.text
         if r1.status_code == HTTPStatus.BAD_REQUEST:
             assert r1.json()["err"] == "invalid_map_name"
-        # Variant 2: literal `foo.pgm` — router passes through, handler
-        # MUST reject via the regex (no `.` allowed in MAPS_NAME_REGEX).
-        r2 = await cl.post("/api/maps/foo.pgm/activate", headers=_auth(token))
+        # Variant 2: literal `.hidden` — router passes through, handler
+        # MUST reject via the regex (leading dot forbidden).
+        r2 = await cl.post("/api/maps/.hidden/activate", headers=_auth(token))
     assert r2.status_code == HTTPStatus.BAD_REQUEST
     assert r2.json()["err"] == "invalid_map_name"
 
@@ -1581,11 +1584,11 @@ async def test_delete_dot_traversal_returns_400(
     tmp_map_pair: Path,
     tmp_maps_dir: Path,
 ) -> None:
-    """Path-traversal corpus for DELETE: encoded slash + literal `.pgm`
-    suffix. The encoded-slash variant collapses to a non-matching route
+    """Path-traversal corpus for DELETE: encoded slash + leading-dot
+    literal. The encoded-slash variant collapses to a non-matching route
     (404/405) or reaches the handler (400); all are valid rejections.
-    The literal `foo.pgm` case reaches the handler and must 400 via
-    regex."""
+    The literal `.hidden` case reaches the handler and must 400 via
+    regex (leading dot is the post-2026-04-29 traversal sentinel)."""
     s = _settings_for(
         uds_socket=tmp_path / "u.sock",
         map_path=tmp_map_pair,
@@ -1605,7 +1608,7 @@ async def test_delete_dot_traversal_returns_400(
         ), r1.text
         if r1.status_code == HTTPStatus.BAD_REQUEST:
             assert r1.json()["err"] == "invalid_map_name"
-        r2 = await cl.delete("/api/maps/foo.pgm", headers=_auth(token))
+        r2 = await cl.delete("/api/maps/.hidden", headers=_auth(token))
     assert r2.status_code == HTTPStatus.BAD_REQUEST
     assert r2.json()["err"] == "invalid_map_name"
 

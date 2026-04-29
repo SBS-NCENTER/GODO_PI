@@ -114,13 +114,15 @@ describe('maps store', () => {
     expect(isValidMapName('studio_v1')).toBe(true);
     expect(isValidMapName('a')).toBe(true);
     expect(isValidMapName('a'.repeat(64))).toBe(true);
+    // 2026-04-29: dot mid-stem and parens are now allowed.
+    expect(isValidMapName('04.29_1')).toBe(true);
+    expect(isValidMapName('studio(1)')).toBe(true);
     // Rejection corpus — string literals, not parametrize. Each call's
     // failure message names exactly which input slipped through.
     expect(isValidMapName('')).toBe(false);
     expect(isValidMapName('..')).toBe(false);
     expect(isValidMapName('foo/bar')).toBe(false);
-    expect(isValidMapName('foo.pgm')).toBe(false);
-    expect(isValidMapName('.hidden')).toBe(false);
+    expect(isValidMapName('.hidden')).toBe(false);  // leading dot still rejected
     expect(isValidMapName('a'.repeat(65))).toBe(false);
   });
 });

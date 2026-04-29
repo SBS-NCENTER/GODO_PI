@@ -139,6 +139,32 @@ export const ERR_MAPS_DIR_MISSING = 'maps_dir_missing';
 // invariant (k).
 export const MAPS_NAME_REGEX_PATTERN_STR = '^[a-zA-Z0-9_()-][a-zA-Z0-9._()-]{0,63}$';
 
+// --- Track D scale fix — map metadata wire shapes ----------------------
+// `MapYaml` is parsed CLIENT-SIDE from the body of GET /api/maps/<name>/yaml
+// (plain ROS map_server YAML — `image`, `resolution`, `origin`, `negate`).
+// `MapDimensions` is the JSON shape of GET /api/maps/<name>/dimensions
+// (PGM header bytes, no Pillow on the backend).
+//
+// `MapMetadata` is the COMPOSED struct the SPA carries through the
+// `mapMetadata` store; PoseCanvas consumes it directly.
+export interface MapYaml {
+  image: string;
+  resolution: number; // meters per cell
+  origin: [number, number, number]; // [x, y, theta] — theta in radians
+  negate: number;
+}
+
+export interface MapDimensions {
+  width: number; // PGM image width in pixels
+  height: number; // PGM image height in pixels
+}
+
+export interface MapMetadata extends MapYaml, MapDimensions {
+  // Source URL the metadata was loaded for; useful for the SPA to
+  // detect "metadata snapshot is stale w.r.t. current mapImageUrl".
+  source_url: string;
+}
+
 // --- PR-DIAG (Track B-DIAG) — diagnostics page wire shapes ---------------
 // `JitterSnapshot` / `AmclIterationRate` / `Resources` / `DiagFrame` mirror
 // the webctl-side projections (godo_webctl.protocol::JITTER_FIELDS /

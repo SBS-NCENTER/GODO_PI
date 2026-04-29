@@ -99,7 +99,9 @@ store into a lib, deliberate and one-way.
 | `stores/lastPose.ts`             | SSE-fed `LastPose`; refcounts subscribers; polling fallback when SSE drops.                                                                                                 |
 | `stores/mode.ts`                 | Polls `/api/health` at HEALTH_POLL_MS; supports `setModeOptimistic` after button clicks.                                                                                    |
 | `stores/theme.ts`                | Light/dark theme; persisted in localStorage; sets `data-theme` attribute on `<html>`.                                                                                       |
-| `components/PoseCanvas.svelte`   | Canvas with pan/zoom/trail; world↔canvas conversion via `MAP_PIXELS_PER_METER`.                                                                                            |
+| `components/PoseCanvas.svelte`   | Canvas with pan/zoom/trail; world↔canvas conversion via `mapMetadata.resolution + .origin + .height`.                                                                      |
+| `lib/mapYaml.ts`                 | Pure parser for ROS map_server YAML (`image`, `resolution`, `origin`, `negate`); throws `MapYamlParseError` on malformed input.                                             |
+| `stores/mapMetadata.ts`          | Composes `parseMapYaml` + `/api/maps/<name>/dimensions` fetch; refetches on `mapImageUrl` change with AbortController-cancelled previous load.                              |
 | `components/MapListPanel.svelte` | Track E (PR-C). Lists every map under `${GODO_WEBCTL_MAPS_DIR}`; admin-gated activate / delete actions; reuses `<ConfirmDialog/>` with the optional `secondaryAction` prop. |
 | `stores/maps.ts`                 | Track E. `Writable<MapEntry[]>` + `refresh()` / `activate(name)` / `remove(name)`. No periodic polling — refresh on mount, post-activate, post-remove only.                 |
 | `routes/*.svelte`                | Page composition only — no business logic; orchestrate via stores + lib calls.                                                                                              |
@@ -459,6 +461,111 @@ so a single stub process is enough to drive playwright. No vite
 preview proxy needed.
 
 ## Change log
+
+### 2026-04-30 17:30 KST — Track D scale + Y-flip fix
+
+#### Added
+
+- `src/lib/mapYaml.ts` — pure parser for ROS map_server YAML; extracts
+  `image / resolution / origin / negate`. Throws `MapYamlParseError`
+  on missing or malformed fields; tolerates blank + comment lines.
+- `src/lib/protocol.ts` — `MapYaml`, `MapDimensions`, `MapMetadata`
+  interfaces. `MapMetadata` composes both wire shapes plus a
+  `source_url` field for store-side staleness detection.
+- `src/stores/mapMetadata.ts` — `Writable<MapMetadata | null>` +
+  `loadMapMetadata(mapImageUrl)`. Parallel-fetches YAML + dimensions
+  via `apiFetch` / `apiGet`; AbortController-cancels the previous
+  load on rapid name changes (Mode-A T2 fold pin).
+- `tests/unit/mapYaml.test.ts` (6 cases — minimal valid + missing
+  resolution + bad type + 3-element origin + non-zero theta + comment
+  tolerance).
+- `tests/unit/mapMetadata.test.ts` (5 cases — parallel fetch + name
+  derivation + cancellation race + 404 + parse-error).
+- `tests/unit/poseCanvasScale.test.ts` (8 cases — Mode-A T3 hand-
+  computed integers: §C-1 identity, §C-2 non-zero origin, §C-3
+  Y-flip pin (the fail-then-pass DoD gate per S1), §C-4 direction
+  sanity, §C-5 zoom-equiv, §C-6 non-square (M2 rewrite), §C-7
+  resolution variance, §C-8 inverse-resolution scaling (T1 rewrite)).
+- `tests/unit/poseCanvasImageReload.test.ts` + `_PoseCanvasHost.svelte`
+  (Mode-A M3 reactive image refetch — assert exactly 1 fetch on
+  initial mount, 2 after first prop change, 3 after second).
+- `tests/e2e/map.spec.ts` — 1 new playwright case "scan overlay
+  survives wheel-zoom (Track D scale fix)".
+
+#### Changed
+
+- `src/components/PoseCanvas.svelte` — (a) subscribes to
+  `$stores/mapMetadata`; (b) `worldToCanvas` / `canvasToWorld` now
+  read `metadata.resolution`, `.origin`, `.width`, `.height` (Y-flip
+  in the single `H - 1 - (wy - oy)/res` line); (c) image draw uses
+  `img.naturalWidth × zoom` anchored to canvas centre — the world
+  frame sits on the SAME centre via `(imgCol - width/2)` so the
+  overlay aligns with the bitmap at every zoom; (d) `MAP_PIXELS_PER_METER`
+  import deleted; (e) reactive `$effect(() => mapImageUrl)` refetches
+  BOTH bitmap + metadata on prop change (Mode-A M3); (f) non-zero
+  theta warning banner (Mode-A S6); (g) overlay gating extended to
+  `meta != null`.
+- `src/lib/constants.ts` — DELETED `MAP_PIXELS_PER_METER` (the
+  structural witness for the fix).
+- `tests/unit/poseCanvasFreshness.test.ts` — inject identity metadata
+  mock + add Mode-A S5 case (scan stays fresh when metadata resolves
+  at t=400ms because Date.now() - 0 = 400 < MAP_SCAN_FRESHNESS_MS).
+- `tests/e2e/_stub_server.py` — new `_h_maps_dimensions(name)` handler
+  returning `{width: 200, height: 100}` non-square (so the e2e suite
+  exercises the H-1 - (wy-oy)/res row math); existing YAML stub
+  unchanged (the earlier "placeholder" claim was a misread per Mode-A
+  S4 fold).
+- `CODEBASE.md` — module-responsibilities row updated; new invariant
+  `(x)` documented.
+
+#### Removed
+
+- `src/lib/constants.ts::MAP_PIXELS_PER_METER` — pre-flight grep
+  captured (single hit in `src/`, two hits in `src/components/`).
+  Post-deletion grep returns zero hits in `src/`.
+
+#### Tests
+
+- 143 → 164 vitest unit cases (+21 from this PR: 6 mapYaml + 5
+  mapMetadata + 8 poseCanvasScale + 1 poseCanvasImageReload + 1
+  Mode-A S5 freshness case; existing freshness tests amended in place).
+- 36 → 37 passing playwright e2e cases (+1 from `map.spec.ts`). The
+  pre-existing `config.spec.ts: anonymous viewer does NOT see the
+Config nav row` failure remains red (unrelated to this PR).
+- `npm run lint` clean for new files; pre-existing warning in
+  `tests/unit/maps.test.ts` is unchanged.
+- `npm run build` produces 33.18 kB gzipped JS (was 31.89 kB on
+  `main e68e035`; +1.29 KB delta — within the +2.0 KB Mode-A M3+S6
+  budget).
+
+#### Mode-A folds applied
+
+- M1: §C-3 rewritten as a fail-on-unfixed test pinning
+  `worldToCanvas(0, 0).cy === 249` against the new metadata-aware
+  math; FAILED on `main e68e035` (cy=75) and PASSED on the new
+  code — fail-then-pass evidence in PR body.
+- M2: §C-6 worked example uses non-square `width=200, height=50`
+  with origin=[0,0,0]; literal-integer expected coords.
+- M3: P4-D5 step iii — reactive `$effect` for image refetch added.
+  Pinned by `poseCanvasImageReload.test.ts` via a Svelte 5 host
+  component that mutates an internal `$state(url)`.
+- M4: webctl invariant tail = `(x)` on `main e68e035`; this PR adds
+  `(y)` to webctl. Frontend tail = `(w)`; this PR adds `(x)`.
+- S1: §C-3 fail-on-unfixed-then-pass evidence captured.
+- S2: pre-flight grep of `MAP_PIXELS_PER_METER` recorded; post-
+  deletion grep returns zero hits in `src/`.
+- S3: line 102 module-responsibilities row updated to read
+  `mapMetadata.resolution + .origin + .height`.
+- S5: scan-arrives-at-t=0 / metadata-at-t=400ms / fresh case added
+  to `poseCanvasFreshness.test.ts`.
+- S6: non-zero theta warning banner in `PoseCanvas.svelte` (visible
+  to operator, not a silent `console.warn`).
+- T1: §C-8 replaces the vacuous "constant deleted" test with the
+  inverse-resolution scaling property (delta_b = 2 × delta_a).
+- T2: `mapMetadata.test.ts::cancellation race` strengthened to spy
+  on store transitions and assert v1 NEVER leaks into the store.
+- T3: §C-1 expected coords are hand-computed literal integers, not
+  formula-recomputed.
 
 ### 2026-04-29 — Track D: Live LIDAR overlay (Phase 4.5+ P0.5)
 
@@ -833,6 +940,66 @@ subscriber and defeats invariant (p). A System-side resources-poll on
 Pinned by `tests/unit/system.test.ts::renders four panels, registers
 one diag subscriber on mount, and unsubs on unmount` (subscriber count
 == 1 after mount, == 0 after unmount).
+
+### (x) Track D scale fix — resolution-aware scan overlay
+
+`PoseCanvas.svelte`'s world↔canvas math reads from the
+`$stores/mapMetadata` store (not a hardcoded `MAP_PIXELS_PER_METER`
+constant). The store composes:
+
+- `parseMapYaml(text)` over the body of `GET /api/maps/<name>/yaml`
+  (resolution, origin, negate),
+- the JSON shape of `GET /api/maps/<name>/dimensions` (width, height
+  read from PGM header bytes — see godo-webctl invariant (y)).
+
+The transform formula (Mode-A M2 fold pin — non-square width != height
+exercised by `tests/unit/poseCanvasScale.test.ts §C-6`):
+
+```
+img_col = (wx - origin_x) / resolution
+img_row = (height - 1) - (wy - origin_y) / resolution     // Y-flip
+cx = canvas.width  / 2 + panX + (img_col - width  / 2) * zoom
+cy = canvas.height / 2 + panY + (img_row - height / 2) * zoom
+```
+
+The single Y-flip lives in the `(height - 1) - ...` term. World +y
+maps to a SMALLER canvas y (higher on screen), matching the ROS
+map_server convention that `origin` is the world coord of the
+bottom-left pixel.
+
+The `MAP_PIXELS_PER_METER` constant was deleted as the structural
+witness — no SPA code path can drift back to a hardcoded scale.
+
+`mapImageUrl` prop changes trigger a reactive `$effect` that refetches
+BOTH the bitmap and the metadata (Mode-A M3 fold). Pre-fix, only the
+metadata refetched, so a `previewUrl` swap in MapListPanel painted
+new coords on old pixels.
+
+For non-zero `theta` in `origin[2]`, the canvas renders an in-canvas
+warning banner ("이 맵은 회전 정보(theta)를 갖지만 SPA가 회전을
+그리지 못합니다 — 좌표가 어긋날 수 있습니다") in the same DOM slot as
+`mapLoadError` (Mode-A S6 fold) — a follow-up ticket will add the
+sin/cos image rotation. The banner is operator-visible, not a silent
+`console.warn`.
+
+The scan overlay renders ONLY when `mapMetadata` is non-null AND the
+freshness gate (Mode-A M2) passes. While metadata is loading, the
+canvas falls back to a centred Cartesian frame so the pose dot still
+renders (back-compat with the `/api/map/image` 404 path).
+
+Pinned by:
+
+- `tests/unit/mapYaml.test.ts` (6 cases),
+- `tests/unit/mapMetadata.test.ts` (5 cases — including Mode-A T2
+  cancellation race),
+- `tests/unit/poseCanvasScale.test.ts` (8 cases — hand-computed
+  literal integers per Mode-A T3, NOT formula-recomputed),
+- `tests/unit/poseCanvasImageReload.test.ts` (Mode-A M3 reactive
+  refetch — call count 1→2→3 on prop changes via a Svelte 5 host
+  component),
+- `tests/unit/poseCanvasFreshness.test.ts::Mode-A S5: scan stays
+fresh when metadata resolves at t=400ms`,
+- `tests/e2e/map.spec.ts::scan overlay survives wheel-zoom`.
 
 ### (w) PR-SYSTEM — sparkline window matches `DIAG_SPARKLINE_DEPTH × SSE_TICK_MS`
 

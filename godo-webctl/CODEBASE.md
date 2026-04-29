@@ -471,6 +471,38 @@ Pinned by `tests/test_services.py::test_control_raises_*` +
 and the integration tests asserting the exact Korean substring per
 service in `tests/test_app_integration.py`.
 
+### (y) Track D scale fix — `/api/maps/{name}/dimensions` reads PGM header without Pillow
+
+`maps.read_pgm_dimensions(pgm_path)` parses the netpbm `P5` header
+(magic + width/height tokens) reading at most `PGM_HEADER_MAX_BYTES = 64`
+bytes from the file. The bound makes the function safe against a
+pathologically large PGM (e.g., a 1 GB sparse file): we never stream
+pixel data through Python.
+
+`maps.py` raises `PgmHeaderInvalid` (a sibling of `InvalidName` /
+`MapNotFound` / `MapIsActive` / `MapsDirMissing`) on malformed magic,
+missing or non-numeric dimension tokens, or non-positive dimensions.
+The class lives in `maps.py` rather than reverse-importing
+`map_image.py::MapImageInvalid` — preserving `maps.py`'s Pillow-free
+filesystem-primitives invariant per its module docstring (Mode-A T5
+fold). `app.py::_map_maps_exc_to_response` maps `PgmHeaderInvalid` →
+HTTP 500 with `{ok: False, err: "map_invalid"}` so the SPA's existing
+`map_invalid` handler catches it.
+
+The endpoint exists because PGM dimensions live in HEADER bytes, not
+the YAML, so the SPA cannot extract them by parsing
+`/api/maps/{name}/yaml`. The combined YAML (resolution + origin) +
+dimensions (width + height) is what `mapMetadata` uses for
+resolution-aware world↔canvas math (see godo-frontend/CODEBASE.md
+invariant (x)).
+
+Pinned by:
+
+- `tests/test_maps.py::test_read_pgm_dimensions_*` (6 cases including
+  the byte-bound spy per Mode-A T4 fold).
+- `tests/test_app_integration.py::test_get_map_dimensions_*` (4 cases:
+  happy + 404 + 400 + 500 malformed).
+
 ### (x) Track B-SYSTEM PR-2 — `POST /api/system/service/{name}/{action}` is admin-non-loopback
 
 Mirrors the `/api/system/reboot` admin-non-loopback pattern:
@@ -512,6 +544,51 @@ unit 404 + 409 transition + 504 timeout + 500 failed).
   different uid.
 
 ## Change log
+
+### 2026-04-30 17:30 KST — Track D scale + Y-flip fix
+
+#### Added
+
+- `src/godo_webctl/maps.py` — `read_pgm_dimensions(pgm_path)` pure
+  function (parses netpbm `P5` header bytes only, no Pillow) and
+  `class PgmHeaderInvalid(ValueError)` exception. ~55 LOC. Per Mode-A
+  T5 fold: lives in `maps.py` (NOT a reverse import from
+  `map_image.py::MapImageInvalid`) to preserve the Pillow-free
+  filesystem-primitives invariant per the module docstring.
+- `src/godo_webctl/constants.py` — `PGM_HEADER_MAX_BYTES = 64` (Tier-1).
+- `src/godo_webctl/app.py` — `GET /api/maps/{name}/dimensions` handler
+  returning `{width, height}`; `_map_maps_exc_to_response` arm extended
+  for `PgmHeaderInvalid → 500 map_invalid`.
+- `tests/test_maps.py` — 6 cases (`test_read_pgm_dimensions_*` —
+  happy + comment-line + 0-byte + no-magic + non-numeric-width +
+  byte-bound spy per Mode-A T4 fold).
+- `tests/test_app_integration.py` — 4 cases for the dimensions
+  endpoint (happy + 404 + 400 + 500 malformed PGM).
+
+#### Changed
+
+- Invariant (y) added (see above).
+
+#### Removed
+
+- (none)
+
+#### Tests
+
+- 491 → 501 hardware-free pytest (+10 from this PR). 1 hardware-marked
+  smoke unchanged. ruff check + ruff format clean.
+
+#### Mode-A folds applied
+
+- M4: webctl invariant letter is `(y)` (Track D ships before
+  B-MAPEDIT per NEXT_SESSION.md TL;DR ordering;
+  `plan_track_b_mapedit.md` §8 M1's `(y)` reservation must shift to
+  `(z)` at the B-MAPEDIT writer kickoff).
+- T4: byte-bound test spies on `Path.open().read()` to assert
+  exactly one read of `PGM_HEADER_MAX_BYTES` bytes against a 1 GB
+  sparse PGM.
+- T5: `PgmHeaderInvalid` lives in `maps.py`, not a reverse import of
+  `map_image.py::MapImageInvalid`.
 
 ### 2026-04-29 — PR-1: Single-instance pidfile lock + backup flock
 

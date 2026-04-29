@@ -91,12 +91,6 @@ export const DASHBOARD_REFRESH_MS = 5000;
 // polling at this cadence (matches the SSE tick).
 export const LOCAL_SERVICES_POLL_MS = 1000;
 
-// --- Map render scale factor -------------------------------------------
-// World meters → screen pixels at zoom=1. Empirical: 100 px/m matches a
-// typical studio scale where the operator can see the whole crane footprint
-// in a 600 px-tall canvas.
-export const MAP_PIXELS_PER_METER = 100;
-
 // Minimum on-screen canvas dimensions (used when getBoundingClientRect
 // reports 0 because the layout hasn't settled before mount).
 export const MAP_CANVAS_MIN_WIDTH_PX = 600;

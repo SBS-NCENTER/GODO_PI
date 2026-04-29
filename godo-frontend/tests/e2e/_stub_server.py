@@ -848,7 +848,7 @@ def _h_maps_yaml(req: StubHandler, name: str) -> None:
     if not _MAPS_NAME_RE.match(name):
         req._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "err": "invalid_map_name"})
         return
-    if name not in MAPS_STATE:
+    if name != "active" and name not in MAPS_STATE:
         req._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "err": "map_not_found"})
         return
     body = (
@@ -856,6 +856,18 @@ def _h_maps_yaml(req: StubHandler, name: str) -> None:
         "occupied_thresh: 0.65\nfree_thresh: 0.196\nnegate: 0\n"
     ).encode("utf-8")
     req._send_bytes(HTTPStatus.OK, "text/plain; charset=utf-8", body)
+
+
+def _h_maps_dimensions(req: StubHandler, name: str) -> None:
+    """Track D scale fix — return PGM dimensions JSON. Non-square (200×100)
+    so e2e exercises the H-1 - (wy-oy)/res row math."""
+    if not _MAPS_NAME_RE.match(name):
+        req._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "err": "invalid_map_name"})
+        return
+    if name != "active" and name not in MAPS_STATE:
+        req._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "err": "map_not_found"})
+        return
+    req._send_json(HTTPStatus.OK, {"width": 200, "height": 100})
 
 
 def _h_maps_activate(req: StubHandler, name: str) -> None:
@@ -1018,6 +1030,10 @@ def _do_get_with_prefix(self: StubHandler) -> None:
     if path.startswith("/api/maps/") and path.endswith("/yaml"):
         name = path[len("/api/maps/") : -len("/yaml")]
         _h_maps_yaml(self, name)
+        return
+    if path.startswith("/api/maps/") and path.endswith("/dimensions"):
+        name = path[len("/api/maps/") : -len("/dimensions")]
+        _h_maps_dimensions(self, name)
         return
     if path == "/api/map/backup/list":
         _h_backup_list(self)

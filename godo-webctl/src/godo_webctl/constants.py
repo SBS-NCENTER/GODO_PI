@@ -128,6 +128,12 @@ MAPS_ACTIVE_BASENAME: Final[str] = "active"
 # `<stem>.yaml` pairs).
 MAPS_ACTIVATE_LOCK_BASENAME: Final[str] = ".activate.lock"
 
+# Maximum bytes to read from a netpbm `P5` PGM header. Any practical map
+# header (P5\nW H\nMAXVAL\n) fits in well under 64 ASCII bytes; bounding
+# the read makes `read_pgm_dimensions` safe against pathologically large
+# PGM files (e.g. a 1 GB sparse file — we never stream pixel data).
+PGM_HEADER_MAX_BYTES: Final[int] = 64
+
 # --- PR-DIAG (Track B-DIAG) — diagnostics page constants -----------------
 # Resources sub-payload cache TTL — `/sys/class/thermal/...` and
 # `/proc/meminfo` reads cost ~10 µs each. With 5 Hz × 4 reads/tick =

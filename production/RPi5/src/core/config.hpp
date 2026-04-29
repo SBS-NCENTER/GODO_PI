@@ -40,6 +40,7 @@ struct Config {
 
     // IPC.
     std::string uds_socket;
+    std::string tracker_pidfile;
 
     // AMCL — Phase 4-2 B Tier-2 tunables (see config_defaults.hpp).
     std::string   amcl_map_path;

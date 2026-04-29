@@ -61,6 +61,12 @@ class Settings:
     # via `restart_pending.is_pending()`. Override via
     # GODO_WEBCTL_RESTART_PENDING_PATH.
     restart_pending_path: Path
+    # Single-instance pidfile lock target. ``__main__.main()`` acquires
+    # ``fcntl.flock`` on this file BEFORE ``uvicorn.run``. Tests override
+    # via GODO_WEBCTL_PIDFILE so they never touch /run/godo. Path MUST
+    # live on a local FS — tmpfs /run/godo is the project default; NFS
+    # is unsupported (flock semantics differ).
+    pidfile_path: Path
 
 
 # Documented defaults — single source for code + README + systemd env-file.
@@ -79,6 +85,7 @@ _DEFAULTS: Final[dict[str, str]] = {
     "GODO_WEBCTL_CHROMIUM_LOOPBACK_ONLY": "true",
     "GODO_WEBCTL_DISK_CHECK_PATH": "/",
     "GODO_WEBCTL_RESTART_PENDING_PATH": "/var/lib/godo/restart_pending",
+    "GODO_WEBCTL_PIDFILE": "/run/godo/godo-webctl.pid",
 }
 
 # Per-field parser. Same keys (in same order) as _DEFAULTS.
@@ -97,6 +104,7 @@ _PARSERS: Final[dict[str, Callable[[str], Any]]] = {
     "GODO_WEBCTL_CHROMIUM_LOOPBACK_ONLY": _parse_bool,
     "GODO_WEBCTL_DISK_CHECK_PATH": Path,
     "GODO_WEBCTL_RESTART_PENDING_PATH": Path,
+    "GODO_WEBCTL_PIDFILE": Path,
 }
 
 # env-var name → Settings field name. Drift between this and the dataclass
@@ -116,6 +124,7 @@ _ENV_TO_FIELD: Final[dict[str, str]] = {
     "GODO_WEBCTL_CHROMIUM_LOOPBACK_ONLY": "chromium_loopback_only",
     "GODO_WEBCTL_DISK_CHECK_PATH": "disk_check_path",
     "GODO_WEBCTL_RESTART_PENDING_PATH": "restart_pending_path",
+    "GODO_WEBCTL_PIDFILE": "pidfile_path",
 }
 
 

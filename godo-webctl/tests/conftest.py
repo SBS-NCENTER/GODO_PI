@@ -92,6 +92,22 @@ class FakeUdsServer:
                     conn.close()
 
 
+@pytest.fixture(autouse=True)
+def _pidfile_path_autouse(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every test gets a tmp_path-anchored ``GODO_WEBCTL_PIDFILE``.
+
+    The default (``/run/godo/godo-webctl.pid``) is unwritable on CI
+    runners and reaches into a shared host tmpfs even on dev boxes;
+    overriding here means no test can accidentally touch the production
+    path. Subprocess tests that want a known path read this same env via
+    the parent process's ``os.environ`` and pass it through.
+    """
+    monkeypatch.setenv(
+        "GODO_WEBCTL_PIDFILE",
+        str(tmp_path / "godo-webctl.pid"),
+    )
+
+
 @pytest.fixture
 def tmp_socket_path(tmp_path: Path) -> Path:
     # sun_path is 108 bytes on Linux. tmp_path under /tmp/pytest-of-... is

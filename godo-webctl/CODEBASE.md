@@ -178,19 +178,29 @@ beyond the documented error-mapping table.
 `.BAD_REQUEST`, `.NOT_FOUND`, `.INTERNAL_SERVER_ERROR`). Integer literals
 are a code-review block.
 
-### (e) `workers=1`
+### (e) `workers=1` and pidfile-enforced single-instance
 
-`__main__.py` hardcodes `workers=1` in `uvicorn.run(...)`. The tracker
-UDS server is single-client, one-shot per connection; multi-worker
-uvicorn would multiply the chances of stale-socket races without
-serialising anything meaningful.
+`__main__.py` hardcodes `workers=1` in `uvicorn.run(...)` (single-client
+tracker UDS — see `__main__.py` D11 comment) AND acquires
+`fcntl.flock(LOCK_EX | LOCK_NB)` on `Settings.pidfile_path`
+(default `/run/godo/godo-webctl.pid`) BEFORE `uvicorn.run`. A second
+webctl invocation — same port or different — exits 1 with stderr
+`godo-webctl already running with PID <pid>`. The lock path is
+overridable via `GODO_WEBCTL_PIDFILE` for tests. Pinned by
+`tests/test_main_lock.py`. See CLAUDE.md §6 "Single-instance
+discipline".
 
-### (f) `backup_map` is single-writer
+### (f) `backup_map` single-writer + flock defense-in-depth
 
-`backup_map` is single-writer at runtime (uvicorn `workers=1` + handler
-single-await). Concurrent invocation is undefined; the bounded
-`MAX_RENAME_ATTEMPTS=9` retry exists only for back-to-back calls in the
-same UTC second by a single writer.
+`backup_map` is single-writer at runtime via invariant (e); a second
+concurrent invocation is now ALSO blocked at the FS layer by
+`fcntl.flock(LOCK_EX | LOCK_NB)` on `<backup_dir>/.lock`. On contention
+(only reachable if invariant (e) is broken) →
+`BackupError("concurrent_backup_in_progress")`, mapped to HTTP 409.
+The bounded `MAX_RENAME_ATTEMPTS=9` retry remains for back-to-back
+calls in the same UTC second by a single writer. Pinned by
+`test_backup_lock_acquired_and_released` +
+`test_concurrent_backup_raises_concurrent_in_progress`.
 
 ### (g) `/run/godo/` is owned by `godo-tracker.service`
 
@@ -384,6 +394,17 @@ restart). Concurrency-correctness inherits from invariant (e)
 concurrent test. Pinned by `tests/test_map_backup.py` and the
 absence of any `from .maps import` line in `map_backup.py`.
 
+### (u) Pidfile path is a Tier-2 config key
+
+`Settings.pidfile_path` is the SOLE source of the lock path; no module
+hardcodes a string. Default = `/run/godo/godo-webctl.pid`. Override via
+`GODO_WEBCTL_PIDFILE`. Tests use `tmp_path / "godo-webctl.pid"` via
+the autouse `_pidfile_path_autouse` fixture. Path MUST live on a local
+FS — tmpfs `/run/godo` is the project default; NFS is unsupported
+(flock semantics differ). Drift between `_DEFAULTS` / `_PARSERS` /
+`_ENV_TO_FIELD` (per invariant (h)) is caught by
+`tests/test_config.py::test_defaults_match_settings`.
+
 ## Phase 4.5 follow-up candidates
 
 - Deadline-based UDS timeout (single shared `monotonic()` budget per
@@ -395,6 +416,85 @@ absence of any `from .maps import` line in `map_backup.py`.
   different uid.
 
 ## Change log
+
+### 2026-04-29 — PR-1: Single-instance pidfile lock + backup flock
+
+#### Added
+
+- `src/godo_webctl/pidfile.py` — `PidFileLock` ctx-manager (open +
+  `fcntl.flock(LOCK_EX | LOCK_NB)` + write own PID + `fsync`); `LockHeld`
+  / `LockSetupError` exception types; `format_lock_held_message`
+  diagnostic helper (uses `kill(pid, 0)` ONLY for stderr phrasing, NOT
+  for the lock decision per Mode-A M4). Module boundary: imported ONLY
+  by `__main__.main()`; `create_app()` does NOT depend on it.
+- `src/godo_webctl/constants.py` — `BACKUP_LOCK_FILENAME = ".lock"`
+  (defence-in-depth target inside `cfg.backup_dir`).
+- `tests/test_pidfile.py` — 11 cases (10 per planner §5 + 1 bonus
+  module-boundary pin).
+- `tests/test_main_lock.py` — 4 subprocess cases including the TB3
+  timing assertion (second instance exits in < 2 s, well below uvicorn
+  boot).
+
+#### Changed
+
+- `src/godo_webctl/config.py` — `Settings.pidfile_path: Path` field
+  added; default `/run/godo/godo-webctl.pid`; env override
+  `GODO_WEBCTL_PIDFILE`; three-table SSOT (`_DEFAULTS` / `_PARSERS` /
+  `_ENV_TO_FIELD`) updated in lockstep.
+- `src/godo_webctl/__main__.py` — acquires `PidFileLock` BEFORE
+  `uvicorn.run`; on `LockHeld` exits 1 with documented stderr; on
+  `LockSetupError` exits 1 with parent-dir diagnostic. Installs
+  SIGTERM/SIGINT handlers that release the lock + exit 128+signum.
+  Uvicorn's `capture_signals` re-raises captured signals after server
+  shutdown, which then hits our handler — guarantees pidfile cleanup
+  on graceful SIGTERM.
+- `src/godo_webctl/backup.py` — wraps mkdir+copy+rename region in
+  `fcntl.flock(LOCK_EX | LOCK_NB)` on `<backup_dir>/.lock`. On
+  contention raises `BackupError("concurrent_backup_in_progress")`.
+  Lock file persists between calls (file presence is NOT the signal —
+  the kernel auto-releases lock state on FD close).
+- `src/godo_webctl/app.py` — `_map_backup_exc_to_response` arm
+  extended: `concurrent_backup_in_progress → HTTPStatus.CONFLICT (409)`
+  with body `{ok: False, err: ..., detail: "다른 백업이 진행 중입니다."}`
+  (Mode-A M3 fold).
+- `tests/conftest.py` — autouse `_pidfile_path_autouse` fixture sets
+  `GODO_WEBCTL_PIDFILE=tmp_path / "godo-webctl.pid"` for every test
+  (Mode-A M5 + TB5 / TB6 pin: no test touches the production path,
+  no inter-test lock state).
+- `tests/test_backup.py` — 3 new cases: lock acquired-and-released,
+  concurrent acquire raises `concurrent_backup_in_progress`, lock file
+  persists but unlocked after call.
+- `tests/test_config.py` — `pidfile_path` default + override pinned.
+- `tests/test_app_integration.py` — `_settings_for(...)` accepts
+  `pidfile_path`; new `test_backup_conflict_returns_409` integration
+  test (Mode-A M3 fold).
+- `tests/test_sse.py` — `_settings()` constructor extended with
+  `pidfile_path` (drift-catch from the new dataclass field).
+- `CODEBASE.md` — invariants (e), (f) replaced; (u) added.
+
+#### Removed
+
+- (none)
+
+#### Tests
+
+- 387 → 406 hardware-free pytest (+19 from this PR). 1 hardware-marked
+  smoke unchanged. ruff check + ruff format clean.
+
+#### Mode-A folds applied
+
+- M1: tests under `production/RPi5/tests/` (plural, flat).
+- M2: invariant (e) preserves the `__main__.py` D11 cross-reference.
+- M3: `app.py` 409 mapping + integration test.
+- M4: stale-PID is lock-only decision; `kill(pid, 0)` is diagnostic.
+- M5: module boundary explicit (`pidfile.py` imported ONLY by
+  `__main__`); autouse conftest fixture; `test_create_app_does_not_acquire_lock`.
+- N1: invariant (u) cross-references existing (h) — no restated table.
+- N4: pidfile content format pinned to `f"{os.getpid()}\n"`.
+- N5: invariant (u) and CLAUDE.md call out NFS-unsupported.
+- TB1: stale-PID test uses sentinel `2**31 - 1`.
+- TB3: timing assertion in `test_second_invocation_exits_under_500ms`.
+- TB5/TB6: autouse conftest fixture; per-test isolation documented.
 
 ### 2026-04-29 — Track D: Live LIDAR overlay (Phase 4.5+ P0.5)
 

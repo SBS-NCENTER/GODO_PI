@@ -41,6 +41,7 @@ const std::set<std::string>& allowed_keys() {
         "rt.cpu",
         "rt.priority",
         "ipc.uds_socket",
+        "ipc.tracker_pidfile",
         "amcl.map_path",
         "amcl.origin_x_m",
         "amcl.origin_y_m",
@@ -123,6 +124,7 @@ void apply_toml_file(Config& c, const std::filesystem::path& path) {
     if (auto v = tbl["rt"]["priority"].value<int64_t>();           v) c.rt_priority = static_cast<int>(*v);
 
     if (auto v = tbl["ipc"]["uds_socket"].value<std::string>();    v) c.uds_socket  = *v;
+    if (auto v = tbl["ipc"]["tracker_pidfile"].value<std::string>();v) c.tracker_pidfile = *v;
 
     if (auto v = tbl["amcl"]["map_path"].value<std::string>();        v) c.amcl_map_path           = *v;
     if (auto v = tbl["amcl"]["origin_x_m"].value<double>();           v) c.amcl_origin_x_m         = *v;
@@ -247,6 +249,7 @@ void apply_env(Config& c, char** envp) {
     if (auto v = env_get(envp, "GODO_RT_CPU"))        c.rt_cpu      = parse_int_or_throw(*v, "GODO_RT_CPU");
     if (auto v = env_get(envp, "GODO_RT_PRIORITY"))   c.rt_priority = parse_int_or_throw(*v, "GODO_RT_PRIORITY");
     if (auto v = env_get(envp, "GODO_UDS_SOCKET"))    c.uds_socket  = *v;
+    if (auto v = env_get(envp, "GODO_TRACKER_PIDFILE")) c.tracker_pidfile = *v;
 
     if (auto v = env_get(envp, "GODO_AMCL_MAP_PATH"))             c.amcl_map_path           = *v;
     if (auto v = env_get(envp, "GODO_AMCL_ORIGIN_X_M"))           c.amcl_origin_x_m         = parse_double_or_throw(*v, "GODO_AMCL_ORIGIN_X_M");
@@ -325,6 +328,7 @@ void apply_cli(Config& c, int argc, char** argv) {
         {"rt-cpu",         [](Config& cc, const std::string& v){ cc.rt_cpu = parse_int_or_throw(v, "--rt-cpu"); }},
         {"rt-priority",    [](Config& cc, const std::string& v){ cc.rt_priority = parse_int_or_throw(v, "--rt-priority"); }},
         {"uds-socket",     [](Config& cc, const std::string& v){ cc.uds_socket = v; }},
+        {"pidfile",        [](Config& cc, const std::string& v){ cc.tracker_pidfile = v; }},
         {"amcl-map-path",            [](Config& cc, const std::string& v){ cc.amcl_map_path           = v; }},
         {"amcl-origin-x-m",          [](Config& cc, const std::string& v){ cc.amcl_origin_x_m         = parse_double_or_throw(v, "--amcl-origin-x-m"); }},
         {"amcl-origin-y-m",          [](Config& cc, const std::string& v){ cc.amcl_origin_y_m         = parse_double_or_throw(v, "--amcl-origin-y-m"); }},
@@ -464,6 +468,7 @@ Config Config::make_default() {
     c.rt_cpu         = cfg_defaults::RT_CPU;
     c.rt_priority    = cfg_defaults::RT_PRIORITY;
     c.uds_socket     = std::string(cfg_defaults::UDS_SOCKET);
+    c.tracker_pidfile = std::string(cfg_defaults::TRACKER_PIDFILE_DEFAULT);
 
     c.amcl_map_path             = std::string(cfg_defaults::AMCL_MAP_PATH);
     c.amcl_origin_x_m           = cfg_defaults::AMCL_ORIGIN_X_M;

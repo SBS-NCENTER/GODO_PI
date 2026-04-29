@@ -168,3 +168,12 @@ CONFIG_VALUE_TEXT_MAX_LEN: Final[int] = 256
 # Default flag-file location. Override via
 # GODO_WEBCTL_RESTART_PENDING_PATH.
 RESTART_PENDING_FLAG_PATH: Final[str] = "/var/lib/godo/restart_pending"
+
+# --- Single-instance lock (CLAUDE.md §6) ---------------------------------
+# Sentinel filename for the defence-in-depth ``flock(LOCK_EX | LOCK_NB)``
+# in backup.backup_map. Lives inside ``cfg.backup_dir``. Concurrent
+# invocation is already prevented at runtime by the webctl pidfile lock
+# (invariant (e)); this is a second line of defence so a future operator
+# running ``backup_map`` directly from a script (bypassing webctl) cannot
+# corrupt the directory.
+BACKUP_LOCK_FILENAME: Final[str] = ".lock"

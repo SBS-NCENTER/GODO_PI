@@ -49,6 +49,7 @@ def _settings_for(
     spa_dist: Path | None = None,
     disk_check_path: Path | None = None,
     restart_pending_path: Path | None = None,
+    pidfile_path: Path | None = None,
 ) -> Settings:
     base = backup_dir.parent
     return Settings(
@@ -69,6 +70,10 @@ def _settings_for(
         chromium_loopback_only=True,
         disk_check_path=disk_check_path or Path("/"),
         restart_pending_path=restart_pending_path or (base / "restart_pending"),
+        # create_app() never touches this path (M5 boundary); the field
+        # exists only because Settings is the SSOT for both code and the
+        # __main__ entrypoint. Tests use a unique tmp filename.
+        pidfile_path=pidfile_path or (base / "godo-webctl.pid"),
     )
 
 
@@ -206,6 +211,7 @@ async def test_calibrate_timeout_returns_504(
         chromium_loopback_only=s.chromium_loopback_only,
         disk_check_path=s.disk_check_path,
         restart_pending_path=s.restart_pending_path,
+        pidfile_path=s.pidfile_path,
     )
     async with _client(s) as cl:
         token = await _login_admin(cl)
@@ -282,6 +288,36 @@ async def test_backup_missing_map_returns_404(
         r = await cl.post("/api/map/backup", headers=_auth(token))
     assert r.status_code == HTTPStatus.NOT_FOUND
     assert r.json() == {"ok": False, "err": "map_path_not_found"}
+
+
+async def test_backup_conflict_returns_409(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mode-A M3 fold: when backup_map raises
+    ``BackupError("concurrent_backup_in_progress")`` the handler maps it
+    to HTTP 409 with the documented Korean detail.
+    """
+    from godo_webctl import backup as backup_mod
+
+    def _raise_conflict(*args: object, **kwargs: object) -> None:
+        raise backup_mod.BackupError("concurrent_backup_in_progress")
+
+    monkeypatch.setattr(backup_mod, "backup_map", _raise_conflict)
+    s = _settings_for(
+        uds_socket=tmp_path / "unused.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post("/api/map/backup", headers=_auth(token))
+    assert r.status_code == HTTPStatus.CONFLICT
+    body = r.json()
+    assert body["ok"] is False
+    assert body["err"] == "concurrent_backup_in_progress"
+    assert body["detail"] == "다른 백업이 진행 중입니다."
 
 
 # ---- static page ----------------------------------------------------------
@@ -1657,6 +1693,7 @@ def test_lifespan_legacy_migration_creates_active_symlink(
         chromium_loopback_only=True,
         disk_check_path=Path("/"),
         restart_pending_path=tmp_path / "rp",
+        pidfile_path=tmp_path / "godo-webctl.pid",
     )
 
     # Manually invoke the migration helper that the lifespan uses.
@@ -1717,6 +1754,7 @@ def test_lifespan_warns_every_boot_when_map_path_set(
         chromium_loopback_only=True,
         disk_check_path=Path("/"),
         restart_pending_path=tmp_path / "rp",
+        pidfile_path=tmp_path / "godo-webctl.pid",
     )
 
     def _boot_and_count_warns() -> int:
@@ -1857,6 +1895,7 @@ async def test_system_amcl_rate_tracker_timeout_returns_504(
         chromium_loopback_only=s.chromium_loopback_only,
         disk_check_path=s.disk_check_path,
         restart_pending_path=s.restart_pending_path,
+        pidfile_path=s.pidfile_path,
     )
     async with _client(s) as cl:
         r = await cl.get("/api/system/amcl_rate")

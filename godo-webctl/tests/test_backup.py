@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
 import stat
 from datetime import UTC, datetime
@@ -10,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from godo_webctl.backup import BackupError, _yaml_path_for, backup_map
+from godo_webctl.constants import BACKUP_LOCK_FILENAME
 
 
 # --- yaml_path_for mirror -------------------------------------------------
@@ -114,3 +116,77 @@ def test_backup_dir_mode_is_0750_when_created(
     mode = stat.S_IMODE(backup_dir.stat().st_mode)
     # umask may strip write bits but never tighter than 0750 on the chosen mode.
     assert mode <= 0o750
+
+
+# --- defence-in-depth flock (PR-1) ---------------------------------------
+def test_backup_lock_acquired_and_released(
+    tmp_map_pair: Path,
+    tmp_path: Path,
+) -> None:
+    """After ``backup_map`` returns, the .lock file persists but the
+    flock is released — a manual re-lock from this test process must
+    succeed.
+    """
+    backup_dir = tmp_path / "bk"
+    backup_map(tmp_map_pair, backup_dir)
+    lock_path = backup_dir / BACKUP_LOCK_FILENAME
+    assert lock_path.is_file(), (
+        ".lock should persist between backup_map calls (kernel releases "
+        "the lock state on FD close, file presence is not the signal)"
+    )
+    # If backup_map released cleanly, we can take the flock now.
+    fd = os.open(str(lock_path), os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def test_concurrent_backup_raises_concurrent_in_progress(
+    tmp_map_pair: Path,
+    tmp_path: Path,
+) -> None:
+    """Hold the .lock from this test, then call backup_map → should
+    raise ``BackupError("concurrent_backup_in_progress")``.
+    """
+    backup_dir = tmp_path / "bk"
+    backup_dir.mkdir(mode=0o750)
+    lock_path = backup_dir / BACKUP_LOCK_FILENAME
+    holder_fd = os.open(
+        str(lock_path),
+        os.O_RDWR | os.O_CREAT | os.O_CLOEXEC,
+        0o644,
+    )
+    try:
+        fcntl.flock(holder_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(BackupError) as ei:
+            backup_map(tmp_map_pair, backup_dir)
+        assert str(ei.value) == "concurrent_backup_in_progress"
+    finally:
+        try:
+            fcntl.flock(holder_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(holder_fd)
+
+
+def test_backup_lock_file_persists_but_unlocked_after_call(
+    tmp_map_pair: Path,
+    tmp_path: Path,
+) -> None:
+    """After two back-to-back backups, the .lock file is still present
+    AND a third concurrent flock attempt from outside succeeds.
+    """
+    backup_dir = tmp_path / "bk"
+    fixed_a = datetime(2026, 4, 26, 14, 30, 22, tzinfo=UTC)
+    fixed_b = datetime(2026, 4, 26, 14, 30, 23, tzinfo=UTC)
+    backup_map(tmp_map_pair, backup_dir, now=fixed_a)
+    backup_map(tmp_map_pair, backup_dir, now=fixed_b)
+    lock_path = backup_dir / BACKUP_LOCK_FILENAME
+    assert lock_path.is_file()
+    fd = os.open(str(lock_path), os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)

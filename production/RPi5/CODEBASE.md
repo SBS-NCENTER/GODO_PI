@@ -417,6 +417,28 @@ Mode-A M3 fold pinned this symmetric contract — the exact-1 + exact-0
 shape catches future drift toward Thread D reading the ring or
 publishing the seqlock directly.
 
+### (l) tracker-pidfile-discipline
+
+`godo_tracker_rt::main()` acquires `core::PidFileLock` on
+`cfg.tracker_pidfile` (default `/run/godo/godo-tracker.pid`)
+IMMEDIATELY after `Config::load` and BEFORE any thread spawn /
+`Seqlock` allocation / device open. Mechanism:
+`fcntl(F_SETLK, F_WRLCK)` (POSIX advisory; auto-released by the
+kernel on FD close — process death, SIGKILL included). On contention:
+log stderr `godo_tracker_rt: pidfile held by PID <pid> — refusing to
+start`, return 1. Lock acquisition is on the boot path only; RT
+threads NEVER touch the pidfile FD. Override via `--pidfile <path>`,
+`GODO_TRACKER_PIDFILE`, or TOML key `ipc.tracker_pidfile`. Path MUST
+live on a local FS — tmpfs `/run/godo` is the project default; NFS
+is unsupported (POSIX advisory lock semantics differ). Mode-A M6
+fold: dtor unlinks BEFORE close so a third process trying open-then-
+lock sees ENOENT promptly. Pinned by `tests/test_pidfile.cpp` (6
+cases incl. fork-does-not-inherit per TB4). UDS server bind is now
+atomic-rename (bind-temp + `rename(2)`) — eliminates the
+`unlink → bind` TOCTOU window; pinned by 2 new cases in
+`tests/test_uds_server.cpp`. See CLAUDE.md §6 "Single-instance
+discipline".
+
 ### Known scaffolding
 
 - (Removed 2026-04-26 with Wave 2.) `thread_stub_cold_writer` and the
@@ -2751,3 +2773,69 @@ side wait-free).
   cause partial visibility within a single AMCL kernel call. Pin:
   `test_cold_writer_reads_hot_config::"mid-call hot publish takes
   effect on next iter"`.
+
+## 2026-04-29 — PR-1: Single-instance pidfile lock + UDS bind-atomic
+
+### Added
+
+- `src/core/pidfile.{hpp,cpp}` — `class PidFileLock` (RAII, owns the
+  POSIX `fcntl(F_SETLK, F_WRLCK)` lock + the path lifetime). Throws
+  `PidFileLockHeld` on contention (with diagnostic PID), or
+  `PidFileLockSetupError` on parent-dir / open / fsync failures.
+  Mode-A M6: dtor unlinks BEFORE close so a third process trying
+  open-then-lock sees ENOENT promptly.
+- `src/core/CMakeLists.txt` — `pidfile.cpp` added to `godo_core`.
+- `src/core/config_defaults.hpp` — `TRACKER_PIDFILE_DEFAULT =
+  "/run/godo/godo-tracker.pid"`.
+- `src/core/config.{hpp,cpp}` — `Config::tracker_pidfile` field;
+  CLI `--pidfile`, env `GODO_TRACKER_PIDFILE`, TOML
+  `ipc.tracker_pidfile`.
+- `tests/test_pidfile.cpp` — 6 doctest cases (acquire, cross-process
+  contention, stale-PID-no-holder, dtor-order, fork-does-not-inherit
+  per TB4, kill-diagnostic-is-not-lock-decision per M4).
+- `tests/CMakeLists.txt` — `test_pidfile` target wired (hardware-free).
+
+### Changed
+
+- `src/godo_tracker_rt/main.cpp` — acquires `PidFileLock`
+  IMMEDIATELY after `Config::load`, BEFORE any thread spawn /
+  Seqlock allocation / device open. On `PidFileLockHeld` returns 1
+  with documented stderr; on `PidFileLockSetupError` returns 1 with
+  parent-dir diagnostic.
+- `src/uds/uds_server.cpp` — `UdsServer::open` replaces
+  `unlink → bind` with **bind-temp + atomic `rename(2)`**. Pattern:
+  bind to `<socket_path>.<pid>.tmp`, then `rename` over the target.
+  Eliminates the TOCTOU window where a concurrent process could race
+  the bind() between our unlink() and bind(). Single-instance
+  discipline (invariant (l)) gates the path on the pidfile lock —
+  only one godo_tracker_rt is ever running, so the only TOCTOU at
+  risk would be a manual `socat` racing the boot. Atomic rename
+  closes that gap regardless.
+- `tests/test_uds_server.cpp` — 2 new doctest cases: stale-socket
+  bind succeeds, second `UdsServer::open()` on bound path. `<sys/stat.h>`
+  added.
+- `tests/test_rt_replay.cpp` — passes `--pidfile /tmp/...` to the
+  spawned tracker so the test does not require `/run/godo`.
+- `production/RPi5/CODEBASE.md` — new invariant `(l)
+  tracker-pidfile-discipline`.
+
+### Removed
+
+- (none)
+
+### Tests
+
+- 45 → 46 hardware-free test executables (+1: `test_pidfile`). All
+  green. `test_uds_server` gains 2 cases. `test_rt_replay` updated
+  to pin pidfile to /tmp (no /run/godo dependency).
+
+### Mode-A folds applied
+
+- M1: tests under `production/RPi5/tests/` (plural, flat).
+- M4: stale-PID is a lock-only decision; `kill(pid, 0)` is purely
+  diagnostic.
+- M6: C++ dtor unlinks BEFORE close.
+- N3: invariant letter `(l)`.
+- N7: `production/RPi5/systemd/godo-tracker.service` NOT modified.
+- TB1: stale-PID test uses `0x7FFFFFFF`.
+- TB4: doctest case 5 = fork-does-not-inherit-lock (POSIX fcntl).

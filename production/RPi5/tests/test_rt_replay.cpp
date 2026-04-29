@@ -124,6 +124,16 @@ TEST_CASE("E2E: tracker_rt forwards FreeD-in to UDP-out with offset applied") {
     const std::string slave   = pty.slave_name;
     const std::string ue_port = std::to_string(port);
 
+    // PR-1: tracker now requires a writable pidfile path. Point at a
+    // tmp file so the test does not need /run/godo (which doesn't
+    // exist in the CI sandbox by default). Per-run unique to avoid
+    // colliding with parallel ctest invocations.
+    char tmp_pid[256];
+    std::snprintf(tmp_pid, sizeof(tmp_pid),
+                  "/tmp/godo_rt_replay_%d.pid",
+                  static_cast<int>(::getpid()));
+    ::unlink(tmp_pid);  // sweep stale leftover from a prior crash.
+
     std::vector<std::string> args_store = {
         find_tracker_binary(),
         "--freed-port",   slave,
@@ -132,6 +142,7 @@ TEST_CASE("E2E: tracker_rt forwards FreeD-in to UDP-out with offset applied") {
         "--t-ramp-ms",    "0",
         "--rt-cpu",       "0",
         "--rt-priority",  "1",
+        "--pidfile",      tmp_pid,
         // Phase 4-2 B: cold writer fail-fasts on map-load error. Point at the
         // synthetic fixture so tracker boots; the LiDAR factory will fail
         // open() (no hardware in CI/test) which the cold writer treats as
@@ -206,6 +217,10 @@ TEST_CASE("E2E: tracker_rt forwards FreeD-in to UDP-out with offset applied") {
             tmp.data(), tmp.size());
         CHECK(cs == r[godo::constants::FreeD::OFF_CHECKSUM]);
     }
+
+    // Sweep tracker's tmp pidfile (dtor unlinks on graceful shutdown,
+    // but a SIGKILL path leaves it). ENOENT is fine.
+    ::unlink(tmp_pid);
 }
 
 #endif  // __linux__

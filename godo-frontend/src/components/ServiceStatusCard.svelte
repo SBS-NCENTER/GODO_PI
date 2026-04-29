@@ -80,12 +80,35 @@
         // 409 transition gate — render the Korean detail with auto-dismiss.
         setErrorWithAutoDismiss(err.body?.detail ?? errCode);
       } else {
-        lastError = err.body?.err ?? err.message;
+        // All other errors auto-dismiss too. Cases like:
+        //   - `subprocess_failed` from a webctl self-restart (webctl
+        //     terminates mid-response so the systemctl call returns
+        //     non-zero before the new process can answer)
+        //   - `request_aborted` / network errors when the operator
+        //     restarts a service whose initialization (mlock + map
+        //     load + AMCL kernel rebuild for the tracker) outlasts
+        //     the SPA fetch timeout
+        // The next /api/system/services poll already shows the new
+        // active state, so a sticky red banner is misleading. Auto-
+        // dismiss matches the 409 path's UX.
+        setErrorWithAutoDismiss(err.body?.err ?? err.message);
       }
     } finally {
       busy = false;
     }
   }
+
+  // Belt-and-suspenders: when the next polling tick reports the
+  // service active AND the SPA is no longer mid-action, clear any
+  // residual error banner. This handles the edge case where the
+  // user navigates back to the page after the auto-dismiss timer
+  // already fired in another tab — Svelte 5 timers are per-component.
+  $effect(() => {
+    if (!busy && lastError !== null && service.active_state === 'active') {
+      lastError = null;
+      clearDismissTimer();
+    }
+  });
 </script>
 
 <div class="card svc-card" data-testid={`service-status-card-${service.name}`}>

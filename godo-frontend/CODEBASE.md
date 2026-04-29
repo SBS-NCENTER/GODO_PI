@@ -1303,3 +1303,28 @@ The staleness predicate is per-envfile; only the affected service
 shows a marker. A top-level page-wide "restart pending" pill would
 imply every service is affected. The badge sits next to the count it
 qualifies, which keeps the signal local to its source.
+
+### `ServiceStatusCard` lastError UX — auto-dismiss + active-state clear
+
+The original Track B-SYSTEM PR-2 wired auto-dismiss only for the 409
+transition gate (`service_starting` / `service_stopping`); every other
+error code (`subprocess_failed`, `request_aborted`, network failures,
+…) parked in `lastError` indefinitely until the next user click. PR-A
+HIL surfaced the failure mode:
+
+- `webctl` self-restart inevitably returns `subprocess_failed`: webctl
+  invokes `systemctl restart godo-webctl`, the subprocess captures a
+  non-zero exit (the new uvicorn replaces the old before the wait
+  completes), and the SPA renders the error sticky-red even though
+  the next poll shows the service back to `active(running)`.
+- `tracker` restart sometimes outlasts the SPA fetch timeout (mlock +
+  map load + AMCL kernel rebuild), surfacing as `request_aborted`
+  even though the service comes up cleanly seconds later.
+
+PR-A widens the auto-dismiss path to ALL error codes (5 s, the same
+`SERVICE_TRANSITION_TOAST_TTL_MS` the 409 path used) and adds a
+`$effect` that clears `lastError` immediately when a polling tick
+reports the service `active` and the SPA is not mid-action. The
+combination handles both the timer-fires-while-tab-hidden case and
+the operator-clicks-and-walks-away case without ever showing a stale
+error past the next successful poll.

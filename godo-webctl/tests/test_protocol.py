@@ -469,3 +469,44 @@ def test_encode_set_config_rejects_newline_in_value() -> None:
 def test_config_schema_response_cap_above_4kb() -> None:
     """37 rows × ~200 B → ~7.5 KiB; cap MUST be wider than the default."""
     assert P.CONFIG_SCHEMA_RESPONSE_CAP >= 16 * 1024
+
+
+# --- Track B-SYSTEM PR-2 — service observability pins ---------------------
+
+
+def test_system_services_fields_pinned() -> None:
+    """Pin the 7-field tuple verbatim. Drift between this constant and
+    `services.ServiceShow` is also caught by the dataclass-time assertion
+    `services._ensure_field_order_pin()` at import; this test is the
+    cross-module SSOT pin."""
+    assert P.SYSTEM_SERVICES_FIELDS == (
+        "name",
+        "active_state",
+        "sub_state",
+        "main_pid",
+        "active_since_unix",
+        "memory_bytes",
+        "env_redacted",
+    )
+
+
+def test_env_redaction_patterns_pinned() -> None:
+    """All 6 substring patterns. False-positives (`MOST_KEY_BUNDLES`)
+    are accepted by design — safe direction."""
+    assert P.ENV_REDACTION_PATTERNS == (
+        "SECRET",
+        "KEY",
+        "TOKEN",
+        "PASSWORD",
+        "PASSWD",
+        "CREDENTIAL",
+    )
+
+
+def test_redacted_placeholder_pinned() -> None:
+    assert P.REDACTED_PLACEHOLDER == "<redacted>"
+
+
+def test_service_transition_error_codes_pinned() -> None:
+    assert P.ERR_SERVICE_STARTING == "service_starting"
+    assert P.ERR_SERVICE_STOPPING == "service_stopping"

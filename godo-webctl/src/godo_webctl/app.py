@@ -68,6 +68,7 @@ from . import resources as resources_mod
 from . import restart_pending as restart_pending_mod
 from . import services as services_mod
 from . import sse as sse_mod
+from . import system_services as system_services_mod
 from . import uds_client as uds_mod
 from .config import Settings, load_settings
 from .constants import (
@@ -83,6 +84,7 @@ from .constants import (
     LOGS_TAIL_DEFAULT_N,
     LOGS_TAIL_MAX_N,
     MAPS_ACTIVE_BASENAME,
+    SERVICE_TRANSITION_MESSAGES_KO,
 )
 from .local_only import loopback_only
 from .protocol import (
@@ -93,6 +95,8 @@ from .protocol import (
     ERR_MAP_NOT_FOUND,
     ERR_MAPS_DIR_MISSING,
     ERR_RESTORE_NAME_CONFLICT,
+    ERR_SERVICE_STARTING,
+    ERR_SERVICE_STOPPING,
     JITTER_FIELDS,
     LAST_POSE_FIELDS,
     LAST_SCAN_HEADER_FIELDS,
@@ -268,6 +272,26 @@ def _resources_view(snap: dict[str, object]) -> dict[str, object]:
     """PR-DIAG — webctl-only Resources schema; pure projection through
     RESOURCES_FIELDS so the wire shape is byte-stable across calls."""
     return {field: snap.get(field) for field in RESOURCES_FIELDS}
+
+
+def _service_transition_response(exc: services_mod.ServiceTransitionInProgress) -> JSONResponse:
+    """Translate a `ServiceTransitionInProgress` into the 409 wire shape.
+
+    Body: `{ok: False, err: "service_starting"|"service_stopping",
+    detail: "<Korean string>"}`. The Korean strings come from
+    `SERVICE_TRANSITION_MESSAGES_KO` keyed by `(svc, transition)`. An
+    out-of-table key falls back to a generic Korean string so a future
+    service added to ALLOWED_SERVICES without a message entry still
+    surfaces as 409 (not 500)."""
+    err = ERR_SERVICE_STARTING if exc.transition == "starting" else ERR_SERVICE_STOPPING
+    detail = SERVICE_TRANSITION_MESSAGES_KO.get(
+        (exc.svc, exc.transition),
+        f"{exc.svc} 전환 중입니다. 잠시 후 다시 시도해주세요.",
+    )
+    return JSONResponse(
+        {"ok": False, "err": err, "detail": detail},
+        status_code=HTTPStatus.CONFLICT,
+    )
 
 
 def _map_logs_exc_to_response(exc: Exception) -> JSONResponse:
@@ -919,6 +943,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 {"ok": False, "err": "unknown_action"},
                 status_code=HTTPStatus.BAD_REQUEST,
             )
+        except services_mod.ServiceTransitionInProgress as e:
+            return _service_transition_response(e)
         except services_mod.CommandTimeout:
             return JSONResponse(
                 {"ok": False, "err": "subprocess_timeout"},
@@ -974,6 +1000,50 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             media_type=_SSE_MEDIA_TYPE,
             headers=sse_mod.SSE_RESPONSE_HEADERS,
         )
+
+    # ---- /api/system/services (Track B-SYSTEM PR-2, anon read) ----------
+    @app.get("/api/system/services")
+    async def system_services_endpoint() -> JSONResponse:
+        items = await asyncio.to_thread(system_services_mod.snapshot)
+        return JSONResponse({"services": items}, status_code=HTTPStatus.OK)
+
+    # ---- /api/system/service/{name}/{action} (Track B-SYSTEM PR-2, admin) -
+    # Mirrors `/api/system/reboot`'s admin-non-loopback pattern: JWT-authed
+    # admin user from any origin (Tailscale, LAN, localhost). Shares
+    # `services.control()` with `/api/local/service/*` so the transition
+    # gate (HTTP 409) is inherited.
+    @app.post("/api/system/service/{name}/{action}")
+    async def system_service_action(
+        name: str,
+        action: str,
+        claims: auth_mod.Claims = Depends(auth_mod.require_admin),
+    ) -> JSONResponse:
+        try:
+            status = await asyncio.to_thread(services_mod.control, name, action)
+        except services_mod.UnknownService:
+            return JSONResponse(
+                {"ok": False, "err": "unknown_service"},
+                status_code=HTTPStatus.NOT_FOUND,
+            )
+        except services_mod.UnknownAction:
+            return JSONResponse(
+                {"ok": False, "err": "unknown_action"},
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+        except services_mod.ServiceTransitionInProgress as e:
+            return _service_transition_response(e)
+        except services_mod.CommandTimeout:
+            return JSONResponse(
+                {"ok": False, "err": "subprocess_timeout"},
+                status_code=HTTPStatus.GATEWAY_TIMEOUT,
+            )
+        except services_mod.CommandFailed as e:
+            return JSONResponse(
+                {"ok": False, "err": "subprocess_failed", "detail": str(e)},
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+        activity_log.append(f"svc_{action}", f"{name} by {claims.username}")
+        return JSONResponse({"ok": True, "status": status}, status_code=HTTPStatus.OK)
 
     # ---- /api/system/* --------------------------------------------------
     @app.post("/api/system/reboot")

@@ -1091,6 +1091,8 @@ async def test_anon_read_endpoints_return_200(
         "/api/system/amcl_rate",
         "/api/system/resources",
         "/api/logs/tail?unit=godo-tracker&n=10",
+        # Track B-SYSTEM PR-2 — anon-readable system services snapshot.
+        "/api/system/services",
     ]
     async with _client(s) as cl:
         for path in paths:
@@ -2504,3 +2506,380 @@ async def test_backup_restore_appends_activity_log(
     assert "map_backup_restored" in types_to_details
     # Format pin: `<ts> (<n> files)` exactly.
     assert types_to_details["map_backup_restored"] == "20260101T010101Z (2 files)"
+
+
+# ============================================================================
+# Track B-SYSTEM PR-2 — service observability
+# ============================================================================
+
+
+def _stub_service_show(name: str, *, env: dict[str, str] | None = None) -> Any:
+    """Helper — build a `services.ServiceShow` with sane defaults."""
+    from godo_webctl import services
+
+    return services.ServiceShow(
+        name=name,
+        active_state="active",
+        sub_state="running",
+        main_pid=1234,
+        active_since_unix=1714397472,
+        memory_bytes=53477376,
+        env_redacted=env if env is not None else {},
+    )
+
+
+async def test_get_system_services_anon_returns_200_with_redacted_env(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    """The aggregate GET is anon-readable (Track F) and emits secrets
+    as `<redacted>` per the substring allow-list."""
+    from godo_webctl import services as svc_mod
+    from godo_webctl import system_services as ss_mod
+    from godo_webctl.protocol import SYSTEM_SERVICES_FIELDS
+
+    ss_mod._reset_cache_for_tests()
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+
+    def _show(name: str) -> svc_mod.ServiceShow:
+        # The stub mirrors `services.service_show` semantics: env_redacted
+        # is the POST-redaction dict.
+        env_raw = {
+            "GODO_LOG_DIR": "/var/log/godo",
+            "JWT_SECRET": "real-value",
+        }
+        return _stub_service_show(name, env=svc_mod.redact_env(env_raw))
+
+    with mock.patch("godo_webctl.system_services.services.service_show", side_effect=_show):
+        async with _client(s) as cl:
+            r = await cl.get("/api/system/services")
+    assert r.status_code == HTTPStatus.OK
+    body = r.json()
+    assert "services" in body
+    assert isinstance(body["services"], list)
+    assert len(body["services"]) == 3
+    for entry in body["services"]:
+        assert tuple(entry.keys()) == SYSTEM_SERVICES_FIELDS
+        assert entry["env_redacted"]["JWT_SECRET"] == "<redacted>"
+        assert entry["env_redacted"]["GODO_LOG_DIR"] == "/var/log/godo"
+
+
+async def test_get_system_services_admin_token_also_works(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    """Track F: read endpoints accept (but do not require) auth."""
+    from godo_webctl import system_services as ss_mod
+
+    ss_mod._reset_cache_for_tests()
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    with mock.patch(
+        "godo_webctl.system_services.services.service_show",
+        side_effect=lambda name: _stub_service_show(name),
+    ):
+        async with _client(s) as cl:
+            token = await _login_admin(cl)
+            r = await cl.get("/api/system/services", headers=_auth(token))
+    assert r.status_code == HTTPStatus.OK
+
+
+async def test_get_system_services_returns_unknown_state_on_per_service_failure(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    """M5 fold pin: per-service degradation. The aggregate endpoint
+    always returns 200; a failed `systemctl show` for ONE service
+    surfaces as `active_state="unknown"` for that entry only."""
+    from godo_webctl import services as svc_mod
+    from godo_webctl import system_services as ss_mod
+
+    ss_mod._reset_cache_for_tests()
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+
+    def _show(name: str) -> svc_mod.ServiceShow:
+        if name == "godo-tracker":
+            raise svc_mod.CommandFailed(returncode=1, stderr="boom")
+        return _stub_service_show(name)
+
+    with mock.patch("godo_webctl.system_services.services.service_show", side_effect=_show):
+        async with _client(s) as cl:
+            r = await cl.get("/api/system/services")
+    assert r.status_code == HTTPStatus.OK
+    by_name = {e["name"]: e for e in r.json()["services"]}
+    assert by_name["godo-tracker"]["active_state"] == "unknown"
+    assert by_name["godo-webctl"]["active_state"] == "active"
+
+
+@pytest.mark.parametrize(
+    "action",
+    ["start", "restart"],
+)
+async def test_local_service_start_during_activating_returns_409_with_korean_detail(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    action: str,
+) -> None:
+    """T3 fold: 409 + EXACT Korean string per M3 table — drift catches
+    the particle (가 vs 이)."""
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    with mock.patch("godo_webctl.services.is_active", return_value="activating"):
+        async with _client(s) as cl:
+            token = await _login_admin(cl)
+            r = await cl.post(
+                f"/api/local/service/godo-tracker/{action}",
+                headers=_auth(token),
+            )
+    assert r.status_code == HTTPStatus.CONFLICT
+    body = r.json()
+    assert body["ok"] is False
+    assert body["err"] == "service_starting"
+    assert "godo-tracker가 시동 중입니다." in body["detail"]
+
+
+async def test_local_service_stop_during_deactivating_returns_409(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    with mock.patch("godo_webctl.services.is_active", return_value="deactivating"):
+        async with _client(s) as cl:
+            token = await _login_admin(cl)
+            r = await cl.post(
+                "/api/local/service/godo-webctl/stop",
+                headers=_auth(token),
+            )
+    assert r.status_code == HTTPStatus.CONFLICT
+    body = r.json()
+    assert body["err"] == "service_stopping"
+    # Particle pin: webctl → 이 (받침 ㄹ).
+    assert "godo-webctl이 종료 중입니다." in body["detail"]
+
+
+async def test_local_service_irq_pin_starting_uses_subject_particle_이(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    """irq-pin → 핀 → ㄴ 받침 → 이. Drift catch on the particle."""
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    with mock.patch("godo_webctl.services.is_active", return_value="activating"):
+        async with _client(s) as cl:
+            token = await _login_admin(cl)
+            r = await cl.post(
+                "/api/local/service/godo-irq-pin/start",
+                headers=_auth(token),
+            )
+    body = r.json()
+    assert "godo-irq-pin이 시동 중입니다." in body["detail"]
+
+
+# --- §8 fold-in: /api/system/service/{name}/{action} (admin-non-loopback) ---
+
+
+async def test_post_system_service_restart_admin_returns_200(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    """TB1 fold: monkeypatch `services.control` (the wrapper, not
+    `subprocess.run`), assert 200 + activity_log entry."""
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    with mock.patch("godo_webctl.app.services_mod.control", return_value="active"):
+        async with _client(s) as cl:
+            token = await _login_admin(cl)
+            r = await cl.post(
+                "/api/system/service/godo-tracker/restart",
+                headers=_auth(token),
+            )
+            assert r.status_code == HTTPStatus.OK
+            assert r.json() == {"ok": True, "status": "active"}
+            # S1 fold: activity_log entry recorded.
+            log = await cl.get("/api/activity?n=10")
+            types_to_details = {e["type"]: e["detail"] for e in log.json()}
+            assert types_to_details.get("svc_restart") == "godo-tracker by ncenter"
+
+
+async def test_post_system_service_restart_anon_returns_401(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    async with _client(s) as cl:
+        r = await cl.post("/api/system/service/godo-tracker/restart")
+    assert r.status_code == HTTPStatus.UNAUTHORIZED
+    assert r.json()["err"] == "auth_required"
+
+
+async def test_post_system_service_restart_user_role_returns_403(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    """A non-admin token must surface as 403 admin_required (mirror of
+    /api/system/reboot pattern)."""
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    # Issue a non-admin token by hand using the same module the app uses.
+    from godo_webctl.auth import issue_token
+
+    # Read the secret the app generated at startup so the token verifies.
+    base = (tmp_path / "bk").parent  # _settings_for() puts bk under this base
+    secret = (base / "jwt_secret").read_bytes() if (base / "jwt_secret").exists() else None
+    async with _client(s) as cl:
+        # Touch /api/health to force the lifespan + auth bootstrap to write
+        # the secret file; then read the bytes for token issuance.
+        await cl.get("/api/health")
+        secret = (base / "jwt_secret").read_bytes()
+        token, _exp = issue_token(secret, "viewer-bob", "viewer")
+        r = await cl.post(
+            "/api/system/service/godo-tracker/restart",
+            headers=_auth(token),
+        )
+    assert r.status_code == HTTPStatus.FORBIDDEN
+    assert r.json()["err"] == "admin_required"
+
+
+async def test_post_system_service_invalid_action_returns_400(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post(
+            "/api/system/service/godo-tracker/frobnicate",
+            headers=_auth(token),
+        )
+    assert r.status_code == HTTPStatus.BAD_REQUEST
+    assert r.json()["err"] == "unknown_action"
+
+
+async def test_post_system_service_unknown_unit_returns_404(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post(
+            "/api/system/service/godo-xyz/restart",
+            headers=_auth(token),
+        )
+    assert r.status_code == HTTPStatus.NOT_FOUND
+    assert r.json()["err"] == "unknown_service"
+
+
+async def test_post_system_service_during_activating_returns_409_with_korean_detail(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    """The transition gate is inherited from `services.control()`: the
+    `/api/system/service/*` route shares the SOLE call site."""
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    with mock.patch("godo_webctl.services.is_active", return_value="activating"):
+        async with _client(s) as cl:
+            token = await _login_admin(cl)
+            r = await cl.post(
+                "/api/system/service/godo-tracker/restart",
+                headers=_auth(token),
+            )
+    assert r.status_code == HTTPStatus.CONFLICT
+    body = r.json()
+    assert body["err"] == "service_starting"
+    assert "godo-tracker가 시동 중입니다." in body["detail"]
+
+
+async def test_post_system_service_subprocess_timeout_returns_504(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    """S2 fold: CommandTimeout maps to 504."""
+    from godo_webctl import services as svc_mod
+
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    with mock.patch(
+        "godo_webctl.app.services_mod.control",
+        side_effect=svc_mod.CommandTimeout("timed out"),
+    ):
+        async with _client(s) as cl:
+            token = await _login_admin(cl)
+            r = await cl.post(
+                "/api/system/service/godo-tracker/restart",
+                headers=_auth(token),
+            )
+    assert r.status_code == HTTPStatus.GATEWAY_TIMEOUT
+    assert r.json()["err"] == "subprocess_timeout"
+
+
+async def test_post_system_service_subprocess_failed_returns_500(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    """S2 fold: CommandFailed maps to 500 with detail."""
+    from godo_webctl import services as svc_mod
+
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    with mock.patch(
+        "godo_webctl.app.services_mod.control",
+        side_effect=svc_mod.CommandFailed(returncode=1, stderr="boom"),
+    ):
+        async with _client(s) as cl:
+            token = await _login_admin(cl)
+            r = await cl.post(
+                "/api/system/service/godo-tracker/restart",
+                headers=_auth(token),
+            )
+    assert r.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
+    assert r.json()["err"] == "subprocess_failed"

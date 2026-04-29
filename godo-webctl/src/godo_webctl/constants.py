@@ -188,3 +188,32 @@ RESTART_PENDING_FLAG_PATH: Final[str] = "/var/lib/godo/restart_pending"
 # running ``backup_map`` directly from a script (bypassing webctl) cannot
 # corrupt the directory.
 BACKUP_LOCK_FILENAME: Final[str] = ".lock"
+
+# --- Track B-SYSTEM PR-2 — service observability -------------------------
+# `system_services.snapshot()` cache TTL. 1 s matches the SPA's polling
+# cadence so a single 1 Hz poll skews at most by the inflight call's
+# subprocess latency (~30-50 ms per `systemctl show` call on RPi 5;
+# planner estimate, sanity-check on the Diagnostics jitter dashboard).
+# Per-service degradation: a `systemctl show` failure for one unit
+# yields `active_state="unknown"` for that entry; the aggregate
+# endpoint always returns 200.
+SYSTEM_SERVICES_CACHE_TTL_S: Final[float] = 1.0
+
+# Korean transition-warning strings keyed by `(svc, transition)`. Used
+# by the 409-translation arm of `local_service_action` and
+# `system_service_action` (both share `services.control()` underneath).
+# Particle convention (M3 fold): Korean reading convention — read each
+# romanized name as a Korean speaker would pronounce it, then apply the
+# 받침 rule to the Korean syllable.
+#
+# - godo-tracker      → 트래커  (last syllable: 커, no 받침) → 가
+# - godo-webctl       → 웹씨티엘 (last syllable: 엘, ㄹ 받침) → 이
+# - godo-irq-pin      → 아이알큐 핀 (last syllable: 핀, ㄴ 받침) → 이
+SERVICE_TRANSITION_MESSAGES_KO: Final[dict[tuple[str, str], str]] = {
+    ("godo-tracker", "starting"): "godo-tracker가 시동 중입니다. 잠시 후 다시 시도해주세요.",
+    ("godo-tracker", "stopping"): "godo-tracker가 종료 중입니다. 잠시 후 다시 시도해주세요.",
+    ("godo-webctl", "starting"): "godo-webctl이 시동 중입니다. 잠시 후 다시 시도해주세요.",
+    ("godo-webctl", "stopping"): "godo-webctl이 종료 중입니다. 잠시 후 다시 시도해주세요.",
+    ("godo-irq-pin", "starting"): "godo-irq-pin이 시동 중입니다. 잠시 후 다시 시도해주세요.",
+    ("godo-irq-pin", "stopping"): "godo-irq-pin이 종료 중입니다. 잠시 후 다시 시도해주세요.",
+}

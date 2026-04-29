@@ -26,6 +26,7 @@ import * as api from '../../src/lib/api';
 import { auth } from '../../src/stores/auth';
 import { _getSubscriberCountForTests, _resetDiagForTests } from '../../src/stores/diag';
 import { _resetJournalTailForTests } from '../../src/stores/journalTail';
+import { _resetSystemServicesForTests, systemServices } from '../../src/stores/systemServices';
 
 let target: HTMLDivElement;
 
@@ -51,10 +52,33 @@ beforeEach(() => {
   // Wire the api layer to a known token so the SSE token gate passes.
   api.configureAuth({ getToken: () => 'tok', onUnauthorized: () => {} });
 
+  // Stub fetch so the systemServices store's poll resolves quickly with
+  // a known payload — keeps these tests focused on the System.svelte
+  // wiring (subscriber refcount, button states, anon hint, etc.).
+  globalThis.fetch = vi.fn().mockResolvedValue(
+    new Response(
+      JSON.stringify({
+        services: [
+          {
+            name: 'godo-tracker',
+            active_state: 'active',
+            sub_state: 'running',
+            main_pid: 1234,
+            active_since_unix: 0,
+            memory_bytes: 0,
+            env_redacted: { GODO_LOG_DIR: '/var/log/godo', JWT_SECRET: '<redacted>' },
+          },
+        ],
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    ),
+  ) as unknown as typeof globalThis.fetch;
+
   target = document.createElement('div');
   document.body.appendChild(target);
   _resetDiagForTests();
   _resetJournalTailForTests();
+  _resetSystemServicesForTests();
   auth.set(null);
 });
 
@@ -62,6 +86,7 @@ afterEach(() => {
   document.body.removeChild(target);
   _resetDiagForTests();
   _resetJournalTailForTests();
+  _resetSystemServicesForTests();
   auth.set(null);
   vi.restoreAllMocks();
 });
@@ -75,8 +100,30 @@ function setAdminSession(): void {
   });
 }
 
+function seedServicesStore(): void {
+  // Bypass the polling fetch and inject a known payload directly into
+  // the store; the System.svelte component subscribes via
+  // `subscribeSystemServices` which subscribes to `systemServices.set(...)`
+  // directly, so this is sufficient for component-render assertions.
+  systemServices.set({
+    services: [
+      {
+        name: 'godo-tracker',
+        active_state: 'active',
+        sub_state: 'running',
+        main_pid: 1234,
+        active_since_unix: 0,
+        memory_bytes: 0,
+        env_redacted: { GODO_LOG_DIR: '/var/log/godo', JWT_SECRET: '<redacted>' },
+      },
+    ],
+    _arrival_ms: Date.now(),
+    err: null,
+  });
+}
+
 describe('System page', () => {
-  it('renders four panels, registers one diag subscriber on mount, and unsubs on unmount', () => {
+  it('renders five panels (PR-2: +services), registers one diag subscriber on mount, and unsubs on unmount', () => {
     expect(_getSubscriberCountForTests()).toBe(0);
 
     const cmp = mount(System, { target, props: {} });
@@ -84,6 +131,7 @@ describe('System page', () => {
 
     expect(target.querySelector('[data-testid="panel-cpu-temp"]')).not.toBeNull();
     expect(target.querySelector('[data-testid="panel-resources"]')).not.toBeNull();
+    expect(target.querySelector('[data-testid="panel-services"]')).not.toBeNull();
     expect(target.querySelector('[data-testid="panel-journal"]')).not.toBeNull();
     expect(target.querySelector('[data-testid="panel-power"]')).not.toBeNull();
     expect(_getSubscriberCountForTests()).toBe(1);
@@ -196,6 +244,83 @@ describe('System page', () => {
     // M3 anti-typo pin: never the shutdown path.
     const calledPaths = apiPostSpy.mock.calls.map((c) => c[0]);
     expect(calledPaths).not.toContain('/api/system/shutdown');
+
+    unmount(cmp);
+  });
+
+  // --- Track B-SYSTEM PR-2 — services panel + admin action wiring -------
+
+  it('renders the services panel after the first poll (PR-2)', () => {
+    seedServicesStore();
+    const cmp = mount(System, { target, props: {} });
+    flushSync();
+
+    expect(target.querySelector('[data-testid="panel-services"]')).not.toBeNull();
+    // Each card carries `data-testid="service-status-card-<name>"`.
+    const card = target.querySelector('[data-testid="service-status-card-godo-tracker"]');
+    expect(card).not.toBeNull();
+
+    unmount(cmp);
+  });
+
+  it('renders redacted env entries with a (secret) label (PR-2)', () => {
+    seedServicesStore();
+    const cmp = mount(System, { target, props: {} });
+    flushSync();
+
+    // <details> is collapsed by default; querying the inner <li> still
+    // finds it in the DOM tree.
+    const secretTag = target.querySelector('[data-testid="env-secret-JWT_SECRET"]');
+    expect(secretTag).not.toBeNull();
+    expect(secretTag?.textContent).toContain('(secret)');
+
+    unmount(cmp);
+  });
+
+  it('admin sees Start/Stop/Restart action buttons on each ServiceStatusCard (PR-2 §8)', () => {
+    setAdminSession();
+    seedServicesStore();
+    const cmp = mount(System, { target, props: {} });
+    flushSync();
+
+    expect(target.querySelector('[data-testid="svc-action-start-godo-tracker"]')).not.toBeNull();
+    expect(target.querySelector('[data-testid="svc-action-stop-godo-tracker"]')).not.toBeNull();
+    expect(target.querySelector('[data-testid="svc-action-restart-godo-tracker"]')).not.toBeNull();
+
+    unmount(cmp);
+  });
+
+  it('anon viewer sees no action buttons on ServiceStatusCard (PR-2 §8)', () => {
+    auth.set(null);
+    seedServicesStore();
+    const cmp = mount(System, { target, props: {} });
+    flushSync();
+
+    expect(target.querySelector('[data-testid="svc-action-start-godo-tracker"]')).toBeNull();
+    expect(target.querySelector('[data-testid="svc-action-stop-godo-tracker"]')).toBeNull();
+    expect(target.querySelector('[data-testid="svc-action-restart-godo-tracker"]')).toBeNull();
+
+    unmount(cmp);
+  });
+
+  it('clicking restart posts to /api/system/service/<name>/restart with no body (PR-2 §8)', async () => {
+    setAdminSession();
+    seedServicesStore();
+    const apiPostSpy = vi.spyOn(api, 'apiPost').mockResolvedValue(null);
+
+    const cmp = mount(System, { target, props: {} });
+    flushSync();
+
+    const btn = target.querySelector(
+      '[data-testid="svc-action-restart-godo-tracker"]',
+    ) as HTMLButtonElement;
+    expect(btn).not.toBeNull();
+    btn.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    flushSync();
+
+    expect(apiPostSpy).toHaveBeenCalledWith('/api/system/service/godo-tracker/restart');
 
     unmount(cmp);
   });

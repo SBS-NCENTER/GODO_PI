@@ -330,14 +330,18 @@ The auth model splits cleanly along read-vs-write:
   `/api/maps/<name>/image`, `/api/maps/<name>/yaml`, `/api/activity`,
   `/api/system/jitter` (PR-DIAG), `/api/system/amcl_rate` (PR-DIAG),
   `/api/system/resources` (PR-DIAG), `/api/diag/stream` (PR-DIAG,
-  SSE @ 5 Hz), `/api/logs/tail` (PR-DIAG), `/api/local/services`
+  SSE @ 5 Hz), `/api/logs/tail` (PR-DIAG),
+  `/api/system/services` (Track B-SYSTEM PR-2; 1 s TTL cache; env
+  values redacted by substring allow-list), `/api/local/services`
   (loopback), `/api/local/services/stream` (loopback),
   `/api/local/journal/<name>` (loopback).
 - **Login-gated mutations** (`Depends(require_admin)`): `/api/calibrate`,
   `/api/live`, `/api/map/backup`, `/api/map/backup/<ts>/restore`
   (Track B-BACKUP), `/api/maps/<name>/activate`,
   `DELETE /api/maps/<name>`, `/api/local/service/<name>/<action>`
-  (loopback + admin), `/api/system/reboot`, `/api/system/shutdown`.
+  (loopback + admin), `/api/system/service/<name>/<action>` (admin-
+  non-loopback; Track B-SYSTEM PR-2 §8 fold), `/api/system/reboot`,
+  `/api/system/shutdown`.
 - **Session-only routes** (`Depends(require_user)`): `/api/auth/me`,
   `/api/auth/refresh`, `/api/auth/logout`.
 
@@ -407,6 +411,95 @@ FS — tmpfs `/run/godo` is the project default; NFS is unsupported
 (flock semantics differ). Drift between `_DEFAULTS` / `_PARSERS` /
 `_ENV_TO_FIELD` (per invariant (h)) is caught by
 `tests/test_config.py::test_defaults_match_settings`.
+
+### (v) Track B-SYSTEM PR-2 — `/api/system/services` is anon-readable + 1 s TTL + env redacted
+
+`system_services.snapshot()` invokes `services.service_show()` over
+`services.ALLOWED_SERVICES` (sorted for stable wire order) and caches
+the projection for `SYSTEM_SERVICES_CACHE_TTL_S = 1.0 s`. Single
+uvicorn worker (invariant (e)) ⇒ no inter-worker race. The wire payload
+is `{services: SystemServiceEntry[]}` with `SYSTEM_SERVICES_FIELDS`
+field order pinned in `protocol.py`. Each entry's `env_redacted`
+substitutes `<redacted>` for any KEY whose name contains any of
+`("SECRET","KEY","TOKEN","PASSWORD","PASSWD","CREDENTIAL")`
+(case-insensitive substring). The redaction is defence-in-depth: the
+SSOT is the systemd unit-file authoring discipline that keeps secrets
+out of plain env vars. False-positives (`MOST_KEY_BUNDLES`) are
+accepted — safe direction.
+
+Per-service degradation (Mode-A M5 fold): when `services.service_show`
+fails for one service (e.g. systemctl unavailable on a dev box), that
+entry surfaces as `active_state="unknown"` with the rest of fields
+nullable. The aggregate endpoint always returns 200; no 503 wire path.
+
+Pinned by `tests/test_system_services.py` +
+`tests/test_protocol.py::test_env_redaction_patterns_pinned` +
+`tests/test_protocol.py::test_system_services_fields_pinned`.
+
+### (w) Track B-SYSTEM PR-2 — `services.control()` refuses start/restart on `activating` and stop on `deactivating`
+
+`services.control(svc, action)` performs an `is_active(svc)` pre-flight
+read; if `action ∈ {start, restart}` and state == `activating`, or
+`action == stop` and state == `deactivating`, raises
+`ServiceTransitionInProgress`. Both `/api/local/service/<name>/<action>`
+(loopback-admin) and `/api/system/service/<name>/<action>` (admin-non-
+loopback per invariant (x)) share `services.control()` as the SOLE call
+site, so the gate is inherited verbatim. The handler maps to HTTP 409 +
+body `{ok: False, err: "service_starting"|"service_stopping",
+detail: "<Korean string>"}` from `constants.SERVICE_TRANSITION_MESSAGES_KO`.
+
+The Korean detail uses the **Korean reading convention** for romanized
+service names — the syllable read aloud determines the 받침 / 조사 pair:
+godo-tracker → 트래커 → 가; godo-webctl → 웹씨티엘 → 이;
+godo-irq-pin → 아이알큐 핀 → 이.
+
+The TOCTOU window between pre-flight and the would-be `systemctl
+<action>` is acceptable because **systemd dedupes redundant
+`restart`/`start` requests on a unit already in `activating` state**
+— the second request is a no-op. The pre-flight gate exists to give the
+operator a Korean-language warning, not as a hard atomic gate
+(Mode-A M6 fold pin: this rationale cites systemd idempotency, NOT
+invariant (e)). `BLOCKING_TRANSITION_STATES` is limited to
+`{activating, deactivating}` deliberately — no service in
+`ALLOWED_SERVICES` defines `ExecReload=`. A future writer who adds a
+reloadable service must extend the set + integration test in the same
+PR (Mode-A S7 fold).
+
+Pinned by `tests/test_services.py::test_control_raises_*` +
+`test_control_pre_flight_does_not_use_system_services_cache` (S2 fold:
+`control()` calls `is_active()` directly, NEVER the cached snapshot)
+and the integration tests asserting the exact Korean substring per
+service in `tests/test_app_integration.py`.
+
+### (x) Track B-SYSTEM PR-2 — `POST /api/system/service/{name}/{action}` is admin-non-loopback
+
+Mirrors the `/api/system/reboot` admin-non-loopback pattern:
+`Depends(auth_mod.require_admin)`, NO `loopback_only`. JWT-authed admin
+users from any origin (Tailscale, LAN, localhost) may invoke it. The
+handler delegates to `services.control()`, so invariant (w)'s
+pre-flight transition gate (HTTP 409 + Korean detail) is inherited
+verbatim. The existing `/api/local/service/<name>/<action>`
+(loopback-admin, kiosk path) stays unchanged — both endpoints share
+`services.control()` underneath.
+
+Full exception → status mapping (S2 fold, mirror of
+`local_service_action`): `UnknownService` → 404,
+`UnknownAction` → 400, `ServiceTransitionInProgress` → 409,
+`CommandTimeout` → 504, `CommandFailed` → 500.
+
+Successful invocations emit `activity_log.append("svc_<action>",
+f"{name} by {claims.username}")` (S1 fold, mirror of
+`local_service_action:932` / `system_reboot:995`).
+
+Until Task #28 (polkit + systemctl unit-management) lands, the wrapped
+`systemctl <action> <unit>` call returns `subprocess_failed` for
+non-root invocations; the auth + transition layers nonetheless work,
+and the integration suite uses a monkeypatched `services.control` to
+assert the success path (TB1 fold pin: monkeypatch target is
+`godo_webctl.services.control`, NOT `subprocess.run`). Pinned by
+`tests/test_app_integration.py::test_post_system_service_*` (8 cases:
+admin happy + anon 401 + user-role 403 + invalid action 400 + unknown
+unit 404 + 409 transition + 504 timeout + 500 failed).
 
 ## Phase 4.5 follow-up candidates
 
@@ -1189,3 +1282,105 @@ NOTE: top-level invariants now reach (t); the post-(s) duplicates inside Track B
 - **TB4**: malformed and unknown-ts arguments both raise
   `BackupNotFound` (deliberate folding for log-uniformity; the
   handler returns 404 for both).
+
+## 2026-04-29 — Track B-SYSTEM PR-2: service observability
+
+### Added
+
+- `src/godo_webctl/system_services.py` (NEW) — TTL cache layer for
+  `/api/system/services`. `snapshot()` invokes `services.service_show()`
+  over `services.ALLOWED_SERVICES`, caches for
+  `SYSTEM_SERVICES_CACHE_TTL_S = 1.0 s`. Per-service degradation (M5
+  fold): `services.ServicesError` / `OSError` / `FileNotFoundError`
+  yield `active_state="unknown"` for that entry; aggregate endpoint
+  always returns 200. `_reset_cache_for_tests()` test seam mirroring
+  `resources._reset_cache_for_tests`.
+- `src/godo_webctl/services.py::ServiceShow` dataclass + `service_show`
+  + `parse_systemctl_show` + `redact_env` + `_parse_environment_value`.
+  `BLOCKING_TRANSITION_STATES = frozenset({"activating",
+  "deactivating"})` (S7 fold: `reloading` deliberately excluded — none
+  of the 3 ALLOWED_SERVICES define `ExecReload=`). `ALLOWED_PROPERTIES`
+  tuple lists the 7 systemd properties queried via `--property=`.
+  `ServiceTransitionInProgress(transition, svc)` exception carries the
+  transition kind for handler-side Korean detail lookup.
+- `src/godo_webctl/services.py::control()` extended with a pre-flight
+  `is_active()` gate (invariant (w)).
+- `src/godo_webctl/protocol.py` — `SYSTEM_SERVICES_FIELDS` (7-field
+  tuple), `ENV_REDACTION_PATTERNS` (6-pattern tuple),
+  `REDACTED_PLACEHOLDER = "<redacted>"`, `ERR_SERVICE_STARTING`,
+  `ERR_SERVICE_STOPPING`.
+- `src/godo_webctl/constants.py` — `SYSTEM_SERVICES_CACHE_TTL_S = 1.0`,
+  `SERVICE_TRANSITION_MESSAGES_KO` (6 keyed Korean strings; Mode-A M3
+  fold uses Korean reading convention).
+- `src/godo_webctl/app.py` — `GET /api/system/services` (anon,
+  invariant (v)), `POST /api/system/service/{name}/{action}` (admin-
+  non-loopback, invariant (x)), `_service_transition_response()`
+  helper for the 409 wire shape, 409 arm added to
+  `local_service_action`.
+- `tests/test_system_services.py` (NEW, 8 cases) —
+  pinned-fields, alphabetical service order, secret redaction, memory
+  not-set handling, per-service failure → unknown state (M5 pin),
+  cache hit/miss with exact `call_count` assertions (T1 fold), degraded
+  entry shape pin.
+- `tests/test_services.py` — 19 new cases (parser corpus including
+  S1 fold's backslash + escaped-newline; redaction parametrize over 6
+  patterns + benign control case (T2 fold); service_show shape +
+  argv-list pin; transition-gate + anti-monotone pair;
+  `test_control_pre_flight_does_not_use_system_services_cache` (S2
+  fold)). Existing `test_control_invokes_literal_argv` updated for the
+  3-call shape.
+- `tests/test_constants.py` — `test_system_services_cache_ttl_pinned`,
+  `test_service_transition_messages_ko_pinned` (all 6 tuples literal,
+  N5 fold), `test_service_transition_messages_ko_covers_allowed_services`
+  (drift catch).
+- `tests/test_protocol.py` — `test_system_services_fields_pinned`,
+  `test_env_redaction_patterns_pinned`, `test_redacted_placeholder_pinned`,
+  `test_service_transition_error_codes_pinned`.
+- `tests/test_app_integration.py` — 13 new integration cases
+  (`/api/system/services` anon read; per-service degradation 200 with
+  unknown state; 409 corpus with EXACT Korean substring pinning per
+  service per particle, including the 3 ALLOWED_SERVICES; 8-case
+  `/api/system/service/*` admin endpoint matrix per §8.4 — happy,
+  401, 403, 400, 404, 409, 504, 500). `test_anon_read_endpoints_return_200`
+  parametrize extended with `/api/system/services`.
+
+### Changed
+
+- Invariant (n) anon-readable list extended with `/api/system/services`;
+  admin-mutation list extended with `/api/system/service/<name>/<action>`.
+- Invariant numbering: PR-1 takes `(u)` (pidfile config key); this PR
+  adds `(v)`, `(w)`, `(x)`.
+
+### Tests
+
+- 431 → 490 hardware-free pytest (+59 from this PR; +24 integration in
+  `test_app_integration.py`, +19 unit in `test_services.py`, +8 in
+  `test_system_services.py`, +4 in `test_protocol.py`, +3 in
+  `test_constants.py`, plus pre-existing test updates).
+  `uv run ruff check` + `uv run ruff format --check` clean.
+
+### Mode-A folds applied (full plan §7 + §8 fold-in)
+
+- M1: invariants `(v) + (w) + (x)` (NOT `(u) + (v)`).
+- M2: §7.1 7-column row format honored in `FRONT_DESIGN.md`.
+- M3: Korean particle convention pinned (Korean reading, 받침 rule).
+- M4: 7-field dataclass + 7 systemd properties.
+- M5: 503 wire path dropped; per-service `active_state="unknown"`.
+- M6: R11 mitigation cites systemd idempotency.
+- S1 (env corpus): backslash + escaped-newline cases pinned.
+- S2 (`control()` doesn't use cache): explicit pin via
+  `test_control_pre_flight_does_not_use_system_services_cache`.
+- S2 (§8 fold): full exception → status mapping in the new admin
+  endpoint (504 for CommandTimeout + 500 for CommandFailed).
+- S1 (§8 fold): handler emits `activity_log` entry (audit trail).
+- S3: out-of-scope `journal_tail` / `JournalTail.svelte` honored.
+- S4: `formatBytesShort` renamed to `formatBytesBinaryShort` on the SPA.
+- S5: rationale for new endpoint vs reuse `/api/local/services/stream`
+  documented in `CODEBASE.md` invariants.
+- S7: `BLOCKING_TRANSITION_STATES` excludes `reloading` with comment.
+- TB1 (§8 fold): integration tests monkeypatch
+  `godo_webctl.services.control`, NOT `subprocess.run`.
+- T1: cache hit/miss tests assert exact `call_count` (3 vs 6).
+- T2: redaction parametrize includes benign control case.
+- T3: 409 integration tests pin EXACT Korean substring per particle.
+- N5: 6 (svc, transition) tuples literal-pinned in `test_constants.py`.

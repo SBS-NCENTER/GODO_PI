@@ -245,6 +245,41 @@ ERR_MAPS_DIR_MISSING: Final[str] = "maps_dir_missing"
 ERR_BACKUP_NOT_FOUND: Final[str] = "backup_not_found"
 ERR_RESTORE_NAME_CONFLICT: Final[str] = "restore_name_conflict"
 
+# --- Track B-SYSTEM PR-2 — service observability -------------------------
+# `/api/system/services` payload field order (one entry per allowed
+# service). Webctl-only (no C++ counterpart). Pinned by
+# `tests/test_protocol.py::test_system_services_fields_pinned`.
+SYSTEM_SERVICES_FIELDS: Final[tuple[str, ...]] = (
+    "name",
+    "active_state",
+    "sub_state",
+    "main_pid",
+    "active_since_unix",
+    "memory_bytes",
+    "env_redacted",
+)
+
+# Substring patterns matched (case-insensitive) against env-var KEY names.
+# Any KEY whose upper-case form contains any of these substrings has its
+# VALUE replaced with `REDACTED_PLACEHOLDER`. Defence-in-depth — the SSOT
+# is the systemd unit-file authoring discipline that keeps secrets out
+# of plain env vars. False-positives (`MOST_KEY_BUNDLES`) are accepted.
+ENV_REDACTION_PATTERNS: Final[tuple[str, ...]] = (
+    "SECRET",
+    "KEY",
+    "TOKEN",
+    "PASSWORD",
+    "PASSWD",
+    "CREDENTIAL",
+)
+
+# Replacement text for redacted env-var values.
+REDACTED_PLACEHOLDER: Final[str] = "<redacted>"
+
+# Track B-SYSTEM PR-2 — error codes for the transition-in-progress gate.
+ERR_SERVICE_STARTING: Final[str] = "service_starting"
+ERR_SERVICE_STOPPING: Final[str] = "service_stopping"
+
 # Mirror the regex pattern as a string so the SPA can do client-side
 # validation without depending on a Python regex parse. Frontend file:
 # `godo-frontend/src/lib/protocol.ts::MAPS_NAME_REGEX_PATTERN_STR`.

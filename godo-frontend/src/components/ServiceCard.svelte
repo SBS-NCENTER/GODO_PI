@@ -1,6 +1,9 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import { apiPost, ApiError } from '$lib/api';
-  import type { ServiceStatus } from '$lib/protocol';
+  import { SERVICE_TRANSITION_TOAST_TTL_MS } from '$lib/constants';
+  import { ERR_SERVICE_STARTING, ERR_SERVICE_STOPPING, type ServiceStatus } from '$lib/protocol';
+  import { statusChipClass } from '$lib/serviceStatus';
 
   interface Props {
     service: ServiceStatus;
@@ -12,30 +15,47 @@
 
   let busy = $state(false);
   let lastError = $state<string | null>(null);
+  let dismissTimer: ReturnType<typeof setTimeout> | null = null;
 
-  const STATUS_TO_CHIP: Record<string, string> = {
-    active: 'ok',
-    activating: 'warn',
-    inactive: 'idle',
-    failed: 'err',
-    timeout: 'err',
-    unknown: 'idle',
-  };
-
-  function chipClass(s: string): string {
-    return STATUS_TO_CHIP[s] ?? 'idle';
+  function clearDismissTimer(): void {
+    if (dismissTimer !== null) {
+      clearTimeout(dismissTimer);
+      dismissTimer = null;
+    }
   }
+
+  function setErrorWithAutoDismiss(msg: string): void {
+    lastError = msg;
+    clearDismissTimer();
+    dismissTimer = setTimeout(() => {
+      lastError = null;
+      dismissTimer = null;
+    }, SERVICE_TRANSITION_TOAST_TTL_MS);
+  }
+
+  onDestroy(() => {
+    clearDismissTimer();
+  });
 
   async function action(act: 'start' | 'stop' | 'restart'): Promise<void> {
     if (!isAdmin || busy) return;
     busy = true;
     lastError = null;
+    clearDismissTimer();
     try {
       await apiPost(`/api/local/service/${service.name}/${act}`);
       onAction?.(act);
     } catch (e) {
       const err = e as ApiError;
-      lastError = err.body?.err ?? err.message;
+      const errCode = err.body?.err;
+      if (errCode === ERR_SERVICE_STARTING || errCode === ERR_SERVICE_STOPPING) {
+        // Track B-SYSTEM PR-2 — 409 transition gate. Render the
+        // Korean detail with auto-dismiss so the operator sees the
+        // warning and the toast clears itself before the next click.
+        setErrorWithAutoDismiss(err.body?.detail ?? errCode);
+      } else {
+        lastError = err.body?.err ?? err.message;
+      }
     } finally {
       busy = false;
     }
@@ -46,7 +66,7 @@
   <div class="hstack" style="justify-content: space-between;">
     <div class="hstack">
       <strong>{service.name}</strong>
-      <span class="chip {chipClass(service.active)}" data-testid="service-status">
+      <span class="chip {statusChipClass(service.active)}" data-testid="service-status">
         {service.active}
       </span>
     </div>
@@ -65,7 +85,7 @@
     </div>
   </div>
   {#if lastError}
-    <div class="muted" style="color: var(--color-status-err); margin-top: 8px;">
+    <div class="muted" style="color: var(--color-status-err); margin-top: 8px;" role="status">
       {lastError}
     </div>
   {/if}

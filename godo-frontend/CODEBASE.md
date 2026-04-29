@@ -338,6 +338,50 @@ drift surfaces as a sad-UX 404, not a security hole.
 `n` input is clamped client-side to `LOGS_TAIL_MAX_N_MIRROR = 500`;
 the server's Pydantic `Field(le=...)` is the authoritative cap.
 
+### (t) Track B-SYSTEM PR-2 — services panel polls `/api/system/services` at 1 Hz, no SSE
+
+`routes/System.svelte` adds a 5th panel rendering one
+`<ServiceStatusCard/>` per allow-listed GODO service. Polls
+`/api/system/services` via `setInterval(SYSTEM_SERVICES_POLL_MS = 1000)`
+through `stores/systemServices.ts` (refcounted; opens on first
+subscribe, closes on last). The timer is captured in `onMount` and
+cleared in `onDestroy` (T5 fold pin: `vi.getTimerCount() === 0` after
+the last unsub). 1 Hz × 1 s backend cache TTL is the matched cadence;
+an SSE was rejected because operator UX gains nothing over the polled
+shape.
+
+Chip-class is single-sourced in `$lib/serviceStatus.ts` (1-export
+module: `STATUS_TO_CHIP` map + `statusChipClass(s)`) and re-used by
+both `ServiceCard` (loopback-admin actions on `/local`) and
+`ServiceStatusCard` (read-only-or-admin twin on `/system`) so the two
+cannot drift.
+
+Both cards render `body.detail` (Korean) on a 409
+`service_starting`/`service_stopping` response in their existing
+`lastError` slot, with auto-dismiss after
+`SERVICE_TRANSITION_TOAST_TTL_MS = 4000`. The dismiss timer is cleared
+in `onDestroy`. ServiceStatusCard ALSO shows admin Start/Stop/Restart
+buttons gated by `$isAdmin`; the click POSTs to
+`apiSystemServiceAction(name, action)` which builds the
+`/api/system/service/<name>/<action>` path. Anon viewers see the
+read-only card with no buttons.
+
+Stale-banner: when `Date.now() - svcState._arrival_ms >
+SYSTEM_SERVICES_STALE_MS = 3000`, the panel header shows a "데이터
+갱신 지연" inline tag (mirror of the Diagnostics page stale-banner
+pattern; same `renderTick` heartbeat re-evaluation).
+
+Pinned by `tests/unit/system.test.ts` (services panel renders + admin
+button visibility + anon hides buttons + clicking restart POSTs to the
+right path), `tests/unit/systemServices.test.ts` (T4 fold: exactly 4
+fetches in 3500 ms; T5 fold: timer count drops to 0 on unmount),
+`tests/unit/serviceStatus.test.ts` (chip-class drift catch),
+`tests/unit/format.test.ts` (formatUptimeKo + formatBytesBinaryShort
+corpus with S4 fold "51 MiB" pin), and `tests/e2e/system.spec.ts`
+(3 new playwright cases: services panel renders, env collapse reveals
+mixed redacted/non-redacted KEYs per T6 fold, admin restart click
+under stub 409 surfaces Korean detail toast).
+
 ### (j) Router is home-grown (per N9)
 
 The plan called for `svelte-spa-router@~4`. After install the package's
@@ -961,3 +1005,103 @@ Existing coverage suffices:
 - TB1: toast strings exported as constants in `lib/constants.ts`;
   `Backup.svelte` AND `tests/unit/backup.test.ts` import the same
   symbol.
+
+## 2026-04-29 — Track B-SYSTEM PR-2: service observability
+
+### Added
+
+- `src/lib/serviceStatus.ts` (NEW) — `STATUS_TO_CHIP` map + `statusChipClass(s)`
+  helper. Single source of the chip-class mapping; both `ServiceCard`
+  and `ServiceStatusCard` import from here so visual drift is impossible.
+- `src/components/ServiceStatusCard.svelte` (NEW) — read-only-or-admin
+  twin of `ServiceCard.svelte`. Renders ActiveState chip + SubState +
+  Korean uptime + PID + memory + a collapsible env-vars list. Shows
+  Start/Stop/Restart buttons when `isAdmin` is true; POSTs to
+  `/api/system/service/<name>/<action>`. 409 transition responses
+  render `body.detail` in the lastError slot with auto-dismiss
+  (`SERVICE_TRANSITION_TOAST_TTL_MS`). The dismiss timer is cleared
+  in `onDestroy`.
+- `src/components/EnvVarsList.svelte` (NEW) — collapsible
+  `<details>` rendering KEY=VALUE lines. Redacted KEYs (value ===
+  `REDACTED_PLACEHOLDER`) get a `(secret)` suffix label and a muted
+  italic value class. Keys are sorted alphabetically for deterministic
+  rendering.
+- `src/stores/systemServices.ts` (NEW) — refcounted polling store.
+  `subscribeSystemServices(fn)` opens a `setInterval` at
+  `SYSTEM_SERVICES_POLL_MS = 1000` on first subscribe, clears it on
+  last unsub. `_arrival_ms` stamped on every successful fetch.
+  Last-good `services` array preserved on fetch error so the panel
+  shows stale-but-visible (the stale banner triggers on the freshness
+  gap).
+- `src/lib/protocol.ts` — `SystemServiceEntry` interface,
+  `SystemServicesResponse` interface, `SYSTEM_SERVICES_FIELDS` tuple,
+  `apiSystemServiceAction(name, action)` path builder, error codes
+  `ERR_SERVICE_STARTING` / `ERR_SERVICE_STOPPING`,
+  `REDACTED_PLACEHOLDER = "<redacted>"` (mirror of webctl).
+- `src/lib/constants.ts` — `SYSTEM_SERVICES_POLL_MS = 1000`,
+  `SYSTEM_SERVICES_STALE_MS = 3000`, `SERVICE_TRANSITION_TOAST_TTL_MS
+= 4000`.
+- `src/lib/format.ts` — `formatUptimeKo(active_since_unix, now_unix)`
+  Korean uptime ("1일 2시간"), `formatBytesBinaryShort(n)` base-1024
+  short bytes ("51 MiB"). S4 fold rename (was `formatBytesShort`).
+
+### Changed
+
+- `src/components/ServiceCard.svelte` — uses `statusChipClass` from
+  `$lib/serviceStatus`. New 409 `service_starting`/`service_stopping`
+  branch in the action handler renders `body.detail` (Korean) with
+  auto-dismiss after `SERVICE_TRANSITION_TOAST_TTL_MS`. The dismiss
+  timer is cleared in `onDestroy`.
+- `src/routes/System.svelte` — adds a 5th panel "GODO 서비스" rendering
+  one `<ServiceStatusCard/>` per service from the `systemServices`
+  store. Subscribes via `subscribeSystemServices` in `onMount`; calls
+  the unsub closure in `onDestroy`. Stale-banner uses the existing
+  `renderTick` heartbeat against `SYSTEM_SERVICES_STALE_MS`.
+
+### Tests
+
+- `tests/unit/format.test.ts` (NEW, 19 cases) — `formatRemaining` +
+  `formatMeters` + `formatDegrees` (existing) + `formatUptimeKo`
+  (10 cases including 0초/null/M분 S초/H시간 M분/D일 H시간 boundaries
+  - clock-skew clamp) + `formatBytesBinaryShort` (5 cases including
+    the S4 fold "51 MiB" corpus pin).
+- `tests/unit/serviceStatus.test.ts` (NEW, 3 cases) — chip-class
+  drift catch, mapped lookup, fallback for unknown words.
+- `tests/unit/systemServices.test.ts` (NEW, 5 cases) —
+  open/close on refcount, T4 fold (exactly 4 fetches in 3500 ms),
+  T5 fold (timer count === 0 on unmount), `_arrival_ms` stamping,
+  last-good preserved on error.
+- `tests/unit/system.test.ts` — 5 new cases (services panel renders,
+  env (secret) tag visible, admin sees action buttons, anon does not,
+  clicking restart POSTs to `/api/system/service/<name>/restart`).
+  Existing "renders four panels" updated to "renders five panels".
+- `tests/e2e/system.spec.ts` — 3 new playwright cases (services panel
+  shows 3 cards + env collapse reveals mixed redacted/non-redacted
+  KEYs per T6 fold + admin clicks restart with stubbed 409 → Korean
+  toast renders).
+- `tests/e2e/_stub_server.py` — `_canned_system_services()` (3-row
+  mixed-env corpus), `/api/system/services` GET route,
+  `_route_system_service_action()` + POST route plumbing,
+  `STUB_FLAGS["system_service_409"]` flag flipped via
+  `?stub_svc_409=starting|stopping`.
+
+### Total frontend test count
+
+`npm run test:unit` 111 → 143 cases (+32). `npm run test:e2e`
+unchanged at 36 passing (33 → 36 passing, +3 new system cases; the
+1 pre-existing failure (`config.spec.ts: anonymous viewer does NOT
+see the Config nav row`) is unrelated to this PR).
+
+### Mode-A folds applied
+
+- M1: backend invariants (v) + (w) + (x); SPA invariant (t).
+- M2: `FRONT_DESIGN.md` §7.1 7-column row format.
+- M3: Korean particle convention (Korean reading) — backend literal pin.
+- M4: 7-field dataclass / interface mirror.
+- M5: per-service degradation; no 503 wire path.
+- N1: stale-banner threshold = 3 × poll cadence (3000 ms).
+- N2: panel uses default `.panel` style; no sparkline.
+- S4: `formatBytesBinaryShort` rename; base-1024 explicit.
+- T4: vitest `vi.useFakeTimers()` asserts EXACTLY 4 fetches in 3500 ms.
+- T5: `vi.getTimerCount() === 0` after last unsub.
+- T6: playwright stub corpus mixes redacted + non-redacted KEYs.

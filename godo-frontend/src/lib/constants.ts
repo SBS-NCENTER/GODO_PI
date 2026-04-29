@@ -180,3 +180,19 @@ export const BACKUP_RESTORE_SUCCESS_TOAST =
 // interpolates `<ts>` at render time; the warning line is static.
 // Mirror of `MapListPanel.svelte:262-264` delete-dialog shape.
 export const BACKUP_RESTORE_OVERWRITE_WARNING = '⚠ 기존 동일 이름 맵 페어를 덮어씁니다.';
+
+// --- Track B-SYSTEM PR-2 — service observability ----------------------
+// 1 Hz polling cadence for `/api/system/services`. Matches the backend
+// cache TTL (`SYSTEM_SERVICES_CACHE_TTL_S = 1.0 s`) so the page sees a
+// fresh snapshot on every tick without piling DOS pressure on systemctl.
+export const SYSTEM_SERVICES_POLL_MS = 1000;
+
+// Stale-banner threshold. 3 × the poll cadence — a missed fetch round
+// (poll, retry, retry) before the operator sees the warning. Mirrors
+// `Diagnostics.svelte`'s freshness pattern.
+export const SYSTEM_SERVICES_STALE_MS = 3000;
+
+// Auto-dismiss interval for the 409 transition-in-progress toast on
+// ServiceCard / ServiceStatusCard. 4 s is long enough to read a Korean
+// sentence aloud, short enough not to linger past a successful retry.
+export const SERVICE_TRANSITION_TOAST_TTL_MS = 4000;

@@ -14,6 +14,7 @@
 
 #include "core/config.hpp"
 #include "core/constants.hpp"
+#include "lidar/sample.hpp"
 #include "localization/amcl.hpp"
 #include "localization/likelihood_field.hpp"
 #include "localization/occupancy_grid.hpp"
@@ -26,8 +27,11 @@
 #endif
 
 using godo::core::Config;
+using godo::lidar::Frame;
+using godo::lidar::Sample;
 using godo::localization::Amcl;
 using godo::localization::build_likelihood_field;
+using godo::localization::downsample;
 using godo::localization::LikelihoodField;
 using godo::localization::load_map;
 using godo::localization::OccupancyGrid;
@@ -164,4 +168,114 @@ TEST_CASE("Amcl::converge — terminates within max_iters on a tight perfect-mat
     CHECK(std::isfinite(result.pose.yaw_deg));
     CHECK(std::isfinite(result.xy_std_m));
     CHECK(std::isfinite(result.yaw_std_deg));
+}
+
+// Track D-3 anti-regression: pin the RPLIDAR-CW → REP-103-CCW boundary in
+// scan_ops::downsample. Mirror of the SPA-side test
+// (godo-frontend/src/lib/components/__tests__/poseCanvasScanLayer.test.ts
+// case 3, PR #30) — pins that a sensor-frame "right" beam (CW 90°) projects
+// to the LiDAR's RIGHT side (REP-103 -y) under the fix. Bias-block: the
+// world-frame endpoint is computed by hand here, NOT by calling
+// evaluate_scan(), so a bug in evaluate_scan() cannot mask a bug in the
+// convention shift. See plan §Test strategy + invariant (m) in CODEBASE.md.
+TEST_CASE("scan_ops::downsample — RPLIDAR CW 90° beam projects to LiDAR's right side under fix") {
+    // Step 1: Frame with one valid sample at sensor angle 90° CW, 1 m.
+    Frame frame;
+    frame.index = 0;
+    Sample s{};
+    s.angle_deg    = 90.0;
+    s.distance_mm  = 1000.0;
+    s.quality      = 47;
+    s.flag         = 0;
+    s.timestamp_ns = 1;
+    frame.samples.push_back(s);
+
+    // Step 2: Run downsample with stride 1, range gate [0.05, 12.0] m.
+    std::vector<RangeBeam> beams;
+    downsample(frame, 1, 0.05, 12.0, beams);
+
+    // Step 3: Beam survived the gate, range came through unscaled.
+    REQUIRE(beams.size() == 1u);
+    CHECK(beams[0].range_m == doctest::Approx(1.0f));
+
+    // Step 4: angle_rad is the negation of the CW degree value (post-fix).
+    // Pre-fix this would have been +π/2; the bug was that AMCL math is REP-103
+    // CCW so a +π/2 sensor-CW beam was projected to the LiDAR's LEFT side.
+    constexpr double kPi = 3.14159265358979323846;
+    CHECK(beams[0].angle_rad ==
+          doctest::Approx(static_cast<float>(-kPi / 2.0)).epsilon(1e-5));
+
+    // Step 5: Manual projection at pose (5, 7, yaw=0). Plug a = beams[0].angle_rad
+    // (the actual post-downsample value, NOT a freshly computed 90·π/180) so that
+    // a bug shared by downsample-and-test cannot ride through silently. Bias-block.
+    {
+        const double a       = static_cast<double>(beams[0].angle_rad);
+        const double r       = static_cast<double>(beams[0].range_m);
+        const double px      = 5.0;
+        const double py      = 7.0;
+        const double yaw_deg = 0.0;
+        const double yaw_rad = yaw_deg * (kPi / 180.0);
+        const double xs      = r * std::cos(a);
+        const double ys      = r * std::sin(a);
+        const double xw      = px + (xs * std::cos(yaw_rad) - ys * std::sin(yaw_rad));
+        const double yw      = py + (xs * std::sin(yaw_rad) + ys * std::cos(yaw_rad));
+        // Right side of the LiDAR (REP-103 -y direction from the pose).
+        CHECK(xw == doctest::Approx(5.0).epsilon(1e-5));
+        CHECK(yw == doctest::Approx(6.0).epsilon(1e-5));
+    }
+
+    // Step 6: Anti-bias rotation matrix exercise — yaw = 45° puts non-zero
+    // values into all four product terms in the rotation matrix, catching
+    // single-term sign errors that yaw=0 alone cannot.
+    // With xs=0, ys=-1, cos(45°)=sin(45°)=√2/2:
+    //   xw = 5 + 0·(√2/2) − (−1)·(√2/2) = 5 + √2/2 ≈ 5.70710678
+    //   yw = 7 + 0·(√2/2) + (−1)·(√2/2) = 7 − √2/2 ≈ 6.29289322
+    {
+        const double a       = static_cast<double>(beams[0].angle_rad);
+        const double r       = static_cast<double>(beams[0].range_m);
+        const double px      = 5.0;
+        const double py      = 7.0;
+        const double yaw_deg = 45.0;
+        const double yaw_rad = yaw_deg * (kPi / 180.0);
+        const double xs      = r * std::cos(a);
+        const double ys      = r * std::sin(a);
+        const double xw      = px + (xs * std::cos(yaw_rad) - ys * std::sin(yaw_rad));
+        const double yw      = py + (xs * std::sin(yaw_rad) + ys * std::cos(yaw_rad));
+        CHECK(xw == doctest::Approx(5.7071).epsilon(1e-4));
+        CHECK(yw == doctest::Approx(6.2929).epsilon(1e-4));
+    }
+
+    // Step 7: Anti-bias second beam — pin BOTH right (90°) and left (270°)
+    // sides simultaneously. CW 270° = LiDAR's LEFT side. Post-fix
+    // angle_rad = -270·π/180 = -3π/2; cos(-3π/2)=0, sin(-3π/2)=+1.
+    // At pose (0, 0, 0): xw=0, yw=+1 (LiDAR's left side, REP-103 +y).
+    Frame frame2;
+    frame2.index = 1;
+    Sample s2{};
+    s2.angle_deg    = 270.0;
+    s2.distance_mm  = 1000.0;
+    s2.quality      = 47;
+    s2.flag         = 0;
+    s2.timestamp_ns = 2;
+    frame2.samples.push_back(s2);
+    std::vector<RangeBeam> beams2;
+    downsample(frame2, 1, 0.05, 12.0, beams2);
+
+    REQUIRE(beams2.size() == 1u);
+    CHECK(beams2[0].angle_rad ==
+          doctest::Approx(static_cast<float>(-3.0 * kPi / 2.0)).epsilon(1e-5));
+    {
+        const double a       = static_cast<double>(beams2[0].angle_rad);
+        const double r       = static_cast<double>(beams2[0].range_m);
+        const double px      = 0.0;
+        const double py      = 0.0;
+        const double yaw_deg = 0.0;
+        const double yaw_rad = yaw_deg * (kPi / 180.0);
+        const double xs      = r * std::cos(a);
+        const double ys      = r * std::sin(a);
+        const double xw      = px + (xs * std::cos(yaw_rad) - ys * std::sin(yaw_rad));
+        const double yw      = py + (xs * std::sin(yaw_rad) + ys * std::cos(yaw_rad));
+        CHECK(xw == doctest::Approx(0.0).epsilon(1e-5));
+        CHECK(yw == doctest::Approx(1.0).epsilon(1e-5));
+    }
 }

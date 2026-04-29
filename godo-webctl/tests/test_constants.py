@@ -162,6 +162,13 @@ def test_maps_name_regex_accepts_reserved_active_name() -> None:
     assert C.MAPS_NAME_REGEX.match("active")
 
 
+def test_pgm_header_max_bytes_pinned() -> None:
+    # 64 bytes comfortably fits any practical netpbm `P5` header
+    # (`P5\nW H\nMAXVAL\n`); bounds `read_pgm_dimensions` against
+    # streaming pixel data from a pathologically large PGM.
+    assert C.PGM_HEADER_MAX_BYTES == 64
+
+
 # --- PR-DIAG (Track B-DIAG) constants ------------------------------------
 
 

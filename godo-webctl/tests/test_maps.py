@@ -555,7 +555,10 @@ def test_read_pgm_dimensions_caps_read_at_pgm_header_max_bytes(
     from godo_webctl.constants import PGM_HEADER_MAX_BYTES
 
     p = tmp_path / "huge.pgm"
-    # Sparse: 1 GB of zero pixels after a tiny header.
+    # Sparse: 1 GB of zero pixels after a tiny header. `truncate` allocates
+    # near-zero blocks on every filesystem GODO targets (ext4 / btrfs /
+    # tmpfs on RPi 5 + CI). On a non-sparse FS (FAT32, some ZFS configs)
+    # this would balloon to 1 GB — out of scope; we never deploy on those.
     header = b"P5\n200 100\n255\n"
     with p.open("wb") as f:
         f.write(header)

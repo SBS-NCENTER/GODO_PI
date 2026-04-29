@@ -253,7 +253,14 @@ describe('PoseCanvas worldToCanvas — Track D scale fix', () => {
   it('§C-4 direction: world (0, +1) maps to cy < world (0, 0).cy', () => {
     const m = makeMetadata({ resolution: 0.05, origin: [0, 0, 0], width: 200, height: 100 });
     const a = mountAndGetPoseDot(m, makePose(0, 0));
-    // Reset DOM + remount with new pose; cleanups handles the unmount.
+    // Mode-B S3: unmount component A before mounting B. Both components
+    // subscribe to the global `mapMetadata` store and render arcs into a
+    // shared mock-context array; leaving A mounted makes the comparison
+    // depend on Svelte 5 effect-flush ordering, which a future framework
+    // upgrade could silently flip (turning the assertion vacuous).
+    while (cleanups.length > 0) {
+      cleanups.pop()?.();
+    }
     const b = mountAndGetPoseDot(m, makePose(0, 1));
     expect(b.cy).toBeLessThan(a.cy);
   });

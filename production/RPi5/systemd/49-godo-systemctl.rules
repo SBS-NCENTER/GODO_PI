@@ -1,32 +1,47 @@
 // 49-godo-systemctl.rules — polkit JS rule
 //
 // Grants members of the `ncenter` group (operator account on news-pi01)
-// permission to invoke `systemctl {start|stop|restart}` on the three
-// GODO units WITHOUT sudo / WITHOUT a password prompt.
+// permission to invoke (a) `systemctl {start|stop|restart}` on the three
+// GODO units and (b) host reboot / power-off, both WITHOUT sudo / WITHOUT
+// a password prompt.
 //
-// This rule is what makes the webctl admin endpoint
+// (a) is the webctl admin endpoint
 // `POST /api/system/service/{name}/{action}` (Track B-SYSTEM PR-2) and
-// the operator-local handler `POST /api/local/service/{name}/{action}`
-// actually function. Both routes ultimately call
-// `services.control(svc, action)` which runs:
+// the operator-local handler `POST /api/local/service/{name}/{action}`.
+// Both routes ultimately call `services.control(svc, action)` which runs:
 //
 //     subprocess.run(
 //         ["systemctl", <action>, "--no-pager", <svc>],
 //         ...
 //     )
 //
-// as the unprivileged ncenter user. Without this polkit rule, polkit
-// denies the manage-units action and the subprocess returns non-zero
-// → CommandFailed → HTTP 500 `subprocess_failed`.
+// (b) is `POST /api/system/reboot` / `POST /api/system/shutdown`
+// (admin-only, both Local + System SPA pages call them). They run:
+//
+//     subprocess.run(["shutdown", "-r", "+0"], ...)   # reboot
+//     subprocess.run(["shutdown", "-h", "+0"], ...)   # power-off
+//
+// The systemd `shutdown` shim routes through the systemd-logind D-Bus
+// API, gated by the `org.freedesktop.login1.*` action family — a
+// DIFFERENT action ID set from `manage-units`. Without the second rule
+// below, ncenter's call returned `Failed to {reboot|power off} system
+// via logind: Interactive authentication required.` and the HTTP
+// endpoint surfaced `subprocess_failed`.
+//
+// Both rules run as the unprivileged `ncenter` user. Without them,
+// polkit denies the action and the subprocess returns non-zero →
+// CommandFailed → HTTP 500 `subprocess_failed`.
 //
 // Filename starts with `49-` so it evaluates BEFORE the distro
-// default `50-default.rules`. The rule only ever returns YES for the
-// matched triple (group + unit + verb); every other path falls through
-// to default-deny semantics. Adding a new GODO service or verb is an
-// explicit edit here in lock-step with `services.py::ALLOWED_SERVICES`
-// / `ALLOWED_ACTIONS` (these three sets must agree — see CODEBASE.md
-// invariant (o)).
+// default `50-default.rules`. Each rule only ever returns YES for the
+// matched conditions; every other path falls through to default-deny
+// semantics. Adding a new GODO service / verb / power-management
+// surface is an explicit edit here in lock-step with
+// `services.py::ALLOWED_SERVICES` / `ALLOWED_ACTIONS` /
+// `SHUTDOWN_REBOOT_ARGV` / `SHUTDOWN_HALT_ARGV` (must agree — see
+// CODEBASE.md invariant (o)).
 
+// (a) systemctl start/stop/restart on the three GODO units
 polkit.addRule(function(action, subject) {
     if (action.id !== "org.freedesktop.systemd1.manage-units") {
         return;
@@ -42,6 +57,30 @@ polkit.addRule(function(action, subject) {
     }
     var verb = action.lookup("verb");
     if (verb !== "start" && verb !== "stop" && verb !== "restart") {
+        return;
+    }
+    return polkit.Result.YES;
+});
+
+// (b) host reboot / power-off via systemd-logind. webctl runs as a
+// non-login systemd service, so any of the variants below can fire
+// depending on what other sessions / inhibit-locks are active at
+// shutdown time. We allow the full set for the ncenter group; the
+// surface is intentionally narrow (no `halt`, no `suspend`, no
+// `hibernate`).
+polkit.addRule(function(action, subject) {
+    var allowed = [
+        "org.freedesktop.login1.reboot",
+        "org.freedesktop.login1.reboot-multiple-sessions",
+        "org.freedesktop.login1.reboot-ignore-inhibit",
+        "org.freedesktop.login1.power-off",
+        "org.freedesktop.login1.power-off-multiple-sessions",
+        "org.freedesktop.login1.power-off-ignore-inhibit"
+    ];
+    if (allowed.indexOf(action.id) < 0) {
+        return;
+    }
+    if (!subject.isInGroup("ncenter")) {
         return;
     }
     return polkit.Result.YES;

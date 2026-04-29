@@ -69,7 +69,7 @@ ACTIVE_MAP = {"value": "studio_v1"}
 # Per Mode-A M4: a query-string flag flips the loopback gate so e2e can
 # exercise the non-loopback `restart` denial path. Set with
 # `?stub_loopback=false` on the page URL once before navigating to /map.
-STUB_FLAGS: dict[str, bool] = {"loopback": True}
+STUB_FLAGS: dict[str, Any] = {"loopback": True}
 
 # Track E `name` regex; mirror of MAPS_NAME_REGEX_PATTERN_STR.
 import re as _re
@@ -256,6 +256,10 @@ class StubHandler(BaseHTTPRequestHandler):
         parts = path.split("/")
         if len(parts) == 6 and parts[:4] == ["", "api", "local", "service"]:
             _route_service_action(self, parts[4], parts[5])
+            return
+        # Track B-SYSTEM PR-2 — /api/system/service/<name>/<action> (admin-non-loopback).
+        if len(parts) == 6 and parts[:4] == ["", "api", "system", "service"]:
+            _route_system_service_action(self, parts[4], parts[5])
             return
         # Track E (PR-C): /api/maps/<name>/activate
         if path.startswith("/api/maps/") and path.endswith("/activate"):
@@ -725,6 +729,88 @@ def _route_service_action(req: StubHandler, name: str, action: str) -> None:
     req._send_json(HTTPStatus.OK, {"ok": True, "status": "active"})
 
 
+# Track B-SYSTEM PR-2 — `/api/system/services` snapshot stub.
+def _canned_system_services() -> list[dict[str, Any]]:
+    return [
+        {
+            "name": "godo-irq-pin",
+            "active_state": "active",
+            "sub_state": "running",
+            "main_pid": 4567,
+            "active_since_unix": 1714397472,
+            "memory_bytes": 4 * 1024 * 1024,
+            "env_redacted": {"GODO_LOG_DIR": "/var/log/godo"},
+        },
+        {
+            "name": "godo-tracker",
+            "active_state": "active",
+            "sub_state": "running",
+            "main_pid": 1234,
+            "active_since_unix": 1714397472,
+            "memory_bytes": 53477376,
+            # T6 fold: mixed corpus — one redacted KEY + one non-redacted
+            # KEY so the e2e test can assert BOTH render paths.
+            "env_redacted": {
+                "JWT_SECRET": "<redacted>",
+                "GODO_LOG_DIR": "/var/log/godo",
+            },
+        },
+        {
+            "name": "godo-webctl",
+            "active_state": "active",
+            "sub_state": "running",
+            "main_pid": 2345,
+            "active_since_unix": 1714397472,
+            "memory_bytes": 12 * 1024 * 1024,
+            "env_redacted": {"GODO_LOG_DIR": "/var/log/godo"},
+        },
+    ]
+
+
+def _h_system_services(req: StubHandler) -> None:
+    # Track F: anon-readable.
+    req._send_json(HTTPStatus.OK, {"services": _canned_system_services()})
+
+
+# `STUB_FLAGS["system_service_409"]` — when set to "starting" or
+# "stopping", the next /api/system/service/<name>/<action> POST returns
+# 409 with the matching err+detail. Lets the playwright admin-409 case
+# exercise the toast logic without driving a real transition state.
+def _route_system_service_action(req: StubHandler, name: str, action: str) -> None:
+    c = req._require_admin()
+    if c is None:
+        return
+    if name not in {"godo-tracker", "godo-webctl", "godo-irq-pin"}:
+        req._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "err": "unknown_service"})
+        return
+    if action not in {"start", "stop", "restart"}:
+        req._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "err": "unknown_action"})
+        return
+    forced = STUB_FLAGS.get("system_service_409")
+    if forced == "starting":
+        req._send_json(
+            HTTPStatus.CONFLICT,
+            {
+                "ok": False,
+                "err": "service_starting",
+                "detail": f"{name}가 시동 중입니다. 잠시 후 다시 시도해주세요.",
+            },
+        )
+        return
+    if forced == "stopping":
+        req._send_json(
+            HTTPStatus.CONFLICT,
+            {
+                "ok": False,
+                "err": "service_stopping",
+                "detail": f"{name}이 종료 중입니다. 잠시 후 다시 시도해주세요.",
+            },
+        )
+        return
+    _activity_append(f"svc_{action}", f"{name} by {c['sub']}")
+    req._send_json(HTTPStatus.OK, {"ok": True, "status": "active"})
+
+
 # --- Track E (PR-C) — multi-map handlers --------------------------------
 
 
@@ -896,6 +982,8 @@ GET_ROUTES: dict[str, Callable[[StubHandler], None]] = {
     "/api/system/resources": _h_system_resources,
     "/api/diag/stream": _h_diag_stream,
     "/api/logs/tail": _h_logs_tail,
+    # Track B-SYSTEM PR-2 — service observability.
+    "/api/system/services": _h_system_services,
     # Track B-CONFIG endpoints.
     "/api/config": _h_get_config,
     "/api/config/schema": _h_get_config_schema,
@@ -913,6 +1001,10 @@ def _do_get_with_prefix(self: StubHandler) -> None:
     qs = parse_qs(urlparse(self.path).query)
     if "stub_loopback" in qs:
         STUB_FLAGS["loopback"] = qs["stub_loopback"][0].lower() in {"1", "true", "yes"}
+    if "stub_svc_409" in qs:
+        # Track B-SYSTEM PR-2 — flip to "starting" / "stopping" / "" (cleared).
+        v = qs["stub_svc_409"][0]
+        STUB_FLAGS["system_service_409"] = v if v in {"starting", "stopping"} else None
     if path.startswith("/api/local/journal/"):
         _h_local_journal(self)
         return

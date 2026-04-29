@@ -24,16 +24,19 @@
   import ConfirmDialog from '$components/ConfirmDialog.svelte';
   import DiagSparkline from '$components/DiagSparkline.svelte';
   import JournalTail from '$components/JournalTail.svelte';
+  import ServiceStatusCard from '$components/ServiceStatusCard.svelte';
   import { ApiError, apiPost } from '$lib/api';
   import {
     DIAG_FRESHNESS_MS,
     DIAG_SPARKLINE_DEPTH,
     RESOURCES_PANEL_COLOR,
     SSE_TICK_MS,
+    SYSTEM_SERVICES_STALE_MS,
   } from '$lib/constants';
   import type { DiagFrame } from '$lib/protocol';
   import { auth } from '$stores/auth';
   import { diagSparklines, subscribeDiag, type DiagSparklineState } from '$stores/diag';
+  import { subscribeSystemServices, type SystemServicesState } from '$stores/systemServices';
 
   let frame = $state<DiagFrame | null>(null);
   let sparklines = $state<DiagSparklineState>({
@@ -45,6 +48,8 @@
   });
   let unsub: (() => void) | null = null;
   let unsubSparks: (() => void) | null = null;
+  let unsubServices: (() => void) | null = null;
+  let svcState = $state<SystemServicesState>({ services: [], _arrival_ms: null, err: null });
   // Force a re-render every 1 s so the freshness gate ticks even when no
   // new frame arrives — same pattern as Diagnostics.svelte.
   let renderTick = $state(0);
@@ -64,12 +69,14 @@
   onMount(() => {
     unsub = subscribeDiag((f) => (frame = f));
     unsubSparks = diagSparklines.subscribe((s) => (sparklines = s));
+    unsubServices = subscribeSystemServices((s) => (svcState = s));
     tickTimer = setInterval(() => (renderTick += 1), 1000);
   });
 
   onDestroy(() => {
     unsub?.();
     unsubSparks?.();
+    unsubServices?.();
     if (tickTimer !== null) clearInterval(tickTimer);
   });
 
@@ -118,6 +125,23 @@
 
   let stale = $derived(isStale(frame?._arrival_ms));
   let resources = $derived(frame?.resources);
+
+  // Track B-SYSTEM PR-2 — services panel staleness gate. Mirrors the
+  // diag stale-banner pattern but with its own threshold
+  // (`SYSTEM_SERVICES_STALE_MS`); also re-evaluates each second via
+  // the existing `renderTick` so the gate flips without a new poll.
+  function isServicesStale(arrival_ms: number | null): boolean {
+    void renderTick;
+    if (arrival_ms === null) return true;
+    return Date.now() - arrival_ms > SYSTEM_SERVICES_STALE_MS;
+  }
+  let servicesStale = $derived(isServicesStale(svcState._arrival_ms));
+  // `Date.now() / 1000` reflows once per renderTick so each card's
+  // uptime label keeps moving even between polls.
+  let nowUnix = $derived.by(() => {
+    void renderTick;
+    return Math.floor(Date.now() / 1000);
+  });
 </script>
 
 <div data-testid="system-page">
@@ -164,6 +188,31 @@
         </div>
       {:else}
         <div class="panel-empty" data-testid="panel-resources-empty">Resources unavailable.</div>
+      {/if}
+    </section>
+
+    <!-- Track B-SYSTEM PR-2 — GODO services panel -->
+    <section class="panel panel-wide" data-testid="panel-services">
+      <div class="hstack" style="justify-content: space-between;">
+        <h3>GODO 서비스</h3>
+        {#if servicesStale}
+          <span class="muted services-stale" data-testid="services-stale-banner" role="status">
+            데이터 갱신 지연
+          </span>
+        {/if}
+      </div>
+      {#if svcState.services.length === 0 && svcState._arrival_ms === null && svcState.err === null}
+        <div class="muted" data-testid="services-loading">로드 중…</div>
+      {:else if svcState.services.length === 0 && svcState.err}
+        <div class="muted" style="color: var(--color-status-err);" data-testid="services-error">
+          {svcState.err}
+        </div>
+      {:else}
+        <div class="services-grid" data-testid="services-grid">
+          {#each svcState.services as svc (svc.name)}
+            <ServiceStatusCard service={svc} {isAdmin} {nowUnix} />
+          {/each}
+        </div>
       {/if}
     </section>
 
@@ -272,5 +321,15 @@
     color: var(--color-warning-fg);
     border: 1px solid var(--color-warning-border);
     font-size: 14px;
+  }
+  .services-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+    gap: 8px;
+    margin-top: 8px;
+  }
+  .services-stale {
+    font-size: 13px;
+    color: var(--color-warning-fg);
   }
 </style>

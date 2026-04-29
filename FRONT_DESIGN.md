@@ -118,7 +118,7 @@ User 답변 (B-Q1/Q2): 우선순위 OK, **낮은 layer부터 가자**. 페이지
 
 **B-MAPEDIT** (P2, §I-Q1 분석 후 결정).
 
-**B-SYSTEM**: CPU temp 5분 graph + 메모리 + 디스크 + journald + Reboot/Shutdown (auth + 원격 OK per C-Q3).
+**B-SYSTEM**: CPU temp 5분 graph + 메모리 + 디스크 + journald + Reboot/Shutdown (auth + 원격 OK per C-Q3). PR-2(2026-04-29) 추가: **GODO 서비스** 패널 (1 Hz polling, 카드 1개/서비스, ActiveState chip + uptime + PID + memory + redacted env collapse + admin Start/Stop/Restart 버튼).
 
 **B-BACKUP**: `/var/lib/godo/map-backups/<UTC ts>/` 리스트 + restore 버튼.
 
@@ -516,7 +516,9 @@ JWT secret: `/var/lib/godo/auth/jwt_secret` (서버 첫 부팅 시 random 생성
 | `DELETE /api/maps/<name>` | admin | P0 (있음) | MAP | — | `{ok}` | non-active 맵 페어 삭제; active는 409 (PR-C) |
 | `GET /api/activity?n=<int>` | viewer | P0 (있음) | DASH | — | `[{ts, type, detail}]` | webctl 자체 활동 로그 |
 | `GET /api/local/services` | admin (loopback) | P0 (있음) | LOCAL | — | `[{name, active, since}]` | systemctl status 3개 |
-| `POST /api/local/service/<name>/<action>` | admin (loopback) | P0 (있음) | LOCAL | — | `{ok, status}` | start \| stop \| restart |
+| `POST /api/local/service/<name>/<action>` | admin (loopback) | P0 (있음) | LOCAL | — | `{ok, status}` | start \| stop \| restart; pre-flight ActiveState gate (PR-2): 409 service_starting on start/restart during `activating`, 409 service_stopping on stop during `deactivating` |
+| `GET /api/system/services` | public | P2 (있음) | SYSTEM | — | `{ services: SystemServiceEntry[] }` | systemctl show; 1 s TTL cache; env redacted by substring allow-list; anon read (Track F) |
+| `POST /api/system/service/<name>/<action>` | admin | P2 (있음) | SYSTEM | — | `{ok, status}` | start \| stop \| restart; admin-non-loopback (mirror /api/system/reboot); shares services.control() with /api/local/service/* so transition gate (409) inherited; subprocess-failed until polkit Task #28 lands |
 | `GET /api/local/journal/<name>?n=<int>` | admin (loopback) | P0 (있음) | LOCAL | — | `[str]` | journalctl tail |
 | `POST /api/system/reboot` | admin | P0 (있음) | LOCAL, SYSTEM | — | `{ok}` | shutdown -r now (5s grace) |
 | `POST /api/system/shutdown` | admin | P0 (있음) | LOCAL, SYSTEM | — | `{ok}` | shutdown -h now (5s grace) |

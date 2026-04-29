@@ -422,3 +422,48 @@ export interface RestoreResponse {
 // `backup_dir_missing` — list returns [] uniformly).
 export const ERR_BACKUP_NOT_FOUND = 'backup_not_found';
 export const ERR_RESTORE_NAME_CONFLICT = 'restore_name_conflict';
+
+// --- Track B-SYSTEM PR-2 — service observability wire shapes ---------
+// Mirror of `godo_webctl.protocol::SYSTEM_SERVICES_FIELDS` and the
+// `services.ServiceShow` dataclass. Drift detected by inspection per
+// godo-frontend/CODEBASE.md invariant (t).
+export const SYSTEM_SERVICES_FIELDS = [
+  'name',
+  'active_state',
+  'sub_state',
+  'main_pid',
+  'active_since_unix',
+  'memory_bytes',
+  'env_redacted',
+] as const;
+
+// One row of `/api/system/services`.
+export interface SystemServiceEntry {
+  name: string; // e.g. "godo-tracker"
+  active_state: string; // "active" | "activating" | ... | "unknown" (degraded)
+  sub_state: string; // systemd sub-state ("running", "dead", "auto-restart", ...)
+  main_pid: number | null; // null when MainPID=0 or [not set]
+  active_since_unix: number | null; // unix-seconds of ActiveEnterTimestampRealtime; null when not active
+  memory_bytes: number | null; // null when MemoryAccounting=no or [not set]
+  env_redacted: Record<string, string>; // env-vars with secret-pattern KEYS replaced by `<redacted>`
+}
+
+// GET /api/system/services response shape.
+export interface SystemServicesResponse {
+  services: SystemServiceEntry[];
+}
+
+// Track B-SYSTEM PR-2 — transition-in-progress error codes (HTTP 409).
+export const ERR_SERVICE_STARTING = 'service_starting';
+export const ERR_SERVICE_STOPPING = 'service_stopping';
+
+// Track B-SYSTEM PR-2 — wire-side redaction placeholder (mirror of
+// `godo_webctl.protocol.REDACTED_PLACEHOLDER`). The SPA renders this
+// string verbatim and tags the row with `(secret)` for clarity.
+export const REDACTED_PLACEHOLDER = '<redacted>';
+
+// Track B-SYSTEM PR-2 — admin-non-loopback action endpoint path builder.
+// Mirrors `/api/local/service/<name>/<action>` shape, but routed at
+// `/api/system/service/<name>/<action>` (no loopback gate).
+export const apiSystemServiceAction = (name: string, action: string): string =>
+  `/api/system/service/${name}/${action}`;

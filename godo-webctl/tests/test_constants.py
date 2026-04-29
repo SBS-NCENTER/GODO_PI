@@ -185,3 +185,41 @@ def test_thermal_zone_path_pinned() -> None:
 
 def test_meminfo_path_pinned() -> None:
     assert C.MEMINFO_PATH == "/proc/meminfo"
+
+
+# --- Track B-SYSTEM PR-2 — service observability constants ---------------
+
+
+def test_system_services_cache_ttl_pinned() -> None:
+    # 1 s matches the SPA's 1 Hz polling cadence.
+    assert C.SYSTEM_SERVICES_CACHE_TTL_S == 1.0
+
+
+def test_service_transition_messages_ko_pinned() -> None:
+    """All 6 (svc, transition) tuples + their literal Korean strings.
+
+    Particle convention (M3 fold): Korean reading convention. 트래커→가,
+    웹씨티엘→이, 아이알큐 핀→이. A future writer who flips to the
+    Latin-letter convention (-r as consonant → 트래커 → 이) breaks this
+    test, which is the whole point.
+    """
+    assert C.SERVICE_TRANSITION_MESSAGES_KO == {
+        ("godo-tracker", "starting"): "godo-tracker가 시동 중입니다. 잠시 후 다시 시도해주세요.",
+        ("godo-tracker", "stopping"): "godo-tracker가 종료 중입니다. 잠시 후 다시 시도해주세요.",
+        ("godo-webctl", "starting"): "godo-webctl이 시동 중입니다. 잠시 후 다시 시도해주세요.",
+        ("godo-webctl", "stopping"): "godo-webctl이 종료 중입니다. 잠시 후 다시 시도해주세요.",
+        ("godo-irq-pin", "starting"): "godo-irq-pin이 시동 중입니다. 잠시 후 다시 시도해주세요.",
+        ("godo-irq-pin", "stopping"): "godo-irq-pin이 종료 중입니다. 잠시 후 다시 시도해주세요.",
+    }
+
+
+def test_service_transition_messages_ko_covers_allowed_services() -> None:
+    """Drift-catch: every ALLOWED_SERVICE has both a starting + stopping
+    entry. Adding a new service to ALLOWED_SERVICES requires extending
+    this dict in the same PR."""
+    from godo_webctl.services import ALLOWED_SERVICES
+
+    keys = set(C.SERVICE_TRANSITION_MESSAGES_KO.keys())
+    for svc in ALLOWED_SERVICES:
+        assert (svc, "starting") in keys, f"missing starting message for {svc}"
+        assert (svc, "stopping") in keys, f"missing stopping message for {svc}"

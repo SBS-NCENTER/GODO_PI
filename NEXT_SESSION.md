@@ -1,119 +1,141 @@
 # Next session — cold-start brief
 
 > Throwaway. Delete the moment the next session picks up the thread.
-> Refreshed 2026-04-29 close. Phase 4.5 P0 + P0.5 + P1 all shipped; P2 next.
+> Refreshed 2026-04-29 close. P2 Step 1+2 shipped + stability hardening shipped. PR 2 (service observability) writer + B-MAPEDIT writer queued. User in studio install — Pi may be off when session starts.
 
-## TL;DR
+## TL;DR (priority order)
 
-**Priority order (user-set 2026-04-29 close)**:
+1. **★ Setup: tmux wrapper for claude** — agreed 2026-04-29. SSH disconnect kills parent + cascades to background subagents (real loss vector observed). Wrap claude in tmux at session start so SSH can drop without losing in-flight pipeline. Consider `~/.bashrc` snippet for auto-attach to `godo` session.
 
-1. **★ Phase 4.5 P2** — B-SYSTEM → B-BACKUP → B-MAPEDIT, in that order (easiest first).
-2. **Phase 2 (AMCL convergence)** — still hardware-gated on LiDAR pivot-center remount + a higher-quality mapping pass.
-3. Optional opportunistic touches: deferred Mode-B nits, the cold_writer test observability extension, the atomic-writer fault-injection mock seam.
+2. **★ PR 2: service observability** — plan + Mode-A fold ready at `.claude/tmp/plan_service_observability.md`. Writer kickoff is the FIRST coding task. 408 backend / 117 frontend unit baselines (after merges). Branch from main; ~580 LOC.
+
+3. **★ Phase 4.5 P2 Step 3: B-MAPEDIT** — plan + Mode-A fold ready at `.claude/tmp/plan_track_b_mapedit.md`. Decision LOCKED: I2 + brush + restart-required (no hot reload). Writer kickoff AFTER PR 2 merges. ~950 LOC; single PR.
+
+4. **★ Privilege escalation audit** (Task #28) — webctl Shutdown/Reboot button currently broken (`subprocess_failed` because `ncenter` can't call `shutdown` directly). Polkit + `systemctl poweroff` route recommended; full audit covers shutdown/reboot/service-control/journalctl. Install script automation also needed so bring-up doesn't drift.
+
+5. **Session-end docs reconciliation** (Task #27) — cascade pass on FRONT_DESIGN.md + 2 CODEBASE.md after all P2 PRs land.
 
 ## Where we are (2026-04-29 close)
 
-**main = `265f5f6`** — Phase 4.5 P0 + P0.5 + P1 all merged. 8 feature/fix commits + 1 post-merge UX hotfix landed this session.
+**main = `70a51de`** — Phase 4.5 P2 Step 1 + Step 2 + stability hardening + housekeeping all merged. **5 PRs merged this session**:
 
-**Open**: nothing. All 4 P1 PRs merged (Track D #14, B-DIAG #18, PR-CONFIG-α #19, PR-CONFIG-β #20).
+| PR | What | LOC |
+|---|---|---|
+| #21 | B-SYSTEM page (/system) — Phase 4.5 P2 Step 1 | +645 |
+| #22 | agent color casing fix + fail-fast BLOCKED-report discipline | +103 |
+| #23 | B-BACKUP page (/backup) — Phase 4.5 P2 Step 2 | +1641 |
+| #24 | FRONT_DESIGN I-Q1 / §4.2 supersession (I2 + restart-required) | +27 |
+| #25 | single-instance pidfile locks (godo-webctl + godo-tracker) + UDS atomic bind + backup flock + CLAUDE.md §6 rule | +700 |
 
-**Local artifacts (not in git, gitignored throwaways under `.claude/tmp/`)**:
-- `plan_track_d_live_lidar.md` + `review_mode_a_track_d.md` + `review_mode_b_track_d.md`
-- `plan_track_b_diag.md` + `review_mode_a_track_b_diag.md` + `review_mode_b_track_b_diag.md`
-- `plan_track_b_config.md` + `review_mode_a_track_b_config.md` + `review_mode_b_track_b_config_alpha.md` + `review_mode_b_track_b_config_beta.md`
-- Older session artefacts (Track E, P0 frontend, Track B-repeat, Phase 4-2/4-3) safe to delete.
+**Open PRs**: 0.
 
-**Live system on news-pi01**:
-- webctl on `0.0.0.0:8080` (`setsid` detached, log: `/tmp/godo-webctl.log`), SPA bundle `index-B1VL4OVo.js` (28.07 KB gzipped). PID changes per session — `pgrep -f godo_webctl` to find current.
-- godo-tracker NOT running (deliberate; banner expected).
-- maps_dir: `/home/ncenter/projects/GODO/godo-mapping/maps/` (overrides default `/var/lib/godo/maps/` via `GODO_WEBCTL_MAPS_DIR` env). Track E auto-migration created `active.pgm` + `active.yaml` symlinks → `studio_v2`.
-- LAN-IP path (`192.168.3.22:8080`) blocked at SBS_XR_NEWS AP client-isolation — use Tailscale `100.127.59.15:8080` for browser access.
+**Working tree**: clean on main.
 
-## Phase 4.5 P2 — start here
+## PR 2 — service observability (NEXT in pipeline)
 
-### Step 1: B-SYSTEM (smallest, leverages existing endpoints)
+**Plan**: `.claude/tmp/plan_service_observability.md` — 580 LOC plan + Mode-A 6 majors + 7 should-fix + 5 nits + 6 test-bias all folded. Verdict: APPROVED for writer kickoff.
 
-FRONT_DESIGN.md §C / §8 row "B-SYSTEM". The page combines:
-- 5-min CPU temp graph (sparkline using `<DiagSparkline/>` from B-DIAG)
-- mem / disk numbers (already in `/api/system/resources`)
-- journald tail (already in `/api/logs/tail`, allow-list = `services.ALLOWED_SERVICES`)
-- Reboot / Shutdown buttons (P0 endpoints `/api/system/reboot`, `/api/system/shutdown` — admin only, confirm dialog reuses `<ConfirmDialog/>`)
+**Scope**:
+- Backend: `GET /api/system/services` (anon, redacted env vars via 6-pattern allow-list, 1s TTL cache); `POST /api/local/service/<name>/start|restart` returns 409 `service_starting` + Korean detail when ActiveState=`activating`; same for `stop` during `deactivating`. Korean particle convention LOCKED in fold (한국어 발음 기준): tracker가 / webctl이 / irq-pin이 / local-window가.
+- Frontend: B-SYSTEM 5번째 panel "GODO 서비스" — 4×1Hz cards via polling (NO SSE), uptime + memory + redacted env collapsible. ServiceCard.svelte 409 toast. `lib/serviceStatus.ts` chip-class SSOT.
+- Webctl invariants `(v)` + `(w)` (NOT `(u)+(v)` — PR 1 took `(u)`).
+- `FRONT_DESIGN.md §7.1` 7-column row format pinned.
+- Branch: `feat/p4.5-service-observability`.
 
-**Backend**: probably nothing new — all endpoints exist.
-**Frontend**: ~250 LOC (route + 1-2 components). Reuses DIAG infra heavily.
+**Important fold-mandated**: Korean particles per Korean reading convention (트래커→가, 웹씨티엘→이). 7-column FRONT_DESIGN row format. 7-field dataclass + 7 systemd properties. NO 503 path (per-service `active_state="unknown"` on partial failure). R11 reasoning corrected (systemd idempotency, NOT invariant (e)).
 
-Pipeline: planner → Mode-A → fold → writer → Mode-B → fold → PR. Single PR, ≤300 LOC, will not need splitting.
+## B-MAPEDIT — Phase 4.5 P2 Step 3 (after PR 2)
 
-### Step 2: B-BACKUP
+**Plan**: `.claude/tmp/plan_track_b_mapedit.md` — Mode-A fold pending; do that next session before writer kickoff.
 
-`/api/map/backup` POST already exists from Phase 4-3. Need:
-- `GET /api/map/backup/list` — enumerate `/var/lib/godo/map-backups/<UTC ts>/` directories.
-- `POST /api/map/backup/<ts>/restore` — atomic copy back to `cfg.maps_dir`.
-- SPA route `/backup` with table + restore confirm dialog.
+**Scope**: brush mask painter + `POST /api/map/edit` (admin, multipart, atomic PGM rewrite via `map_edit.py` SOLE owner) + auto-backup-first + restart-required banner. Tracker C++ NOT touched. `MapMaskCanvas.svelte` + `routes/MapEdit.svelte` + new constants. Webctl invariant `(v)` (after PR 2's `(v)+(w)` lands → B-MAPEDIT becomes `(x)`; verify letter at writer time).
 
-**Backend**: ~200 LOC + tests.
-**Frontend**: ~200 LOC + tests.
-**~400 LOC total**, single PR.
+**Decision LOCKED**: I2 + restart-required, NO hot reload (FRONT_DESIGN.md §I-Q1 + §4.2 already supersession-annotated by PR #24).
 
-### Step 3: B-MAPEDIT
+**~950 LOC, single PR** — borderline against 1500 LOC ceiling, fine.
 
-Open question §I-Q1 needs to resolve first (mask method): rectangle erase / flood fill / brush. Recommend brush (simplest UX, simplest implementation — circular kernel paint into a mask, then erase pixels above 200 = free in PGM).
+## Privilege escalation audit (Task #28)
 
-**Backend**: `POST /api/map/edit` body `{ops: [{type: erase|fill|flood, mask: [[x,y]...]}]}` with numpy + Pillow. Atomic write back to `<map>.pgm` (reuse Track E's symlink swap pattern). Backup before edit.
-**Frontend**: `<MapEditor/>` with brush drawing on canvas; `Map.svelte` toggle "Edit mode". ~400 LOC SPA.
+**Bug observed**: web Shutdown Pi button → `subprocess_failed`. Root cause: `webctl`이 `ncenter` 사용자로 실행 + `subprocess.run(["shutdown", "-h", "+0"])` → 권한 거부.
 
-**~700 LOC total**, ≤1500 borderline → single PR is fine.
+**Recommended fix path** (polkit + systemctl):
+1. `/etc/polkit-1/rules.d/50-godo-webctl.rules` allowing `ncenter` to use `org.freedesktop.login1.{power-off,reboot}`.
+2. `services.py`'s `SHUTDOWN_*_ARGV` switches from `shutdown -h +0` to `systemctl poweroff` / `systemctl reboot`.
+3. Same polkit pattern for `org.freedesktop.systemd1.manage-units` so service start/stop/restart works for the 3 (or 4) godo-* units.
 
-## Phase 2 (AMCL convergence) — still hardware-blocked
+**Install script automation**: bake the polkit + sudoers files into a bring-up step (somewhere under `production/RPi5/scripts/` or `godo-webctl/install.sh`). User: "파일과 OS 동작, 프로세스 관리 등 관련된 것들은 sudo 권한이 필요할 수 있겠다. 잘 확인해줘 다음 세션에" (2026-04-29).
 
-Pre-requisites unchanged from previous NEXT_SESSION:
-- LiDAR mounted at pan-pivot center (currently 20 cm offset).
-- Mapping pass with explicit loop closure + slow walk + retro-reflector landmarks (per `.claude/memory/project_studio_geometry.md`).
-- Then evaluate (a) ICP-based initial pose seed, (b) tightened `amcl_sigma_seed_xy_m` ~30 cm, (c) AMCL config tuning per new feature density.
+**Workaround until then**: SSH-based shutdown (`ssh news-pi01 sudo shutdown -h now`).
 
-P1 SPA visualization (Diagnostics page) now lets the operator watch AMCL convergence stats live + see RT jitter; once tracker is up + mapped properly, this is the page to debug from.
-
-## Stacked-PR merge mechanics — lesson learned
-
-`gh pr merge --rebase --delete-branch` deletes the head branch. If a downstream PR has base = that branch, GitHub **auto-closes** it on base-branch deletion (does NOT auto-retarget to main). Workaround for next time:
+## tmux setup (cold-start)
 
 ```bash
-# BEFORE merging upstream PR:
-gh pr edit <downstream> --base main
-# Then merge upstream:
-gh pr merge <upstream> --rebase --delete-branch
-# Downstream still open + retargeted, just needs rebase on the new main:
-git checkout <downstream-head> && git rebase origin/main && git push --force-with-lease
+# At session start on news-pi01:
+tmux new -s godo  # or: tmux attach -t godo
+claude            # inside tmux
+
+# Detach with Ctrl+B, D — tmux server keeps claude alive across SSH disconnect
+# Reattach later with: tmux attach -t godo
 ```
 
-Order matters: retarget → merge → rebase. If you skip the retarget step, the downstream PR will close and you need to recreate it.
+Optional `~/.bashrc` snippet for auto-attach (suggest to user; do NOT add without confirmation):
+```bash
+# Auto-attach to godo tmux session on interactive SSH login
+if [[ -n "$SSH_CONNECTION" && -z "$TMUX" && $- == *i* ]]; then
+    tmux new -A -s godo
+fi
+```
+
+## Session-end docs reconciliation (Task #27)
+
+After all current P2 + observability + B-MAPEDIT PRs merge, do a single coherent reconciliation pass:
+
+- **`FRONT_DESIGN.md`** — full rewrite of §C / §6.4 / §7.1 / §8 to match shipped state (B-MAPEDIT body update); verify all P0/P1/P2 rows are accurate. The §I-Q1 / §4.2 supersession blocks (PR #24) can be folded into the main text once B-MAPEDIT ships.
+- **`godo-webctl/CODEBASE.md`** — invariant letter scheme normalization. Currently `(a)`–`(u)` are used + Track B-CONFIG's change-log subsection has `(n)`–`(q)` duplicates that PR 1 explicitly punted. Decide: rename the duplicates OR leave them (with explicit acknowledgment that the change-log subsection's lettering is local to that block).
+- **`godo-frontend/CODEBASE.md`** — same audit. Confirm change-log entries chronological + invariants (a)-(t) consistent.
+
+User explicit (2026-04-29): "front design 과 백엔드, 프론트엔드 각각의 CODEBASE.md 파일도 cascade하게 모두 수정 부탁".
+
+## Live system on news-pi01
+
+- webctl on `0.0.0.0:8080` (currently running manually as `ncenter`, `setsid` detached, log: `/tmp/godo-webctl.log`). PID changes per session — `pgrep -f godo_webctl` to find current.
+- godo-tracker NOT running.
+- maps_dir: `/home/ncenter/projects/GODO/godo-mapping/maps/` (overrides default `/var/lib/godo/maps/`).
+- LAN-IP path (`192.168.3.22:8080`) blocked at SBS_XR_NEWS AP client-isolation — use Tailscale `100.127.59.15:8080` for browser access.
+- **NEW** in PR #25: pidfile locks active. If you start a second webctl manually it WILL exit 1. Check `/run/godo/godo-webctl.pid` for held PID.
 
 ## Quick orientation files
 
-1. **CLAUDE.md** §6 Golden Rules + §7 agent pipeline.
-2. **PROGRESS.md** — 2026-04-29 session entry has all 4 PR details.
-3. **doc/history.md** — last entry 2026-04-29 — Korean narrative ("왜 / 무엇을 결정했는가" centric).
-4. **FRONT_DESIGN.md** ★ — §6.4 (Tracker C++ changes table), §7.1 (HTTP endpoint living table — every Track D/B-DIAG/B-CONFIG row marked `(있음)`), §8 (Phase plan — P2 rows still untouched).
-5. **production/RPi5/CODEBASE.md** — invariants (a)–(p) — (l) hot-path config, (m) hot-config publisher, (n) atomic TOML writer, (o)/(p) cold_writer HotConfig reader migration.
-6. **godo-webctl/CODEBASE.md** — invariants (a)–(t) — Track F + 4 PR-DIAG endpoints + 4 PR-CONFIG endpoints + restart_pending + journald subprocess discipline.
-7. **godo-frontend/CODEBASE.md** — invariants (a)–(s) — (l) arrival-wall-clock freshness (DiagFrame + LastScan), (s) RestartPendingBanner single-mount in App.svelte.
+1. **CLAUDE.md** §6 Golden Rules + §7 agent pipeline. **NEW**: §6 "Single-instance discipline" sub-bullet (PR #25).
+2. **PROGRESS.md** — should be updated next session start with the 2026-04-29 entry.
+3. **doc/history.md** — reverse chronological narrative; due an entry for 2026-04-29.
+4. **FRONT_DESIGN.md** — §I-Q1 + §4.2 supersession (PR #24); rest awaiting B-MAPEDIT.
+5. **godo-webctl/CODEBASE.md** invariants (a)–(u); changelog rich.
+6. **godo-frontend/CODEBASE.md** invariants (a)–(s) + (v)+(w) (Track B-SYSTEM).
+7. **production/RPi5/CODEBASE.md** invariants (a)–(l) (NEW (l) tracker-pidfile-discipline).
 
 ## Throwaway scratch (`.claude/tmp/`)
 
-Keep until next session:
-- `plan_track_d_live_lidar.md` + reviews — referenced by 2026-04-29 PROGRESS entry.
-- `plan_track_b_diag.md` + reviews — referenced by 2026-04-29 PROGRESS entry.
-- `plan_track_b_config.md` + reviews — referenced by 2026-04-29 PROGRESS entry.
+**Keep until B-MAPEDIT ships**:
+- `plan_service_observability.md` — PR 2 plan + fold (writer input)
+- `plan_track_b_mapedit.md` — B-MAPEDIT plan + fold (writer input after PR 2)
+- `plan_single_instance_locks.md` — PR 1 plan + fold (reference, PR shipped)
+- `plan_track_b_backup.md` — Step 2 plan + fold (reference, PR shipped)
+- `plan_track_b_system.md` — Step 1 plan + fold (reference, PR shipped)
 
-Delete when convenient (older session artefacts, no longer load-bearing):
-- `plan_p0_frontend.md` + `review_mode_*_p0_frontend*.md` — pre-this-session.
-- `plan_track_e_map_management.md` + `review_mode_*_track_e.md` — Track E shipped 2 sessions ago.
-- `plan_track_b_repeatability.md` + `review_track_b_repeatability_*.md` — Track B legacy.
-- `plan_phase4_2_*.md`, `plan_phase4_3.md` — older phase plans.
-- `apply_*.sh` — Phase 4-1 RT bring-up scripts (one-time).
+**Delete when convenient** (older session artefacts):
+- Anything pre-2026-04-29 not in the above list.
+
+## Tasks alive for next session
+
+- #15 (pending) — B-MAPEDIT writer (queued behind PR 2)
+- #19 (in_progress) — PR 2 service observability (writer kickoff is the first coding task)
+- #26 (pending) — tmux wrapper setup (do at session start)
+- #27 (pending) — session-end docs cascade reconciliation
+- #28 (pending) — privilege escalation audit (PR after PR 2 + B-MAPEDIT, before Phase 5)
 
 ## Session-end cleanup
 
-Closeout commit `1` (post-merge UX hotfix `265f5f6`) + closeout commit `2` (this docs commit) are local on `main` but NOT pushed. Run `git push origin main` to land them.
+NEXT_SESSION.md itself: refresh in place each session; never delete (drives every cold-start).
 
-NEXT_SESSION.md itself: refresh in place each session; never delete this file (drives every cold-start). P2 status updates each session.
+PROGRESS.md + doc/history.md updates: TODO before session close.

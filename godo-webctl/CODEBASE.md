@@ -818,6 +818,21 @@ Pinned by:
 
 ## Change log
 
+### 2026-04-30 15:30 KST — Track B-MAPEDIT-2 follow-up (Mode-B Minor-1) — bound-semantics docstring
+
+#### Changed
+
+- `src/godo_webctl/constants.py` — `ORIGIN_X_Y_ABS_MAX_M` docstring
+  corrected. Previous wording said "after delta resolution"; the actual
+  implementation enforces the bound at TWO layers: `app.py` checks the
+  *typed input* before delta resolution (conservative wire-layer
+  rejection of operator typos), and `map_origin.apply_origin_edit`
+  re-validates the *computed* `(new_x, new_y)` post-resolution as
+  defence-in-depth. The docstring now spells out both layers + the
+  intentional consequence (a typed delta with `|input| > 1 km` is
+  rejected even if the resolved value would be in-bound). Behavior is
+  unchanged; this is a documentation correction. No test changes.
+
 ### 2026-04-30 14:37 KST — Track B-MAPEDIT-2 (Phase 4.5 P2) — origin pick (dual GUI + numeric input)
 
 #### Added

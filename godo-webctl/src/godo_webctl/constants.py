@@ -254,12 +254,27 @@ MAP_EDIT_PAINT_THRESHOLD: Final[int] = 128
 # because the origin payload is even smaller.
 ORIGIN_BODY_MAX_BYTES: Final[int] = 256
 
-# Magnitude bound on `x_m` / `y_m` (after delta resolution). Studio is
-# ~10 m square; 1 km bound covers the studio (~100×) plus headroom for
-# shared-frame debug scenarios with multiple studios in the same world
-# frame. Values >1 km are flagged as operator typos rather than valid
-# geometry. Reviewer N2 nudge to 1 000.0 (vs. the planner's initial
-# 10 000.0 default) accepted by Parent 2026-04-30 KST.
+# Magnitude bound on `x_m` / `y_m`. Studio is ~10 m square; 1 km bound
+# covers the studio (~100×) plus headroom for shared-frame debug
+# scenarios with multiple studios in the same world frame. Values >1 km
+# are flagged as operator typos rather than valid geometry. Reviewer N2
+# nudge to 1 000.0 (vs. the planner's initial 10 000.0 default) accepted
+# by Parent 2026-04-30 KST.
+#
+# Bound is applied at TWO layers (defence-in-depth):
+#   1. `app.py` POST /api/map/origin handler — checks the *typed input*
+#      (`body.x_m`, `body.y_m`) BEFORE delta resolution. A delta typed
+#      with magnitude >1 km is rejected even if the resolved new origin
+#      would land within bound. This is the conservative pre-check that
+#      catches operator typos at the wire layer.
+#   2. `map_origin.apply_origin_edit` — re-validates the *computed*
+#      (post-delta) `(new_x, new_y)`. Defends against numeric edge
+#      cases (e.g. an absolute-mode value technically within bound that
+#      the input-layer check missed because of float-string coercion).
+#
+# A typed delta scenario where `|input| > 1 km` but `|resolved| < 1 km`
+# is rejected by the input layer. This is intentional — operator-locked
+# spec treats values >1 km as typos regardless of context.
 ORIGIN_X_Y_ABS_MAX_M: Final[float] = 1_000.0
 
 # Korean transition-warning strings keyed by `(svc, transition)`. Used

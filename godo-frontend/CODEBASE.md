@@ -591,6 +591,28 @@ preview proxy needed.
 
 ## Change log
 
+### 2026-04-30 12:50 KST — Map Edit moved into Map page as a sub-tab (operator HIL request)
+
+Operator HIL request 2026-04-30 12:30 KST: move the Map Edit menu from a top-level sidebar entry to a sub-tab inside the Map page, mirroring the System tab's Processes / Extended resources sub-tab idiom (PR-B).
+
+#### Changed
+
+- `src/routes/Map.svelte` — Hosts the Edit sub-tab. Reads `route.path` to derive `activeSubtab`: `/map` → Overview, `/map-edit` → Edit. Sub-tab clicks call `navigate('/map' | '/map-edit')` so the URL stays in sync (refresh + browser back-button preserve view; bookmarks to `/map-edit` keep working). Sub-tab styling cloned verbatim from `System.svelte` (consistent visual idiom across the SPA). Overview content unchanged from prior `Map.svelte` body; Edit content delegates to `<MapEdit />`.
+- `src/routes/MapEdit.svelte` — Removed top-level breadcrumb + `<h2>Map Edit</h2>` (now provided by the parent `Map.svelte` outer wrapper). The `data-testid="map-edit-page"` container is preserved so existing e2e + unit tests anchor unchanged. `RestartPendingBanner` stays inside the editor body. The post-Apply `navigate('/map')` redirect is unchanged — operator lands on Overview after a successful edit.
+- `src/routes.ts` — `/map-edit` now mounts `Map` (was `MapEdit`). Inline comment explains why `MapEdit` is no longer top-level. The `MapEdit` import + route entry are gone from this file; the component is imported by `Map.svelte` instead.
+- `src/components/Sidebar.svelte` — `Map Edit` nav row removed. Only the `Map` row appears in the sidebar; operators reach the editor via the Map page's Edit sub-tab.
+- `src/lib/constants.ts` — Added `MAP_SUBTAB_OVERVIEW = 'overview'`, `MAP_SUBTAB_EDIT = 'edit'`. Comment notes URL-backed semantics (unlike System.svelte's component-local sub-tab state).
+
+#### Why URL-backed sub-tabs (Map) but component-local (System)?
+
+System's three sub-tabs are session-scoped views (Processes / Extended resources are SSE streams the operator toggles for monitoring); deep-linking to a specific sub-tab would surprise more than help. Map's Edit sub-tab is destination-scoped — operators receive `/map-edit` URLs in chat, e2e specs hit it directly, and the post-Apply redirect to `/map` is part of the editor contract. URL-backed makes refresh + back-button + external links all work without state-restoration code. The pattern split is intentional, not an oversight.
+
+#### Tests + LOC
+
+- All 204 vitest cases pass unchanged (existing `tests/unit/mapEdit.test.ts` mounts `MapEdit` directly, so the refactor doesn't perturb it).
+- E2E `tests/e2e/mapEdit.spec.ts` keeps working: `/#/map-edit` → router resolves to `Map` → Map auto-selects Edit sub-tab → MapEdit renders with the same `data-testid="map-edit-page"` anchor.
+- Bundle delta: JS 111.32 → 112.13 KB raw (+0.81 KB), gzip 40.53 → 40.80 KB (+0.27 KB).
+
 ### 2026-04-30 11:30 KST — Track B-MAPEDIT (frontend) — Map editor + restart-required
 
 #### Added

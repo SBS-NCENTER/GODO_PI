@@ -205,6 +205,14 @@ export const SYSTEM_SUBTAB_OVERVIEW = 'overview';
 export const SYSTEM_SUBTAB_PROCESSES = 'processes';
 export const SYSTEM_SUBTAB_EXTENDED = 'extended';
 
+// Sub-tab keys for `routes/Map.svelte`. URL-backed (unlike System): the
+// Overview sub-tab lives at `/map` and the Edit sub-tab lives at
+// `/map-edit`, so refresh + browser back-button preserve the active
+// view, and sidebar Map link + e2e direct-navigate to `/map-edit`
+// continue to work without the legacy top-level Map Edit menu entry.
+export const MAP_SUBTAB_OVERVIEW = 'overview';
+export const MAP_SUBTAB_EDIT = 'edit';
+
 // Per-core CPU bar height. 12 px is dense enough to show 4–8 cores in
 // the same panel without scrolling on a 720p preview.
 export const CPU_BAR_HEIGHT_PX = 12;

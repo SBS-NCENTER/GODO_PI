@@ -19,6 +19,7 @@
   const items: NavItem[] = [
     { path: '/', label: 'Dashboard' },
     { path: '/map', label: 'Map' },
+    { path: '/map-edit', label: 'Map Edit' },
     { path: '/diag', label: 'Diagnostics' },
     { path: '/config', label: 'Config' },
     { path: '/system', label: 'System' },

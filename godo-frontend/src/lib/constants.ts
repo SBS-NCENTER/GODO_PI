@@ -209,6 +209,24 @@ export const SYSTEM_SUBTAB_EXTENDED = 'extended';
 // the same panel without scrolling on a 720p preview.
 export const CPU_BAR_HEIGHT_PX = 12;
 
+// --- Track B-MAPEDIT — POST /api/map/edit constants ------------------
+// Brush radius slider clamps in CSS pixels. The mask canvas is sized to
+// PGM logical dimensions (R2 mitigation), so 5..100 CSS px translates
+// 1:1 to logical mask cells regardless of `devicePixelRatio`.
+export const BRUSH_RADIUS_PX_MIN = 5;
+export const BRUSH_RADIUS_PX_MAX = 100;
+export const BRUSH_RADIUS_PX_DEFAULT = 15;
+
+// SPA-side mirror of webctl `MAP_EDIT_MASK_PNG_MAX_BYTES` (4 MiB). The
+// SPA short-circuits the upload before it even starts (the backend's
+// 413 path is defence-in-depth).
+export const MASK_PNG_MAX_BYTES = 4_194_304;
+
+// On a successful edit, redirect the operator back to /map after this
+// delay so the success toast is visible. 3 s matches the typical
+// "ack-and-move-on" cadence operators are used to from /backup.
+export const MAP_EDIT_REDIRECT_DELAY_MS = 3000;
+
 // --- Track B-CONFIG PR-C — per-row apply-result marker TTL ------------
 // After Apply finishes, ✓ / ✗ glyphs render next to each row's input.
 // The markers auto-clear after this delay; 2 s is half the System

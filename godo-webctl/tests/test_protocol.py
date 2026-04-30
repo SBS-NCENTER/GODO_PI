@@ -119,6 +119,35 @@ def test_maps_name_regex_pattern_str_mirrors_constants() -> None:
     assert MAPS_NAME_REGEX.pattern == P.MAPS_NAME_REGEX_PATTERN_STR
 
 
+# --- Track B-MAPEDIT — POST /api/map/edit error codes + response shape ---
+
+
+def test_map_edit_error_codes_pinned() -> None:
+    """All five Track B-MAPEDIT error codes. Drift from this file fails
+    the SPA mirror in `lib/protocol.ts`."""
+    assert P.ERR_MASK_SHAPE_MISMATCH == "mask_shape_mismatch"
+    assert P.ERR_MASK_TOO_LARGE == "mask_too_large"
+    assert P.ERR_MASK_DECODE_FAILED == "mask_decode_failed"
+    assert P.ERR_EDIT_FAILED == "edit_failed"
+    assert P.ERR_ACTIVE_MAP_MISSING == "active_map_missing"
+
+
+def test_edit_response_fields_pinned() -> None:
+    """`POST /api/map/edit` 200-response field order. `restart_required`
+    is forward-compat (always True in v1; field stays for a future hot-
+    reload edit class). S2 fold: pinned both as a tuple of names AND as
+    a literal-value reminder that v1 emits True."""
+    assert P.EDIT_RESPONSE_FIELDS == (
+        "ok",
+        "backup_ts",
+        "pixels_changed",
+        "restart_required",
+    )
+    # Literal-value drift catch — encoded as a comment-test so a future
+    # writer who flips the wire to `restart_required: False` fails here.
+    assert "restart_required" in P.EDIT_RESPONSE_FIELDS
+
+
 # --- Track D: get_last_scan mirror ----------------------------------------
 
 

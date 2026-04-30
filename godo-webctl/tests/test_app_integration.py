@@ -20,6 +20,7 @@ PR-A new coverage (≥ 13 cases per plan T6):
 
 from __future__ import annotations
 
+import os
 import time
 from collections.abc import AsyncIterator
 from http import HTTPStatus
@@ -3244,3 +3245,377 @@ async def test_get_system_resources_extended_stream_smoke(
         return
     assert status == HTTPStatus.OK
     assert "text/event-stream" in ctype
+
+
+# ---- Track B-MAPEDIT: /api/map/edit (admin) -----------------------------
+# 11 integration cases per planner §5 + §8 fold (S1, S2, T2, T3 included).
+
+
+def _settings_for_mapedit(
+    *,
+    tmp_path: Path,
+    tmp_active_map_pair: tuple[Path, Path],
+    backup_dir_name: str = "bk",
+    restart_pending_path: Path | None = None,
+) -> Settings:
+    maps_dir, _active_pgm = tmp_active_map_pair
+    backup_dir = tmp_path / backup_dir_name
+    return _settings_for(
+        uds_socket=tmp_path / "unused.sock",
+        # `map_path` is irrelevant for edit (uses maps_dir/active.pgm),
+        # but the legacy back-compat path still requires a real file.
+        map_path=maps_dir / "studio_v1.pgm",
+        backup_dir=backup_dir,
+        maps_dir=maps_dir,
+        restart_pending_path=restart_pending_path,
+    )
+
+
+def _make_full_mask_png(width: int, height: int) -> bytes:
+    from io import BytesIO
+
+    from PIL import Image
+
+    img = Image.new("L", (width, height), 255)
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _make_empty_mask_png(width: int, height: int) -> bytes:
+    from io import BytesIO
+
+    from PIL import Image
+
+    img = Image.new("L", (width, height), 0)
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _multipart_body(mask_bytes: bytes, *, boundary: str = "----godo-test") -> tuple[bytes, str]:
+    body = (
+        (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="mask"; filename="mask.png"\r\n'
+            f"Content-Type: image/png\r\n\r\n"
+        ).encode("ascii")
+        + mask_bytes
+        + f"\r\n--{boundary}--\r\n".encode("ascii")
+    )
+    return body, f"multipart/form-data; boundary={boundary}"
+
+
+async def test_map_edit_admin_happy_path(
+    tmp_path: Path,
+    tmp_active_map_pair: tuple[Path, Path],
+) -> None:
+    s = _settings_for_mapedit(tmp_path=tmp_path, tmp_active_map_pair=tmp_active_map_pair)
+    body, ctype = _multipart_body(_make_full_mask_png(8, 8))
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post(
+            "/api/map/edit",
+            content=body,
+            headers={**_auth(token), "Content-Type": ctype},
+        )
+    assert r.status_code == HTTPStatus.OK, r.text
+    resp = r.json()
+    assert resp["ok"] is True
+    # S2 fold: literal value pin.
+    assert resp["restart_required"] is True
+    assert resp["pixels_changed"] == 64  # 8×8 all painted
+    # Canonical UTC stamp shape `YYYYMMDDTHHMMSSZ`.
+    import re as _re
+
+    assert _re.match(r"^[0-9]{8}T[0-9]{6}Z$", resp["backup_ts"])
+
+
+async def test_map_edit_anon_returns_401(
+    tmp_path: Path,
+    tmp_active_map_pair: tuple[Path, Path],
+) -> None:
+    s = _settings_for_mapedit(tmp_path=tmp_path, tmp_active_map_pair=tmp_active_map_pair)
+    body, ctype = _multipart_body(_make_empty_mask_png(8, 8))
+    async with _client(s) as cl:
+        r = await cl.post(
+            "/api/map/edit",
+            content=body,
+            headers={"Content-Type": ctype},
+        )
+    assert r.status_code == HTTPStatus.UNAUTHORIZED
+    assert r.json()["err"] == "auth_required"
+
+
+async def test_map_edit_viewer_returns_401(
+    tmp_path: Path,
+    tmp_active_map_pair: tuple[Path, Path],
+) -> None:
+    """Viewer role hits the admin gate. The lazy-seeded user is admin
+    only; we forge a viewer-claim token using the issued JWT secret."""
+    s = _settings_for_mapedit(tmp_path=tmp_path, tmp_active_map_pair=tmp_active_map_pair)
+    body, ctype = _multipart_body(_make_empty_mask_png(8, 8))
+    async with _client(s) as cl:
+        token_admin = await _login_admin(cl)
+        # Decode-then-reissue under role=viewer.
+        secret = (
+            cl._transport.app.state.jwt_secret  # type: ignore[union-attr]
+            if hasattr(cl, "_transport")
+            else None
+        )
+        if secret is None:
+            # Fallback: read from settings + bootstrap
+            from godo_webctl import auth as auth_mod
+
+            secret, _store = auth_mod.bootstrap(s.jwt_secret_path, s.users_file)
+        viewer_token = jwt.encode(
+            {"sub": "viewer", "role": "viewer", "iat": 0, "exp": 99999999999},
+            secret,
+            algorithm=JWT_ALGORITHM,
+        )
+        r = await cl.post(
+            "/api/map/edit",
+            content=body,
+            headers={
+                "Authorization": f"Bearer {viewer_token}",
+                "Content-Type": ctype,
+            },
+        )
+        # Sanity: admin token still works.
+        del token_admin
+    assert r.status_code == HTTPStatus.FORBIDDEN
+    assert r.json()["err"] == "admin_required"
+
+
+async def test_map_edit_mask_shape_mismatch_returns_400(
+    tmp_path: Path,
+    tmp_active_map_pair: tuple[Path, Path],
+) -> None:
+    s = _settings_for_mapedit(tmp_path=tmp_path, tmp_active_map_pair=tmp_active_map_pair)
+    # Mask is 4x4 but PGM is 8x8.
+    body, ctype = _multipart_body(_make_empty_mask_png(4, 4))
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post(
+            "/api/map/edit",
+            content=body,
+            headers={**_auth(token), "Content-Type": ctype},
+        )
+    assert r.status_code == HTTPStatus.BAD_REQUEST
+    assert r.json()["err"] == "mask_shape_mismatch"
+
+
+async def test_map_edit_active_pgm_missing_returns_503(
+    tmp_path: Path,
+    tmp_active_map_pair: tuple[Path, Path],
+) -> None:
+    """Remove the active.pgm symlink to simulate a misconfigured maps_dir."""
+    maps_dir, active_pgm = tmp_active_map_pair
+    active_pgm.unlink()
+    (maps_dir / "active.yaml").unlink()
+    s = _settings_for_mapedit(tmp_path=tmp_path, tmp_active_map_pair=tmp_active_map_pair)
+    body, ctype = _multipart_body(_make_empty_mask_png(8, 8))
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post(
+            "/api/map/edit",
+            content=body,
+            headers={**_auth(token), "Content-Type": ctype},
+        )
+    assert r.status_code == HTTPStatus.SERVICE_UNAVAILABLE
+    assert r.json()["err"] == "active_map_missing"
+
+
+async def test_map_edit_backup_failure_aborts_pgm_untouched(
+    tmp_path: Path,
+    tmp_active_map_pair: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Backup-first ordering: a backup-error must abort BEFORE the PGM
+    rewrite. The active PGM stays byte-for-byte unchanged."""
+    from godo_webctl import backup as backup_mod
+
+    s = _settings_for_mapedit(tmp_path=tmp_path, tmp_active_map_pair=tmp_active_map_pair)
+    _maps_dir, active_pgm = tmp_active_map_pair
+    realpath = Path(os.path.realpath(active_pgm))
+    pre_bytes = realpath.read_bytes()
+    pre_mtime = realpath.stat().st_mtime_ns
+
+    def _raise(*args: object, **kwargs: object) -> None:
+        raise backup_mod.BackupError("simulated_backup_failure")
+
+    monkeypatch.setattr(backup_mod, "backup_map", _raise)
+
+    body, ctype = _multipart_body(_make_full_mask_png(8, 8))
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post(
+            "/api/map/edit",
+            content=body,
+            headers={**_auth(token), "Content-Type": ctype},
+        )
+    assert r.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
+    # PGM byte-for-byte unchanged.
+    assert realpath.read_bytes() == pre_bytes
+    assert realpath.stat().st_mtime_ns == pre_mtime
+
+
+async def test_map_edit_touches_restart_pending(
+    tmp_path: Path,
+    tmp_active_map_pair: tuple[Path, Path],
+) -> None:
+    """A successful edit creates the sentinel file AND the
+    /api/system/restart_pending endpoint reflects it."""
+    rp_path = tmp_path / "restart_pending"
+    s = _settings_for_mapedit(
+        tmp_path=tmp_path,
+        tmp_active_map_pair=tmp_active_map_pair,
+        restart_pending_path=rp_path,
+    )
+    body, ctype = _multipart_body(_make_full_mask_png(8, 8))
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post(
+            "/api/map/edit",
+            content=body,
+            headers={**_auth(token), "Content-Type": ctype},
+        )
+        assert r.status_code == HTTPStatus.OK, r.text
+        # Sentinel must exist on disk.
+        assert rp_path.exists()
+        # And /api/system/restart_pending reports it.
+        rp_resp = await cl.get("/api/system/restart_pending")
+        assert rp_resp.status_code == HTTPStatus.OK
+        assert rp_resp.json() == {"pending": True}
+
+
+async def test_map_edit_appends_activity_log(
+    tmp_path: Path,
+    tmp_active_map_pair: tuple[Path, Path],
+) -> None:
+    """M2 fold: activity log entry type literal is "map_edit" (NOT
+    "map_edited"). The `detail` body carries `backup=<ts>,
+    pixels_changed=<n>` per the M2 fold."""
+    s = _settings_for_mapedit(tmp_path=tmp_path, tmp_active_map_pair=tmp_active_map_pair)
+    body, ctype = _multipart_body(_make_full_mask_png(8, 8))
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post(
+            "/api/map/edit",
+            content=body,
+            headers={**_auth(token), "Content-Type": ctype},
+        )
+        assert r.status_code == HTTPStatus.OK
+        ar = await cl.get("/api/activity?n=5")
+        assert ar.status_code == HTTPStatus.OK
+        items = ar.json()
+    types = [item["type"] for item in items]
+    assert "map_edit" in types
+    assert "map_edited" not in types
+    detail = next(item["detail"] for item in items if item["type"] == "map_edit")
+    assert detail.startswith("backup=")
+    assert "pixels_changed=" in detail
+
+
+# ---- S1 fold — backup-success-ordering partner ---------------------------
+
+
+async def test_map_edit_backup_ts_matches_disk_snapshot(
+    tmp_path: Path,
+    tmp_active_map_pair: tuple[Path, Path],
+) -> None:
+    """S1 fold: returned `backup_ts` matches exactly one entry from
+    GET /api/map/backup/list AND that entry's content matches what was
+    on disk pre-edit."""
+    s = _settings_for_mapedit(tmp_path=tmp_path, tmp_active_map_pair=tmp_active_map_pair)
+    _maps_dir, active_pgm = tmp_active_map_pair
+    realpath = Path(os.path.realpath(active_pgm))
+    pre_bytes = realpath.read_bytes()
+
+    body, ctype = _multipart_body(_make_full_mask_png(8, 8))
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post(
+            "/api/map/edit",
+            content=body,
+            headers={**_auth(token), "Content-Type": ctype},
+        )
+        assert r.status_code == HTTPStatus.OK
+        backup_ts = r.json()["backup_ts"]
+        # Backup list reflects the snapshot.
+        lr = await cl.get("/api/map/backup/list")
+        assert lr.status_code == HTTPStatus.OK
+        items = lr.json()["items"]
+    matching = [it for it in items if it["ts"] == backup_ts]
+    assert len(matching) == 1, f"expected exactly 1 backup with ts={backup_ts}, got {len(matching)}"
+    # And the backup directory holds the pre-edit bytes verbatim.
+    backup_pgm = s.backup_dir / backup_ts / "studio_v1.pgm"
+    assert backup_pgm.is_file()
+    assert backup_pgm.read_bytes() == pre_bytes
+
+
+# ---- T2 fold — content-length BEFORE decode ------------------------------
+
+
+async def test_map_edit_oversize_returns_413_without_decode(
+    tmp_path: Path,
+    tmp_active_map_pair: tuple[Path, Path],
+) -> None:
+    """A 5 MiB body (over 4 MiB cap) that is ALSO non-PNG must fail with
+    413 mask_too_large, NOT 400 mask_decode_failed. Pins ordering: the
+    content-length check runs BEFORE PNG decode."""
+    from godo_webctl.constants import MAP_EDIT_MASK_PNG_MAX_BYTES
+
+    s = _settings_for_mapedit(tmp_path=tmp_path, tmp_active_map_pair=tmp_active_map_pair)
+    huge_garbage = b"x" * (MAP_EDIT_MASK_PNG_MAX_BYTES + 1024)
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post(
+            "/api/map/edit",
+            content=huge_garbage,
+            headers={
+                **_auth(token),
+                "Content-Type": "application/octet-stream",
+                "Content-Length": str(len(huge_garbage)),
+            },
+        )
+    assert r.status_code == HTTPStatus.REQUEST_ENTITY_TOO_LARGE
+    assert r.json()["err"] == "mask_too_large"
+
+
+# ---- T3 fold — anti-monotone: failure leaves no restart-pending ----------
+
+
+async def test_map_edit_failure_leaves_no_restart_pending(
+    tmp_path: Path,
+    tmp_active_map_pair: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T3 fold partner of B7. If `apply_edit` raises after a successful
+    backup, the restart-pending sentinel is NOT created."""
+    from godo_webctl import map_edit as map_edit_mod
+
+    rp_path = tmp_path / "restart_pending_sentinel"
+    s = _settings_for_mapedit(
+        tmp_path=tmp_path,
+        tmp_active_map_pair=tmp_active_map_pair,
+        restart_pending_path=rp_path,
+    )
+
+    def _raise_edit(*args: object, **kwargs: object) -> None:
+        raise map_edit_mod.EditFailed("simulated_edit_failure")
+
+    monkeypatch.setattr(map_edit_mod, "apply_edit", _raise_edit)
+
+    body, ctype = _multipart_body(_make_full_mask_png(8, 8))
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post(
+            "/api/map/edit",
+            content=body,
+            headers={**_auth(token), "Content-Type": ctype},
+        )
+    assert r.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
+    assert r.json()["err"] == "edit_failed"
+    # Anti-monotone: sentinel must NOT exist.
+    assert not rp_path.exists()

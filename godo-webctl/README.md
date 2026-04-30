@@ -12,6 +12,7 @@ Phase 4-2 D Unix-domain JSON-lines socket at `/run/godo/ctl.sock`.
 | GET  | `/api/health`       | Tracker liveness + current AMCL mode (public) |
 | POST | `/api/calibrate`    | Latch `OneShot` on the tracker (admin) |
 | POST | `/api/map/backup`   | Atomic snapshot of `.pgm + .yaml` (admin) |
+| POST | `/api/map/edit`     | Brush-erase the active PGM via multipart mask + auto-backup-first + restart-pending sentinel touch (admin; tracker restart required) |
 | POST | `/api/live`         | Toggle Live ↔ Idle on the tracker (admin) |
 | GET  | `/api/last_pose`    | One-shot pose snapshot (public) |
 | GET  | `/api/last_pose/stream` | SSE: pose @ 5 Hz (public) |
@@ -385,6 +386,9 @@ field to match.
 | `EROFS` from `set_active` after overriding `GODO_WEBCTL_MAPS_DIR` | The unit's `ProtectSystem=strict` + `ReadWritePaths=/var/lib/godo` only covers the default. | Add the new path to a unit override: `sudo systemctl edit godo-webctl` → `[Service]\nReadWritePaths=/var/lib/godo /your/maps/dir`, then `sudo systemctl daemon-reload` and `restart`. |
 | `map_is_active` (HTTP 409) on DELETE | Operator clicked Delete on the active row. | Activate a different map first, then delete; the SPA also disables the Delete button on the active row. |
 | `maps.legacy_map_path_in_use` WARN every boot | `GODO_WEBCTL_MAP_PATH` is still set in `/etc/godo/webctl.env`. | After confirming `${GODO_WEBCTL_MAPS_DIR}/active.pgm` exists, comment out (or remove) the `GODO_WEBCTL_MAP_PATH=…` line and restart webctl. |
+| `mask_shape_mismatch` (HTTP 400) on `/api/map/edit` | The mask PNG dimensions do not equal the active PGM dimensions (the SPA must build the canvas at the same logical `width × height` reported by `/api/maps/<active>/dimensions`). | The SPA's `MapMaskCanvas` sizes the canvas from `mapMetadata.width × .height`. A mismatch indicates the operator opened `/map-edit` while the active map changed underneath; reload the page so `mapMetadata` re-fetches. |
+| `mask_too_large` (HTTP 413) on `/api/map/edit` | The mask PNG exceeds `MAP_EDIT_MASK_PNG_MAX_BYTES = 4 MiB`. | Reduce brush usage or lower the canvas resolution. The SPA short-circuits before upload at the same cap. |
+| `active_map_missing` (HTTP 503) on `/api/map/edit` | `${GODO_WEBCTL_MAPS_DIR}/active.pgm` symlink is missing or broken. | `ls -l ${GODO_WEBCTL_MAPS_DIR}/active.pgm`; activate a valid map via `POST /api/maps/<name>/activate` (or the SPA's `/map` page). |
 
 ## Tests
 

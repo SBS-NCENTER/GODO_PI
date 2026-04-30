@@ -1,0 +1,238 @@
+<script lang="ts">
+  /**
+   * Track B-MAPEDIT — `/map-edit` route.
+   *
+   * Renders the active map underlay + brush surface + Apply / Discard
+   * controls. Apply path:
+   *   1. Build a PNG blob from MapMaskCanvas's `getMaskPng()`.
+   *   2. POST /api/map/edit (multipart) via `postMapEdit`.
+   *   3. On 200: show success toast, refresh the restart-pending flag,
+   *      navigate back to /map after MAP_EDIT_REDIRECT_DELAY_MS.
+   *   4. On 4xx: render the response's `err` string inline; brush state
+   *      is preserved so the operator can retry without redrawing.
+   *
+   * Anonymous viewers see the page (READ-only) but the Apply button is
+   * disabled. The backend separately enforces 401 on the POST.
+   *
+   * The brush radius is held in this component (not the child) so that
+   * the slider can drive the child's brush size prop without round-trip.
+   * Mask state lives ENTIRELY inside `<MapMaskCanvas/>` per
+   * CODEBASE.md invariant (u).
+   */
+  import { onDestroy, onMount } from 'svelte';
+
+  import MapMaskCanvas from '$components/MapMaskCanvas.svelte';
+  import RestartPendingBanner from '$components/RestartPendingBanner.svelte';
+  import { ApiError, postMapEdit } from '$lib/api';
+  import {
+    BRUSH_RADIUS_PX_DEFAULT,
+    BRUSH_RADIUS_PX_MAX,
+    BRUSH_RADIUS_PX_MIN,
+    MAP_EDIT_REDIRECT_DELAY_MS,
+  } from '$lib/constants';
+  import type { EditResponse, MapDimensions } from '$lib/protocol';
+  import { navigate } from '$lib/router';
+  import { auth } from '$stores/auth';
+  import { loadMapMetadata, mapMetadata } from '$stores/mapMetadata';
+  import { refresh as refreshRestartPending } from '$stores/restartPending';
+
+  let dims = $state<MapDimensions | null>(null);
+  let dimsError = $state<string | null>(null);
+  let role = $state<'admin' | 'viewer' | null>(null);
+  let unsubAuth: (() => void) | null = null;
+  let unsubMeta: (() => void) | null = null;
+  let brushRadius = $state(BRUSH_RADIUS_PX_DEFAULT);
+  let busy = $state(false);
+  let banner = $state<string | null>(null);
+  let bannerKind = $state<'info' | 'success' | 'error'>('info');
+  let canvasRef: MapMaskCanvas | undefined = $state();
+  let redirectTimer: ReturnType<typeof setTimeout> | null = null;
+
+  $effect(() => {
+    void mapMetadata;
+  });
+
+  function fmtRedirectMs(ms: number): string {
+    return `${(ms / 1000).toFixed(0)}초`;
+  }
+
+  function setBanner(msg: string, kind: 'info' | 'success' | 'error'): void {
+    banner = msg;
+    bannerKind = kind;
+  }
+
+  onMount(() => {
+    unsubAuth = auth.subscribe((s) => (role = s?.role ?? null));
+    unsubMeta = mapMetadata.subscribe((m) => {
+      if (m) {
+        dims = { width: m.width, height: m.height };
+      }
+    });
+    // The /map page also calls loadMapMetadata; calling here too is
+    // idempotent (same store, abort-cancellable). Without this,
+    // operators landing on /map-edit directly would see "loading…"
+    // forever.
+    void loadMapMetadata('/api/map/image').catch((e: unknown) => {
+      const err = (e as { body?: { err?: string } })?.body?.err;
+      dimsError = err || 'metadata_load_failed';
+    });
+  });
+
+  onDestroy(() => {
+    unsubAuth?.();
+    unsubMeta?.();
+    if (redirectTimer !== null) {
+      clearTimeout(redirectTimer);
+      redirectTimer = null;
+    }
+  });
+
+  async function onApply(): Promise<void> {
+    if (busy || !canvasRef || role !== 'admin') return;
+    busy = true;
+    setBanner('적용 중…', 'info');
+    try {
+      const blob = await canvasRef.getMaskPng();
+      const resp = await postMapEdit<EditResponse>(blob);
+      setBanner(
+        `완료: ${resp.pixels_changed} 셀 변경 — ${fmtRedirectMs(MAP_EDIT_REDIRECT_DELAY_MS)} 후 /map으로 이동합니다. ` +
+          `적용은 godo-tracker 재시작 후 (System 탭 또는 /local).`,
+        'success',
+      );
+      void refreshRestartPending();
+      redirectTimer = setTimeout(() => {
+        navigate('/map');
+      }, MAP_EDIT_REDIRECT_DELAY_MS);
+    } catch (e) {
+      busy = false;
+      if (e instanceof ApiError) {
+        const errCode = e.body?.err || `http_${e.status}`;
+        setBanner(`적용 실패: ${errCode}`, 'error');
+      } else {
+        setBanner('적용 실패: 네트워크 오류', 'error');
+      }
+      return;
+    }
+    busy = false;
+  }
+
+  function onDiscard(): void {
+    if (busy) return;
+    canvasRef?.clear();
+    banner = null;
+  }
+</script>
+
+<div data-testid="map-edit-page">
+  <div class="breadcrumb">GODO &gt; Map Edit</div>
+  <RestartPendingBanner />
+  <h2>Map Edit</h2>
+
+  {#if dimsError}
+    <p class="error" data-testid="map-edit-dims-error">
+      맵 메타데이터를 불러오지 못했습니다: {dimsError}
+    </p>
+  {:else if dims === null}
+    <p class="muted" data-testid="map-edit-loading">맵을 불러오는 중…</p>
+  {:else}
+    <div class="toolbar">
+      <label class="brush-slider">
+        Brush radius (px):
+        <input
+          type="range"
+          min={BRUSH_RADIUS_PX_MIN}
+          max={BRUSH_RADIUS_PX_MAX}
+          bind:value={brushRadius}
+          data-testid="map-edit-brush-slider"
+        />
+        <span class="brush-value">{brushRadius}</span>
+      </label>
+      <div class="actions">
+        <button
+          type="button"
+          class="btn-secondary"
+          onclick={onDiscard}
+          disabled={busy}
+          data-testid="map-edit-discard-btn"
+        >
+          Discard
+        </button>
+        <button
+          type="button"
+          class="btn-primary"
+          onclick={onApply}
+          disabled={busy || role !== 'admin'}
+          data-testid="map-edit-apply-btn"
+          title={role !== 'admin' ? '제어 동작은 로그인 필요' : ''}
+        >
+          {busy ? '적용 중…' : 'Apply'}
+        </button>
+      </div>
+    </div>
+
+    <MapMaskCanvas
+      bind:this={canvasRef}
+      width={dims.width}
+      height={dims.height}
+      mapImageUrl="/api/map/image"
+      {brushRadius}
+      disabled={busy}
+    />
+  {/if}
+
+  {#if banner}
+    <p class="banner banner-{bannerKind}" data-testid="map-edit-banner">{banner}</p>
+  {/if}
+
+  <p class="hint">
+    적용 후 godo-tracker를 재시작해야 효과가 반영됩니다 — System 탭 또는 (loopback) /local에서.
+  </p>
+</div>
+
+<style>
+  h2 {
+    margin-top: 0;
+  }
+  .toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin: 8px 0;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .brush-slider {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .brush-value {
+    min-width: 3em;
+    text-align: right;
+  }
+  .actions {
+    display: flex;
+    gap: 8px;
+  }
+  .banner {
+    padding: 8px 12px;
+    border-left: 3px solid var(--color-accent);
+    margin-top: 12px;
+  }
+  .banner-success {
+    border-left-color: #2e7d32;
+    background: color-mix(in srgb, #2e7d32 10%, var(--color-bg));
+  }
+  .banner-error {
+    border-left-color: var(--color-error, #c62828);
+    background: color-mix(in srgb, var(--color-error, #c62828) 10%, var(--color-bg));
+  }
+  .hint {
+    margin-top: 16px;
+    font-size: 0.9em;
+    color: var(--color-text-muted, #666);
+  }
+  .error {
+    color: var(--color-error, #c62828);
+  }
+</style>

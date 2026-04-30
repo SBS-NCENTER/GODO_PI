@@ -237,6 +237,28 @@ ERR_MAP_NOT_FOUND: Final[str] = "map_not_found"
 ERR_MAP_IS_ACTIVE: Final[str] = "map_is_active"
 ERR_MAPS_DIR_MISSING: Final[str] = "maps_dir_missing"
 
+# --- Track B-MAPEDIT — POST /api/map/edit error codes -------------------
+# Webctl-internal (no C++ wire counterpart). Mirror in the SPA's
+# `lib/protocol.ts`. Pinned by `tests/test_protocol.py::
+# test_map_edit_error_codes_pinned`.
+ERR_MASK_SHAPE_MISMATCH: Final[str] = "mask_shape_mismatch"
+ERR_MASK_TOO_LARGE: Final[str] = "mask_too_large"
+ERR_MASK_DECODE_FAILED: Final[str] = "mask_decode_failed"
+ERR_EDIT_FAILED: Final[str] = "edit_failed"
+ERR_ACTIVE_MAP_MISSING: Final[str] = "active_map_missing"
+
+# `POST /api/map/edit` success response field order. SOLE Python mirror
+# of the JSON keys emitted by `app.py::map_edit_endpoint` on the 200 path.
+# `restart_required` is forward-compat — v1 always emits `True`, but the
+# field stays in the wire schema so a future writer that introduces a
+# hot-reload edit class can flip per-call without a wire shape change.
+EDIT_RESPONSE_FIELDS: Final[tuple[str, ...]] = (
+    "ok",
+    "backup_ts",
+    "pixels_changed",
+    "restart_required",
+)
+
 # --- Track B-BACKUP — map-backup history error codes ---------------------
 # Webctl-internal (no C++ wire counterpart). Mirror in the SPA's
 # `lib/protocol.ts`. Per Mode-A M5 fold there is no `backup_dir_missing`

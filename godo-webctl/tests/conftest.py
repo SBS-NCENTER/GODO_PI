@@ -184,6 +184,69 @@ def tmp_backup_dir(tmp_path: Path) -> Path:
     return backup_dir
 
 
+def make_test_pgm_bytes(width: int, height: int, fill: int = 0) -> bytes:
+    """Build a P5 PGM body of `width`×`height` cells, all set to `fill`.
+
+    Helper for Track B-MAPEDIT tests. Header format mirrors what the
+    map_edit module accepts: `P5\\n<W> <H>\\n255\\n` + W*H raw bytes.
+    """
+    if not (0 <= fill <= 255):
+        raise ValueError(f"fill out of range: {fill}")
+    header = f"P5\n{width} {height}\n255\n".encode("ascii")
+    body = bytes([fill] * (width * height))
+    return header + body
+
+
+def make_test_mask_png(width: int, height: int, painted_indices: list[int]) -> bytes:
+    """Build a single-channel ("L") PNG of `width`×`height` whose
+    flat-index entries listed in `painted_indices` are set to 255 and
+    every other cell is 0.
+
+    Helper for Track B-MAPEDIT tests. Mode "L" (greyscale) so the
+    threshold path (≥ 128) is exercised.
+    """
+    from io import BytesIO
+
+    from PIL import Image
+
+    pixels = bytearray(width * height)
+    for i in painted_indices:
+        pixels[i] = 255
+    img = Image.frombytes("L", (width, height), bytes(pixels))
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+@pytest.fixture
+def tmp_active_map_pair(tmp_path: Path) -> tuple[Path, Path]:
+    """Track B-MAPEDIT fixture.
+
+    Returns ``(maps_dir, active_pgm)`` where:
+
+    - `maps_dir` contains `studio_v1.{pgm,yaml}` (8×8 PGM, all cells 100)
+      and `active.{pgm,yaml}` symlinks pointing at `studio_v1`.
+    - `active_pgm` is the `Path` of `active.pgm` (symlink); the realpath
+      is `<maps_dir>/studio_v1.pgm`.
+
+    Tests that need a non-default PGM size or fill value should call
+    `make_test_pgm_bytes` directly and overwrite the file.
+    """
+    import os
+
+    maps_dir = tmp_path / "maps"
+    maps_dir.mkdir(mode=0o750)
+    pgm_bytes = make_test_pgm_bytes(8, 8, fill=100)
+    (maps_dir / "studio_v1.pgm").write_bytes(pgm_bytes)
+    (maps_dir / "studio_v1.yaml").write_text(
+        "image: studio_v1.pgm\nresolution: 0.05\norigin: [0,0,0]\n"
+        "occupied_thresh: 0.65\nfree_thresh: 0.196\nnegate: 0\n",
+    )
+    os.symlink("studio_v1.pgm", maps_dir / "active.pgm")
+    os.symlink("studio_v1.yaml", maps_dir / "active.yaml")
+    return maps_dir, maps_dir / "active.pgm"
+
+
 @pytest.fixture
 def tmp_maps_dir(tmp_path: Path) -> Path:
     """Track E (PR-C) fixture.

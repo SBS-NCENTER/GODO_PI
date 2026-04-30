@@ -220,6 +220,25 @@ def test_service_transition_messages_ko_pinned() -> None:
     }
 
 
+# --- Track B-MAPEDIT — POST /api/map/edit constants ----------------------
+
+
+def test_map_edit_mask_png_max_bytes_pinned() -> None:
+    # 4 MiB ceiling on the multipart `mask` part.
+    assert C.MAP_EDIT_MASK_PNG_MAX_BYTES == 4_194_304
+
+
+def test_map_edit_free_pixel_value_pinned() -> None:
+    # Canonical "free" sentinel; 254 (NOT 255) so it does not collide
+    # with uninitialised cells.
+    assert C.MAP_EDIT_FREE_PIXEL_VALUE == 254
+
+
+def test_map_edit_paint_threshold_pinned() -> None:
+    # Greyscale mask threshold; conventional midpoint of 0..255.
+    assert C.MAP_EDIT_PAINT_THRESHOLD == 128
+
+
 def test_service_transition_messages_ko_covers_allowed_services() -> None:
     """Drift-catch: every ALLOWED_SERVICE has both a starting + stopping
     entry. Adding a new service to ALLOWED_SERVICES requires extending

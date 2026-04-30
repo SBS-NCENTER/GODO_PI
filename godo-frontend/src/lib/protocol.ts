@@ -451,6 +451,25 @@ export interface RestoreResponse {
 export const ERR_BACKUP_NOT_FOUND = 'backup_not_found';
 export const ERR_RESTORE_NAME_CONFLICT = 'restore_name_conflict';
 
+// --- Track B-MAPEDIT — POST /api/map/edit wire shapes -----------------
+// Mirror of `godo_webctl.protocol::ERR_MASK_*` / `EDIT_RESPONSE_FIELDS`.
+// Drift detected by inspection per godo-frontend/CODEBASE.md invariant
+// (u). The `restart_required` field is forward-compat: v1 always
+// emits `true`, but the field stays in the wire schema so a future
+// hot-reload edit class can flip per-call without a wire shape change.
+export const ERR_MASK_SHAPE_MISMATCH = 'mask_shape_mismatch';
+export const ERR_MASK_TOO_LARGE = 'mask_too_large';
+export const ERR_MASK_DECODE_FAILED = 'mask_decode_failed';
+export const ERR_EDIT_FAILED = 'edit_failed';
+export const ERR_ACTIVE_MAP_MISSING = 'active_map_missing';
+
+export interface EditResponse {
+  ok: true;
+  backup_ts: string; // canonical "YYYYMMDDTHHMMSSZ"
+  pixels_changed: number;
+  restart_required: true;
+}
+
 // --- Track B-SYSTEM PR-2 — service observability wire shapes ---------
 // Mirror of `godo_webctl.protocol::SYSTEM_SERVICES_FIELDS` and the
 // `services.ServiceShow` dataclass. Drift detected by inspection per

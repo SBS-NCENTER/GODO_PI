@@ -148,6 +148,27 @@ export async function apiPatch<T>(path: string, body: unknown, init?: RequestIni
   return (await resp.json()) as T;
 }
 
+/**
+ * Track B-MAPEDIT — POST /api/map/edit with a multipart body carrying
+ * the mask PNG. Separate helper because `apiPost` JSON-encodes the body;
+ * here we attach the blob to a `FormData`.
+ */
+export async function postMapEdit<T>(maskBlob: Blob, init?: RequestInit): Promise<T> {
+  const fd = new FormData();
+  fd.append('mask', maskBlob, 'mask.png');
+  // Do NOT manually set Content-Type — the browser builds the multipart
+  // boundary string automatically when the body is a FormData.
+  const headers = new Headers(init?.headers || {});
+  headers.delete('Content-Type');
+  const resp = await apiFetch('/api/map/edit', {
+    ...init,
+    method: 'POST',
+    headers,
+    body: fd,
+  });
+  return (await resp.json()) as T;
+}
+
 export async function apiDelete<T>(path: string, init?: RequestInit): Promise<T | null> {
   const resp = await apiFetch(path, { ...init, method: 'DELETE' });
   const ctype = resp.headers.get('content-type') || '';

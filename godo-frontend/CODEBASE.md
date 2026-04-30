@@ -343,6 +343,67 @@ drift surfaces as a sad-UX 404, not a security hole.
 `n` input is clamped client-side to `LOGS_TAIL_MAX_N_MIRROR = 500`;
 the server's Pydantic `Field(le=...)` is the authoritative cap.
 
+### (u) `MapMaskCanvas` is the sole owner of mask state (Track B-MAPEDIT)
+
+The brush-mask `Uint8ClampedArray` lives inside
+`components/MapMaskCanvas.svelte` instance state. `routes/MapEdit.svelte`
+orchestrates (brush radius slider, Apply / Discard buttons, error
+banner) and obtains the mask via `getMaskPng() -> Promise<Blob>` only
+at submit time. No store, no global, no parent-side mirror.
+
+`devicePixelRatio` is intentionally NOT baked into the mask coordinate
+system (R2 mitigation + T4 fold pin). Pointer events are translated
+from CSS coords to LOGICAL mask cells via the canvas's
+`getBoundingClientRect()`:
+
+```ts
+lx = floor((ev.clientX - rect.left) * width / rect.width);
+ly = floor((ev.clientY - rect.top)  * height / rect.height);
+```
+
+So a click at CSS (50, 50) under `devicePixelRatio = 2` lands at
+logical (50, 50), NOT (100, 100). The CSS box (`rect.width/height`)
+takes the visible pixels into account; multiplying by the LOGICAL
+`width/height` gives the canonical mask index regardless of zoom or
+DPR.
+
+Apply path (mirrors webctl invariant (aa) on the wire side):
+
+1. SPA calls `getMaskPng()` which builds a fresh canvas at the
+   logical size, populates each cell with greyscale 255 / 0, and
+   resolves a `Blob` from `canvas.toBlob('image/png')`.
+2. SPA POSTs to `/api/map/edit` via `postMapEdit(blob)` —
+   `FormData` body with a single `mask` part.
+3. On 200: a success banner renders, `restartPending` store is
+   refreshed (the global `RestartPendingBanner` immediately reflects
+   the flag), and `navigate('/map')` fires after
+   `MAP_EDIT_REDIRECT_DELAY_MS = 3000 ms`.
+4. On 4xx: the response's `err` code surfaces inline; brush state
+   is NOT cleared (operator can retry without redrawing).
+
+The Apply button is `disabled = busy || role !== 'admin'` so anon
+viewers see the page in read-only mode. The backend separately
+returns 401 on the POST (defence-in-depth).
+
+Restart UX cross-reference: edits require a `godo-tracker` restart
+to take effect (the tracker reads PGM at boot only — Phase 4.5
+deferred-indefinitely hot-reload decision per FRONT_DESIGN §4.2
+2026-04-29 supersession block). Operators restart via either
+`/local` (loopback-admin kiosk path) or `/system` (admin-non-loopback,
+PR #27 service-controls). Per
+`.claude/memory/project_godo_service_management_model.md`, the SPA is
+the SOLE start/stop/restart UI; messaging in the success banner
+points there, NOT at raw `systemctl`.
+
+Bundle-size note: this PR adds ~+2.4 KB gzipped JS + ~+0.2 KB CSS
+(measured 2026-04-30 11:30 KST against the immediate-pre-PR baseline);
+under the planner's +5 KB ceiling.
+
+Pinned by `tests/unit/mapEdit.test.ts` (6 cases — DPR coord pin (T4
+fold), clear() reset, Apply FormData shape, anon disabled, success
+redirect, error banner) + `tests/e2e/mapEdit.spec.ts` (3 cases — anon
+view + admin happy path + viewer cannot apply).
+
 ### (t) Track B-SYSTEM PR-2 — services panel polls `/api/system/services` at 1 Hz, no SSE
 
 `routes/System.svelte` adds a 5th panel rendering one
@@ -529,6 +590,82 @@ so a single stub process is enough to drive playwright. No vite
 preview proxy needed.
 
 ## Change log
+
+### 2026-04-30 11:30 KST — Track B-MAPEDIT (frontend) — Map editor + restart-required
+
+#### Added
+
+- `src/routes/MapEdit.svelte` — `/map-edit` page. Renders the active
+  map underlay + brush surface + Apply / Discard controls + restart-
+  pending banner. Apply path: build PNG from `MapMaskCanvas.getMaskPng()`,
+  POST `/api/map/edit` (multipart), refresh `restartPending` store,
+  navigate to `/map` after `MAP_EDIT_REDIRECT_DELAY_MS = 3000 ms`.
+  Anon viewers see the page; the Apply button is disabled.
+- `src/components/MapMaskCanvas.svelte` — Brush surface. Owns the mask
+  `Uint8ClampedArray` sized to PGM logical dimensions. Pointer events
+  paint a circular kernel; CSS coords are mapped to LOGICAL mask
+  coords via `getBoundingClientRect()` so `devicePixelRatio` never
+  bleeds into the mask index space (T4 fold). Exports `getMaskPng()`
+  and `clear()` to the parent route. SOLE owner of mask state per
+  invariant (u).
+- `src/routes.ts` — `/map-edit` → `MapEdit` route entry.
+- `src/components/Sidebar.svelte` — `Map Edit` nav row (visible to all
+  roles; Apply gating happens at the input level).
+- `src/lib/protocol.ts` — `EditResponse` interface +
+  `ERR_MASK_SHAPE_MISMATCH`, `ERR_MASK_TOO_LARGE`, `ERR_MASK_DECODE_FAILED`,
+  `ERR_EDIT_FAILED`, `ERR_ACTIVE_MAP_MISSING` constants. Mirror of the
+  webctl-side `protocol.py` additions.
+- `src/lib/constants.ts` — `BRUSH_RADIUS_PX_MIN/MAX/DEFAULT` (5/100/15),
+  `MASK_PNG_MAX_BYTES = 4_194_304`, `MAP_EDIT_REDIRECT_DELAY_MS = 3000`.
+- `src/lib/api.ts::postMapEdit(maskBlob, init?)` — multipart helper
+  that wraps a `Blob` into `FormData` and POSTs to `/api/map/edit`.
+  Distinct from `apiPost` (which JSON-encodes its body).
+- `tests/unit/mapEdit.test.ts` — 6 vitest cases: T4 DPR-coord pin,
+  `clear()` reset, Apply FormData shape, anon disabled, success
+  redirect, error inline.
+- `tests/e2e/mapEdit.spec.ts` — 3 playwright cases: anon page, admin
+  happy path with restart-pending banner, viewer cannot apply.
+- `tests/e2e/_stub_server.py` — `_h_map_edit` handler. On admin
+  success, flips `RESTART_PENDING_FLAG` to True so subsequent
+  `/api/system/restart_pending` GETs return `{pending: true}`.
+
+#### Changed
+
+- Invariant (u) added (see above).
+
+#### Removed
+
+- (none)
+
+#### Tests
+
+- 197 → 203 vitest (+6 from this PR). All 29 unit-test files green.
+- e2e is dev-only per invariant (i); 3 new playwright cases added but
+  not run in this RPi 5 writer session (project policy).
+- `npm run lint` clean on PR paths (5 pre-existing prettier warnings
+  in unrelated files unchanged from main).
+- `npm run build` clean. Bundle delta: JS 38.16 → 40.53 KB gzipped
+  (+2.37 KB), CSS 4.62 → 4.83 KB gzipped (+0.21 KB). Total
+  `~+2.6 KB gzip`, well under the +5 KB ceiling.
+
+#### Mode-A folds applied (M1 letter shift, T4, N1, N2, N3)
+
+- M1 — frontend invariant `(u)` (NOT `(t)`): `(t)` is taken on main
+  by Track B-SYSTEM PR-2; `(u)` was the next free letter as of
+  2026-04-30 (`(r)` and `(s)` are also free but cluster less well
+  with the recent invariants).
+- T4 — vitest case 1 asserts logical mask cell (50, 50) is painted
+  for a CSS click at (50, 50) under `devicePixelRatio = 2`. A
+  DPR-bug writer would have written into (100, 100) which is
+  out-of-range; the adjacent (49, 49) check sanity-asserts the
+  paint kernel did not over-shoot.
+- N1 — banner copy points operators at System tab / `/local` for the
+  restart, NOT raw `systemctl` per
+  `.claude/memory/project_godo_service_management_model.md`.
+- N2 — `package.json` unchanged (no new dep; FormData + fetch are
+  browser standard).
+- N3 — total LOC ~530 frontend (component + route + tests + small
+  protocol/constants edits) within plan budget.
 
 ### 2026-04-30 14:00 KST — Track B-SYSTEM PR-B (frontend) — System tab sub-tabs
 

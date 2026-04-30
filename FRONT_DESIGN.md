@@ -116,7 +116,13 @@ User 답변 (B-Q1/Q2): 우선순위 OK, **낮은 layer부터 가자**. 페이지
 - `recalibrate` 클래스: "재시작 + 재캘리브레이션 필요" + 붉은 ‼ 아이콘
 - 사용자가 적용 안 된 키를 한 눈에 식별 가능
 
-**B-MAPEDIT** (P2, §I-Q1 분석 후 결정).
+**B-MAPEDIT** (P2, §I-Q1 분석 후 결정 — 구현됨 2026-04-30, `feat/p4.5-track-b-mapedit`).
+- `/map-edit` 라우트 + 사이드바 진입점 (`Map Edit`).
+- 활성 맵 underlay 위에 brush-erase 마스크 페인팅 (반경 5..100 CSS px 슬라이더, 기본 15).
+- Apply 시 (admin only): auto-backup → atomic PGM rewrite → restart-pending sentinel touch.
+- 응답 `{ok, backup_ts, pixels_changed, restart_required: true}` → 성공 토스트 + 3초 후 `/map`로 redirect + 글로벌 `RestartPendingBanner` 표출.
+- 적용은 godo-tracker 재시작 후 (System 탭 또는 loopback `/local`). hot reload 미채택 (deferred indefinitely).
+- B-MAPEDIT-2 (origin pick, dual GUI+numeric input) 및 B-MAPEDIT-3 (rotation, 동일) 은 별도 후속 PR — `.claude/memory/project_map_edit_origin_rotation.md` 참조.
 
 **B-SYSTEM**: CPU temp 5분 graph + 메모리 + 디스크 + journald + Reboot/Shutdown (auth + 원격 OK per C-Q3). PR-2(2026-04-29) 추가: **GODO 서비스** 패널 (1 Hz polling, 카드 1개/서비스, ActiveState chip + uptime + PID + memory + redacted env collapse + admin Start/Stop/Restart 버튼).
 
@@ -203,7 +209,7 @@ UDS reply ok / err (atomic-write 실패 시 reject, RAM도 안 바뀜)
 ### I. Map editor — §4.2 분석 후 결정
 
 User 답변 (I-Q1): 구현 시간보다 **production 부하**와 **맵 변경 적용 속도/정확성**이 결정 기준.
-아래 §4.2 분석에 따라 **I2 + hot reload**가 둘 다 우위. 채택.
+아래 §4.2 분석에 따라 **I2 + restart-required**가 둘 다 우위. 채택 (2026-04-29 supersession; hot reload는 deferred indefinitely).
 
 > **2026-04-29 supersession**: hot reload는 deferred indefinitely 결정. 채택은
 > **I2 + restart-required (no hot reload)**. 이유: tracker 재시작은 (a) 메모리
@@ -460,7 +466,7 @@ User 결정 fold-in: 새 frontend 도입을 계기로 top-level 디렉토리를 
 | D3 (config PATCH, 있음 PR-CONFIG-α/β) | `core/config_schema.hpp` 의 37-row `constexpr ConfigSchemaRow[]` 가 SSOT; `config/validate.cpp` (type+range), `config/atomic_toml_writer.cpp` (mkstemp+fsync+rename + parent-writable check), `config/apply.cpp::apply_set` (validate→atomic write→ram update→hot/restart-pending publish), `core/hot_config.hpp` 의 `Seqlock<HotConfig>` (cold_writer가 매 iteration `hot_cfg_seq.load()` 후 cfg-fallback), `config/restart_pending.cpp` (sentinel file touch/clear), 3 새 UDS branches (`get_config`, `get_config_schema`, `set_config`), 3 새 build greps |
 | PR-DIAG jitter exposure (있음) | Thread D가 `JitterRing::record(delta_ns)`로 sample을 ring에 적재; `rt/diag_publisher.cpp` (SCHED_OTHER)가 1 Hz로 percentile + summary 계산 후 `Seqlock<JitterSnapshot>`에 publish + UDS `get_jitter` |
 | PR-DIAG amcl_rate exposure (있음) | Cold writer가 매 AMCL iteration마다 `AmclRateAccumulator::record(now_ns)` 호출 (Mode-A M1: `Seqlock<AmclRateRecord>`); diag_publisher가 두-틱 differencing으로 Hz 계산 + UDS `get_amcl_rate` (Mode-A M2 fold rename) |
-| I2 + hot reload | inotify watch on /etc/godo/maps/*.pgm + occupancy_grid atomic swap |
+| I2 + restart-required (있음, B-MAPEDIT 2026-04-30) | webctl: `map_edit.py` (Pillow 기반 PGM brush-erase, atomic write) + `restart_pending.touch()` (sentinel writer; tracker는 boot 시 clear). C++ tracker 변경 0. |
 
 → Track B처럼 별도 hotfix/feature 단위로 PR 단위 분리 추천.
 
@@ -533,7 +539,7 @@ JWT secret: `/var/lib/godo/auth/jwt_secret` (서버 첫 부팅 시 random 생성
 | `GET /api/config/schema` | public | P1 (있음) | CONFIG | — | `[{name, type, min, max, default, reload_class, description}]` | 37-row 메타; webctl serves the cached Python parse of `config_schema.hpp`; 60s cache; anon read |
 | `PATCH /api/config` | admin | P1 (있음) | CONFIG | `{key, value}` | `{ok, reload_class}` | 단일 키 only; webctl pre-validates body size + special-char shape; 트래커가 schema 매칭 + atomic TOML write + RAM update + restart-pending flag touch (`reload_class != "hot"` 일 때) |
 | `GET /api/system/restart_pending` | public | P1 (있음) | CONFIG, DASH | — | `{pending: bool}` | 트래커가 set_config 후 touch한 sentinel file 존재 여부; SPA의 RestartPendingBanner 가 구독 |
-| `POST /api/map/edit` | admin | P2 | MAPEDIT | `{ops: [{type, mask}]}` | `{ok, backup_ts}` | numpy/Pillow + auto-backup |
+| `POST /api/map/edit` | admin | P2 (있음, 2026-04-30) | MAPEDIT | multipart `mask` part (PNG, ≤ 4 MiB) | `{ok, backup_ts, pixels_changed, restart_required: true}` | Pillow brush-erase + auto-backup-first + restart-pending sentinel; tracker 재시작 필요 |
 | `GET /api/map/backup/list` | anon | P2 | BACKUP | — | `[{ts, files, size}]` | /var/lib/godo/map-backups/ scan |
 | `POST /api/map/backup/<ts>/restore` | admin | P2 | BACKUP | — | `{ok}` | cp + reload |
 | `POST /api/auth/users` | admin | P2 | LOCAL | `{username, password, role}` | `{ok}` | 사용자 추가 |
@@ -642,9 +648,9 @@ JWT secret: `/var/lib/godo/auth/jwt_secret` (서버 첫 부팅 시 random 생성
 
 ### Phase 4 — P2 구현 (Track C-3, Phase 4.5)
 
-- B-MAPEDIT / B-SYSTEM / B-BACKUP
-- /api/map/edit (numpy + Pillow)
-- I2 hot reload class (tracker inotify + occupancy_grid swap)
+- B-MAPEDIT (있음, 2026-04-30, `feat/p4.5-track-b-mapedit`) — brush-erase 페인팅 + auto-backup + restart-required. webctl `map_edit.py` (Pillow 기반 atomic PGM rewrite) + `restart_pending.touch()` (sentinel writer; tracker는 boot 시 clear). SPA `routes/MapEdit.svelte` + `components/MapMaskCanvas.svelte` (sole-owner 마스크 상태, DPR-격리 좌표). Mode-A 5 majors + 4 nits + 4 test-bias 모두 fold; backend 628 pytest + frontend 203 vitest 모두 green.
+- B-SYSTEM / B-BACKUP
+- I2 hot reload class — **deferred indefinitely** (2026-04-29 결정, FRONT_DESIGN §4.2 supersession block 참조). 운영 안정성 우선; B-MAPEDIT는 restart-required 패턴으로 충분.
 
 ### Phase 5 — Field integration
 

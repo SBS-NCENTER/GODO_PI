@@ -938,6 +938,47 @@ def _h_backup_list(req: StubHandler) -> None:
     req._send_json(HTTPStatus.OK, {"items": items})
 
 
+def _h_map_edit(req: StubHandler) -> None:
+    """Track B-MAPEDIT — admin-gated brush-erase.
+
+    Mirrors the real backend's three-step happy path: success → flip
+    `RESTART_PENDING_FLAG` to True so the next /api/system/restart_pending
+    GET returns `{pending: true}`. The stub does not actually decode the
+    PNG; it accepts any non-zero `mask` part and returns a canonical
+    backup_ts.
+    """
+    c = req._require_admin()
+    if c is None:
+        return
+    cl = int(req.headers.get("content-length", "0"))
+    if cl > 4 * 1024 * 1024:
+        req._send_json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"ok": False, "err": "mask_too_large"})
+        return
+    # Drain the body so the keep-alive connection isn't left in a
+    # half-read state. We don't actually validate the multipart shape.
+    if cl > 0:
+        try:
+            req.rfile.read(cl)
+        except (OSError, ValueError):
+            pass
+    RESTART_PENDING_FLAG["value"] = True
+    ts = "20260430T010203Z"
+    BACKUPS_STATE[ts] = {
+        "files": ["studio_v1.pgm", "studio_v1.yaml"],
+        "size_bytes": 2048,
+    }
+    _activity_append("map_edit", f"backup={ts}, pixels_changed=10 by {c['sub']}")
+    req._send_json(
+        HTTPStatus.OK,
+        {
+            "ok": True,
+            "backup_ts": ts,
+            "pixels_changed": 10,
+            "restart_required": True,
+        },
+    )
+
+
 def _h_backup_restore(req: StubHandler, ts: str) -> None:
     """Admin-only restore. Mirrors the backend wire shape:
     - 422 (or 404) on malformed `<ts>` (FastAPI Path constraint).
@@ -1054,6 +1095,7 @@ POST_ROUTES: dict[str, Callable[[StubHandler], None]] = {
     "/api/calibrate": _h_calibrate,
     "/api/live": _h_live,
     "/api/map/backup": _h_backup,
+    "/api/map/edit": _h_map_edit,
     "/api/system/reboot": _h_system_reboot,
     "/api/system/shutdown": _h_system_shutdown,
 }

@@ -208,3 +208,10 @@ export const SYSTEM_SUBTAB_EXTENDED = 'extended';
 // Per-core CPU bar height. 12 px is dense enough to show 4–8 cores in
 // the same panel without scrolling on a 720p preview.
 export const CPU_BAR_HEIGHT_PX = 12;
+
+// --- Track B-CONFIG PR-C — per-row apply-result marker TTL ------------
+// After Apply finishes, ✓ / ✗ glyphs render next to each row's input.
+// The markers auto-clear after this delay; 2 s is half the System
+// transition toast (above) because the operator is reading the row at
+// arm's length, not glancing at a top-bar toast.
+export const CONFIG_APPLY_RESULT_MARKER_TTL_MS = 2000;

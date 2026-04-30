@@ -364,6 +364,8 @@ export interface ConfigSchemaRow {
   type: ConfigValueType;
   min: number;
   max: number;
+  // Rendered as a muted `(default: …)` hint under each row's Current
+  // value per `godo-frontend/CODEBASE.md` invariant (z) (PR-C).
   default: string;
   reload_class: ReloadClass;
   description: string;

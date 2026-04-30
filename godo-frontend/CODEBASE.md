@@ -86,25 +86,28 @@ store into a lib, deliberate and one-way.
 
 ## Module responsibilities
 
-| Module                           | Responsibility                                                                                                                                                              |
-| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `lib/constants.ts`               | SPA-internal Tier-1. **Every numeric literal in `src/` MUST trace here, to `protocol.ts`, or to a local iteration bound.**                                                  |
-| `lib/protocol.ts`                | Wire-shape mirror of `godo-webctl/src/godo_webctl/protocol.py` — types, mode names, error codes, LAST_POSE_FIELDS order.                                                    |
-| `lib/router.ts`                  | 30-line hash-router. Emits `route` rune; `navigate(path)` updates `location.hash`.                                                                                          |
-| `lib/api.ts`                     | `apiFetch` adds Bearer header from auth store; 401 → clearSession + nav `/login`; non-2xx → throws `ApiError`.                                                              |
-| `lib/sse.ts`                     | `SSEClient` — token-on-URL (Q3), Page Visibility handbrake, expired-token guard before reconnect.                                                                           |
-| `lib/auth.ts`                    | `login/logout/refresh/getClaims/isExpired`. Decode-only on token (server is the SSOT for trust).                                                                            |
-| `lib/format.ts`                  | Korean-friendly formatters for topbar countdown + pose readouts.                                                                                                            |
-| `stores/auth.ts`                 | Persisted `AuthSession`. Writes from outside limited to `setSession/clearSession`.                                                                                          |
-| `stores/lastPose.ts`             | SSE-fed `LastPose`; refcounts subscribers; polling fallback when SSE drops.                                                                                                 |
-| `stores/mode.ts`                 | Polls `/api/health` at HEALTH_POLL_MS; supports `setModeOptimistic` after button clicks.                                                                                    |
-| `stores/theme.ts`                | Light/dark theme; persisted in localStorage; sets `data-theme` attribute on `<html>`.                                                                                       |
-| `components/PoseCanvas.svelte`   | Canvas with pan/zoom/trail; world↔canvas conversion via `mapMetadata.resolution + .origin + .height`.                                                                      |
-| `lib/mapYaml.ts`                 | Pure parser for ROS map_server YAML (`image`, `resolution`, `origin`, `negate`); throws `MapYamlParseError` on malformed input.                                             |
-| `stores/mapMetadata.ts`          | Composes `parseMapYaml` + `/api/maps/<name>/dimensions` fetch; refetches on `mapImageUrl` change with AbortController-cancelled previous load.                              |
-| `components/MapListPanel.svelte` | Track E (PR-C). Lists every map under `${GODO_WEBCTL_MAPS_DIR}`; admin-gated activate / delete actions; reuses `<ConfirmDialog/>` with the optional `secondaryAction` prop. |
-| `stores/maps.ts`                 | Track E. `Writable<MapEntry[]>` + `refresh()` / `activate(name)` / `remove(name)`. No periodic polling — refresh on mount, post-activate, post-remove only.                 |
-| `routes/*.svelte`                | Page composition only — no business logic; orchestrate via stores + lib calls.                                                                                              |
+| Module                           | Responsibility                                                                                                                                                                                                                          |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `lib/constants.ts`               | SPA-internal Tier-1. **Every numeric literal in `src/` MUST trace here, to `protocol.ts`, or to a local iteration bound.**                                                                                                              |
+| `lib/protocol.ts`                | Wire-shape mirror of `godo-webctl/src/godo_webctl/protocol.py` — types, mode names, error codes, LAST_POSE_FIELDS order.                                                                                                                |
+| `lib/router.ts`                  | 30-line hash-router. Emits `route` rune; `navigate(path)` updates `location.hash`.                                                                                                                                                      |
+| `lib/api.ts`                     | `apiFetch` adds Bearer header from auth store; 401 → clearSession + nav `/login`; non-2xx → throws `ApiError`.                                                                                                                          |
+| `lib/sse.ts`                     | `SSEClient` — token-on-URL (Q3), Page Visibility handbrake, expired-token guard before reconnect.                                                                                                                                       |
+| `lib/auth.ts`                    | `login/logout/refresh/getClaims/isExpired`. Decode-only on token (server is the SSOT for trust).                                                                                                                                        |
+| `lib/format.ts`                  | Korean-friendly formatters for topbar countdown + pose readouts.                                                                                                                                                                        |
+| `stores/auth.ts`                 | Persisted `AuthSession`. Writes from outside limited to `setSession/clearSession`.                                                                                                                                                      |
+| `stores/lastPose.ts`             | SSE-fed `LastPose`; refcounts subscribers; polling fallback when SSE drops.                                                                                                                                                             |
+| `stores/mode.ts`                 | Polls `/api/health` at HEALTH_POLL_MS; supports `setModeOptimistic` after button clicks.                                                                                                                                                |
+| `stores/theme.ts`                | Light/dark theme; persisted in localStorage; sets `data-theme` attribute on `<html>`.                                                                                                                                                   |
+| `components/PoseCanvas.svelte`   | Canvas with pan/zoom/trail; world↔canvas conversion via `mapMetadata.resolution + .origin + .height`.                                                                                                                                  |
+| `lib/mapYaml.ts`                 | Pure parser for ROS map_server YAML (`image`, `resolution`, `origin`, `negate`); throws `MapYamlParseError` on malformed input.                                                                                                         |
+| `stores/mapMetadata.ts`          | Composes `parseMapYaml` + `/api/maps/<name>/dimensions` fetch; refetches on `mapImageUrl` change with AbortController-cancelled previous load.                                                                                          |
+| `components/MapListPanel.svelte` | Track E (PR-C). Lists every map under `${GODO_WEBCTL_MAPS_DIR}`; admin-gated activate / delete actions; reuses `<ConfirmDialog/>` with the optional `secondaryAction` prop.                                                             |
+| `stores/maps.ts`                 | Track E. `Writable<MapEntry[]>` + `refresh()` / `activate(name)` / `remove(name)`. No periodic polling — refresh on mount, post-activate, post-remove only.                                                                             |
+| `routes/Config.svelte`           | PR-C. Owns the page-level `mode` / `pending` / `applyResults` / `isApplying` state machine; renders EDIT / Cancel / Apply button group + tracker-inactive banner; reuses `<ConfirmDialog/>` for Cancel-with-pending. See invariant (z). |
+| `components/ConfigEditor.svelte` | PR-C. Dumb controlled table: schema/current/admin/mode/pending/applyResults/isApplying as props; emits edits via `setPending` callback. No store back-edge.                                                                             |
+| `stores/config.ts`               | `refresh()` + legacy `set()` (deferred-deletion) + `applyBatch(pending)` (PR-C best-effort sequential PATCH + post-loop `refresh()`).                                                                                                   |
+| `routes/*.svelte`                | Page composition only — no business logic; orchestrate via stores + lib calls.                                                                                                                                                          |
 
 ## Invariants
 
@@ -1155,6 +1158,137 @@ parallel deeper ring. Pinned by
 `tests/unit/system.test.ts::sparkline label is derived from
 DIAG_SPARKLINE_DEPTH × SSE_TICK_MS`.
 
+### (z) PR-C — Config tab page-level Edit-mode safety gate
+
+`routes/Config.svelte` owns the `mode: 'view' | 'edit'`, `pending:
+Record<string,string>`, `applyResults`, and `isApplying` state. The
+state is page-local — unmounting `/config` (route change) resets
+all of them; this is the safety property that prevents a forgotten
+Edit-mode in another tab from poisoning the next session. Hoisting
+any of these to a store would defeat the operator-stated
+"실수로 값이 변경되는 것을 방지" requirement and is a code-review block.
+
+`components/ConfigEditor.svelte` is now a dumb controlled table:
+`mode`, `pending`, `applyResults`, `setPending`, `isApplying`, plus
+schema/current/admin come in as props; nothing flows back into the
+config store from this component. Inputs are `disabled = mode==='view'
+|| !admin || isApplying`. The previous on-blur PATCH path was deleted
+— operator-driven Apply is the only mutation route.
+
+`stores/config.ts::applyBatch(pending)` is a best-effort sequential
+PATCH loop (memory §"Why best-effort, not all-or-nothing"). Snapshot
+order is pinned at call time via `Object.entries(pending)`; failures
+do NOT short-circuit. Post-loop sequence:
+`await refresh()` (authoritative truth) + `void
+refreshRestartPending()` (fire-and-forget). Returns `Array<{key, ok,
+error?}>` so the caller can render per-row markers and surface
+detail strings. Changing this to "stop on first failure" or wrapping
+in a bulk endpoint for atomicity is a regression unless the operator
+re-asks.
+
+`stores/config.ts::set()` is retained as a tested-but-unused symbol
+after the per-row blur-PATCH UI was deleted in this PR; its 4
+existing unit tests at `tests/unit/config.test.ts` (lines 53-147)
+document the contract for future re-use, and deletion is deferred
+to a follow-up sweep PR per minimum-change discipline.
+
+Cancel is **client-side only** — never fires a PATCH, never fires a
+reverse-PATCH (memory §"Why Cancel is client-side only"). With
+`pending === 0` it short-circuits to View; with `pending > 0` it
+opens `<ConfirmDialog/>` (`message="${N}개 변경사항이 폐기됩니다.
+계속하시겠습니까?"`) and on 확인 clears the pending dict + returns
+to View. If somebody adds a reverse-PATCH path "for symmetry," that
+is a regression — re-read `.claude/memory/project_config_tab_edit_mode_ux.md`.
+
+The schema `default` value renders as a muted `(default: <value>)`
+hint under each row's Current value (`.default-hint` CSS uses
+`word-break: break-all` + `max-width: 100%` so long string defaults
+wrap inside the 10em Current column rather than push the table
+wider).
+
+The tracker-inactive banner is sourced from the existing
+`systemServices` polling store (invariant (t)) — no new endpoint.
+Banner suppression rule: render the banner ONLY when the store
+has fetched a non-empty services list AND the `godo-tracker` row's
+`active_state !== 'active'`. On initial mount before the first
+`/api/system/services` resolution the banner stays suppressed (R5
+false-positive avoidance). On an inactive→active transition the
+page fires `void refresh()` so the operator sees fresh values
+immediately.
+
+The Apply mid-loop button label is the Korean string
+`적용 중… (k/N)` per Final fold O1; the surrounding EDIT/Cancel/Apply
+button bases stay English to mirror `Sidebar.svelte`'s nav labels.
+
+Pinned by `tests/unit/config.test.ts`:
+
+- 4 existing `set()` cases (refresh / set-success / set-400 /
+  set-network-error) at the top of the file (deferred deletion path).
+- 4 new `applyBatch` cases: all-success, all-failure, mixed (A+B
+  succeed C fails), `Object.entries`-snapshot ordering.
+- 5 new state-machine cases: View→Edit admin-gating, Cancel-no-pending
+  (no dialog), Cancel-with-pending → 확인 (clears + View),
+  Cancel-with-pending → 취소 (preserves + Edit), Apply all-success
+  (auto returns to View + markers fade after
+  `CONFIG_APPLY_RESULT_MARKER_TTL_MS = 2000 ms`),
+  Apply partial (stays in Edit, ✗ + error visible).
+- 3 new banner cases: tracker active → no banner, tracker inactive →
+  banner with the canonical Korean substring, tracker reactivation →
+  banner disappears + `refresh()` fires.
+- 1 new `(default: ...)` hint render case.
+- 1 new Cancel-after-partial-apply walkthrough (continuation of the
+  partial-apply test): operator clicks Cancel after a partial Apply,
+  the confirm dialog shows `1개 변경사항이 폐기됩니다`, no NEW PATCH
+  is fired by the cancel path.
+
+Total: 19 cases in `tests/unit/config.test.ts` post-PR.
+
+## 2026-04-30 09:00 KST — PR-C: Config tab Edit-mode UX
+
+### Added
+
+- `src/lib/constants.ts` — `CONFIG_APPLY_RESULT_MARKER_TTL_MS = 2000 ms`
+  (per-row ✓/✗ marker fade-out after Apply resolves).
+- `src/stores/config.ts::applyBatch(pending)` + `ApplyBatchResult`
+  interface — best-effort sequential PATCH loop with one final
+  `await refresh()` + fire-and-forget `refreshRestartPending()`.
+  See invariant (z).
+- 15 new vitest cases in `tests/unit/config.test.ts` (4 `applyBatch`
+  - 5 state-machine + 3 banner + 1 default + 2
+    walkthrough/continuation), bringing the file from 4 → 19 cases
+    and the suite from 164 → 179 cases.
+
+### Changed
+
+- `src/routes/Config.svelte` (43 → ~290 LOC) — owns `mode` /
+  `pending` / `applyResults` / `isApplying`; renders the
+  EDIT / Cancel / Apply button group; subscribes to `systemServices`
+  for the tracker-inactive banner; renders `<ConfirmDialog/>` for
+  Cancel-with-pending (reuses the same component as
+  `MapListPanel.svelte`).
+- `src/components/ConfigEditor.svelte` (266 → ~263 LOC) — refactored
+  to a dumb controlled table: removed `submit()` / `onblur` /
+  `busy[]` / `errors[]` coupling to the store-`set()` path; accepts
+  `mode` / `isApplying` / `pending` / `setPending` / `applyResults`
+  props; renders the new `(default: <value>)` hint under each row's
+  Current value; ✓/✗ marker + error text now sourced from
+  `applyResults[key]`.
+- `src/lib/protocol.ts` — added a comment under
+  `ConfigSchemaRow.default` linking to invariant (z). No type
+  change.
+
+### Removed
+
+- `src/components/ConfigEditor.svelte::submit()` / `onblur` PATCH
+  path / `busy[]` / `pending` local state (hoisted to
+  `Config.svelte`). The previous behavior fired a PATCH on every
+  input blur, which the operator flagged as accident-prone.
+
+### Tests
+
+- New: `tests/unit/config.test.ts` grew 4 → 19 cases (+15). Total
+  suite 164 → 179 cases. All pass (`npm run test:unit`).
+
 ## 2026-04-29 — PR-SYSTEM (Track B-SYSTEM): /system page
 
 ### Added
@@ -1435,8 +1569,8 @@ see the Config nav row`) is unrelated to this PR).
 - `ServiceStatusCard.svelte` — passes `service.env_stale` through
   to `<EnvVarsList>` as `stale`.
 - `tests/unit/system.test.ts` + `tests/unit/systemServices.test.ts`
-  + `tests/e2e/_stub_server.py` corpora seeded with `env_stale: False`
-  on every `SystemServiceEntry` so the schema parity check stays green.
+  - `tests/e2e/_stub_server.py` corpora seeded with `env_stale: False`
+    on every `SystemServiceEntry` so the schema parity check stays green.
 
 ### Why a badge instead of a top-level "restart pending" pill
 

@@ -174,6 +174,38 @@ All host-side bring-up steps complete. See per-step session log entry below. The
 
 ## Session log
 
+### 2026-04-30 (afternoon → late evening — 14:00 KST → 22:00 KST, twelfth-session — B-MAPEDIT-2 origin pick + B-MAPEDIT-2 minor cleanup + banner-refresh fix + PR β shared map viewport + β.5 Map Edit controls parity + branch-check feedback + issue#2.2 panClamp/pinch + issue#2.2 sensitivity hotfix + issue#2.3 Map Edit overlay/pan/pinch fix; AMCL multi-basin observation surfaced)
+
+Twelfth-session shipped Phase 4.5 P2 / B-MAPEDIT-2 origin pick as a single full-pipeline PR (#43), then operator-driven follow-ups (#44 Minor cleanup, #45 banner-refresh fix, #46 shared map viewport with zoom UX uniform + Map Edit LiDAR overlay, #47 controls parity, #48 panClamp+pinch hotfix, #49 branch-check feedback memory, #50 Map Edit overlay/pan/pinch fix). 8 PRs across the session. Notable: PR β bundle was uncovered via HIL to have THREE different bugs not caught by Mode-A or Mode-B (panClamp formula inversion at high zoom, pinch zoom missing entirely, MapMaskCanvas duplicate map-layer hiding shared underlay) — operator's iterative deploy → use → fix cycle is the canonical bug-finder for layout-heavy refactors.
+
+**Mid-session conceptual revelation**: operator surfaced a question whether Problem 1 (AMCL accuracy — runtime localization) and Problem 2 (frame redefinition — YAML metadata edit) were the same problem. Untangling them produced `feedback_two_problem_taxonomy.md`: they share the visualization (overlay) but require different tools. B-MAPEDIT-2/3 only address Problem 2; Problem 1 needs pose hint + AMCL diagnostics. test4/test5 HIL screenshots showed AMCL multi-basin yaw error (90° between one-shot and live for the SAME physical pose) — `project_amcl_multi_basin_observation.md` documents the observation and reprioritizes issue#3 (pose hint) as P0 over previously-queued issue#4 (diagnostic).
+
+**Process violation + lesson**: Parent committed dd348ba (pinch-zoom sensitivity hotfix) directly to `main` after operator's `git checkout main` silently switched the shared-Pi working tree. Operator chose Option C (leave + lock the rule), and `feedback_check_branch_before_commit.md` is the structural witness — `git branch --show-current` before every commit, read `[branch <hash>]` in commit output before push.
+
+**8 PRs landed/queued this session**:
+
+| PR | Issue | Title | State |
+|---|---|---|---|
+| #43 | — | B-MAPEDIT-2 origin pick (dual GUI + numeric, ADD sign) | merged |
+| #44 | — | B-MAPEDIT-2 minor cleanup (Mode-B M1 + M2) | merged |
+| #45 | issue#1 | restart-pending banner refresh after service action | merged |
+| #46 | issue#2 | shared map viewport + zoom UX + Map Edit LiDAR overlay | merged |
+| #47 | issue#2.1 | Last pose card + Tracker controls on /map + /map-edit | open |
+| #48 | issue#2.2 | panClamp single-case + pinch zoom (HIL hotfix) | merged + dd348ba sensitivity follow-up direct on main |
+| #49 | — | branch-check-before-commit feedback memory | open |
+| #50 | issue#2.3 | Map Edit overlay/pan/pinch (PR #46 HIL hotfix) | open |
+
+Naming convention introduced this session: **`issue#N.M`** (operator-locked 2026-04-30 KST — Greek letters too hard to type). Sequential integers for independent PRs, decimal for follow-ups stacked on a parent. Memory: `feedback_layered_canvas_alpha_architecture.md` is referenced informally in PR #50 description but not as a standalone memory file (the lesson is "drop redundant opaque layers; alpha-aware compositing already works in Canvas API").
+
+**Open queue for next session** (priority order, operator-locked):
+1. issue#3 — initial pose hint UI (multi-basin direct fix, P0)
+2. issue#4 — AMCL silent-converge diagnostic (measures issue#3 effect)
+3. issue#5 — pipelined K-step Live AMCL (per-scan accuracy)
+4. issue#2.4 — Map page common header layout (TrackerControls + LastPoseCard + ScanToggle promoted to sub-tab-independent region; Overview canvas/MapListPanel reorder; STACKED on PR #47)
+5. issue#6 — B-MAPEDIT-3 yaw rotation (deferred until AMCL stable)
+6. issue#7 — boom-arm angle masking (optional, contingent on δ result)
+7. memory bundle save (this session-close)
+
 ### 2026-04-30 (late morning through early afternoon — 10:08 KST → 13:30 KST, eleventh-session — 4 PRs: B-MAPEDIT brush + 2 prod hotfixes + Map sub-tab refactor + hierarchical SSOT doc reorg)
 
 Eleventh-session shipped Track B-MAPEDIT (brush-erase + auto-backup + restart-required) as a single PR through the full agent pipeline, caught **two prod regressions during HIL** that bypassed both writer self-checks and Mode-B review, then continued with two operator-driven follow-ups: a Map Edit sub-tab refactor (per HIL request) and a hierarchical SSOT doc reorg (root `CODEBASE.md` + `DESIGN.md` + cascade rule). Total: 4 PRs in one continuous session. The two HIL regressions are instances of the cross-language "tests pass + prod breaks" pattern first surfaced by PR-A2 in the prior session — second occurrence confirms it is a structural gap, not a one-off.

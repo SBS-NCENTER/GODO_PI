@@ -85,3 +85,37 @@ export function resolveDelta(
 export function resolveAbsolute(absX: number, absY: number): { x_m: number; y_m: number } {
   return { x_m: absX, y_m: absY };
 }
+
+/**
+ * issue#3 — compute the CCW-positive REP-103 yaw angle (degrees, in
+ * [0, 360)) from a drag-vector EXPRESSED IN WORLD COORDINATES. The
+ * caller MUST supply world-frame `(startWx, startWy)` and `(endWx, endWy)`
+ * — typically obtained by feeding canvas-pixel coords through
+ * `viewport.canvasToWorld(...)` first (Mode-A M5 — single math SSOT;
+ * pose-hint pointer math uses viewport.canvasToWorld, NOT pixelToWorld).
+ *
+ * `viewport.canvasToWorld` already inverts Y per the ROS map_server
+ * convention (world Y increases upward), so a straight `atan2(dy, dx)`
+ * on the world-frame delta gives the CCW yaw with the standard
+ * mathematical convention. The output is wrapped to `[0, 360)` to
+ * match the AMCL / FreeD wire convention.
+ *
+ * Returns `null` for a zero-length drag (start == end) — caller must
+ * decide whether to treat as "no yaw committed" (path B awaiting a
+ * second click) or as a parse error.
+ */
+export function yawFromDrag(
+  startWx: number,
+  startWy: number,
+  endWx: number,
+  endWy: number,
+): number | null {
+  const dx = endWx - startWx;
+  const dy = endWy - startWy;
+  if (dx === 0 && dy === 0) return null;
+  const radians = Math.atan2(dy, dx);
+  const degrees = (radians * 180) / Math.PI;
+  // Wrap to [0, 360).
+  const wrapped = ((degrees % 360) + 360) % 360;
+  return wrapped;
+}

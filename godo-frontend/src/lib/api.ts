@@ -159,6 +159,23 @@ export async function postMapOrigin<T>(body: unknown, init?: RequestInit): Promi
 }
 
 /**
+ * issue#3 — POST /api/calibrate with an optional `CalibrateBody`. When
+ * `body` is `undefined`, the SPA emits a body-less POST so the webctl
+ * handler sees `body=None` and the wire stays byte-identical to
+ * pre-issue#3 (back-compat anti-regression — pinned by
+ * `tests/unit/api.test.ts::apiPostCalibrate undefined emits no body`).
+ */
+export async function apiPostCalibrate<T = null>(
+  body?: import('./protocol').CalibrateBody,
+  init?: RequestInit,
+): Promise<T> {
+  // Pass `body` through verbatim. `apiPost` already does
+  // `body !== undefined ? JSON.stringify(body) : undefined`, so the
+  // body-less branch is faithfully preserved when `body === undefined`.
+  return apiPost<T>('/api/calibrate', body, init);
+}
+
+/**
  * Track B-MAPEDIT — POST /api/map/edit with a multipart body carrying
  * the mask PNG. Separate helper because `apiPost` JSON-encodes the body;
  * here we attach the blob to a `FormData`.

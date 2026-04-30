@@ -90,4 +90,15 @@ describe('PR β + issue#2.2 — wheel-zoom-removal structural pin (pinch carve-o
     }
     expect(offenders).toEqual([]);
   });
+
+  it('case 4: PoseHintLayer (issue#3) does NOT register onwheel=', () => {
+    // issue#3 anti-regression — pose-hint canvas is a sibling DOM
+    // overlay; pinch zoom must fall through to MapUnderlay below.
+    const path = '../../src/components/PoseHintLayer.svelte';
+    const content = svelteFiles[path];
+    expect(content, `${path} not found in glob`).toBeDefined();
+    const lower = String(content).toLowerCase();
+    expect(lower.includes('onwheel=')).toBe(false);
+    expect(lower.includes('onwheel ')).toBe(false);
+  });
 });

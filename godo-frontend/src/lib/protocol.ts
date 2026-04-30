@@ -635,3 +635,24 @@ export const GODO_PROCESS_NAMES: ReadonlySet<string> = new Set<string>([
   'godo_jitter',
   'godo-webctl',
 ]);
+
+// --- issue#3 — POST /api/calibrate body ----------------------------------
+// Mirror of `godo-webctl/src/godo_webctl/app.py::CalibrateBody`. All
+// fields optional; webctl Pydantic enforces all-or-none on the seed
+// triple AND that σ overrides require seed_* to be present. Bounds
+// match production/RPi5/src/uds/uds_server.cpp::hint_within_bounds:
+//   - seed_x_m, seed_y_m ∈ [-100, 100]
+//   - seed_yaw_deg ∈ [0, 360)
+//   - sigma_xy_m ∈ [0.05, 5.0]
+//   - sigma_yaw_deg ∈ [1.0, 90.0]
+//
+// Drift policy: changing any field name / bound here without changing
+// the corresponding webctl Pydantic + C++ uds_server bounds is a
+// code-review block.
+export interface CalibrateBody {
+  seed_x_m?: number;
+  seed_y_m?: number;
+  seed_yaw_deg?: number;
+  sigma_xy_m?: number;
+  sigma_yaw_deg?: number;
+}

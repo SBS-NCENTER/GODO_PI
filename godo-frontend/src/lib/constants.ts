@@ -317,3 +317,29 @@ export const ORIGIN_PICK_REDIRECT_DELAY_MS = 3000;
 // transition toast (above) because the operator is reading the row at
 // arm's length, not glancing at a top-bar toast.
 export const CONFIG_APPLY_RESULT_MARKER_TTL_MS = 2000;
+
+// --- issue#3 — pose hint UI (Map Overview sub-tab) --------------------
+// Pixel distance threshold separating gesture path A (single drag) from
+// path B (click-then-click). pointerdown→pointerup with movement <
+// MIN_PX is treated as a click, ≥ MIN_PX is treated as a drag. 8 px
+// (Mode-A N4 fold) is empirically wide enough that operators don't
+// trigger A by accident on the first click of B, and tight enough that
+// a deliberate drag of even 1 cm on a typical display triggers A.
+export const POSE_HINT_DRAG_MIN_PX = 8;
+// Visual marker constants — chosen to be visually distinct from existing
+// pose dot (red #c62828) and trail dot (blue #1565c0). The hint marker
+// uses a brighter red with a cyan arrow so it's immediately
+// distinguishable from the converged pose marker the operator is also
+// looking at.
+export const POSE_HINT_MARKER_COLOR = '#ff5252';        // bright red
+export const POSE_HINT_ARROW_COLOR = '#00e5ff';         // cyan
+export const POSE_HINT_MARKER_RADIUS_PX = 7;
+export const POSE_HINT_ARROW_LENGTH_PX = 28;
+export const POSE_HINT_ARROW_HEAD_PX = 6;
+// Numeric panel display rounding (mirrors ORIGIN_DECIMAL_DISPLAY_MM idiom).
+export const POSE_HINT_DECIMAL_DISPLAY_MM = 3;
+// Numeric input bounds — mirrors webctl Pydantic CalibrateBody bounds:
+//   seed_x_m, seed_y_m ∈ [-100, 100]
+//   seed_yaw_deg ∈ [0, 360)
+export const POSE_HINT_X_Y_ABS_MAX_M = 100.0;
+export const POSE_HINT_YAW_DEG_LT = 360.0;

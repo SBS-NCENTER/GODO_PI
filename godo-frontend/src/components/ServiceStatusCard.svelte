@@ -31,6 +31,7 @@
     type SystemServiceEntry,
   } from '$lib/protocol';
   import { statusChipClass } from '$lib/serviceStatus';
+  import { refresh as refreshRestartPending } from '$stores/restartPending';
 
   interface Props {
     service: SystemServiceEntry;
@@ -72,6 +73,10 @@
     clearDismissTimer();
     try {
       await apiPost(apiSystemServiceAction(service.name, act));
+      // godo-tracker boots clear the restart-pending sentinel; refresh
+      // the SPA store so the banner clears without a page reload.
+      // No-op for non-tracker services.
+      void refreshRestartPending();
       onAction?.(act);
     } catch (e) {
       const err = e as ApiError;

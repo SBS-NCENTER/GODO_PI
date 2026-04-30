@@ -20,8 +20,8 @@ using godo::core::config_schema::reload_class_to_string;
 using godo::core::config_schema::ValueType;
 using godo::core::config_schema::value_type_to_string;
 
-TEST_CASE("CONFIG_SCHEMA has exactly 40 rows (Track D-5)") {
-    CHECK(CONFIG_SCHEMA.size() == 40);
+TEST_CASE("CONFIG_SCHEMA has exactly 42 rows (issue#3 fold added 2 hint-σ rows)") {
+    CHECK(CONFIG_SCHEMA.size() == 42);
 }
 
 TEST_CASE("CONFIG_SCHEMA rows are alphabetically ordered by name") {

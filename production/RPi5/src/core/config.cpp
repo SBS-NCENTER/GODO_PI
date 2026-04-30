@@ -77,6 +77,8 @@ const std::set<std::string>& allowed_keys() {
         "amcl.sigma_hit_schedule_m",
         "amcl.sigma_seed_xy_schedule_m",
         "amcl.anneal_iters_per_phase",
+        "amcl.hint_sigma_xy_m_default",
+        "amcl.hint_sigma_yaw_deg_default",
         "gpio.calibrate_pin",
         "gpio.live_toggle_pin",
     };
@@ -180,6 +182,13 @@ void apply_toml_file(Config& c, const std::filesystem::path& path) {
     }
     if (auto v = tbl["amcl"]["anneal_iters_per_phase"].value<int64_t>();   v) {
         c.amcl_anneal_iters_per_phase = static_cast<int>(*v);
+    }
+    // issue#3 — hint-σ defaults.
+    if (auto v = tbl["amcl"]["hint_sigma_xy_m_default"].value<double>();   v) {
+        c.amcl_hint_sigma_xy_m_default = *v;
+    }
+    if (auto v = tbl["amcl"]["hint_sigma_yaw_deg_default"].value<double>(); v) {
+        c.amcl_hint_sigma_yaw_deg_default = *v;
     }
 
     if (auto v = tbl["gpio"]["calibrate_pin"].value<int64_t>();    v) c.gpio_calibrate_pin   = static_cast<int>(*v);
@@ -418,6 +427,15 @@ void apply_env(Config& c, char** envp) {
         c.amcl_anneal_iters_per_phase =
             parse_int_or_throw(*v, "GODO_AMCL_ANNEAL_ITERS_PER_PHASE");
     }
+    // issue#3 — hint-σ defaults.
+    if (auto v = env_get(envp, "GODO_AMCL_HINT_SIGMA_XY_M_DEFAULT")) {
+        c.amcl_hint_sigma_xy_m_default =
+            parse_double_or_throw(*v, "GODO_AMCL_HINT_SIGMA_XY_M_DEFAULT");
+    }
+    if (auto v = env_get(envp, "GODO_AMCL_HINT_SIGMA_YAW_DEG_DEFAULT")) {
+        c.amcl_hint_sigma_yaw_deg_default =
+            parse_double_or_throw(*v, "GODO_AMCL_HINT_SIGMA_YAW_DEG_DEFAULT");
+    }
 
     if (auto v = env_get(envp, "GODO_GPIO_CALIBRATE_PIN"))             c.gpio_calibrate_pin             = parse_int_or_throw(*v, "GODO_GPIO_CALIBRATE_PIN");
     if (auto v = env_get(envp, "GODO_GPIO_LIVE_TOGGLE_PIN"))           c.gpio_live_toggle_pin           = parse_int_or_throw(*v, "GODO_GPIO_LIVE_TOGGLE_PIN");
@@ -500,6 +518,8 @@ void apply_cli(Config& c, int argc, char** argv) {
         {"amcl-sigma-hit-schedule-m",      [](Config& cc, const std::string& v){ cc.amcl_sigma_hit_schedule_m      = parse_csv_doubles_or_throw(v, "--amcl-sigma-hit-schedule-m"); }},
         {"amcl-sigma-seed-xy-schedule-m",  [](Config& cc, const std::string& v){ cc.amcl_sigma_seed_xy_schedule_m  = parse_csv_doubles_with_sentinel_or_throw(v, "--amcl-sigma-seed-xy-schedule-m"); }},
         {"amcl-anneal-iters-per-phase",    [](Config& cc, const std::string& v){ cc.amcl_anneal_iters_per_phase    = parse_int_or_throw(v, "--amcl-anneal-iters-per-phase"); }},
+        {"amcl-hint-sigma-xy-m-default",   [](Config& cc, const std::string& v){ cc.amcl_hint_sigma_xy_m_default   = parse_double_or_throw(v, "--amcl-hint-sigma-xy-m-default"); }},
+        {"amcl-hint-sigma-yaw-deg-default",[](Config& cc, const std::string& v){ cc.amcl_hint_sigma_yaw_deg_default = parse_double_or_throw(v, "--amcl-hint-sigma-yaw-deg-default"); }},
         {"gpio-calibrate-pin",             [](Config& cc, const std::string& v){ cc.gpio_calibrate_pin             = parse_int_or_throw(v, "--gpio-calibrate-pin"); }},
         {"gpio-live-toggle-pin",           [](Config& cc, const std::string& v){ cc.gpio_live_toggle_pin           = parse_int_or_throw(v, "--gpio-live-toggle-pin"); }},
     };
@@ -567,6 +587,20 @@ void validate_amcl(const Config& c) {
     require_positive_double(c.amcl_sigma_yaw_jitter_live_deg, "amcl_sigma_yaw_jitter_live_deg");
     require_positive_double(c.amcl_sigma_seed_xy_m,           "amcl_sigma_seed_xy_m");
     require_positive_double(c.amcl_sigma_seed_yaw_deg,        "amcl_sigma_seed_yaw_deg");
+    // issue#3 — hint default σ bounds (Mode-A schema bounds; matches
+    // config_schema.hpp + webctl Pydantic CalibrateBody).
+    if (!(c.amcl_hint_sigma_xy_m_default >= 0.05 &&
+          c.amcl_hint_sigma_xy_m_default <= 5.0)) {
+        throw std::runtime_error(
+            "config: amcl_hint_sigma_xy_m_default must be in [0.05, 5.0] "
+            "(got " + std::to_string(c.amcl_hint_sigma_xy_m_default) + ")");
+    }
+    if (!(c.amcl_hint_sigma_yaw_deg_default >= 1.0 &&
+          c.amcl_hint_sigma_yaw_deg_default <= 90.0)) {
+        throw std::runtime_error(
+            "config: amcl_hint_sigma_yaw_deg_default must be in [1.0, 90.0] "
+            "(got " + std::to_string(c.amcl_hint_sigma_yaw_deg_default) + ")");
+    }
     require_positive_double(c.amcl_converge_xy_std_m,         "amcl_converge_xy_std_m");
     require_positive_double(c.amcl_converge_yaw_std_deg,      "amcl_converge_yaw_std_deg");
 
@@ -711,6 +745,10 @@ Config Config::make_default() {
             cfg_defaults::AMCL_SIGMA_SEED_XY_SCHEDULE_M,
             "AMCL_SIGMA_SEED_XY_SCHEDULE_M");
     c.amcl_anneal_iters_per_phase = cfg_defaults::AMCL_ANNEAL_ITERS_PER_PHASE;
+
+    // issue#3 — hint-σ defaults.
+    c.amcl_hint_sigma_xy_m_default    = cfg_defaults::AMCL_HINT_SIGMA_XY_M_DEFAULT;
+    c.amcl_hint_sigma_yaw_deg_default = cfg_defaults::AMCL_HINT_SIGMA_YAW_DEG_DEFAULT;
 
     return c;
 }

@@ -337,11 +337,11 @@ The auth model splits cleanly along read-vs-write:
   `/api/local/journal/<name>` (loopback).
 - **Login-gated mutations** (`Depends(require_admin)`): `/api/calibrate`,
   `/api/live`, `/api/map/backup`, `/api/map/backup/<ts>/restore`
-  (Track B-BACKUP), `/api/maps/<name>/activate`,
-  `DELETE /api/maps/<name>`, `/api/local/service/<name>/<action>`
-  (loopback + admin), `/api/system/service/<name>/<action>` (admin-
-  non-loopback; Track B-SYSTEM PR-2 §8 fold), `/api/system/reboot`,
-  `/api/system/shutdown`.
+  (Track B-BACKUP), `/api/map/edit` (Track B-MAPEDIT),
+  `/api/maps/<name>/activate`, `DELETE /api/maps/<name>`,
+  `/api/local/service/<name>/<action>` (loopback + admin),
+  `/api/system/service/<name>/<action>` (admin-non-loopback;
+  Track B-SYSTEM PR-2 §8 fold), `/api/system/reboot`, `/api/system/shutdown`.
 - **Session-only routes** (`Depends(require_user)`): `/api/auth/me`,
   `/api/auth/refresh`, `/api/auth/logout`.
 
@@ -601,6 +601,84 @@ assert the success path (TB1 fold pin: monkeypatch target is
 admin happy + anon 401 + user-role 403 + invalid action 400 + unknown
 unit 404 + 409 transition + 504 timeout + 500 failed).
 
+### (aa) `map_edit.py` is the SOLE owner of the mask→PGM transform (Track B-MAPEDIT, Phase 4.5 P2)
+
+> Letter rationale: invariants (a)-(z) are all taken on main as of
+> 2026-04-30 (Track D scale fix at (y), PR-B at (z)); the planner's
+> `(y)` reservation in `plan_track_b_mapedit.md` §8 M1 was based on a
+> pre-Track-D fold and the Track D close-out note already flagged the
+> shift to (z) — which itself moved further to (aa) once PR-B landed.
+
+Every byte written to a PGM file under `cfg.maps_dir` as a result of
+`POST /api/map/edit` goes through `map_edit.apply_edit`. `app.py`
+orchestrates the three-step sequence (backup-first, edit, restart-
+pending-touch). `map_edit.py` does NOT import `maps.py` (Track E
+uncoupled-leaves) — caller resolves the active realpath via
+`maps.read_active_name` + `maps.pgm_for` and passes the `Path` in.
+Concurrency-correctness inherits from invariant (e) (single uvicorn
+worker = serial handler).
+
+**Three-step sequence is contractual** (the writer must not reorder):
+
+1. `backup.backup_map(active_pgm, cfg.backup_dir)` — backup-FIRST. A
+   backup-failure aborts BEFORE the PGM is touched (R1 mitigation).
+2. `map_edit.apply_edit(active_pgm, mask_bytes)` — atomic on-disk
+   rewrite via tmp + `os.replace` (mode 0644). Mirrors
+   `auth.py::_write_atomic` pattern. An edit-failure leaves the backup
+   intact so the operator can manually restore.
+3. `restart_pending.touch(cfg.restart_pending_path)` — LAST step. Never
+   set on a failure path (anti-monotone partner). Tracker C++ has no
+   awareness of edits; it reads PGM at boot only. Activation path is
+   the operator-driven `systemctl restart godo-tracker` via either
+   `/local` (loopback-admin kiosk path) or `/system` (admin-non-
+   loopback, PR #27).
+
+**Restart-pending sentinel ownership** is asymmetric: webctl OWNS the
+write path via `restart_pending.touch()` (this PR adds the writer);
+the tracker continues to OWN the clear path at boot via its existing
+`clear_pending_flag()` (`production/RPi5/CODEBASE.md` invariant — set
+during `Config::load()` boot sequence). Both processes run as user
+`ncenter` (StateDirectory=godo), so the sentinel file's writers and
+clearer share a uid — no cross-uid permission concern. The asymmetry
+is contractual: webctl never clears, tracker never sets via this path
+(the tracker's own `touch_pending_flag` writes the same file from a
+different code path during `set_config`).
+
+**Mask semantics** (R8 mitigation):
+
+- Greyscale (mode "L"): pixel value `>= MAP_EDIT_PAINT_THRESHOLD` (128)
+  means paint.
+- RGBA / LA (with alpha channel): alpha `> 0` means paint.
+- Anything else is converted to "L" first via `Image.convert("L")`.
+
+**Body-size enforcement**: `app.py` checks `Content-Length`
+header BEFORE reading the body (T2 fold pin — content-length check
+runs BEFORE PNG decode, so an oversized garbage payload fails 413
+distinctly from a shape-mismatch which fails 400 AFTER decode).
+`map_edit.apply_edit` re-checks the byte length defence-in-depth.
+
+**Activity log type literal**: `"map_edit"` (NOT `"map_edited"`) per
+M2 fold — matches the imperative-style convention used by
+`map_backup`, `map_activate`, `map_delete`, `svc_<action>`,
+`calibrate`, `live_on/off`, `reboot`, `shutdown`, `login`.
+
+Pinned by:
+
+- `tests/test_map_edit.py::test_module_does_not_import_maps`,
+- `tests/test_map_edit.py::test_apply_edit_atomic_write` (S3 fold —
+  tmp cleanup on `os.replace` failure),
+- `tests/test_map_edit.py::test_apply_edit_grey_threshold_boundary`
+  (T1 fold — 127 NOT painted, 128 painted),
+- `tests/test_app_integration.py::test_map_edit_backup_failure_aborts_pgm_untouched`,
+- `tests/test_app_integration.py::test_map_edit_backup_ts_matches_disk_snapshot`
+  (S1 fold — success-ordering pin),
+- `tests/test_app_integration.py::test_map_edit_oversize_returns_413_without_decode`
+  (T2 fold — content-length-before-decode pin),
+- `tests/test_app_integration.py::test_map_edit_failure_leaves_no_restart_pending`
+  (T3 fold — anti-monotone partner of `_touches_restart_pending`),
+- `tests/test_app_integration.py::test_map_edit_appends_activity_log`
+  (M2 fold — type literal `"map_edit"` pin).
+
 ## Phase 4.5 follow-up candidates
 
 - Deadline-based UDS timeout (single shared `monotonic()` budget per
@@ -612,6 +690,122 @@ unit 404 + 409 transition + 504 timeout + 500 failed).
   different uid.
 
 ## Change log
+
+### 2026-04-30 11:30 KST — Track B-MAPEDIT (Phase 4.5 P2 Step 3) — brush-erase + auto-backup + restart-required
+
+#### Added
+
+- `src/godo_webctl/map_edit.py` — Sole-owner module for the mask→PGM
+  transform. `apply_edit(active_pgm, mask_png_bytes)` decodes the
+  multipart mask via Pillow, validates dimensions, rewrites painted
+  cells to `MAP_EDIT_FREE_PIXEL_VALUE = 254`, and writes atomically
+  through tmp + `os.replace` (mode 0644). Custom exceptions
+  `MapEditError`, `ActiveMapMissing`, `MaskDecodeFailed`,
+  `MaskShapeMismatch`, `MaskTooLarge`, `EditFailed`. ~290 LOC.
+- `src/godo_webctl/restart_pending.py::touch(flag_path)` — webctl's
+  new write path for the sentinel file at `cfg.restart_pending_path`.
+  Atomic create-or-replace via tmp + `os.replace` (mode 0644). Writes
+  an ISO-8601 UTC stamp body (informational; readers only check
+  presence). Tracker remains the clear path at boot via its existing
+  `clear_pending_flag()` — both processes run as uid `ncenter` so the
+  cross-process write/read/clear cycle is permission-clean.
+- `src/godo_webctl/app.py` — `_map_edit_exc_to_response` shape mapper
+  + `POST /api/map/edit` route handler (admin-gated, multipart). The
+  three-step sequence is contractual per invariant (aa):
+  `backup_map` → `apply_edit` → `restart_pending.touch`.
+  Content-length check runs BEFORE multipart decode (T2 fold).
+- `src/godo_webctl/protocol.py` — `ERR_MASK_SHAPE_MISMATCH`,
+  `ERR_MASK_TOO_LARGE`, `ERR_MASK_DECODE_FAILED`, `ERR_EDIT_FAILED`,
+  `ERR_ACTIVE_MAP_MISSING`, `EDIT_RESPONSE_FIELDS = ("ok", "backup_ts",
+  "pixels_changed", "restart_required")`.
+- `src/godo_webctl/constants.py` — `MAP_EDIT_MASK_PNG_MAX_BYTES =
+  4_194_304` (4 MiB), `MAP_EDIT_FREE_PIXEL_VALUE = 254`,
+  `MAP_EDIT_PAINT_THRESHOLD = 128`.
+- `tests/conftest.py` — `tmp_active_map_pair` fixture (8×8 PGM, all
+  cells 100, with `active.{pgm,yaml}` symlinks) +
+  `make_test_pgm_bytes` / `make_test_mask_png` helpers.
+- `tests/test_map_edit.py` — 14 cases: empty/full/partial mask;
+  dimensions mismatch; non-PNG decode failure; oversize;
+  atomic-write failure (no leftover .tmp per S3 fold); active-pgm
+  missing; header preserved; RGBA alpha-as-paint; constants drift
+  catch; greyscale 128-threshold boundary (T1 fold); idempotent
+  re-paint; module-discipline pin (no `from .maps`).
+- `tests/test_restart_pending.py` — 3 cases for the new `touch()`
+  writer: creates-from-missing, idempotent, atomic-no-partial.
+- `tests/test_app_integration.py` — 11 cases for `POST /api/map/edit`:
+  admin happy + anon 401 + viewer 403 + shape mismatch 400 +
+  active-pgm missing 503 + backup-failure aborts (PGM mtime unchanged)
+  + restart-pending sentinel created + activity log type
+  literal `"map_edit"` (M2 fold) + S1 backup-ts disk match +
+  T2 oversize 413 before decode + T3 failure leaves no restart-
+  pending.
+- `tests/test_protocol.py` — pins for `ERR_MASK_*` codes +
+  `EDIT_RESPONSE_FIELDS` (S2 fold — `restart_required` literal value
+  pin).
+- `tests/test_constants.py` — pins for the three new `MAP_EDIT_*`
+  constants.
+
+#### Changed
+
+- Invariant (n) extended: `POST /api/map/edit` added to the admin-
+  gated mutations list.
+- Invariant (aa) added: SOLE-owner discipline + three-step sequence
+  + sentinel writer/reader split (M3 fold) + greyscale threshold +
+  Pillow decode semantics + activity log type literal `"map_edit"`.
+
+#### Removed
+
+- (none)
+
+#### Tests
+
+- 594 → 628 hardware-free pytest (+34 from this PR; +14 unit map_edit,
+  +3 restart_pending touch, +11 integration map_edit, +5 pin tests in
+  protocol/constants, +1 fixture coverage).
+- `ruff check` clean on PR paths (1 pre-existing E402 in
+  `config_schema.py` is unchanged from main).
+- `ruff format` applied across modified files (3 pre-existing
+  unformatted files in `config_schema.py` / `services.py` /
+  `test_services.py` are unchanged from main).
+- `python-multipart` is NOT a new dependency: Starlette 1.0's
+  built-in multipart parser handles `request.form()` for our
+  single-part body.
+- `pillow` is unchanged (already a transitive dep at v12.2.0 — N2
+  fold confirmed).
+
+#### Mode-A folds applied
+
+- M1 (letter shift) — webctl invariant uses `(aa)` (NOT `(y)` as the
+  plan reserved): on main `(y)` was taken by Track D (close-out note
+  in CODEBASE.md change log already flagged this); `(z)` was then
+  taken by PR-B; the next free letter at writer kickoff was `(aa)`.
+  Recorded as a deviation in the writer's handoff report.
+- M2 — activity log type literal is `"map_edit"` (imperative-style,
+  matches existing convention).
+- M3 — invariant (aa) prose includes the writer/reader split
+  paragraph: webctl OWNS touch, tracker OWNS clear, both at uid
+  `ncenter`.
+- S1 — `test_map_edit_backup_ts_matches_disk_snapshot` integration
+  case asserts the returned `backup_ts` is reflected in
+  `/api/map/backup/list` and the on-disk backup directory holds the
+  pre-edit bytes.
+- S2 — `test_map_edit_admin_happy_path` asserts
+  `resp["restart_required"] is True`; `test_edit_response_fields_pinned`
+  pins the literal value via the tuple + a presence check.
+- S3 — atomic write mirrors `auth.py::_write_atomic`;
+  `test_apply_edit_atomic_write` asserts no `*.tmp` survives a
+  failed `os.replace`.
+- T1 — `test_apply_edit_grey_threshold_boundary` pins 127 NOT
+  painted, 128 painted (with 200/0 controls).
+- T2 — `test_map_edit_oversize_returns_413_without_decode` pins
+  content-length-before-decode ordering.
+- T3 — `test_map_edit_failure_leaves_no_restart_pending` is the
+  anti-monotone partner of `_touches_restart_pending`.
+- N1 — invariant (aa) prose cross-references PR #27's `/system`
+  restart UX as an alternative to `/local` for non-loopback admins.
+- N2 — `pyproject.toml` unchanged (Pillow already transitive).
+- N3 — total LOC ~1050 across backend + frontend (within plan
+  estimate, below the 1500 ceiling).
 
 ### 2026-04-30 14:00 KST — Track B-SYSTEM PR-B (backend) — process monitor + extended resources
 

@@ -62,6 +62,7 @@ from . import config_schema as config_schema_mod
 from . import config_view as config_view_mod
 from . import logs as logs_mod
 from . import map_backup as map_backup_mod
+from . import map_edit as map_edit_mod
 from . import map_image as map_image_mod
 from . import maps as maps_mod
 from . import processes as processes_mod
@@ -85,17 +86,23 @@ from .constants import (
     LOGIN_USERNAME_MAX_LEN,
     LOGS_TAIL_DEFAULT_N,
     LOGS_TAIL_MAX_N,
+    MAP_EDIT_MASK_PNG_MAX_BYTES,
     MAPS_ACTIVE_BASENAME,
     SERVICE_TRANSITION_MESSAGES_KO,
 )
 from .local_only import loopback_only
 from .protocol import (
     AMCL_RATE_FIELDS,
+    ERR_ACTIVE_MAP_MISSING,
     ERR_BACKUP_NOT_FOUND,
+    ERR_EDIT_FAILED,
     ERR_INVALID_MAP_NAME,
     ERR_MAP_IS_ACTIVE,
     ERR_MAP_NOT_FOUND,
     ERR_MAPS_DIR_MISSING,
+    ERR_MASK_DECODE_FAILED,
+    ERR_MASK_SHAPE_MISMATCH,
+    ERR_MASK_TOO_LARGE,
     ERR_RESTORE_NAME_CONFLICT,
     ERR_SERVICE_STARTING,
     ERR_SERVICE_STOPPING,
@@ -246,6 +253,49 @@ def _map_backup_exc_to_response(exc: Exception) -> JSONResponse:
     if isinstance(exc, OSError):
         return JSONResponse(
             {"ok": False, "err": "restore_failed", "detail": str(exc)},
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+        )
+    return JSONResponse(
+        {"ok": False, "err": "internal_error"},
+        status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+    )
+
+
+def _map_edit_exc_to_response(exc: Exception) -> JSONResponse:
+    """Local error mapper for `map_edit.*` exceptions. Kept separate from
+    `_map_maps_exc_to_response` and `_map_backup_exc_to_response` because
+    the three error families do not overlap (CODEBASE.md invariant (c)).
+
+    Status mapping (Track B-MAPEDIT, see CODEBASE.md invariant (aa)):
+      - `MaskTooLarge` → 413 (`mask_too_large`)
+      - `MaskDecodeFailed` → 400 (`mask_decode_failed`)
+      - `MaskShapeMismatch` → 400 (`mask_shape_mismatch`)
+      - `ActiveMapMissing` → 503 (`active_map_missing`)
+      - `EditFailed` (atomic-write or header-parse) → 500 (`edit_failed`)
+    """
+    if isinstance(exc, map_edit_mod.MaskTooLarge):
+        return JSONResponse(
+            {"ok": False, "err": ERR_MASK_TOO_LARGE},
+            status_code=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+        )
+    if isinstance(exc, map_edit_mod.MaskDecodeFailed):
+        return JSONResponse(
+            {"ok": False, "err": ERR_MASK_DECODE_FAILED},
+            status_code=HTTPStatus.BAD_REQUEST,
+        )
+    if isinstance(exc, map_edit_mod.MaskShapeMismatch):
+        return JSONResponse(
+            {"ok": False, "err": ERR_MASK_SHAPE_MISMATCH, "detail": str(exc)},
+            status_code=HTTPStatus.BAD_REQUEST,
+        )
+    if isinstance(exc, map_edit_mod.ActiveMapMissing):
+        return JSONResponse(
+            {"ok": False, "err": ERR_ACTIVE_MAP_MISSING},
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+        )
+    if isinstance(exc, map_edit_mod.EditFailed):
+        return JSONResponse(
+            {"ok": False, "err": ERR_EDIT_FAILED, "detail": str(exc)},
             status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
         )
     return JSONResponse(
@@ -542,6 +592,166 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         return JSONResponse(
             {"ok": True, "ts": ts, "restored": restored},
+            status_code=HTTPStatus.OK,
+        )
+
+    # ---- /api/map/edit (Track B-MAPEDIT, admin) -------------------------
+    # Brush-erase + auto-backup + restart-required. Three-step sequence
+    # is contractual (see CODEBASE.md invariant (aa)):
+    #   1. backup_map(active_pgm, cfg.backup_dir) — backup-FIRST so an
+    #      edit-failure leaves a recoverable snapshot.
+    #   2. map_edit.apply_edit(active_pgm, mask_bytes) — atomic on-disk
+    #      rewrite; backup-failure aborts BEFORE this step.
+    #   3. restart_pending.touch(cfg.restart_pending_path) — last step;
+    #      never set on a failure path (anti-monotone partner).
+    # Tracker C++ has no awareness of edits — it reads PGM at boot only.
+    # Operator restarts via /local (loopback) or /system (admin-non-
+    # loopback per PR #27) to apply.
+    @app.post("/api/map/edit")
+    async def map_edit_endpoint(
+        request: Request,
+        claims: auth_mod.Claims = Depends(auth_mod.require_admin),
+    ) -> JSONResponse:
+        # T2 fold: content-length check BEFORE any decode. Distinct
+        # error from MaskShapeMismatch (which runs after decode).
+        cl_header = request.headers.get("content-length")
+        if cl_header is not None:
+            try:
+                cl = int(cl_header)
+            except ValueError:
+                cl = -1
+            if cl > MAP_EDIT_MASK_PNG_MAX_BYTES:
+                return JSONResponse(
+                    {"ok": False, "err": ERR_MASK_TOO_LARGE},
+                    status_code=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                )
+        # Resolve the active PGM realpath via maps.py. The active.pgm
+        # symlink hop is intentional: if a future writer hand-edits the
+        # symlink to a path outside maps_dir, `pgm_for` raises
+        # InvalidName via realpath containment.
+        active_name = await asyncio.to_thread(maps_mod.read_active_name, cfg.maps_dir)
+        if active_name is None:
+            return JSONResponse(
+                {"ok": False, "err": ERR_ACTIVE_MAP_MISSING},
+                status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+        try:
+            active_pgm = maps_mod.pgm_for(cfg.maps_dir, active_name)
+        except maps_mod.InvalidName as e:
+            return _map_maps_exc_to_response(e)
+        if not active_pgm.is_file():
+            return JSONResponse(
+                {"ok": False, "err": ERR_ACTIVE_MAP_MISSING},
+                status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+
+        # Read the multipart body. FastAPI's `Form()` / `File()` would
+        # require a Pydantic-style model; for a single binary part we
+        # accept either:
+        #   - multipart/form-data with a `mask` part
+        #   - raw image/png body (operator using `curl -T`)
+        ctype = request.headers.get("content-type", "")
+        try:
+            if "multipart/form-data" in ctype.lower():
+                form = await request.form()
+                mask_part = form.get("mask")
+                if mask_part is None:
+                    return JSONResponse(
+                        {"ok": False, "err": ERR_MASK_DECODE_FAILED, "detail": "missing_mask_part"},
+                        status_code=HTTPStatus.BAD_REQUEST,
+                    )
+                if hasattr(mask_part, "read"):
+                    mask_bytes = await mask_part.read()  # type: ignore[union-attr]
+                else:
+                    mask_bytes = (
+                        mask_part.encode("latin-1")
+                        if isinstance(mask_part, str)
+                        else bytes(mask_part)
+                    )
+            else:
+                mask_bytes = await request.body()
+        except (OSError, ValueError) as e:
+            return JSONResponse(
+                {"ok": False, "err": ERR_MASK_DECODE_FAILED, "detail": str(e)},
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+
+        # Defence-in-depth: re-check size on the decoded byte length
+        # (multipart envelopes can hide the real payload size).
+        if len(mask_bytes) > MAP_EDIT_MASK_PNG_MAX_BYTES:
+            return JSONResponse(
+                {"ok": False, "err": ERR_MASK_TOO_LARGE},
+                status_code=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+            )
+
+        # Step 1: auto-backup. Backup-failure aborts the request BEFORE
+        # the PGM is touched.
+        try:
+            backup_dir_path = await asyncio.to_thread(
+                backup_mod.backup_map,
+                active_pgm,
+                cfg.backup_dir,
+            )
+        except backup_mod.BackupError as e:
+            err = str(e)
+            if err == "concurrent_backup_in_progress":
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "err": err,
+                        "detail": "다른 백업이 진행 중입니다.",
+                    },
+                    status_code=HTTPStatus.CONFLICT,
+                )
+            if err == "map_path_not_found":
+                return JSONResponse(
+                    {"ok": False, "err": ERR_ACTIVE_MAP_MISSING},
+                    status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+                )
+            return JSONResponse(
+                {"ok": False, "err": "backup_failed", "detail": err},
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+        backup_ts = backup_dir_path.name
+
+        # Step 2: atomic PGM rewrite.
+        try:
+            result = await asyncio.to_thread(
+                map_edit_mod.apply_edit,
+                active_pgm,
+                mask_bytes,
+            )
+        except map_edit_mod.MapEditError as e:
+            return _map_edit_exc_to_response(e)
+
+        # Step 3: restart-pending sentinel. Last step on the success
+        # path; never touched on the failure path.
+        try:
+            await asyncio.to_thread(
+                restart_pending_mod.touch,
+                cfg.restart_pending_path,
+            )
+        except OSError as e:
+            return JSONResponse(
+                {"ok": False, "err": ERR_EDIT_FAILED, "detail": f"restart_pending_touch: {e}"},
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+        # Drop the cached PGM bytes so the next /api/map/image GET
+        # re-renders from the just-modified PGM.
+        map_image_mod.invalidate_cache()
+
+        activity_log.append(
+            "map_edit",
+            f"backup={backup_ts}, pixels_changed={result.pixels_changed} by {claims.username}",
+        )
+        return JSONResponse(
+            {
+                "ok": True,
+                "backup_ts": backup_ts,
+                "pixels_changed": result.pixels_changed,
+                "restart_required": True,
+            },
             status_code=HTTPStatus.OK,
         )
 

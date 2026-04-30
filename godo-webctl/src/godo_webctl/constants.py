@@ -224,6 +224,27 @@ PROC_STAT_PATH: Final[str] = "/proc/stat"
 SSE_PROCESSES_TICK_S: Final[float] = 1.0
 SSE_RESOURCES_EXTENDED_TICK_S: Final[float] = 1.0
 
+# --- Track B-MAPEDIT — POST /api/map/edit body + paint constants --------
+# Server-side ceiling on the multipart `mask` part. 4 MiB is generous
+# vs. a 1024×1024 single-channel PNG (≤ 1 MB after zlib) but stops a
+# malicious operator from DoS-ing the mask decoder with a multi-MB
+# payload. SPA's `MASK_PNG_MAX_BYTES` mirror enforces the same cap
+# client-side so the upload never starts.
+MAP_EDIT_MASK_PNG_MAX_BYTES: Final[int] = 4_194_304  # 4 MiB
+
+# Canonical "free" pixel value the brush writes into masked cells. 254
+# matches the ROS map_server `free_thresh` default of 0.196 × 255 ≈ 50
+# (so a value above 254 × (1 - 0.196) = 204 is "free"); 254 is the
+# project-wide "fully free" sentinel. Choosing 255 would clash with
+# uninitialised PGM cells; 254 is unambiguous.
+MAP_EDIT_FREE_PIXEL_VALUE: Final[int] = 254
+
+# Greyscale mask threshold: a mask pixel value `>= 128` means paint.
+# 128 is the conventional midpoint of the 0..255 range; the bright/
+# dark split is operator-intuitive ("white = erase, black = leave
+# alone"). RGBA masks use alpha > 0 instead per `map_edit.py`.
+MAP_EDIT_PAINT_THRESHOLD: Final[int] = 128
+
 # Korean transition-warning strings keyed by `(svc, transition)`. Used
 # by the 409-translation arm of `local_service_action` and
 # `system_service_action` (both share `services.control()` underneath).

@@ -1115,3 +1115,312 @@ TEST_CASE("json_mini::parse_request — number-shape rejections") {
     CHECK(parse_request("{\"cmd\":\"set_mode\",\"mode\":\"OneShot\"}").cmd ==
           "set_mode");
 }
+
+// --------------------------------------------------------------
+// issue#3 — UDS handler hint publish + validation surface.
+// `g_calibrate_hint_data` + `g_calibrate_hint_valid` ownership pinned
+// in production/RPi5/CODEBASE.md invariant (p).
+// --------------------------------------------------------------
+
+namespace {
+
+// Reset hint state before each issue#3 test to keep cases independent.
+void reset_calibrate_hint_state() noexcept {
+    godo::rt::g_calibrate_hint_valid.store(false, std::memory_order_release);
+    godo::rt::HintBundle b{};
+    godo::rt::g_calibrate_hint_data.store(b);
+}
+
+}  // namespace
+
+TEST_CASE("set_mode + full hint publishes seqlock and lifts valid flag") {
+    TempUdsPath guard(tmp_socket_path("hint_full"));
+    ServerHarness h;
+    godo::rt::g_running.store(true, std::memory_order_release);
+    reset_calibrate_hint_state();
+
+    UdsServer server(
+        guard.path,
+        [&]() { return h.mode_target.load(std::memory_order_acquire); },
+        [&](AmclMode m) {
+            h.mode_target.store(m, std::memory_order_release);
+        });
+    REQUIRE_NOTHROW(server.open());
+    h.th = std::thread([&]() { server.run(); });
+
+    int fd = connect_client(guard.path);
+    REQUIRE(fd >= 0);
+    auto resp = send_recv(fd,
+        "{\"cmd\":\"set_mode\",\"mode\":\"OneShot\","
+        "\"seed_x_m\":1.5,\"seed_y_m\":-2.25,\"seed_yaw_deg\":90.0,"
+        "\"sigma_xy_m\":0.5,\"sigma_yaw_deg\":20.0}\n");
+    ::close(fd);
+    CHECK(resp == "{\"ok\":true}\n");
+    CHECK(h.mode_target.load() == AmclMode::OneShot);
+    CHECK(godo::rt::g_calibrate_hint_valid.load(
+        std::memory_order_acquire) == true);
+    const auto b = godo::rt::g_calibrate_hint_data.load();
+    CHECK(b.x_m == doctest::Approx(1.5));
+    CHECK(b.y_m == doctest::Approx(-2.25));
+    CHECK(b.yaw_deg == doctest::Approx(90.0));
+    CHECK(b.sigma_xy_m == doctest::Approx(0.5));
+    CHECK(b.sigma_yaw_deg == doctest::Approx(20.0));
+
+    godo::rt::g_running.store(false, std::memory_order_release);
+    h.th.join();
+}
+
+TEST_CASE("set_mode without hint leaves g_calibrate_hint_valid alone") {
+    TempUdsPath guard(tmp_socket_path("hint_absent"));
+    ServerHarness h;
+    godo::rt::g_running.store(true, std::memory_order_release);
+    reset_calibrate_hint_state();
+
+    UdsServer server(
+        guard.path,
+        [&]() { return h.mode_target.load(std::memory_order_acquire); },
+        [&](AmclMode m) {
+            h.mode_target.store(m, std::memory_order_release);
+        });
+    REQUIRE_NOTHROW(server.open());
+    h.th = std::thread([&]() { server.run(); });
+
+    int fd = connect_client(guard.path);
+    REQUIRE(fd >= 0);
+    auto resp = send_recv(fd, "{\"cmd\":\"set_mode\",\"mode\":\"OneShot\"}\n");
+    ::close(fd);
+    CHECK(resp == "{\"ok\":true}\n");
+    CHECK(godo::rt::g_calibrate_hint_valid.load(
+        std::memory_order_acquire) == false);
+
+    godo::rt::g_running.store(false, std::memory_order_release);
+    h.th.join();
+}
+
+TEST_CASE("set_mode partial hint (two of three) → bad_seed_partial") {
+    TempUdsPath guard(tmp_socket_path("hint_partial"));
+    ServerHarness h;
+    godo::rt::g_running.store(true, std::memory_order_release);
+    reset_calibrate_hint_state();
+
+    UdsServer server(
+        guard.path,
+        [&]() { return h.mode_target.load(std::memory_order_acquire); },
+        [&](AmclMode m) {
+            h.mode_target.store(m, std::memory_order_release);
+        });
+    REQUIRE_NOTHROW(server.open());
+    h.th = std::thread([&]() { server.run(); });
+
+    int fd = connect_client(guard.path);
+    REQUIRE(fd >= 0);
+    auto resp = send_recv(fd,
+        "{\"cmd\":\"set_mode\",\"mode\":\"OneShot\","
+        "\"seed_x_m\":1.0,\"seed_y_m\":2.0}\n");
+    ::close(fd);
+    CHECK(resp == "{\"ok\":false,\"err\":\"bad_seed_partial\"}\n");
+    // Hint state must NOT be lifted on rejection.
+    CHECK(godo::rt::g_calibrate_hint_valid.load(
+        std::memory_order_acquire) == false);
+
+    godo::rt::g_running.store(false, std::memory_order_release);
+    h.th.join();
+}
+
+TEST_CASE("set_mode hint with non-OneShot → bad_seed_with_non_oneshot") {
+    TempUdsPath guard(tmp_socket_path("hint_live"));
+    ServerHarness h;
+    godo::rt::g_running.store(true, std::memory_order_release);
+    reset_calibrate_hint_state();
+
+    UdsServer server(
+        guard.path,
+        [&]() { return h.mode_target.load(std::memory_order_acquire); },
+        [&](AmclMode m) {
+            h.mode_target.store(m, std::memory_order_release);
+        });
+    REQUIRE_NOTHROW(server.open());
+    h.th = std::thread([&]() { server.run(); });
+
+    int fd = connect_client(guard.path);
+    REQUIRE(fd >= 0);
+    auto resp = send_recv(fd,
+        "{\"cmd\":\"set_mode\",\"mode\":\"Live\","
+        "\"seed_x_m\":1.0,\"seed_y_m\":2.0,\"seed_yaw_deg\":45.0}\n");
+    ::close(fd);
+    CHECK(resp == "{\"ok\":false,\"err\":\"bad_seed_with_non_oneshot\"}\n");
+    CHECK(godo::rt::g_calibrate_hint_valid.load(
+        std::memory_order_acquire) == false);
+
+    godo::rt::g_running.store(false, std::memory_order_release);
+    h.th.join();
+}
+
+TEST_CASE("set_mode hint out-of-range value → bad_seed_value") {
+    TempUdsPath guard(tmp_socket_path("hint_range"));
+    ServerHarness h;
+    godo::rt::g_running.store(true, std::memory_order_release);
+    reset_calibrate_hint_state();
+
+    UdsServer server(
+        guard.path,
+        [&]() { return h.mode_target.load(std::memory_order_acquire); },
+        [&](AmclMode m) {
+            h.mode_target.store(m, std::memory_order_release);
+        });
+    REQUIRE_NOTHROW(server.open());
+    h.th = std::thread([&]() { server.run(); });
+
+    auto post = [&](const char* req) -> std::string {
+        int fd = connect_client(guard.path);
+        REQUIRE(fd >= 0);
+        auto r = send_recv(fd, req);
+        ::close(fd);
+        return r;
+    };
+
+    // yaw_deg == 360.0 (must be < 360).
+    CHECK(post("{\"cmd\":\"set_mode\",\"mode\":\"OneShot\","
+               "\"seed_x_m\":1.0,\"seed_y_m\":1.0,\"seed_yaw_deg\":360.0}\n")
+          == "{\"ok\":false,\"err\":\"bad_seed_value\"}\n");
+
+    // x_m above bound (>100).
+    CHECK(post("{\"cmd\":\"set_mode\",\"mode\":\"OneShot\","
+               "\"seed_x_m\":101.0,\"seed_y_m\":1.0,\"seed_yaw_deg\":0.0}\n")
+          == "{\"ok\":false,\"err\":\"bad_seed_value\"}\n");
+
+    // sigma_xy below bound.
+    CHECK(post("{\"cmd\":\"set_mode\",\"mode\":\"OneShot\","
+               "\"seed_x_m\":0.0,\"seed_y_m\":0.0,\"seed_yaw_deg\":0.0,"
+               "\"sigma_xy_m\":0.01}\n")
+          == "{\"ok\":false,\"err\":\"bad_seed_value\"}\n");
+
+    // sigma_yaw above bound.
+    CHECK(post("{\"cmd\":\"set_mode\",\"mode\":\"OneShot\","
+               "\"seed_x_m\":0.0,\"seed_y_m\":0.0,\"seed_yaw_deg\":0.0,"
+               "\"sigma_yaw_deg\":91.0}\n")
+          == "{\"ok\":false,\"err\":\"bad_seed_value\"}\n");
+
+    CHECK(godo::rt::g_calibrate_hint_valid.load(
+        std::memory_order_acquire) == false);
+
+    godo::rt::g_running.store(false, std::memory_order_release);
+    h.th.join();
+}
+
+TEST_CASE("set_mode sigma overrides without seed → bad_sigma_without_seed") {
+    TempUdsPath guard(tmp_socket_path("hint_sigma_only"));
+    ServerHarness h;
+    godo::rt::g_running.store(true, std::memory_order_release);
+    reset_calibrate_hint_state();
+
+    UdsServer server(
+        guard.path,
+        [&]() { return h.mode_target.load(std::memory_order_acquire); },
+        [&](AmclMode m) {
+            h.mode_target.store(m, std::memory_order_release);
+        });
+    REQUIRE_NOTHROW(server.open());
+    h.th = std::thread([&]() { server.run(); });
+
+    int fd = connect_client(guard.path);
+    REQUIRE(fd >= 0);
+    auto resp = send_recv(fd,
+        "{\"cmd\":\"set_mode\",\"mode\":\"OneShot\","
+        "\"sigma_xy_m\":0.5}\n");
+    ::close(fd);
+    CHECK(resp == "{\"ok\":false,\"err\":\"bad_sigma_without_seed\"}\n");
+    CHECK(godo::rt::g_calibrate_hint_valid.load(
+        std::memory_order_acquire) == false);
+
+    godo::rt::g_running.store(false, std::memory_order_release);
+    h.th.join();
+}
+
+// Mode-A M3 ordering torture test. UDS-thread publishes hint+mode; a
+// concurrent reader simulates the cold writer's acquire-load on
+// g_amcl_mode followed by acquire-load on g_calibrate_hint_valid. The
+// invariant: whenever the reader sees mode==OneShot, the hint flag MUST
+// already be true (because the UDS handler stored the flag BEFORE the
+// mode). Catches a regression where the order is flipped (e.g. someone
+// later moves the flag store after set_mode_).
+//
+// Bias-block: this test does NOT exercise the network path — it
+// directly drives the in-memory atomics so the race window is tight
+// enough that a wrong ordering would surface within a few thousand
+// iterations on aarch64 (which has weak default ordering). 5000 rounds
+// gives us margin against scheduler quantization.
+TEST_CASE("M3 ordering torture — hint flag is true when mode is observed OneShot") {
+    constexpr int kRounds = 5000;
+    std::atomic<bool> stop{false};
+    std::atomic<int>  oneshot_observed{0};
+    std::atomic<int>  oneshot_with_invalid_hint{0};
+
+    reset_calibrate_hint_state();
+    // Mirror production main.cpp's set_mode lambda: release-store on
+    // g_amcl_mode happens AFTER the hint publish.
+    auto publish_hint_and_mode = [](double x) {
+        godo::rt::HintBundle b{};
+        b.x_m            = x;
+        b.y_m            = -x;
+        b.yaw_deg        = 90.0;
+        b.sigma_xy_m     = 0.5;
+        b.sigma_yaw_deg  = 20.0;
+        godo::rt::g_calibrate_hint_data.store(b);
+        godo::rt::g_calibrate_hint_valid.store(
+            true, std::memory_order_release);
+        godo::rt::g_amcl_mode.store(
+            godo::rt::AmclMode::OneShot, std::memory_order_release);
+    };
+
+    // Reader thread — polls mode/flag and counts the bad triple.
+    std::thread reader([&]() {
+        while (!stop.load(std::memory_order_acquire)) {
+            const auto mode = godo::rt::g_amcl_mode.load(
+                std::memory_order_acquire);
+            if (mode == godo::rt::AmclMode::OneShot) {
+                oneshot_observed.fetch_add(1, std::memory_order_relaxed);
+                const bool valid = godo::rt::g_calibrate_hint_valid.load(
+                    std::memory_order_acquire);
+                if (!valid) {
+                    oneshot_with_invalid_hint.fetch_add(
+                        1, std::memory_order_relaxed);
+                }
+                // Simulate cold writer's consume-once + return to Idle so
+                // the next round can observe a fresh OneShot transition.
+                godo::rt::g_calibrate_hint_valid.store(
+                    false, std::memory_order_release);
+                godo::rt::g_amcl_mode.store(
+                    godo::rt::AmclMode::Idle, std::memory_order_release);
+            }
+        }
+    });
+
+    // Writer rounds.
+    for (int i = 0; i < kRounds; ++i) {
+        // Wait for the reader to drain mode back to Idle before writing
+        // again, so each round corresponds to one transition.
+        while (godo::rt::g_amcl_mode.load(std::memory_order_acquire) !=
+               godo::rt::AmclMode::Idle) {
+            // Spin briefly; reader should clear it within microseconds.
+            std::this_thread::yield();
+        }
+        publish_hint_and_mode(static_cast<double>(i % 50));
+    }
+
+    // Drain.
+    while (godo::rt::g_amcl_mode.load(std::memory_order_acquire) !=
+           godo::rt::AmclMode::Idle) {
+        std::this_thread::yield();
+    }
+    stop.store(true, std::memory_order_release);
+    reader.join();
+
+    CHECK(oneshot_observed.load() >= kRounds / 2);   // saw most rounds
+    // The load-bearing invariant: NEVER observed (mode==OneShot, hint_valid==false).
+    CHECK(oneshot_with_invalid_hint.load() == 0);
+
+    godo::rt::g_amcl_mode.store(
+        godo::rt::AmclMode::Idle, std::memory_order_release);
+    reset_calibrate_hint_state();
+}

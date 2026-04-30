@@ -149,6 +149,16 @@ export async function apiPatch<T>(path: string, body: unknown, init?: RequestIni
 }
 
 /**
+ * Track B-MAPEDIT-2 — POST /api/map/origin with a JSON body carrying
+ * `{x_m, y_m, mode}`. Separate from `apiPost` only as a typed
+ * convenience; under the hood it's a plain JSON POST so the SPA
+ * applies the standard 401 redirect + ApiError surface.
+ */
+export async function postMapOrigin<T>(body: unknown, init?: RequestInit): Promise<T> {
+  return apiPost<T>('/api/map/origin', body, init);
+}
+
+/**
  * Track B-MAPEDIT — POST /api/map/edit with a multipart body carrying
  * the mask PNG. Separate helper because `apiPost` JSON-encodes the body;
  * here we attach the blob to a `FormData`.

@@ -19,6 +19,13 @@
    * route holds the brush radius + Apply orchestration; this component
    * exposes neither read access nor a writable handle to the mask
    * array.
+   *
+   * Track B-MAPEDIT-2 mode-prop split (per invariant (aa)): the
+   * `mode: 'paint' | 'origin-pick'` prop (default `'paint'`)
+   * disambiguates pointer-event behaviour. In `'origin-pick'` mode
+   * pointer-down emits `oncoordpick(lx, ly)` with logical PGM coords
+   * and the mask buffer is NOT touched — invariant (u) holds because
+   * mask state is byte-identical to a paint-mode no-op pointer event.
    */
   import { onMount } from 'svelte';
 
@@ -28,9 +35,19 @@
     mapImageUrl: string;
     brushRadius: number;
     disabled?: boolean;
+    mode?: 'paint' | 'origin-pick';
+    oncoordpick?: (lx: number, ly: number) => void;
   }
 
-  let { width, height, mapImageUrl, brushRadius, disabled = false }: Props = $props();
+  let {
+    width,
+    height,
+    mapImageUrl,
+    brushRadius,
+    disabled = false,
+    mode = 'paint',
+    oncoordpick,
+  }: Props = $props();
 
   let mapCanvas: HTMLCanvasElement | undefined = $state();
   let maskCanvas: HTMLCanvasElement | undefined = $state();
@@ -138,12 +155,20 @@
     if (disabled) return;
     const c = pointerToLogicalCoords(ev);
     if (!c) return;
+    if (mode === 'origin-pick') {
+      // Track B-MAPEDIT-2: emit logical coords, do NOT touch the mask
+      // buffer. Invariant (u) holds — mask state is byte-identical to
+      // a paint-mode no-op.
+      oncoordpick?.(c.lx, c.ly);
+      return;
+    }
     painting = true;
     maskCanvas?.setPointerCapture(ev.pointerId);
     paintCircle(c.lx, c.ly, brushRadius);
   }
 
   function onPointerMove(ev: PointerEvent): void {
+    if (mode === 'origin-pick') return; // no drag-paint in origin-pick mode
     if (!painting || disabled) return;
     const c = pointerToLogicalCoords(ev);
     if (!c) return;
@@ -214,7 +239,7 @@
   <canvas bind:this={mapCanvas} class="layer map-layer" data-testid="mask-map-layer"></canvas>
   <canvas
     bind:this={maskCanvas}
-    class="layer mask-layer"
+    class="layer mask-layer {mode === 'origin-pick' ? 'origin-pick' : ''}"
     data-testid="mask-paint-layer"
     onpointerdown={onPointerDown}
     onpointermove={onPointerMove}
@@ -246,5 +271,10 @@
     inset: 0;
     cursor: crosshair;
     /* Mask layer overlays the map; pointer events are bound here. */
+  }
+  .mask-layer.origin-pick {
+    /* `cell` cursor signals "pick a point" affordance to the operator
+       (Track B-MAPEDIT-2 mode-prop split). */
+    cursor: cell;
   }
 </style>

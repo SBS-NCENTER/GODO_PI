@@ -22,15 +22,23 @@
   import { onDestroy, onMount } from 'svelte';
 
   import MapMaskCanvas from '$components/MapMaskCanvas.svelte';
+  import OriginPicker from '$components/OriginPicker.svelte';
   import RestartPendingBanner from '$components/RestartPendingBanner.svelte';
-  import { ApiError, postMapEdit } from '$lib/api';
+  import { ApiError, postMapEdit, postMapOrigin } from '$lib/api';
   import {
     BRUSH_RADIUS_PX_DEFAULT,
     BRUSH_RADIUS_PX_MAX,
     BRUSH_RADIUS_PX_MIN,
     MAP_EDIT_REDIRECT_DELAY_MS,
+    ORIGIN_PICK_REDIRECT_DELAY_MS,
   } from '$lib/constants';
-  import type { EditResponse, MapDimensions } from '$lib/protocol';
+  import { pixelToWorld } from '$lib/originMath';
+  import type {
+    EditResponse,
+    MapDimensions,
+    OriginEditResponse,
+    OriginPatchBody,
+  } from '$lib/protocol';
   import { navigate } from '$lib/router';
   import { auth } from '$stores/auth';
   import { loadMapMetadata, mapMetadata } from '$stores/mapMetadata';
@@ -46,7 +54,17 @@
   let banner = $state<string | null>(null);
   let bannerKind = $state<'info' | 'success' | 'error'>('info');
   let canvasRef: MapMaskCanvas | undefined = $state();
+  let originPickerRef: OriginPicker | undefined = $state();
   let redirectTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Track B-MAPEDIT-2 — origin pick state.
+  let originPickEnabled = $state(false);
+  let originBusy = $state(false);
+  let originBanner = $state<string | null>(null);
+  let originBannerKind = $state<'info' | 'success' | 'error' | null>(null);
+  let currentOrigin = $state<readonly [number, number, number] | null>(null);
+  // Resolution + origin captured from mapMetadata for the GUI-pick math.
+  let resolution = $state<number | null>(null);
 
   $effect(() => {
     void mapMetadata;
@@ -66,6 +84,8 @@
     unsubMeta = mapMetadata.subscribe((m) => {
       if (m) {
         dims = { width: m.width, height: m.height };
+        currentOrigin = m.origin;
+        resolution = m.resolution;
       }
     });
     // The /map page also calls loadMapMetadata; calling here too is
@@ -120,6 +140,47 @@
     if (busy) return;
     canvasRef?.clear();
     banner = null;
+  }
+
+  // Track B-MAPEDIT-2 — GUI-pick: convert logical pixel → world coords
+  // using the active map's resolution + origin, pre-fill the picker.
+  function onCanvasCoordPick(lx: number, ly: number): void {
+    if (!dims || resolution === null || currentOrigin === null) return;
+    const w = pixelToWorld(lx, ly, dims, resolution, currentOrigin);
+    originPickerRef?.setCandidate({ x_m: w.world_x, y_m: w.world_y });
+  }
+
+  async function onOriginApply(body: OriginPatchBody): Promise<void> {
+    if (originBusy || role !== 'admin') return;
+    originBusy = true;
+    originBanner = '적용 중…';
+    originBannerKind = 'info';
+    try {
+      const resp = await postMapOrigin<OriginEditResponse>(body);
+      const px = resp.prev_origin;
+      const nx = resp.new_origin;
+      originBanner =
+        `완료: (${px[0].toFixed(3)}, ${px[1].toFixed(3)}) → ` +
+        `(${nx[0].toFixed(3)}, ${nx[1].toFixed(3)}) — ` +
+        `${(ORIGIN_PICK_REDIRECT_DELAY_MS / 1000).toFixed(0)}초 후 /map으로 이동합니다. ` +
+        `적용은 godo-tracker 재시작 후.`;
+      originBannerKind = 'success';
+      void refreshRestartPending();
+      redirectTimer = setTimeout(() => {
+        navigate('/map');
+      }, ORIGIN_PICK_REDIRECT_DELAY_MS);
+    } catch (e) {
+      originBusy = false;
+      if (e instanceof ApiError) {
+        const errCode = e.body?.err || `http_${e.status}`;
+        originBanner = `적용 실패: ${errCode}`;
+      } else {
+        originBanner = '적용 실패: 네트워크 오류';
+      }
+      originBannerKind = 'error';
+      return;
+    }
+    originBusy = false;
   }
 </script>
 
@@ -178,12 +239,38 @@
       height={dims.height}
       mapImageUrl="/api/map/image"
       {brushRadius}
-      disabled={busy}
+      disabled={busy || originBusy}
+      mode={originPickEnabled ? 'origin-pick' : 'paint'}
+      oncoordpick={onCanvasCoordPick}
     />
   {/if}
 
   {#if banner}
     <p class="banner banner-{bannerKind}" data-testid="map-edit-banner">{banner}</p>
+  {/if}
+
+  {#if dims !== null}
+    <label class="pick-toggle" data-testid="origin-pick-toggle-label">
+      <input
+        type="checkbox"
+        bind:checked={originPickEnabled}
+        disabled={busy || originBusy}
+        data-testid="origin-pick-toggle"
+      />
+      Click on canvas to pre-fill (origin-pick mode)
+    </label>
+
+    <OriginPicker
+      bind:this={originPickerRef}
+      {currentOrigin}
+      {role}
+      busy={originBusy}
+      bannerMsg={originBanner}
+      bannerKind={originBannerKind}
+      onapply={(body) => {
+        void onOriginApply(body);
+      }}
+    />
   {/if}
 
   <p class="hint">
@@ -233,5 +320,12 @@
   }
   .error {
     color: var(--color-error, #c62828);
+  }
+  .pick-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 12px;
+    font-size: 0.9em;
   }
 </style>

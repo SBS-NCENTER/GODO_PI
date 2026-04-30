@@ -235,6 +235,23 @@ export const MASK_PNG_MAX_BYTES = 4_194_304;
 // "ack-and-move-on" cadence operators are used to from /backup.
 export const MAP_EDIT_REDIRECT_DELAY_MS = 3000;
 
+// --- Track B-MAPEDIT-2 — POST /api/map/origin SPA constants ----------
+// Magnitude bound mirror of webctl `ORIGIN_X_Y_ABS_MAX_M`. Studio is
+// ~10 m square; 1 km bound covers it plus 100x headroom for shared-
+// frame debug. SPA-side validation rejects values beyond this so the
+// upload never starts (the backend's 400 path is defence-in-depth).
+export const ORIGIN_X_Y_ABS_MAX_M = 1_000.0;
+
+// Decimal places shown in the operator-facing display (1 mm). The
+// underlying state keeps full float precision; this only controls
+// the `toFixed`-style render. 3 places is the sub-cm precision the
+// operator-locked accuracy target asks for.
+export const ORIGIN_DECIMAL_DISPLAY_MM = 3;
+
+// Mirror of MAP_EDIT_REDIRECT_DELAY_MS — same 3 s "ack-and-move-on"
+// pacing so the operator sees the success banner before /map opens.
+export const ORIGIN_PICK_REDIRECT_DELAY_MS = 3000;
+
 // --- Track B-CONFIG PR-C — per-row apply-result marker TTL ------------
 // After Apply finishes, ✓ / ✗ glyphs render next to each row's input.
 // The markers auto-clear after this delay; 2 s is half the System

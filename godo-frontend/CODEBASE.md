@@ -616,8 +616,13 @@ preview proxy needed.
 - `src/components/MapUnderlay.svelte` — `onWheel` handler added,
   gated on `e.ctrlKey === true`. Enables trackpad pinch zoom while
   preserving the operator-locked rule that scroll-wheel ≠ zoom.
-  Pinch in / out reuses `viewport.zoomIn() / zoomOut()` (same step
-  factor as the (+/−) buttons).
+  Per-event sensitivity is FRACTIONAL (HIL hotfix): each wheel event
+  applies `factor = MAP_ZOOM_STEP ^ (-deltaY / MAP_PINCH_DELTA_PX_PER_STEP)`
+  via `setZoomFromPercent`, so a typical 20-event pinch totals ~1.5×
+  zoom rather than 1.25^20 ≈ 86×. Operator-locked
+  `MAP_PINCH_DELTA_PX_PER_STEP = 100` (10-px tick = 0.1 step ≈ 2.3 %).
+- `src/lib/constants.ts` — `MAP_PINCH_DELTA_PX_PER_STEP = 100` added
+  with rationale docstring.
 - `tests/unit/mapViewportNoWheelImports.test.ts` — case 2 relaxed to
   permit `onwheel=` ONLY on `MapUnderlay.svelte`, AND requires the
   handler to reference `ctrlKey`. Cases 1 + 3 unchanged.

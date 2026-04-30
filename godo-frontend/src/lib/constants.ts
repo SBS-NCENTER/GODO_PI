@@ -120,6 +120,19 @@ export const MAP_ZOOM_PERCENT_DECIMAL_DISPLAY = 0;
 // the map yet small enough that they can still pan to the edges.
 export const MAP_PAN_OVERSCAN_PX = 100;
 
+// issue#2.2 follow-up — trackpad-pinch sensitivity. Each wheel event
+// from a pinch gesture applies a fractional zoom step, where
+// `stepFraction = -e.deltaY / MAP_PINCH_DELTA_PX_PER_STEP`. With
+// `MAP_PINCH_DELTA_PX_PER_STEP = 100`, ten 10-px ticks (a typical
+// pinch gesture on a Mac trackpad fires ~20 wheel events with
+// |deltaY| in the 1–20 range) accumulate to ~1× MAP_ZOOM_STEP, giving
+// a controllable feel comparable to a couple of (+/−) button clicks
+// per gesture rather than the ~9× explosive zoom of one-step-per-event.
+// Operator-locked 2026-04-30 KST: HIL on news-pi01 trackpad found that
+// one-step-per-event was too aggressive ("원하는 확대 비율에 정착하기
+// 어려워"). 100 was tuned by treating 10 px ≈ one button click.
+export const MAP_PINCH_DELTA_PX_PER_STEP = 100;
+
 // --- Service status colours (3 systemd services on B-LOCAL) ------------
 export const SVC_NAMES = ['godo-tracker', 'godo-webctl', 'godo-irq-pin'] as const;
 

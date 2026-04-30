@@ -34,10 +34,12 @@
   import {
     MAP_CANVAS_MIN_HEIGHT_PX,
     MAP_CANVAS_MIN_WIDTH_PX,
+    MAP_PINCH_DELTA_PX_PER_STEP,
     MAP_SCAN_DOT_COLOR,
     MAP_SCAN_DOT_OPACITY,
     MAP_SCAN_DOT_RADIUS_PX,
     MAP_SCAN_FRESHNESS_MS,
+    MAP_ZOOM_STEP,
   } from '$lib/constants';
   import type { MapViewport } from '$lib/mapViewport.svelte';
   import type { LastScan, MapMetadata } from '$lib/protocol';
@@ -267,7 +269,7 @@
   }
 
   /**
-   * Pinch-zoom on touchpads — issue#2.2 follow-up to PR #46.
+   * Pinch-zoom on touchpads — issue#2.2 (+ HIL sensitivity follow-up).
    *
    * Browsers map trackpad pinch gestures to `wheel` events with
    * `e.ctrlKey === true` (synthetic; the user is NOT actually
@@ -277,17 +279,33 @@
    * wheel zoom). The narrow `ctrlKey` gate is the structural witness
    * that distinguishes pinch from scroll.
    *
-   * Pinch convention: deltaY < 0 (pinch out) = zoom in;
-   *                   deltaY > 0 (pinch in)  = zoom out.
+   * Per-event sensitivity (HIL operator request 2026-04-30 KST):
+   * a typical Mac trackpad pinch fires 20+ wheel events; reacting
+   * with one full `MAP_ZOOM_STEP` per event multiplies the zoom by
+   * 1.25^20 ≈ 86× per gesture — completely unusable. Instead each
+   * event applies a FRACTIONAL step:
+   *
+   *   stepFraction = -e.deltaY / MAP_PINCH_DELTA_PX_PER_STEP
+   *   factor       = MAP_ZOOM_STEP ^ stepFraction
+   *
+   * With `MAP_PINCH_DELTA_PX_PER_STEP = 100`, a single 10-px tick is
+   * 0.1 of a step (~2.3 % zoom); a 20-event gesture totalling 200 px
+   * ≈ 2 steps ≈ 1.56× zoom — controllable. The continuous fractional
+   * factor lets the operator land on ANY zoom value (e.g. 142 %),
+   * unlike the discrete (+/−) buttons which snap to 100 / 125 / 156 ….
+   *
+   * Convention: `deltaY < 0` (pinch out) = zoom in;
+   *             `deltaY > 0` (pinch in)  = zoom out.
    */
   function onWheel(e: WheelEvent): void {
     if (!e.ctrlKey) return;
     e.preventDefault();
-    if (e.deltaY < 0) {
-      viewport.zoomIn();
-    } else if (e.deltaY > 0) {
-      viewport.zoomOut();
-    }
+    if (e.deltaY === 0) return;
+    const stepFraction = -e.deltaY / MAP_PINCH_DELTA_PX_PER_STEP;
+    const factor = Math.pow(MAP_ZOOM_STEP, stepFraction);
+    // setZoomFromPercent expects a percentage (1.5 ratio = 150 %); it
+    // handles clamp to [minZoom, maxZoom] internally.
+    viewport.setZoomFromPercent(viewport.zoom * factor * 100);
   }
 
   // --- mount / unmount -----------------------------------------------

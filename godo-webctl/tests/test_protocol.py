@@ -148,6 +148,42 @@ def test_edit_response_fields_pinned() -> None:
     assert "restart_required" in P.EDIT_RESPONSE_FIELDS
 
 
+# --- Track B-MAPEDIT-2 — POST /api/map/origin error codes + response ----
+
+
+def test_origin_error_codes_pinned() -> None:
+    """Track B-MAPEDIT-2 error codes. Drift from this file fails the SPA
+    mirror in `lib/protocol.ts`."""
+    assert P.ERR_ORIGIN_BAD_VALUE == "bad_origin_value"
+    assert P.ERR_ORIGIN_YAML_PARSE_FAILED == "origin_yaml_parse_failed"
+    assert P.ERR_ORIGIN_EDIT_FAILED == "origin_edit_failed"
+    assert P.ERR_ACTIVE_YAML_MISSING == "active_yaml_missing"
+
+
+def test_origin_edit_response_fields_pinned() -> None:
+    """`POST /api/map/origin` 200-response field order. `restart_required`
+    is always True in v1 (origin lives in YAML, tracker reads at boot only);
+    field stays in the wire schema for future hot-reload symmetry with
+    EDIT_RESPONSE_FIELDS."""
+    assert P.ORIGIN_EDIT_RESPONSE_FIELDS == (
+        "ok",
+        "backup_ts",
+        "prev_origin",
+        "new_origin",
+        "restart_required",
+    )
+    assert "restart_required" in P.ORIGIN_EDIT_RESPONSE_FIELDS
+
+
+def test_origin_modes_pinned() -> None:
+    """Track B-MAPEDIT-2 — mode literals match the SPA's OriginMode
+    union. Drift catch: a writer flipping to a new mode here without
+    updating `lib/protocol.ts::OriginMode` fails this set-equality."""
+    assert P.ORIGIN_MODE_ABSOLUTE == "absolute"
+    assert P.ORIGIN_MODE_DELTA == "delta"
+    assert frozenset({"absolute", "delta"}) == P.VALID_ORIGIN_MODES  # noqa: SIM300
+
+
 # --- Track D: get_last_scan mirror ----------------------------------------
 
 

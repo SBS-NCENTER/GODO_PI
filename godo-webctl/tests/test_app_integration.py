@@ -3619,3 +3619,393 @@ async def test_map_edit_failure_leaves_no_restart_pending(
     assert r.json()["err"] == "edit_failed"
     # Anti-monotone: sentinel must NOT exist.
     assert not rp_path.exists()
+
+
+# ---- Track B-MAPEDIT-2: /api/map/origin (admin) -------------------------
+# 13 integration cases per planner §5.2 + Parent fold (M3, S1, S3, T4).
+
+
+def _settings_for_map_origin(
+    *,
+    tmp_path: Path,
+    tmp_active_map_pair: tuple[Path, Path],
+    backup_dir_name: str = "bk",
+    restart_pending_path: Path | None = None,
+) -> Settings:
+    maps_dir, _active_pgm = tmp_active_map_pair
+    backup_dir = tmp_path / backup_dir_name
+    return _settings_for(
+        uds_socket=tmp_path / "unused.sock",
+        map_path=maps_dir / "studio_v1.pgm",
+        backup_dir=backup_dir,
+        maps_dir=maps_dir,
+        restart_pending_path=restart_pending_path,
+    )
+
+
+async def test_post_map_origin_admin_absolute_happy_path(
+    tmp_path: Path,
+    tmp_active_map_pair: tuple[Path, Path],
+) -> None:
+    s = _settings_for_map_origin(tmp_path=tmp_path, tmp_active_map_pair=tmp_active_map_pair)
+    body = {"x_m": 0.32, "y_m": -0.18, "mode": "absolute"}
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post("/api/map/origin", json=body, headers=_auth(token))
+    assert r.status_code == HTTPStatus.OK, r.text
+    resp = r.json()
+    assert resp["ok"] is True
+    assert resp["restart_required"] is True
+    # 5-field shape pin (mirror of ORIGIN_EDIT_RESPONSE_FIELDS).
+    assert set(resp.keys()) == {"ok", "backup_ts", "prev_origin", "new_origin", "restart_required"}
+    # The fixture writes `origin: [-1.5, -2.0, 0.0]`.
+    assert resp["prev_origin"] == [-1.5, -2.0, 0.0]
+    assert resp["new_origin"] == [0.32, -0.18, 0.0]
+    # Canonical UTC stamp shape.
+    import re as _re
+
+    assert _re.match(r"^[0-9]{8}T[0-9]{6}Z$", resp["backup_ts"])
+
+
+async def test_post_map_origin_admin_delta_happy_path(
+    tmp_path: Path,
+    tmp_active_map_pair: tuple[Path, Path],
+) -> None:
+    """Operator-locked ADD sign convention end-to-end pin: typed `(x_m, y_m)`
+    in delta mode is the offset of the new origin from the current origin.
+    """
+    s = _settings_for_map_origin(tmp_path=tmp_path, tmp_active_map_pair=tmp_active_map_pair)
+    body = {"x_m": 0.32, "y_m": -0.18, "mode": "delta"}
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post("/api/map/origin", json=body, headers=_auth(token))
+    assert r.status_code == HTTPStatus.OK, r.text
+    resp = r.json()
+    assert resp["prev_origin"] == [-1.5, -2.0, 0.0]
+    # ADD: new = prev + typed = (-1.5 + 0.32, -2.0 + (-0.18), 0.0).
+    new_x, new_y, new_th = resp["new_origin"]
+    assert new_x == pytest.approx(-1.5 + 0.32)
+    assert new_y == pytest.approx(-2.0 + (-0.18))
+    assert new_th == 0.0
+
+
+async def test_post_map_origin_anon_returns_401(
+    tmp_path: Path,
+    tmp_active_map_pair: tuple[Path, Path],
+) -> None:
+    s = _settings_for_map_origin(tmp_path=tmp_path, tmp_active_map_pair=tmp_active_map_pair)
+    body = {"x_m": 0.0, "y_m": 0.0, "mode": "absolute"}
+    async with _client(s) as cl:
+        r = await cl.post("/api/map/origin", json=body)
+    assert r.status_code == HTTPStatus.UNAUTHORIZED
+    assert r.json()["err"] == "auth_required"
+
+
+async def test_post_map_origin_viewer_returns_403(
+    tmp_path: Path,
+    tmp_active_map_pair: tuple[Path, Path],
+) -> None:
+    s = _settings_for_map_origin(tmp_path=tmp_path, tmp_active_map_pair=tmp_active_map_pair)
+    body = {"x_m": 0.0, "y_m": 0.0, "mode": "absolute"}
+    async with _client(s) as cl:
+        await _login_admin(cl)  # bootstrap secret
+        from godo_webctl import auth as auth_mod
+
+        secret, _store = auth_mod.bootstrap(s.jwt_secret_path, s.users_file)
+        viewer_token = jwt.encode(
+            {"sub": "viewer", "role": "viewer", "iat": 0, "exp": 99999999999},
+            secret,
+            algorithm=JWT_ALGORITHM,
+        )
+        r = await cl.post(
+            "/api/map/origin",
+            json=body,
+            headers={"Authorization": f"Bearer {viewer_token}"},
+        )
+    assert r.status_code == HTTPStatus.FORBIDDEN
+    assert r.json()["err"] == "admin_required"
+
+
+async def test_post_map_origin_nan_returns_400_bad_origin_value(
+    tmp_path: Path,
+    tmp_active_map_pair: tuple[Path, Path],
+) -> None:
+    """S5 fold: `math.isfinite` is the load-bearing check. Inject NaN as
+    the JSON literal `NaN` (Pydantic with `allow_inf_nan=True` parses it)
+    and assert webctl rejects with `bad_origin_value` `non_finite_x_m`.
+    """
+    s = _settings_for_map_origin(tmp_path=tmp_path, tmp_active_map_pair=tmp_active_map_pair)
+    # Pydantic accepts the literal `NaN` (non-standard JSON, but Python's
+    # json module emits it via `json.dumps(float('nan'))`).
+    raw = b'{"x_m": NaN, "y_m": -0.18, "mode": "absolute"}'
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post(
+            "/api/map/origin",
+            content=raw,
+            headers={**_auth(token), "Content-Type": "application/json"},
+        )
+    # Either Pydantic rejects (bad_payload) OR our isfinite check fires
+    # (bad_origin_value). Both surface as 400; pin both shapes.
+    assert r.status_code == HTTPStatus.BAD_REQUEST
+    err = r.json()["err"]
+    assert err in ("bad_origin_value", "bad_payload")
+    if err == "bad_origin_value":
+        assert r.json()["detail"] == "non_finite_x_m"
+
+
+async def test_post_map_origin_inf_returns_400_bad_origin_value(
+    tmp_path: Path,
+    tmp_active_map_pair: tuple[Path, Path],
+) -> None:
+    """S5 fold partner: ±Inf rejected via `math.isfinite`."""
+    s = _settings_for_map_origin(tmp_path=tmp_path, tmp_active_map_pair=tmp_active_map_pair)
+    raw = b'{"x_m": 0.0, "y_m": Infinity, "mode": "absolute"}'
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post(
+            "/api/map/origin",
+            content=raw,
+            headers={**_auth(token), "Content-Type": "application/json"},
+        )
+    assert r.status_code == HTTPStatus.BAD_REQUEST
+    err = r.json()["err"]
+    assert err in ("bad_origin_value", "bad_payload")
+    if err == "bad_origin_value":
+        assert r.json()["detail"] == "non_finite_y_m"
+
+
+async def test_post_map_origin_bad_mode_returns_422(
+    tmp_path: Path,
+    tmp_active_map_pair: tuple[Path, Path],
+) -> None:
+    """Pydantic Literal["absolute","delta"] enforces `mode` BEFORE the
+    handler runs. A bad value lands as 422 (FastAPI's standard for
+    request-body validation errors)."""
+    s = _settings_for_map_origin(tmp_path=tmp_path, tmp_active_map_pair=tmp_active_map_pair)
+    body = {"x_m": 0.0, "y_m": 0.0, "mode": "lol"}
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post("/api/map/origin", json=body, headers=_auth(token))
+    # FastAPI parses Pydantic via `model_validate_json` here (we call it
+    # ourselves), so a Literal mismatch surfaces as 400 bad_payload.
+    assert r.status_code in (HTTPStatus.BAD_REQUEST, HTTPStatus.UNPROCESSABLE_ENTITY)
+    assert r.json()["err"] == "bad_payload"
+
+
+async def test_post_map_origin_active_map_missing_returns_503(
+    tmp_path: Path,
+    tmp_active_map_pair: tuple[Path, Path],
+) -> None:
+    """Remove the active.{pgm,yaml} symlinks to simulate a missing
+    active map."""
+    maps_dir, active_pgm = tmp_active_map_pair
+    active_pgm.unlink()
+    (maps_dir / "active.yaml").unlink()
+    s = _settings_for_map_origin(tmp_path=tmp_path, tmp_active_map_pair=tmp_active_map_pair)
+    body = {"x_m": 0.0, "y_m": 0.0, "mode": "absolute"}
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post("/api/map/origin", json=body, headers=_auth(token))
+    assert r.status_code == HTTPStatus.SERVICE_UNAVAILABLE
+    assert r.json()["err"] == "active_map_missing"
+
+
+async def test_post_map_origin_backup_failure_aborts_yaml_untouched(
+    tmp_path: Path,
+    tmp_active_map_pair: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Backup-FIRST ordering: a backup-error must abort BEFORE the YAML
+    rewrite. The active YAML stays byte-for-byte unchanged AND the
+    restart-pending sentinel is NOT created."""
+    from godo_webctl import backup as backup_mod
+
+    rp_path = tmp_path / "restart_pending"
+    s = _settings_for_map_origin(
+        tmp_path=tmp_path,
+        tmp_active_map_pair=tmp_active_map_pair,
+        restart_pending_path=rp_path,
+    )
+    maps_dir, _active_pgm = tmp_active_map_pair
+    yaml_realpath = Path(os.path.realpath(maps_dir / "active.yaml"))
+    pre_bytes = yaml_realpath.read_bytes()
+    pre_mtime = yaml_realpath.stat().st_mtime_ns
+
+    def _raise(*args: object, **kwargs: object) -> None:
+        raise backup_mod.BackupError("simulated_backup_failure")
+
+    monkeypatch.setattr(backup_mod, "backup_map", _raise)
+
+    body = {"x_m": 0.32, "y_m": -0.18, "mode": "absolute"}
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post("/api/map/origin", json=body, headers=_auth(token))
+    assert r.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
+    # YAML byte-for-byte unchanged.
+    assert yaml_realpath.read_bytes() == pre_bytes
+    assert yaml_realpath.stat().st_mtime_ns == pre_mtime
+    # Anti-monotone: sentinel NOT touched.
+    assert not rp_path.exists()
+
+
+async def test_post_map_origin_touches_restart_pending_on_success(
+    tmp_path: Path,
+    tmp_active_map_pair: tuple[Path, Path],
+) -> None:
+    """A successful origin edit creates the sentinel file AND the
+    /api/system/restart_pending endpoint reflects it."""
+    rp_path = tmp_path / "restart_pending"
+    s = _settings_for_map_origin(
+        tmp_path=tmp_path,
+        tmp_active_map_pair=tmp_active_map_pair,
+        restart_pending_path=rp_path,
+    )
+    body = {"x_m": 0.32, "y_m": -0.18, "mode": "absolute"}
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post("/api/map/origin", json=body, headers=_auth(token))
+        assert r.status_code == HTTPStatus.OK, r.text
+        assert rp_path.exists()
+        rp_resp = await cl.get("/api/system/restart_pending")
+        assert rp_resp.status_code == HTTPStatus.OK
+        assert rp_resp.json() == {"pending": True}
+
+
+async def test_post_map_origin_appends_activity_log(
+    tmp_path: Path,
+    tmp_active_map_pair: tuple[Path, Path],
+) -> None:
+    """M5 fold: activity log type literal is `"map_origin"` (NOT
+    `"map_origin_edit"`, NOT `"origin_set"`). String-equality on the
+    type field — single-token drift catch."""
+    s = _settings_for_map_origin(tmp_path=tmp_path, tmp_active_map_pair=tmp_active_map_pair)
+    body = {"x_m": 0.32, "y_m": -0.18, "mode": "absolute"}
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post("/api/map/origin", json=body, headers=_auth(token))
+        assert r.status_code == HTTPStatus.OK
+        ar = await cl.get("/api/activity?n=5")
+        assert ar.status_code == HTTPStatus.OK
+        items = ar.json()
+    types = [item["type"] for item in items]
+    # Literal-string equality (NOT startswith / in).
+    assert "map_origin" in types
+    assert "map_origin_edit" not in types
+    assert "origin_set" not in types
+    detail = next(item["detail"] for item in items if item["type"] == "map_origin")
+    assert "mode=absolute" in detail
+    assert "prev=" in detail
+    assert "new=" in detail
+
+
+async def test_post_map_origin_backup_ts_matches_disk_snapshot(
+    tmp_path: Path,
+    tmp_active_map_pair: tuple[Path, Path],
+) -> None:
+    """S1 fold: returned `backup_ts` matches exactly one entry from
+    GET /api/map/backup/list AND the on-disk snapshot YAML reflects the
+    PRE-edit origin bytes (so a future Restore actually undoes the
+    origin change). Anti-swap pin: a writer reordering the sequence to
+    "edit-then-backup" would archive the post-edit YAML and fail this."""
+    s = _settings_for_map_origin(tmp_path=tmp_path, tmp_active_map_pair=tmp_active_map_pair)
+
+    body = {"x_m": 0.32, "y_m": -0.18, "mode": "absolute"}
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post("/api/map/origin", json=body, headers=_auth(token))
+        assert r.status_code == HTTPStatus.OK
+        backup_ts = r.json()["backup_ts"]
+        lr = await cl.get("/api/map/backup/list")
+        assert lr.status_code == HTTPStatus.OK
+        items = lr.json()["items"]
+    matching = [it for it in items if it["ts"] == backup_ts]
+    assert len(matching) == 1, f"expected exactly 1 backup with ts={backup_ts}, got {len(matching)}"
+    # Snapshot YAML reflects pre-edit origin bytes.
+    backup_yaml = s.backup_dir / backup_ts / "studio_v1.yaml"
+    assert backup_yaml.is_file()
+    snapshot_text = backup_yaml.read_text("utf-8")
+    assert "origin: [-1.5, -2.0, 0.0]" in snapshot_text
+    # Sanity: the LIVE YAML reflects the new origin.
+    maps_dir, _active_pgm = tmp_active_map_pair
+    live_text = (maps_dir / "active.yaml").read_text("utf-8")
+    assert "origin: [0.32, -0.18, 0.0]" in live_text
+
+
+async def test_post_map_origin_yaml_rewrite_failure_leaves_no_restart_pending(
+    tmp_path: Path,
+    tmp_active_map_pair: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S3 fold: anti-monotone partner of `_touches_restart_pending`.
+    If `apply_origin_edit` raises after a successful backup, (a) the
+    backup snapshot still exists (it ran first), (b) restart-pending
+    is NOT touched, (c) activity log does NOT carry a `map_origin` row.
+    """
+    from godo_webctl import map_origin as map_origin_mod
+
+    rp_path = tmp_path / "restart_pending_sentinel"
+    s = _settings_for_map_origin(
+        tmp_path=tmp_path,
+        tmp_active_map_pair=tmp_active_map_pair,
+        restart_pending_path=rp_path,
+    )
+
+    def _raise_edit(*args: object, **kwargs: object) -> None:
+        raise map_origin_mod.OriginEditFailed("simulated_origin_edit_failure")
+
+    monkeypatch.setattr(map_origin_mod, "apply_origin_edit", _raise_edit)
+
+    body = {"x_m": 0.32, "y_m": -0.18, "mode": "absolute"}
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post("/api/map/origin", json=body, headers=_auth(token))
+        assert r.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
+        assert r.json()["err"] == "origin_edit_failed"
+        # Anti-monotone: sentinel NOT touched.
+        assert not rp_path.exists()
+        # Activity log does NOT carry a map_origin row.
+        ar = await cl.get("/api/activity?n=10")
+        types = [it["type"] for it in ar.json()]
+        assert "map_origin" not in types
+    # Backup snapshot still exists (step 1 succeeded).
+    backups = list(s.backup_dir.iterdir())
+    assert any(b.is_dir() and b.name.endswith("Z") for b in backups)
+
+
+async def test_post_map_origin_oversize_returns_413(
+    tmp_path: Path,
+    tmp_active_map_pair: tuple[Path, Path],
+) -> None:
+    """M3 Option A: oversize body returns 413 with `bad_payload +
+    detail=body_too_large` (mirror of PATCH /api/config precedent)."""
+    s = _settings_for_map_origin(tmp_path=tmp_path, tmp_active_map_pair=tmp_active_map_pair)
+    huge = b'{"x_m": 0.0, "y_m": 0.0, "mode": "absolute", "junk": "' + b"x" * 1024 + b'"}'
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post(
+            "/api/map/origin",
+            content=huge,
+            headers={**_auth(token), "Content-Type": "application/json"},
+        )
+    assert r.status_code == HTTPStatus.REQUEST_ENTITY_TOO_LARGE
+    body = r.json()
+    assert body["err"] == "bad_payload"
+    assert body["detail"] == "body_too_large"
+
+
+async def test_post_map_origin_locale_comma_string_returns_400(
+    tmp_path: Path,
+    tmp_active_map_pair: tuple[Path, Path],
+) -> None:
+    """T4 fold: defence-in-depth — a string-typed locale-comma value
+    (`"1,234.5"`) reaches the JSON layer and is rejected by Pydantic's
+    float coercion as `bad_payload`. The SPA already short-circuits this
+    upstream; the test pins the backend's defence."""
+    s = _settings_for_map_origin(tmp_path=tmp_path, tmp_active_map_pair=tmp_active_map_pair)
+    body = {"x_m": "1,234.5", "y_m": -2.0, "mode": "absolute"}
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post("/api/map/origin", json=body, headers=_auth(token))
+    assert r.status_code == HTTPStatus.BAD_REQUEST
+    assert r.json()["err"] == "bad_payload"

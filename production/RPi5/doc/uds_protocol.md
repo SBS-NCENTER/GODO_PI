@@ -28,16 +28,87 @@ is pure ASCII). Whitespace between structural tokens is tolerated.
 
 ### `set_mode`
 
-Set `g_amcl_mode` atomically. Always succeeds (the value is overwritten
-even if AMCL is mid-iteration; the cold writer observes the new mode at
-the next loop top or after the in-flight scan completes).
+Set `g_amcl_mode` atomically. Always succeeds for the bare-mode shape
+(the value is overwritten even if AMCL is mid-iteration; the cold
+writer observes the new mode at the next loop top or after the in-flight
+scan completes).
+
+issue#3 (pose hint, §C.1.1) — the request MAY carry an optional pose-
+hint payload of up to five number-valued fields. When present, the
+tracker publishes the hint into the calibrate-hint atomics via the
+M3 release/acquire ordering chain BEFORE storing
+`g_amcl_mode = OneShot`, so the cold writer sees a fresh hint on its
+next acquire-load of the mode.
 
 ```text
 Request:  {"cmd":"set_mode","mode":"<Idle|OneShot|Live>"}\n
+          {"cmd":"set_mode","mode":"OneShot",
+           "seed_x_m":<num>,"seed_y_m":<num>,"seed_yaw_deg":<num>}\n
+          {"cmd":"set_mode","mode":"OneShot",
+           "seed_x_m":<num>,"seed_y_m":<num>,"seed_yaw_deg":<num>,
+           "sigma_xy_m":<num>,"sigma_yaw_deg":<num>}\n
 Response: {"ok":true}\n
-Errors:   {"ok":false,"err":"bad_mode"}\n     unknown mode value
-          {"ok":false,"err":"parse_error"}\n  malformed JSON
+Errors:   {"ok":false,"err":"bad_mode"}\n                  unknown mode value
+          {"ok":false,"err":"parse_error"}\n               malformed JSON
+          {"ok":false,"err":"bad_seed_partial"}\n          two-of-three seed_* fields
+          {"ok":false,"err":"bad_seed_with_non_oneshot"}\n hint with mode != OneShot
+          {"ok":false,"err":"bad_sigma_without_seed"}\n    σ override without seed_*
+          {"ok":false,"err":"bad_seed_value"}\n            non-finite or out-of-range
 ```
+
+#### `set_mode` — pose hint payload (issue#3, §C.1.1)
+
+The pose-hint extension carries the operator-placed initial seed for
+AMCL phase-0 (`converge_anneal`). When the hint is present, the cold
+writer's phase-0 calls `seed_around(hint, σ_xy, σ_yaw)` instead of
+`seed_global`, narrowing the multi-basin spread to a single Gaussian
+basin around the operator's click.
+
+Field semantics:
+
+| Field | Type | Optional | Range | Notes |
+|---|---|---|---|---|
+| `seed_x_m`     | JSON number | yes (all-or-none) | `[-100, 100]` m       | AMCL-frame X. |
+| `seed_y_m`     | JSON number | yes (all-or-none) | `[-100, 100]` m       | AMCL-frame Y. |
+| `seed_yaw_deg` | JSON number | yes (all-or-none) | `[0, 360)` (CCW REP-103) | AMCL-frame yaw. |
+| `sigma_xy_m`   | JSON number | independent       | `[0.05, 5.0]` m       | Per-call σ_xy override. Cfg default `amcl.hint_sigma_xy_m_default = 0.50` applies when omitted. |
+| `sigma_yaw_deg`| JSON number | independent       | `[1.0, 90.0]` deg     | Per-call σ_yaw override. Cfg default `amcl.hint_sigma_yaw_deg_default = 20.0` applies when omitted. |
+
+Validation rules:
+
+1. The seed triple `(seed_x_m, seed_y_m, seed_yaw_deg)` is
+   **all-or-none**. Two-of-three is rejected as `bad_seed_partial`.
+2. σ overrides require the seed triple to be present. σ alone is
+   rejected as `bad_sigma_without_seed`.
+3. Hint payloads with `mode != "OneShot"` are rejected as
+   `bad_seed_with_non_oneshot`. Live-mode hint is out of scope; GPIO
+   calibrate keeps its current uniform-seed behaviour.
+4. Each field MUST be a JSON NUMBER (not a JSON string). The C++
+   parser rejects string-quoted "1.0" on a number-valued key as
+   `parse_error`. `repr(float)` (Python webctl encoder) emits the
+   accepted shape: optional `-`, integer part, optional `.N+`,
+   optional `eN`. NaN / Infinity / leading `+` / leading `.` are
+   rejected.
+5. Non-finite or out-of-range values are rejected as `bad_seed_value`.
+
+Wire ordering (Mode-A M3): the tracker stores the bundle into
+`Seqlock<HintBundle> g_calibrate_hint_data`, then sets
+`std::atomic<bool> g_calibrate_hint_valid` to `true` with release
+ordering, THEN stores `g_amcl_mode = OneShot` (also release). The
+cold writer's acquire-load on `g_amcl_mode` happens-after the bundle
+publish.
+
+Consume-once: the cold writer (`run_one_iteration`) is the SOLE
+clearer of `g_calibrate_hint_valid`. Every OneShot completion
+clears the flag whether the OneShot started with a hint or not, so
+a stale hint from a previous OneShot can never bleed into the next
+one. See production/RPi5/CODEBASE.md invariant (p) for the full
+ownership chain.
+
+Empty-body `set_mode` (no hint fields) is byte-identical to the
+pre-issue#3 wire — back-compat is pinned by webctl
+`test_protocol::encode_set_mode_no_hint_byte_identical_to_pre_issue3`
++ `test_app_integration::test_calibrate_empty_body_byte_identical_to_pre_issue3`.
 
 ### `get_mode`
 

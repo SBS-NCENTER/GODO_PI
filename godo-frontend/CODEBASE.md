@@ -2212,3 +2212,130 @@ void` callback prop. In origin-pick mode pointer-down emits
   unrelated to this PR. The 3 new origin-pick cases all pass; 1 fix
   to the existing brush-edit happy-path test (strict-mode locator
   collision after PR #41 added the page-local RestartPendingBanner).
+
+## 2026-05-01 00:30 KST — issue#3: pose hint UI (Map Overview, blended A+B + C numeric)
+
+### Added
+
+- `src/components/PoseHintLayer.svelte` (~290 LOC) — sibling DOM
+  canvas overlay on Map Overview (Mode-A C1: NOT an `ondraw`
+  consumer of MapUnderlay's layer-3 paint slot, which is owned by
+  `<PoseCanvas/>`). Pattern mirrors `<MapMaskCanvas/>` on Edit:
+  absolute-positioned canvas with `pointer-events: auto` only when
+  the toggle is ON. Owns the blended A+B gesture state machine:
+    A: pointerdown → drag ≥ POSE_HINT_DRAG_MIN_PX (8 px) →
+       pointerup commits position + yaw.
+    B: pointerdown → pointerup with drag < MIN_PX → placing-yaw-await
+       → second click commits yaw.
+    ESC at any non-idle state aborts to idle and clears hint.
+  Pointer math via `viewport.canvasToWorld(...)` (Mode-A M5).
+  Affordance badge "이제 방향을 클릭하세요" during placing-yaw-await
+  (Mode-A S5).
+- `src/components/PoseHintNumericFields.svelte` (~150 LOC) — three
+  text inputs (x_m, y_m, yaw_deg) with locale-comma rejection +
+  range validation. Two-way bound with the GUI marker via prop +
+  callback. Mirrors OriginPicker's input idiom (B-MAPEDIT-2 dual-
+  input pattern).
+- `src/lib/originMath.ts::yawFromDrag(startWx, startWy, endWx, endWy)`
+  — pure helper, CCW REP-103 [0, 360). Returns `null` on zero-length
+  drag. World-frame delta (caller has already passed canvas pixels
+  through `viewport.canvasToWorld` which Y-flips per ROS).
+- `src/lib/api.ts::apiPostCalibrate(body?)` — body-less POST when
+  `body === undefined` (back-compat byte-identical to pre-issue#3).
+- `src/lib/protocol.ts::CalibrateBody` interface — TS mirror of
+  webctl Pydantic shape. Drift policy mirrors `(u)`.
+- `src/lib/constants.ts` — `POSE_HINT_DRAG_MIN_PX = 8` (Mode-A N4),
+  `POSE_HINT_MARKER_*`, `POSE_HINT_ARROW_*`, `POSE_HINT_X_Y_ABS_MAX_M`,
+  `POSE_HINT_YAW_DEG_LT`, `POSE_HINT_DECIMAL_DISPLAY_MM`.
+
+### Changed
+
+- `src/routes/Map.svelte` — `poseHintEnabled` toggle + hint state
+  live in this parent (Mode-A M6). `<PoseHintLayer/>` mounted only
+  when toggle is ON AND active sub-tab is Overview. Hint state
+  survives sub-tab switch so the common-header
+  `<TrackerControls/>` "Calibrate from hint" button works on either
+  sub-tab. Numeric panel rendered below canvas when toggle is ON.
+- `src/components/TrackerControls.svelte` — new `hint` + `onClearHint`
+  props. New "Calibrate from hint" button next to the existing
+  Calibrate button; disabled until a hint is placed. Inherits the
+  existing `busy` debounce (Mode-A S7) — no new debounce code.
+  After successful calibrate-from-hint, `onClearHint()` clears the
+  marker (consume-once UX mirror of the cold-writer consume-once
+  invariant in production CODEBASE (p)).
+
+### Tests
+
+- `tests/unit/poseHintLayer.test.ts` (NEW, 8 cases):
+  * A path: drag ≥ MIN_PX commits yaw
+  * B path: sub-MIN drag → placing-yaw-await → second click commits
+  * ESC during placing-yaw-await aborts + clears hint
+  * ESC during placing-yaw-via-drag aborts (no commit)
+  * disabled layer ignores pointer events
+  * viewport round-trip identity at zoom=1, pan=(0,0)
+  * viewport round-trip identity at zoom=2, pan=(0,0)
+  * viewport round-trip identity at zoom=1, pan=(100,-50)
+- `tests/unit/originMath.test.ts` — 10 new yawFromDrag cases
+  (8 cardinal/diagonal + zero-length + translation invariance).
+- `tests/unit/api.test.ts` — 2 new apiPostCalibrate cases
+  (undefined body / with body).
+- `tests/unit/mapViewportNoWheelImports.test.ts` — case 4 added:
+  `<PoseHintLayer/>` does NOT register `onwheel=` (Mode-A
+  anti-regression: pinch zoom must fall through to MapUnderlay).
+- All 299 vitest cases pass. `tsc --noEmit` clean for issue#3 files.
+  `npm run build` green (135 KB JS bundle, 28 KB CSS).
+
+### Removed
+
+- (none)
+
+### Invariants
+
+- **(ac) pose-hint-layer-sibling-canvas-discipline** — issue#3 UI.
+  Mirror of webctl's `(ab) → (aa) → (ac)` letter progression.
+
+  1. **Sibling DOM canvas, NOT an `ondraw` consumer** (Mode-A C1).
+     `<PoseCanvas/>` already owns `<MapUnderlay/>`'s layer-3
+     `ondraw` paint slot (pose-dot + trail). A second consumer is
+     impossible. `<PoseHintLayer/>` mounts as an absolute-
+     positioned sibling DOM canvas with z-index 2; it is unmounted
+     entirely on the Edit sub-tab and when the operator toggles
+     pose-hint OFF.
+
+  2. **Pointer-event gating**: `pointer-events: auto` ONLY when
+     `enabled === true`. Otherwise `pointer-events: none` so pan +
+     pinch + hover fall through to `<MapUnderlay/>` below. Pinned
+     by `mapViewportNoWheelImports.test.ts` case 4 (no `onwheel=`
+     handler at all on this layer — pinch reaches MapUnderlay
+     regardless of toggle state).
+
+  3. **Hint state lives in `Map.svelte`** (Mode-A M6), NOT in
+     `<PoseHintLayer/>`. The layer is unmounted on Edit but the
+     placed hint persists — the common-header
+     `<TrackerControls/>` "Calibrate from hint" button works on
+     either sub-tab. A future refactor that moves hint state into
+     the layer breaks the cross-sub-tab UX.
+
+  4. **Coord conversion via `viewport.canvasToWorld`** (Mode-A M5),
+     NOT `pixelToWorld`. The viewport helper is zoom/pan-aware AND
+     applies the ROS Y-flip; `pixelToWorld` (originMath.ts) is the
+     static-PGM-image path used by OriginPicker and is wrong here
+     (would ignore zoom/pan). `yawFromDrag` is a pure helper that
+     consumes WORLD-frame deltas (output of canvasToWorld), so a
+     straight `atan2(dy, dx)` gives the CCW yaw with the standard
+     mathematical convention.
+
+  5. **Consume-once UX mirror**: after a successful
+     `Calibrate from hint`, the SPA clears the marker
+     (`onClearHint()` callback). This mirrors the cold-writer
+     consume-once invariant in production CODEBASE (p) — the
+     tracker has consumed the bundle on its side; leaving the
+     marker visible would mislead the operator about a future
+     fresh click.
+
+### Test counts
+
+- vitest: 299 (was 277; +22 new = 10 yawFromDrag + 8 poseHintLayer
+  + 2 api + 1 mapViewportNoWheel + 1 already-existing infrastructure).
+- playwright: deferred (no e2e change for issue#3; HIL is the
+  load-bearing acceptance gate per plan §"Definition of Done").

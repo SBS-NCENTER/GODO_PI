@@ -120,6 +120,7 @@
         'success',
       );
       void refreshRestartPending();
+      if (redirectTimer !== null) clearTimeout(redirectTimer);
       redirectTimer = setTimeout(() => {
         navigate('/map');
       }, MAP_EDIT_REDIRECT_DELAY_MS);
@@ -166,6 +167,7 @@
         `적용은 godo-tracker 재시작 후.`;
       originBannerKind = 'success';
       void refreshRestartPending();
+      if (redirectTimer !== null) clearTimeout(redirectTimer);
       redirectTimer = setTimeout(() => {
         navigate('/map');
       }, ORIGIN_PICK_REDIRECT_DELAY_MS);

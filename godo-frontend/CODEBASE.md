@@ -1835,6 +1835,22 @@ combination handles both the timer-fires-while-tab-hidden case and
 the operator-clicks-and-walks-away case without ever showing a stale
 error past the next successful poll.
 
+## 2026-04-30 15:30 KST — Track B-MAPEDIT-2 follow-up (Mode-B Minor-2) — `redirectTimer` clearTimeout-before-reassign
+
+### Changed
+
+- `src/routes/MapEdit.svelte` — Both apply paths (`onApply` for brush,
+  `onOriginApply` for origin pick) reuse a single `redirectTimer`
+  variable. If an operator fires both within the redirect window, the
+  second `setTimeout` ID overwrites the first and `onDestroy` only
+  clears the most recent. Added `if (redirectTimer !== null)
+  clearTimeout(redirectTimer);` before each reassignment so a prior
+  pending timer is canceled before the new one starts. User-visible
+  behavior unchanged in normal flows (both targets are `/map`); the
+  fix prevents a leak in the edge case where two applies fire
+  back-to-back. No new tests — existing playwright cases continue to
+  pass.
+
 ## 2026-04-30 14:37 KST — Track B-MAPEDIT-2 (Phase 4.5 P2): origin pick (dual GUI + numeric input)
 
 ### Added

@@ -33,7 +33,15 @@ const tsFiles = import.meta.glob<string>(
   { eager: true, query: '?raw', import: 'default' },
 );
 
-const PINCH_ALLOWED_FILE = '../../src/components/MapUnderlay.svelte';
+// issue#2.3 — both MapUnderlay AND MapMaskCanvas now register `onwheel=`
+// because the mask layer sits on top of the underlay and would otherwise
+// absorb the wheel event, preventing pinch zoom from reaching the
+// shared viewport. Both handlers MUST gate on `ctrlKey` (operator-locked
+// Rule 1 — scroll-wheel zoom remains forbidden; pinch is the carve-out).
+const PINCH_ALLOWED_FILES = new Set<string>([
+  '../../src/components/MapUnderlay.svelte',
+  '../../src/components/MapMaskCanvas.svelte',
+]);
 
 describe('PR β + issue#2.2 — wheel-zoom-removal structural pin (pinch carve-out)', () => {
   it('case 1: MAP_WHEEL_ZOOM_FACTOR is gone from lib/constants.ts', () => {
@@ -41,22 +49,26 @@ describe('PR β + issue#2.2 — wheel-zoom-removal structural pin (pinch carve-o
     expect(value).toBeUndefined();
   });
 
-  it('case 2: only MapUnderlay.svelte has onwheel=, and its handler is ctrlKey-gated', () => {
+  it('case 2: only PINCH_ALLOWED_FILES have onwheel=, and each handler is ctrlKey-gated', () => {
     const offenders: string[] = [];
     for (const [path, content] of Object.entries(svelteFiles)) {
       const lower = String(content).toLowerCase();
       const hasOnWheel = lower.includes('onwheel=') || lower.includes('onwheel ');
       if (!hasOnWheel) continue;
 
-      if (path !== PINCH_ALLOWED_FILE) {
-        offenders.push(`${path} (only MapUnderlay may register wheel handlers)`);
+      if (!PINCH_ALLOWED_FILES.has(path)) {
+        offenders.push(`${path} (only MapUnderlay/MapMaskCanvas may register wheel handlers)`);
         continue;
       }
 
-      // The MapUnderlay handler MUST check ctrlKey before zooming —
+      // The handler MUST check ctrlKey before zooming —
       // operator-locked: scroll without ctrl = page scroll, NOT zoom.
       const text = String(content);
-      if (!text.includes('e.ctrlKey') && !text.includes('event.ctrlKey')) {
+      if (
+        !text.includes('e.ctrlKey') &&
+        !text.includes('ev.ctrlKey') &&
+        !text.includes('event.ctrlKey')
+      ) {
         offenders.push(`${path} (onwheel handler missing ctrlKey check)`);
       }
     }

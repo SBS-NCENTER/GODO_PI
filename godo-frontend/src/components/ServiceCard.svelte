@@ -4,6 +4,7 @@
   import { SERVICE_TRANSITION_TOAST_TTL_MS } from '$lib/constants';
   import { ERR_SERVICE_STARTING, ERR_SERVICE_STOPPING, type ServiceStatus } from '$lib/protocol';
   import { statusChipClass } from '$lib/serviceStatus';
+  import { refresh as refreshRestartPending } from '$stores/restartPending';
 
   interface Props {
     service: ServiceStatus;
@@ -44,6 +45,10 @@
     clearDismissTimer();
     try {
       await apiPost(`/api/local/service/${service.name}/${act}`);
+      // godo-tracker boots clear the restart-pending sentinel; refresh
+      // the SPA store so the banner clears without a page reload.
+      // No-op for non-tracker services.
+      void refreshRestartPending();
       onAction?.(act);
     } catch (e) {
       const err = e as ApiError;

@@ -1,4 +1,5 @@
-- [CODEBASE.md SSOT freshness at task close](feedback_codebase_md_freshness.md) — backend + frontend CODEBASE.md files must reflect the final change shape before any commit/merge/push.
+- [CODEBASE.md SSOT freshness + cascade rule](feedback_codebase_md_freshness.md) — per-stack CODEBASE.md files reflect final shape before commit/merge/push; root CODEBASE.md / DESIGN.md update only when the family shape shifts (no duplicate invariant text across levels).
+- [NEXT_SESSION.md is a cache, not a SSOT](feedback_next_session_cache_role.md) — SSOT-docs = RAM, NEXT_SESSION = cache. 3-step absorb routine (read → record in SSOT → prune the NEXT_SESSION item).
 - [Repo topology and multi-machine workflow](project_repo_topology.md) — SSOT = SBS-NCENTER/GODO_PI (company); chunbay/GODO is a mirror only. Three hosts: Mac, Windows, RPi5 (via SSH).
 - [CLAUDE.md stays concise](feedback_claudemd_concise.md) — CLAUDE.md is a short guide; detailed analyses go into separate reference docs with back-links.
 - [Project overview](project_overview.md) — GODO = RPi 5 single binary (LiDAR localization + FreeD merge + 59.94 fps UDP). Map built once via Docker. Details in SYSTEM_DESIGN.md.

@@ -86,24 +86,32 @@ The smoother + 60 Hz hot path was designed around mode (4) — its 60 Hz interpo
 │ Phase 0. Deep analysis of RPLIDAR C1           ✅ done       │
 │   └─ Deliverable: doc/RPLIDAR/RPLIDAR_C1.md                  │
 ├─────────────────────────────────────────────────────────────┤
-│ Phase 1. Data normalization (Python prototype) ◄ current    │
-│   ├─ Raw data dump via the official SDK                     │
-│   ├─ Noise characterization, filter design                  │
-│   └─ Static (x, y, yaw) extraction pipeline                 │
+│ Phase 1. Data normalization (Python prototype) ✅ scaffold   │
+│   └─ Replaced in production by Phase 4-2 in-process pipeline │
 ├─────────────────────────────────────────────────────────────┤
-│ Phase 2. Localization algorithm                             │
-│   ├─ Reference-scan + ICP (provisional per Phase 0)         │
-│   ├─ World-frame pose from the origin                       │
-│   └─ Reproducibility test (repeat scans at same position)   │
+│ Phase 2. Localization algorithm                ✅ done       │
+│   └─ Pre-built map + AMCL (Track D family closed Phase 4-2) │
 ├─────────────────────────────────────────────────────────────┤
-│ Phase 3. Port to target hardware                            │
-│   ├─ RPi 5 as primary host (provisional per Phase 0)        │
-│   ├─ Trigger UX (physical button vs. network — Q6)          │
-│   └─ Offset delivery path                                   │
+│ Phase 3. Port to target hardware               ✅ done       │
+│   └─ RPi 5 C++ scaffold + godo_smoke 2026-04-23             │
 ├─────────────────────────────────────────────────────────────┤
-│ Phase 4. FreeD integration                                  │
-│   ├─ FreeD receive + offset merge + UDP send (unified C++)  │
-│   └─ Origin-reset interface                                 │
+│ Phase 4-1. RT hot path closeout                ✅ done       │
+│   └─ SCHED_FIFO + CPU 3 isolation, p99=12.7 µs measured     │
+├─────────────────────────────────────────────────────────────┤
+│ Phase 4-2. LiDAR + AMCL + cold-path           ✅ done       │
+│   ├─ AMCL one-shot + Live (Track D-1..D-5)                  │
+│   └─ Sigma annealing solved convergence (PR #32)            │
+├─────────────────────────────────────────────────────────────┤
+│ Phase 4-3. webctl + UDS bridge                 ✅ done       │
+│   └─ FastAPI + 14+ endpoints + 4 SSE streams                │
+├─────────────────────────────────────────────────────────────┤
+│ Phase 4.5. Operator SPA + Map editor          ◄ current     │
+│   ├─ P0 SPA scaffold ✅                                      │
+│   ├─ P1 Track-B family (config / diag / backup) ✅           │
+│   ├─ P2 System tab + process monitor ✅ (PR #36)             │
+│   ├─ P2 Map editor brush-erase ✅ (PR #39)                   │
+│   ├─ P2 Map editor origin pick ◄ next                       │
+│   └─ P2 Map editor rotation (deferred)                       │
 ├─────────────────────────────────────────────────────────────┤
 │ Phase 5. Field integration test (Unreal Engine)             │
 └─────────────────────────────────────────────────────────────┘
@@ -141,49 +149,62 @@ The smoother + 60 Hz hot path was designed around mode (4) — its 60 Hz interpo
 
 ```text
 /                                ← GODO workspace root
-├─ CLAUDE.md                     ← This document (SSOT)
-├─ SYSTEM_DESIGN.md              ← End-to-end system design & implementation guide
-├─ PROGRESS.md                   ← Cross-session progress log (Mac / Windows)
+├─ CLAUDE.md                     ← Operating rules (this file)
+├─ CODEBASE.md                   ← Cross-stack scaffold + module roles (root index)
+├─ DESIGN.md                     ← Design-doc TOC (links SYSTEM + FRONT)
+├─ SYSTEM_DESIGN.md              ← Backend + RT + AMCL + FreeD design SSOT
+├─ FRONT_DESIGN.md               ← Frontend / page / component design SSOT
+├─ PROGRESS.md                   ← Cross-session progress log (English, technical)
+├─ NEXT_SESSION.md               ← Cold-start cache (throwaway, prune-on-absorption)
 ├─ /.claude
 │    ├─ /agents                  ← Agent definitions (planner / writer / reviewer)
 │    └─ /memory                  ← Project persistent memory (portable)
 │         ├─ MEMORY.md
 │         └─ *.md                ← user / feedback / project / reference entries
 ├─ /doc                          ← Reference documents
-│    ├─ Embedded_CheckPoint.md   ← Embedded reliability checklist (reference)
+│    ├─ history.md                 Cross-session narrative (Korean)
+│    ├─ Embedded_CheckPoint.md     Embedded reliability checklist (reference)
 │    ├─ /hardware                ← Hardware decision / measurement reports
 │    │    ├─ floor_tilt_survey_TS5.md
 │    │    └─ leveling_mount.md
 │    └─ /RPLIDAR                 ← RPLIDAR reference docs
 │         ├─ RPLIDAR_C1.md       ← C1 deep dive (Phase 0 output)
-│         └─ /sources            ← Original datasheets (PDF)
+│         └─ /sources            ← Original datasheets (PDF, read-only)
 ├─ /prototype                    ← Prototyping / research stacks
-│    └─ /Python                  ← Python prototype project (Phase 1~2, UV)
+│    └─ /Python                  ← Phase 1~2 algorithm prototype (UV)
 │         ├─ README.md
 │         └─ CODEBASE.md         ← Structural / functional change log
 ├─ /production                   ← Production deployment stacks
-│    └─ /RPi5                    ← C++ application on Raspberry Pi 5 (Phase 3~)
+│    └─ /RPi5                    ← C++ tracker (godo_tracker_rt, Phase 3+)
 │         ├─ README.md
-│         └─ CODEBASE.md
-├─ /godo-webctl                  ← Operator web control plane (Python FastAPI, Phase 4-3~)
+│         └─ CODEBASE.md         ← Invariants (a)..(o) + change log
+├─ /godo-webctl                  ← Operator web control plane (Python FastAPI, Phase 4-3+)
 │    ├─ README.md                  drives godo-tracker via UDS at /run/godo/ctl.sock
-│    ├─ CODEBASE.md
-│    └─ pyproject.toml             UV-managed; 14 endpoints + 2 SSE streams (PR-A, P0)
-├─ /godo-frontend                ← Operator SPA (Vite + Svelte 5 + TS, Phase 4.5 P0)
+│    ├─ CODEBASE.md                Invariants (a)..(aa) + change log
+│    └─ pyproject.toml             UV-managed; FastAPI + bcrypt + pyjwt + pillow + python-multipart
+├─ /godo-frontend                ← Operator SPA (Vite + Svelte 5 + TS, Phase 4.5)
 │    ├─ README.md                  served by godo-webctl when GODO_WEBCTL_SPA_DIST is set
-│    ├─ CODEBASE.md
-│    └─ package.json               P0 pages: DASH, MAP, AUTH, LOCAL
-└─ /XR_FreeD_to_UDP              ← Legacy Arduino firmware (rollback card, reference)
+│    ├─ CODEBASE.md                Invariants (a)..(u) + change log
+│    └─ package.json               Pages: Dashboard, Map (with Edit sub-tab), Diag, Config, System (with sub-tabs), Backup, Local, Login
+└─ /XR_FreeD_to_UDP              ← Legacy Arduino firmware (rollback card, read-only reference)
      ├─ README.md
      ├─ platformio.ini
      └─ src/main.cpp             ← FreeD D1 parser + UDP send reference
 ```
 
+**Hierarchy quick-reference:**
+- `CODEBASE.md` (root) and `DESIGN.md` (root) are scaffold/index files. They do NOT duplicate per-stack invariant text or design-doc bodies.
+- Per-stack `CODEBASE.md` files own their invariants `(a)..(z)..` and change log; this is the SSOT for "what is built and why each rule exists."
+- `SYSTEM_DESIGN.md` + `FRONT_DESIGN.md` own design narrative; the root `DESIGN.md` is just their TOC.
+
 ### New-session entry procedure (Mac / Windows alike)
 
-1. Read `CLAUDE.md` and `PROGRESS.md` first for full context.
-2. Check `.claude/memory/MEMORY.md` and load relevant entries.
-3. As needed, open `SYSTEM_DESIGN.md`, `doc/RPLIDAR/RPLIDAR_C1.md`, and other references.
+1. Read `CLAUDE.md` (this file) for operating rules.
+2. Read `NEXT_SESSION.md` for what's queued (cold-start cache; prune-on-absorption — see §6).
+3. Check `.claude/memory/MEMORY.md` and load relevant entries.
+4. Open `CODEBASE.md` (root) for "where does X live"; follow into the relevant per-stack `CODEBASE.md` for invariants and recent change log.
+5. Open `DESIGN.md` (root) for "why does X work this way"; follow into `SYSTEM_DESIGN.md` or `FRONT_DESIGN.md`.
+6. `PROGRESS.md` / `doc/history.md` for "what happened in the last few sessions" narrative.
 
 > Automatic memory loading depends on per-host caches, so **explicitly reading `.claude/memory/MEMORY.md` at the start of each session** is recommended. This folder is all you need to continue work on any machine.
 
@@ -211,10 +232,23 @@ These rules apply to the Parent orchestrator and all subagents. They are non-neg
 
 ### Context maintenance
 
-- Code or feature changes → update the relevant `CODEBASE.md` in the same change.
-- Project state / decision changes → update `PROGRESS.md` (Parent's responsibility).
+- Code or feature changes → update the relevant per-stack `CODEBASE.md` in the same change. Per-stack files own invariants `(a)..(z)..` and change log; the root `CODEBASE.md` is updated only when the *family shape* shifts (new stack added, cross-stack data flow changes). See `.claude/memory/feedback_codebase_md_freshness.md` for the cascade rule and the operator's lock-in.
+- Design decisions → update `SYSTEM_DESIGN.md` (backend) or `FRONT_DESIGN.md` (frontend). The root `DESIGN.md` is a TOC; update it only when the design-doc split itself changes.
+- Project state / decision changes → update `PROGRESS.md` + `doc/history.md` (Parent's responsibility).
 - Global behavioral preferences → update `.claude/memory/` (Parent's responsibility).
 - Never write long analysis directly into `CLAUDE.md`; create a dedicated document and link to it.
+
+### NEXT_SESSION.md is a cache, not a SSOT
+
+- `NEXT_SESSION.md` is the cold-start cache: it summarises what's queued so a new session can hit the ground without opening every SSOT file. SSOT documents (PROGRESS.md, doc/history.md, .claude/memory/, per-stack CODEBASE.md) are RAM; NEXT_SESSION.md is cache.
+- The 3-step absorption routine: (1) read the queued task in NEXT_SESSION.md, (2) record outcomes in the relevant SSOT(s) at session-close, (3) prune the absorbed item from NEXT_SESSION.md. The file is rewritten as a whole at session-close, not patched in place piece-by-piece across the session.
+- See `.claude/memory/feedback_next_session_cache_role.md` for the operator-locked routine and rationale.
+
+### Cascade-edit rule for hierarchical docs
+
+- A change in a leaf (per-stack CODEBASE.md, SYSTEM_DESIGN, FRONT_DESIGN) is its own complete update — the leaf is the SSOT.
+- A change that genuinely shifts the *shape* of the family (new stack, renamed module, changed cross-stack arrow, new top-level design doc) updates every affected level in the same commit. No half-cascade.
+- Reviewers (Mode-B) should treat a root-level update without a leaf counterpart, OR a leaf update that contradicts the root scaffold, as a Critical finding.
 
 ### Date + time stamps in date-bearing SSOT entries
 
@@ -321,9 +355,15 @@ Planner ──► Reviewer (Mode-A) ──► (approve) Writer ──► Reviewe
 
 ## 9. Reference documents
 
-### End-to-end design
+### Root navigation hubs
 
-→ **[SYSTEM_DESIGN.md](./SYSTEM_DESIGN.md)** — final topology, data flow, module layout, mapping workflow (Docker + ROS 2 Jazzy + slam_toolbox), AMCL overview, 59.94 fps RT design, phase plan, failure scenarios, and the Windows handoff guide.
+- → **[CODEBASE.md](./CODEBASE.md)** — cross-stack scaffold + module roles + cross-stack data flow + pointers to per-stack CODEBASE.md files.
+- → **[DESIGN.md](./DESIGN.md)** — TOC for the design SSOTs (SYSTEM_DESIGN + FRONT_DESIGN) + cross-doc orientation.
+
+### Design SSOTs (leaves)
+
+- → **[SYSTEM_DESIGN.md](./SYSTEM_DESIGN.md)** — final topology, data flow, module layout, mapping workflow (Docker + ROS 2 Jazzy + slam_toolbox), AMCL overview, 59.94 fps RT design, phase plan, failure scenarios, and the Windows handoff guide.
+- → **[FRONT_DESIGN.md](./FRONT_DESIGN.md)** — frontend SSOT for the operator SPA (page contracts, route map, auth model, component composition).
 
 ### RPLIDAR C1 deep dive (Phase 0 output)
 
@@ -332,4 +372,5 @@ Planner ──► Reviewer (Mode-A) ──► (approve) Writer ──► Reviewe
 ### Others
 
 - [doc/Embedded_CheckPoint.md](./doc/Embedded_CheckPoint.md) — embedded reliability checklist.
-- [PROGRESS.md](./PROGRESS.md) — cross-session progress state.
+- [PROGRESS.md](./PROGRESS.md) — cross-session progress state (English, technical).
+- [doc/history.md](./doc/history.md) — cross-session narrative (Korean).

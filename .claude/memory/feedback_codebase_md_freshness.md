@@ -40,3 +40,56 @@ The CLAUDE.md §6 "Context maintenance" rule already states this; the
 user's reminder elevates it from a default-on rule to an explicit
 non-negotiable invariant, especially for SSOT freshness in
 multi-session work.
+
+---
+
+## Cascade rule for hierarchical SSOT docs (added 2026-04-30 12:50 KST)
+
+The doc tree is now hierarchical:
+
+- Root `CODEBASE.md` = scaffold + module roles + cross-stack data flow.
+- Per-stack `production/RPi5/CODEBASE.md`, `godo-webctl/CODEBASE.md`,
+  `godo-frontend/CODEBASE.md`, `prototype/Python/CODEBASE.md` = invariants
+  + change log (the load-bearing SSOT).
+
+The same hierarchy applies to design docs:
+
+- Root `DESIGN.md` = TOC + cross-doc orientation.
+- Leaf `SYSTEM_DESIGN.md` + `FRONT_DESIGN.md` = the design SSOT bodies.
+
+**Cascade-edit rule** (operator-locked 2026-04-30):
+
+- A change in a leaf (per-stack CODEBASE.md, SYSTEM_DESIGN, FRONT_DESIGN)
+  is its own complete update. The leaf is the SSOT — the root index files
+  do NOT duplicate the leaf content, so most leaf changes touch only the
+  leaf.
+- The root `CODEBASE.md` / `DESIGN.md` is updated **only** when the
+  *shape* of the family shifts: a new stack is added, a stack is renamed
+  or moved, the high-level data flow changes, the design-doc split
+  itself changes (e.g., a third top-level design doc is added).
+- A change that genuinely spans levels (e.g., a new wire-shape that
+  crosses webctl ↔ frontend AND changes the cross-stack arrow drawn in
+  the root CODEBASE.md) MUST update every affected level in the same
+  commit. No half-cascade.
+- Ownership stays asymmetric: the leaf invariant text never lives at the
+  root; the root scaffold text never lives in a leaf. Duplicating either
+  way creates drift between siblings or between levels.
+
+**How to apply:**
+
+1. When opening a new feature plan, identify which level(s) the change
+   touches.
+2. If only a leaf is affected, update only that leaf's CODEBASE.md /
+   design doc.
+3. If the cross-stack diagram, module-roles table, or scaffold hierarchy
+   in the root file would mislead the next reader without the change,
+   include the root update in the same PR.
+4. Reviewers (Mode-B) should treat a root-level update without a leaf
+   counterpart, or a leaf update that contradicts the root scaffold,
+   as a Critical finding.
+
+**Why:** the operator wanted hierarchical SSOT docs to make navigation
+easier, but explicitly called out the SSOT/DRY risk: "any modification
+must cascade so all content is properly reflected." The cascade-edit
+rule is what makes the hierarchy safe — without it, the root files
+become a second copy of the leaves and the two drift.

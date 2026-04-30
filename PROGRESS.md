@@ -174,6 +174,44 @@ All host-side bring-up steps complete. See per-step session log entry below. The
 
 ## Session log
 
+### 2026-04-30 (morning — 06:07 KST → 10:08 KST, tenth-session — 4 PRs landed: PR-A1 + PR-A2 + PR-B + PR-C)
+
+Tenth-session ran the full agent pipeline four times in parallel for the System tab + Config tab feature set. Single-session record: **4 PRs merged on `main`** (5d3cb95, 9c52446, b701f83, 43e100c) plus a session-close docs commit. Operator did GH UI merges + news-pi01 deploy; Parent orchestrated planner → Mode-A → writer → Mode-B for the two larger PRs, direct-write for the two hotfixes.
+
+- **4 PRs merged on main** (final = `5d3cb95`):
+  - **PR #37 → main** (`fix(webctl): unwrap C++ tracker's keys envelope in /api/config (PR-A2)`, +72 / -17, 1 commit): Hotfix for a wire-shape drift bug latent since PR-CONFIG-β shipped. The C++ tracker emits `{"ok":true,"keys":{...}}` (per `json_mini.cpp:374`); the Python `project_config_view` only stripped `ok` and passed `keys` through unchanged → SPA's `current["amcl.foo"]` resolved to `undefined` → Config tab rendered "—" for every Tier-2 row even when the tracker was fully online. Latent because both unit + integration tests mocked the WRONG (flat) UDS reply. Fix: `project_config_view` unwraps `keys`, fixtures reshaped to actual C++ wire, `uds_client.get_config` docstring corrected. **No C++ changes** — the projection layer is the right bridge.
+  - **PR #35 → main** (`fix(systemd): polkit rule for ncenter-group reboot/shutdown (PR-A1)`, +160 / -35, 1 commit): Operator HIL after PR-A merge surfaced HTTP 500 `subprocess_failed` on SPA System tab Reboot Pi / Shutdown Pi buttons. Root cause: PR-A's polkit rule only authorised `org.freedesktop.systemd1.manage-units` (start/stop/restart). The shutdown shim's reboot/power-off path goes through a different action family — `org.freedesktop.login1.{reboot,power-off}*`. Fix: second `polkit.addRule()` block in `49-godo-systemctl.rules` covering all six login1 variants (reboot / power-off, each in plain / -multiple-sessions / -ignore-inhibit form). install.sh + README §7 + production/RPi5/CODEBASE.md invariant `(o)` extended to the dual-rule shape; cross-language SSOT table 4 → 5 rows.
+  - **PR #36 → main** (`feat(webctl,frontend): System tab process monitor + extended resources (PR-B)`, +4193 / -125, 3 commits squashed): Adds Processes + Extended resources sub-tabs to the System tab; both 1 Hz SSE-fed, both anon-readable. Processes lists every PID classified into `general` / `godo` / `managed` (bold + accent name styling for managed); sortable by CPU%; text-search + "GODO only" filter; duplicate-PID red banner (defense-in-depth on top of CLAUDE.md §6 pidfile locking). Extended resources renders per-core CPU bars + mem bar + disk bar (no GPU per operator decision — Trixie firmware regression on V3D `gpu_busy_percent`). Pure stdlib `/proc` + `/sys` parsers (no `psutil`, no `subprocess`, no `vcgencmd`). Cross-language SSOT pinned end-to-end: `test_godo_process_names_match_cmake_executables` regex-extracts `add_executable(<name>` from each `production/RPi5/src/*/CMakeLists.txt`. webctl invariant `(z)` + frontend invariant `(y)` claimed.
+  - **PR #38 → main** (`feat(frontend): Config tab View/Edit safety gate + best-effort Apply (PR-C)`, +1466 / -108, 2 commits + 1 rebase-resolution commit): Adds a View / Edit safety gate on the Config page so the existing per-row blur-PATCH model can no longer fire by accident. Page-level `mode: 'view'|'edit'` state in `Config.svelte`; admin-gated EDIT button top-right; click EDIT → Cancel/Apply button group. Apply uses best-effort sequential PATCH via new `stores/config.ts::applyBatch(pending)` (loops all keys, never aborts mid-loop, single refresh + restartPending refresh post-loop). **Cancel never sends a PATCH** — client-side only; successfully-applied prior values persist on the tracker (memory: `project_config_tab_edit_mode_ux.md`). `(default: <row.default>)` muted hint under each row's Current. Korean tracker-inactive banner subscribed to existing `systemServices` store (no new endpoint). frontend invariant `(z)` claimed (post PR-B's `(y)`). Backend zero LOC.
+
+- **Operator-driven design decisions captured into in-repo memory**:
+  - `project_config_tab_edit_mode_ux.md` — PR-C operator-locked spec with state machine ASCII diagram + canonical t=0..t=6 Cancel-after-partial walkthrough. Explicitly documents WHY Cancel is client-side only (reverse-PATCH is dangerous + surprising) and WHY best-effort over all-or-nothing (atomic bulk would need C++ UDS verb; keys are operationally independent). Future maintainers reverting either decision should re-read this memory first.
+
+- **Tooling milestones**:
+  - First session running 4 parallel PRs through the agent pipeline. Background writer-agent pattern (planner → background writer → Mode-B) scaled cleanly; the only sequencing dependency was branch isolation (Parent committed PR-A1 + PR-A2 + PR-C on separate branches off `main` before kicking each writer, so no shared-tree conflicts).
+  - PR-B's writer absorbed a 9-item Mode-A fold + 5-item Mode-B fold without re-review; PR-C's writer absorbed a 3+4+3-item Mode-A fold and a 5-item Mode-B fold the same way.
+  - Mode-B identified a real UX bug in PR-C (`적용 중… (k/N)` always rendering `0/N` because the counter was set once and never incremented) — fixed in `94dc4a1` follow-up before merge by dropping the broken `(k/N)` from the label.
+
+- **HIL verification on news-pi01 post-deploy**:
+  - install.sh re-run → polkit count 13 → 14 (rule (a) manage-units + rule (b) login1.{reboot,power-off}*).
+  - webctl source rsync to `/opt/godo-webctl/` + `systemctl restart godo-webctl` → `/api/health` returns `ok`.
+  - frontend `npm run build` + rsync `dist/` to `/opt/godo-frontend/dist/` → SPA refreshed.
+  - **Config tab**: 37 Tier-2 keys all show live values (PR-A2 effect — was "—"). `(default: ...)` hint under each row. EDIT button disabled for anon, enabled for admin (PR-C effect).
+  - **System tab**: Processes / Extended resources sub-tabs visible. Process table classifies + bold-renders `godo_*` rows (PR-B effect). Reboot/Shutdown buttons return HTTP 200 (PR-A1 effect).
+
+- **Test deltas**:
+  - Backend pytest 521 → 615 (+94 net: +76 from PR-B `test_processes.py` + `test_resources_extended.py` + integration cases, +18 from PR-A2 reshape; 1 pre-existing flaky `test_atomic_write_c_concurrent_writers_serialise` unrelated).
+  - Frontend unit 164 → 197 (+33: +18 from PR-B `processes.test.ts` + `resourcesExtended.test.ts` + `processTable.test.ts`, +15 from PR-C `config.test.ts` extension).
+  - Frontend e2e unchanged at 37.
+
+- **Operator-prioritized next-session priority order** (refreshed 2026-04-30 10:08 KST close):
+  1. **B-MAPEDIT** (brush erase, ~950 LOC) — Mode-A folded plan ready (`.claude/tmp/plan_track_b_mapedit.md`).
+  2. **B-MAPEDIT-2: origin pick** (~90 LOC bolt-on).
+  3. **Pipelined-pattern audit** (Task #9 carryover).
+  4. **Admin password rotation** (Task #6 from PR-A NEXT_SESSION; deferred from PR-B; defer further to a Local-only / SSH-shell-only flow per PR-C operator decision).
+  5. (deferred) B-MAPEDIT-3 rotation + GPU POC + Track D-5-Live + Track D-5-P.
+  6. (low priority) `test_jitter_ring` flake fix.
+
 ### 2026-04-30 (early morning — 00:00 KST → 06:07 KST, ninth-session marathon — PR-A full systemd switchover + operator service-management policy)
 
 Single-PR session that started as a one-line polkit rule and grew into the full systemd switchover the operator had been working around for weeks. Multiple bug-fix arcs surfaced during HIL and were folded into the same PR — by the time the merge fired, the SPA System tab was fully populated end-to-end (uptime + memory + envfile + env_stale staleness badge + working Start/Stop/Restart buttons).

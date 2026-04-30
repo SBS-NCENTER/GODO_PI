@@ -10,6 +10,79 @@
 
 ---
 
+## 2026-04-30 (오전 — 06:07 KST → 10:08 KST, 열 번째 세션 — PR-A1 + PR-A2 + PR-B + PR-C 4 PR 한 세션 처리)
+
+### 한 줄 요약
+
+**한 세션 안에 4개 PR 머지 (#37 #35 #36 #38) 완료.** PR-A 후속 폴리시 (PR-A1 = login1 polkit rule for reboot/shutdown, PR-A2 = config keys envelope unwrap) 두 작은 hotfix + 큰 feature 두 개 (PR-B = System tab process monitor + extended resources sub-tabs, PR-C = Config tab View/Edit safety gate + best-effort Apply). 두 큰 feature 는 planner → Mode-A → writer → Mode-B 풀 파이프라인을 백그라운드로 병렬 실행.
+
+> 기술 상세는 [PROGRESS.md 2026-04-30 morning 블록](../PROGRESS.md#session-log) 참조.
+
+### 왜 이렇게 결정했는가
+
+#### PR-A1 — login1 polkit rule (Reboot/Shutdown 버튼이 안 됨)
+
+PR-A 머지 직후 운영자 HIL: SPA System tab 의 "Reboot Pi" / "Shutdown Pi" 버튼이 HTTP 500 `subprocess_failed`. PR-A 의 polkit rule 은 `org.freedesktop.systemd1.manage-units` (start/stop/restart) 만 허용했는데, `shutdown -r/-h +0` 은 systemd-logind 의 D-Bus API 경유 → `org.freedesktop.login1.{reboot,power-off}*` 라는 다른 action family. webctl 가 non-login systemd service 라 `*-multiple-sessions` / `*-ignore-inhibit` variant 까지 다 도달 가능 — 6개 variant 전부 allow. halt / suspend / hibernate 는 의도적으로 제외. CODEBASE invariant `(o)` 가 두 룰 (manage-units + login1) 의 lock-step discipline 으로 확장됨.
+
+#### PR-A2 — Config keys envelope unwrap (latent wire-shape drift)
+
+운영자 질문: "Config 탭이 트래커 켜져 있는데도 모두 — 표시." 라이브 진단: `curl /api/config` 가 정상 응답 (`{"keys":{"amcl.foo":1,...}}`) — 즉 webctl→tracker 통신은 살아있음. 그런데 SPA 가 못 받는 게 문제 → 추적해 보니 wire-shape drift.
+
+C++ `json_mini.cpp:374::format_ok_get_config` 는 의도적으로 `{"ok":true,"keys":{...}}` 로 envelope wrap (스키마 endpoint 의 `format_ok_get_config_schema` 와 일관). 그런데 Python `project_config_view` 는 `ok` 만 strip 하고 `keys` 를 통과시킴 → SPA 의 `current = {"keys":{...}}` → `current["amcl.foo"]` → undefined → "—" 렌더링. **PR-CONFIG-β 출시 이후 계속 잠복**했던 버그. 잡히지 않은 이유: 단위 테스트 + 통합 테스트 둘 다 가짜 UDS 응답을 평탄한 (잘못된) shape 으로 mock — 픽스처가 production wire 와 drift.
+
+수정: `project_config_view` 가 `keys` envelope 를 unwrap; 픽스처 4개를 실제 C++ wire shape 으로 reshape; `uds_client.get_config` docstring 정정. **C++ 변경 0** — projection layer 가 SPA 의 평탄-dict 계약을 만족시키는 올바른 위치.
+
+이 사건의 메타-교훈: cross-language wire 의 양쪽 mock 이 모두 잘못되면 "테스트 통과 + 라이브 깨짐" 이 가능. 다음 세션에 cross-language SSOT pin (PR-B 의 `test_godo_process_names_match_cmake_executables` 같은 regex-extract 검증) 을 wire-shape 에도 적용 검토할 만함.
+
+#### PR-B — System tab process monitor + extended resources
+
+운영자 우선순위 #1. 메모리 spec (`project_system_tab_service_control.md`) 기반 + 작업 중 운영자 추가 결정으로 scope 일부 변경:
+
+1. **GPU 모니터링 drop**: V3D `gpu_busy_percent` 가 RPi 5 + Trixie firmware 에서 unreliable (raspberrypi/linux #7230). 운영자 결정: "안 보여줘도 돼". CPU temp 는 기존 System tab CPU 스파크라인이 이미 처리하므로 GPU temp 도 불필요. → `EXTENDED_RESOURCES_FIELDS` = 6 필드 (no gpu_pct, no gpu_temp_c).
+2. **Whitelist 범위 반전**: 원래 plan 은 GODO 5개 프로세스만 filter. 운영자 결정: "RPi5 에서 실행되는 모든 프로세스를 모니터링". → enumerate every PID, classify per-row (`general` / `godo` / `managed`). Kernel thread (cmdline 빈) 만 제외. duplicate_alert 는 GODO 만 적용 (bash shell 2개는 정상).
+3. **Row styling — typography over background shading**: 운영자 처음엔 옅은 음영 제안 → reviewer 가 dark-mode contrast 문제 지적 → 양쪽 mode 다 텍스트 weight + color 로 강조 (managed 3개는 amber `--color-status-warn` accent + bold). 기존 CSS variable 만 사용 — 새 hex 토큰 없음.
+4. **`i` 정보 popover**: 운영자가 "godo-irq-pin 은 oneshot 이라 PID 가 안 보이는 게 정상" 같은 운영 지식을 추가 콜라잡 안 하고 SPA 안에서 알게끔. HTML5 `<details><summary>` fallback (popover dep 추가 안 함).
+5. **Filter UI**: 텍스트 검색 + "GODO only" 토글. 둘 다 client-side (백엔드 query param 추가 없음).
+6. **컬럼 추가**: `user` (uid → username via stdlib `pwd`) + `state` (R/S/D/Z/T/I/W/X). 운영자: "그 정보도 있으면 좋겠어".
+
+writer 가 9개 must-fix Mode-A fold + 5개 Mode-B fold 를 모두 plan-fold 로 흡수해서 단일 PR (3 commits squashed) 로 머지. 모든 cross-language SSOT pin 테스트 그린.
+
+#### PR-C — Config 탭 View/Edit safety gate
+
+운영자 발견: 현재 Config 탭은 admin 이 입력 박스에 타이핑하면 blur 시점에 즉시 PATCH. "실수로 값이 변경되는 것을 방지하려면 EDIT 버튼이 필요할 것 같아". 운영자 spec 으로 `project_config_tab_edit_mode_ux.md` 영구 저장.
+
+핵심 결정 3개:
+
+1. **Best-effort sequential Apply (not all-or-nothing)**: "다 해보고 안되는 것만 포기". 백엔드 0 LOC (기존 `PATCH /api/config` single-key endpoint loop). atomic bulk verb 추가는 C++ UDS verb 까지 수정해야 해서 ~150 LOC; tracker 는 키 단위 적용이라 partial-apply 가 일관성 깨지지 않음 (operationally independent keys).
+2. **Cancel never PATCHes**: 클라 측 pending 만 폐기. 이미 적용된 키는 tracker 에서 새 current 가 됐으므로 자연스럽게 보존. reverse-PATCH 는 "rollback PATCH 도 실패 가능 → 일관성 깨짐" 이라 의도적 회피. 운영자 walkthrough 시나리오 (3개 중 2개 성공, 1개 실패 → Cancel) 가 정확히 이 동작을 자연스럽게 만족.
+3. **Default 값 표시**: `(default: <row.default>)` muted hint — `ConfigSchemaRow.default` 가 이미 wire 에 있어서 프론트엔드만 작업.
+
+writer 의 첫 commit 후 Mode-B 가 실제 UX 버그 발견: 진행 라벨 `적용 중… (k/N)` 가 항상 `0/N` 으로 렌더링. `applyProgress.k` 가 한 번 0 으로 set 되고 increment 안 됨. 가장 단순한 fix = 카운터 자체 drop 하고 `적용 중…` 만 표시 → follow-up commit `94dc4a1` 으로 정리. operator 요청 라벨 ("k/N 진행률") 자체가 spec 에 명시 안 됐고, broken 상태 출하보다 단순 "적용 중…" 가 정직.
+
+#### Tooling 측면 — 한 세션에 4 PR 의 의의
+
+이전 마라톤 세션 (#34 PR-A) 에선 한 PR 에 9개 fix 를 fold 한 것이 "조밀한 작업" 의 표본이었다면, 이번 세션은 정반대의 표본 — 각 PR 이 독립 변수 (다른 file group, 다른 invariant letter, 다른 스토리) 라 분리가 옳음. PR-A1/A2 는 작은 hotfix → planner/reviewer 생략하고 직접 writer (Pipeline short-circuit, `feedback_pipeline_short_circuit.md` 정책 적용). PR-B/C 는 feature 규모 → 풀 파이프라인. 4 PR 모두 backgound 에이전트 + 분리 브랜치 패턴으로 충돌 없이 진행.
+
+PR-C 가 PR-B 머지 후에 머지될 때 invariant letter (z) → (z) 그대로 유효 (PR-B 가 (y) 점유). 충돌 1건 (`godo-frontend/src/lib/constants.ts` 의 추가 라인) 은 rebase 로 해결 — 양쪽 블록 다 keep.
+
+### 산출물
+
+- 4 PR merged: #37 (`43e100c`), #35 (`b701f83`), #36 (`9c52446`), #38 (`5d3cb95`).
+- main = `5d3cb95`.
+- Test baselines: backend 521 → 615 (+94 — PR-B 의 76개 + PR-A2 의 18개 reshape), frontend unit 164 → 197 (+33 — PR-B 의 18개 + PR-C 의 15개), e2e 변화 없음.
+- HIL 검증 완료: install.sh 재실행 (polkit count 13→14), webctl 재시작 후 `/api/health` ok, frontend dist 재배포 후 SPA 새로고침 — Config 탭 37 키 모두 라이브 값 + EDIT 모드 동작, System 탭 Reboot/Shutdown 200 OK, Processes / Extended resources sub-tab 정상.
+- 새 메모리 entry 1개: `project_config_tab_edit_mode_ux.md` — PR-C 운영자 결정 근거 영구 저장 (Cancel-no-PATCH 이유 + best-effort 이유).
+
+### 결정 요약
+
+- 한 세션에 4 PR 처리는 background agent 파이프라인 + branch isolation 으로 가능. 다음에도 독립적인 작업 묶음에선 같은 패턴 적용 가능.
+- PR-A2 (config keys unwrap) 가 가르쳐주는 메타-교훈: cross-language wire 의 양쪽 mock 이 동시에 잘못되면 잠복 가능. 다음 세션에 wire-shape SSOT pin (regex-extract 검증) 적용 검토.
+- PR-B 의 GPU 드롭 + 모든 프로세스 enumerate 으로 방향 전환은 운영자 라이브 의도와 부합. spec 메모리는 항상 plan 보다 우위 — plan 작성 도중 spec 이 바뀌면 plan 본체는 두고 fold 로 처리하는 패턴이 두 번째 정착.
+- PR-C 의 Cancel-no-PATCH 결정은 향후 누군가 "symmetry 를 위해 reverse-PATCH 추가" 하려고 할 때 메모리에서 막아야 함 — `project_config_tab_edit_mode_ux.md` 가 그 가드.
+- 다음 세션 우선순위: B-MAPEDIT (brush erase) 가 P0, B-MAPEDIT-2 (origin pick) 가 P1.
+
+---
+
 ## 2026-04-30 (새벽 — 00:00 KST → 06:07 KST, 아홉 번째 세션 — PR-A 풀 systemd 스위치오버)
 
 ### 한 줄 요약

@@ -10,11 +10,11 @@
 
 ---
 
-## 2026-04-30 (늦은 오전 — 10:08 KST → 12:35 KST, 열한 번째 세션 — B-MAPEDIT brush erase 출하 + prod hotfix 2건 + degenerate-metric audit 메모)
+## 2026-04-30 (늦은 오전 ~ 이른 오후 — 10:08 KST → 13:30 KST, 열한 번째 세션 — 4 PR: B-MAPEDIT brush + prod hotfix 2건 + Map sub-tab 리팩터 + 계층적 SSOT doc reorg)
 
 ### 한 줄 요약
 
-**Track B-MAPEDIT (브러시 erase + 자동 백업 + restart-required) 단일 PR 출하 + HIL 중 prod 회귀 2건 잡아 hotfix PR 추가 머지.** 두 회귀 모두 PR-A2 (열 번째 세션) 가 가르쳐준 "테스트는 그린, prod 는 깨짐" 의 cross-language drift 패턴 — 이번에 두 번째 사례가 나왔으니 구조적 gap 으로 확인됨.
+**Track B-MAPEDIT (브러시 erase + 자동 백업 + restart-required) 단일 PR 출하 + HIL 중 prod 회귀 2건 잡아 hotfix PR 머지 + 운영자 두 후속 요청 (Map Edit 를 Map 탭의 sub-tab 으로 이동, 그리고 root `CODEBASE.md`/`DESIGN.md` + cascade rule 으로 doc 계층화) 까지 한 세션에 4 PR 출하.** 두 회귀 모두 PR-A2 (열 번째 세션) 가 가르쳐준 "테스트는 그린, prod 는 깨짐" 의 cross-language drift 패턴 — 두 번째 사례 + 세 번째 사례 (`python-multipart` + `getMaskPng` alpha) 가 같이 나오면서 구조적 gap 으로 확정.
 
 > 기술 상세는 [PROGRESS.md 2026-04-30 late morning 블록](../PROGRESS.md#session-log) 참조.
 
@@ -42,20 +42,39 @@
 
 이번 세션의 dispatch 실수 — main 머지 후 frontend `npm run build` + rsync 만 하고 webctl src 의 rsync 를 빠뜨림. 9:57 (머지 전) app.py 가 prod 에 그대로 → `map/edit` 라우트 자체가 없어 405. 다음부터는 deploy 스크립트화 검토 (현재는 README 의 manual rsync 절차).
 
+#### Map Edit 메뉴 위치 — Map 페이지 sub-tab 으로 이동 (PR #41)
+
+운영자 HIL 직후 결정 (12:30 KST): Map Edit 를 사이드바 top-level 항목에서 Map 페이지의 Edit sub-tab 으로 이동. 패턴은 System 탭의 Processes / Extended resources sub-tab (PR-B). URL 시맨틱은 두 가지 선택지 중 **URL-backed** (`/map` → Overview, `/map-edit` → Edit) 채택 — System sub-tab 은 session-scoped (모니터링용) 라서 component-local 이 맞지만 Map Edit 는 destination-scoped (chat 으로 받은 `/map-edit` 링크, e2e 직접 navigate, post-Apply 후 `/map` 으로 redirect) 라서 refresh + back-button + external bookmark 모두 자연스럽게 동작해야 함. 6 files / +121 / -16, 백엔드 0 LOC, 기존 e2e + unit 테스트 anchor 그대로 유지 (data-testid 보존).
+
+#### Doc 계층화 — root CODEBASE.md + DESIGN.md + cascade rule (PR #42)
+
+운영자 분석 (11:50 KST): "SSOT 문서들이 여기저기 흩어져 있고 내용도 많아서 새 세션 cold-start 가 복잡함. SSOT = RAM, NEXT_SESSION = cache 비유. 계위로 정리하고 cascade 수정 룰을 박자". 두 가지 가드레일 합의:
+
+1. **루트 CODEBASE.md 는 scaffold + 모듈 역할 + cross-stack 데이터흐름만**. 인배리언트 텍스트 (per-stack `(a)..(z)..` 항목들) 는 **절대 루트로 복사 안 함**. 안 그러면 두 군데 invariant 가 drift.
+2. **NEXT_SESSION.md 는 cache, 3-step 흡수 루틴 강제** — task 흡수 후 PROGRESS / history / CODEBASE / memory 에 기록 → NEXT_SESSION 항목 prune. 세션 종료 시점에 통째로 재작성, 중간 수정 금지.
+
+루트 `CODEBASE.md` (192 LOC) = 3-stack overview + per-stack 모듈 역할 + cross-stack 데이터흐름 다이어그램 + per-stack CODEBASE.md 링크. 루트 `DESIGN.md` (70 LOC) = SYSTEM_DESIGN + FRONT_DESIGN TOC + "어떤 결정이 어디에 land 하는가" 표. CLAUDE.md §3 Phases 는 stale 했음 ("Phase 1 ◄ current" 인데 실제는 Phase 4.5 P2) — refresh. §6 에 cascade rule + NEXT_SESSION cache role 두 룰 추가. 메모리 entry 2개 (`feedback_codebase_md_freshness.md` 확장 + `feedback_next_session_cache_role.md` 신규).
+
+핵심: Mode-B reviewer 가 root↔leaf 모순/누락을 Critical 로 처리 — cascade 강제력의 출처. half-cascade 금지.
+
 ### 산출물
 
-- 2 PR merged: #39 (`7fd7a26`), #40 (`9c5166e`).
-- main = `9c5166e`.
-- Test baselines: backend 615 → 628 (+13), frontend unit 197 → 204 (+7), e2e 37 → 40 (+3).
-- HIL 검증: 페인트 3회 (장애물 2회 + 빈 공간 1회) 모두 백업 스냅샷 4개 (`20260430T031846Z` 복구 base + `033105Z`/`033202Z`/`033221Z` 정상 edit 3개), 활성 PGM 히스토그램 정상 (occupied 1386 / unknown 5258 / free 5004 — 벽 보존), tracker 로그 yaw tripwire 0건.
-- 새 메모리 entry 2개: `project_map_edit_origin_rotation.md` (Map Edit 가족 dual-input spec), `project_silent_degenerate_metric_audit.md` (10개 audit 후보 + 진행 절차).
+- 4 PR merged: #39 (`7fd7a26`), #40 (`9c5166e`), #41 (`9322644`), #42 (`787c986`).
+- main = `787c986`.
+- Test baselines: backend 615 → 628 (+13), frontend unit 197 → 204 (+7), e2e 37 → 40 (+3). PR #41/#42 zero test deltas (UX 리팩터 + docs).
+- HIL 검증: 페인트 3회 (장애물 2회 + 빈 공간 1회) 모두 백업 스냅샷 4개 (`20260430T031846Z` 복구 base + `033105Z`/`033202Z`/`033221Z` 정상 edit 3개), 활성 PGM 히스토그램 정상 (occupied 1386 / unknown 5258 / free 5004 — 벽 보존), tracker 로그 yaw tripwire 0건. PR #41 의 sub-tab 리팩터 도 HIL 검증 — 사이드바 정리 + URL 보존 + `/map-edit` 직접 진입 모두 정상.
+- 새 메모리 entry 4개: `project_map_edit_origin_rotation.md` (Map Edit 가족 dual-input spec), `project_silent_degenerate_metric_audit.md` (10개 audit 후보), `feedback_codebase_md_freshness.md` (cascade rule 추가), `feedback_next_session_cache_role.md` (3-step 흡수 루틴).
+- 새 root doc 2개: `CODEBASE.md`, `DESIGN.md`.
 
 ### 결정 요약
 
-- B-MAPEDIT 가족 (brush + origin + rotation) 은 3 PR 로 분리. brush 는 본 세션 출하; origin (B-MAPEDIT-2) + rotation (B-MAPEDIT-3) 은 별도 PR + dual-input 스펙 mandatory.
-- cross-language wire drift 가 두 번째 발현 (PR-A2 가 첫 번째). 구조적 gap 확인 → wire-shape SSOT pin (regex-extract 검증) 도입 검토 + canvas-PNG round-trip CI 검토.
-- silent degenerate-metric 패턴 audit 가 task 화 됨 (#6) — B-MAPEDIT-2 출하 후 진행.
-- 다음 세션 #1 작업: Map Edit 를 Map 탭의 sub-tab 으로 이동 (System.svelte L180-203 패턴 미러링) — 운영자 HIL 직접 요청, ~80 LOC 단일 PR.
+- B-MAPEDIT 가족 (brush + origin + rotation) 은 3 PR 로 분리. brush 는 본 세션 출하 (#39 + #40 hotfix); origin (B-MAPEDIT-2) + rotation (B-MAPEDIT-3) 은 별도 PR + dual-input 스펙 mandatory.
+- Map Edit 메뉴 위치 = Map 탭의 Edit sub-tab. URL-backed 시맨틱 (System sub-tab 은 component-local 인 점과 분리 — 의도적).
+- Doc 계위 살아남: root `CODEBASE.md` + `DESIGN.md` 가 navigation hub, per-stack 파일이 SSOT. cascade rule 이 두 레벨의 분리를 보호 (Mode-B 가 root↔leaf 모순을 Critical 로 처리).
+- NEXT_SESSION.md = cache, 세션 종료 시 통째로 재작성. 중간 수정 금지. 3-step 흡수 루틴이 standard practice.
+- cross-language wire drift 는 1차 (PR-A2) → 2/3차 (PR #40) 로 발현 회수 늘어남. 구조적 gap 확정 → wire-shape SSOT pin (regex-extract) + canvas-PNG round-trip CI 가 다음 세션 우선순위 #3.
+- silent degenerate-metric 패턴 audit task 화 (#6). B-MAPEDIT-2 출하 후 schedule.
+- 다음 세션 #1 작업: **B-MAPEDIT-2 origin pick (dual-input GUI + numeric)** — ~150 LOC, spec memory 에 박혀있음.
 
 ---
 

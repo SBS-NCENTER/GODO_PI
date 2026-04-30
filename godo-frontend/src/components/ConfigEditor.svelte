@@ -1,6 +1,12 @@
 <script lang="ts">
   /**
    * Track B-CONFIG (PR-CONFIG-β) — main config editor table.
+   * Track B-CONFIG PR-C — refactored into a dumb controlled table:
+   * `Config.svelte` owns `mode` + `pending` + `applyResults`. This
+   * component renders rows + inputs only and emits edits via the
+   * `setPending` callback. The previous on-blur PATCH path was
+   * removed; Apply is page-level (memory §"How to apply", invariant
+   * (z)).
    *
    * One row per schema entry (37 in production). Per-row columns:
    *   [Reload-class indicator | Key | Description | Current | Editor]
@@ -9,17 +15,19 @@
    *   - int / double  → <input type="number" step+min+max from schema>
    *   - string        → <input type="text" maxlength=256>
    *
-   * Submit-on-blur or Enter; Escape cancels back to current. On 400
-   * the row's value rolls back and the tracker's `detail` shows below
-   * the input.
+   * Disabled state: inputs are disabled when `mode === 'view'`, when
+   * `!admin`, or when `isApplying === true`. The visual disabled style
+   * is theme-aware via existing CSS.
    *
-   * Admin-gating: when `admin === false` (anon viewer), inputs render
-   * disabled. The PATCH itself is admin-gated server-side; this is UX
-   * polish only.
+   * The schema `default` value renders as a muted `(default: …)` hint
+   * under the Current value (PR-C N3 fold; long defaults wrap inside
+   * the column via `word-break: break-all`).
+   *
+   * Per-row errors come from `applyResults[key].error` (set by the
+   * Apply loop in `Config.svelte`); successful rows show a transient
+   * ✓ marker until the page-level TTL clears it.
    */
 
-  import { onDestroy, onMount } from 'svelte';
-  import { config as configStore, refresh, set as applySet } from '$stores/config';
   import {
     RELOAD_CLASS_HOT,
     RELOAD_CLASS_RESTART,
@@ -28,31 +36,24 @@
     type ConfigValue,
   } from '$lib/protocol';
 
+  interface ApplyResult {
+    ok: boolean;
+    error?: string;
+  }
+
   interface Props {
     admin: boolean;
+    mode: 'view' | 'edit';
+    isApplying: boolean;
+    schema: ConfigSchemaRow[];
+    current: Record<string, ConfigValue>;
+    pending: Record<string, string>;
+    applyResults: Record<string, ApplyResult>;
+    setPending: (key: string, raw: string) => void;
   }
-  let { admin }: Props = $props();
 
-  let schema = $state<ConfigSchemaRow[]>([]);
-  let current = $state<Record<string, ConfigValue>>({});
-  let errors = $state<Record<string, string>>({});
-  // Per-row pending text — what's in the input box right now.
-  let pending = $state<Record<string, string>>({});
-  let busy = $state<Record<string, boolean>>({});
-  let unsub: (() => void) | null = null;
-
-  onMount(() => {
-    unsub = configStore.subscribe((s) => {
-      schema = s.schema;
-      current = s.current;
-      errors = s.errors;
-    });
-    void refresh();
-  });
-
-  onDestroy(() => {
-    unsub?.();
-  });
+  let { admin, mode, isApplying, schema, current, pending, applyResults, setPending }: Props =
+    $props();
 
   function fmtCurrent(value: ConfigValue | undefined): string {
     if (value === undefined || value === null) return '—';
@@ -78,51 +79,21 @@
     return { text: '?', cls: 'glyph-hot', tooltip: 'unknown class' };
   }
 
-  // Coerce the input string into the schema's typed value before sending.
-  function coerce(row: ConfigSchemaRow, raw: string): ConfigValue | null {
-    const trimmed = raw.trim();
-    if (row.type === 'int') {
-      if (!/^-?\d+$/.test(trimmed)) return null;
-      return parseInt(trimmed, 10);
-    }
-    if (row.type === 'double') {
-      const n = Number(trimmed);
-      if (Number.isNaN(n)) return null;
-      return n;
-    }
-    return trimmed;
-  }
-
-  async function submit(row: ConfigSchemaRow): Promise<void> {
-    const raw = pending[row.name] ?? fmtCurrent(current[row.name]);
-    const coerced = coerce(row, raw);
-    if (coerced === null) {
-      errors = { ...errors, [row.name]: `bad ${row.type} literal` };
-      return;
-    }
-    busy = { ...busy, [row.name]: true };
-    try {
-      await applySet(row.name, coerced);
-      pending = { ...pending, [row.name]: '' };
-    } catch {
-      // The store already rolled back + populated `errors[key]`.
-    } finally {
-      busy = { ...busy, [row.name]: false };
-    }
+  function inputDisabled(): boolean {
+    return mode === 'view' || !admin || isApplying;
   }
 
   function onKeydown(e: KeyboardEvent, row: ConfigSchemaRow): void {
-    if (e.key === 'Enter') {
+    if (e.key === 'Escape') {
       e.preventDefault();
-      void submit(row);
-    } else if (e.key === 'Escape') {
-      pending = { ...pending, [row.name]: '' };
+      // Drop this row's pending edit back to the current value display.
+      setPending(row.name, '');
     }
   }
 
   function onInput(e: Event, name: string): void {
     const target = e.target as HTMLInputElement;
-    pending = { ...pending, [name]: target.value };
+    setPending(name, target.value);
   }
 </script>
 
@@ -140,13 +111,19 @@
     {#each schema as row (row.name)}
       {@const glyph = reloadGlyph(row.reload_class)}
       {@const inputValue = pending[row.name] ?? fmtCurrent(current[row.name])}
+      {@const result = applyResults[row.name]}
       <tr data-testid="row-{row.name}">
         <td class="col-glyph">
           <span class="glyph {glyph.cls}" title={glyph.tooltip}>{glyph.text}</span>
         </td>
         <td class="col-key"><code>{row.name}</code></td>
         <td class="col-desc">{row.description}</td>
-        <td class="col-current">{fmtCurrent(current[row.name])}</td>
+        <td class="col-current">
+          <div class="current-value">{fmtCurrent(current[row.name])}</div>
+          <div class="default-hint" data-testid="default-{row.name}">
+            (default: {row.default})
+          </div>
+        </td>
         <td class="col-edit">
           {#if row.type === 'int'}
             <input
@@ -155,9 +132,8 @@
               min={row.min}
               max={row.max}
               value={inputValue}
-              disabled={!admin || busy[row.name]}
+              disabled={inputDisabled()}
               oninput={(e) => onInput(e, row.name)}
-              onblur={() => admin && submit(row)}
               onkeydown={(e) => onKeydown(e, row)}
               data-testid="input-{row.name}"
             />
@@ -168,9 +144,8 @@
               min={row.min}
               max={row.max}
               value={inputValue}
-              disabled={!admin || busy[row.name]}
+              disabled={inputDisabled()}
               oninput={(e) => onInput(e, row.name)}
-              onblur={() => admin && submit(row)}
               onkeydown={(e) => onKeydown(e, row)}
               data-testid="input-{row.name}"
             />
@@ -179,15 +154,19 @@
               type="text"
               maxlength={256}
               value={inputValue}
-              disabled={!admin || busy[row.name]}
+              disabled={inputDisabled()}
               oninput={(e) => onInput(e, row.name)}
-              onblur={() => admin && submit(row)}
               onkeydown={(e) => onKeydown(e, row)}
               data-testid="input-{row.name}"
             />
           {/if}
-          {#if errors[row.name]}
-            <div class="error" data-testid="error-{row.name}">{errors[row.name]}</div>
+          {#if result?.ok}
+            <span class="marker marker-ok" data-testid="marker-{row.name}">✓</span>
+          {:else if result && !result.ok}
+            <span class="marker marker-fail" data-testid="marker-{row.name}">✗</span>
+          {/if}
+          {#if result && !result.ok && result.error}
+            <div class="error" data-testid="error-{row.name}">{result.error}</div>
           {/if}
         </td>
       </tr>
@@ -221,6 +200,16 @@
   .col-current {
     width: 10em;
     color: var(--color-text-muted);
+  }
+  .current-value {
+    color: var(--color-text);
+  }
+  .default-hint {
+    margin-top: 2px;
+    color: var(--color-text-muted);
+    font-size: 0.85em;
+    word-break: break-all;
+    max-width: 100%;
   }
   .col-edit input {
     width: 100%;
@@ -256,6 +245,17 @@
   .glyph-recalibrate {
     background: var(--color-error, #c62828);
     color: white;
+  }
+  .marker {
+    display: inline-block;
+    margin-left: var(--space-2);
+    font-weight: 700;
+  }
+  .marker-ok {
+    color: var(--color-status-ok, #2e7d32);
+  }
+  .marker-fail {
+    color: var(--color-error, #c62828);
   }
   .error {
     margin-top: var(--space-1);

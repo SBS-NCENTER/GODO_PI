@@ -64,14 +64,17 @@ def touch(flag_path: Path) -> None:
 
     Idempotent: a second call simply replaces the existing file. The
     parent directory is `mkdir(parents=True, exist_ok=True)` at mode
-    0750 so the systemd `StateDirectory=godo` default works on a fresh
-    deployment without pre-creating intermediate dirs.
+    0755 so the systemd `StateDirectory=godo` default (also 0755) is
+    matched, AND the world-execute bit lets the file's mode 0o644
+    actually be reachable from a future read-only diagnostic helper
+    running as another uid (the file is world-readable per
+    ``_FLAG_FILE_MODE``; a 0750 directory would silently block that).
 
     Raises ``OSError`` from the underlying syscalls (ENOSPC, EROFS,
     EACCES, ...) — caller maps to HTTP 500. The tmp is cleaned up on
     failure paths.
     """
-    flag_path.parent.mkdir(parents=True, exist_ok=True, mode=0o750)
+    flag_path.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
     tmp = flag_path.with_suffix(flag_path.suffix + _TMP_SUFFIX)
     fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _FLAG_FILE_MODE)
     try:

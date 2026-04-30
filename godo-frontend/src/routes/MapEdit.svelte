@@ -22,8 +22,11 @@
   import { onDestroy, onMount } from 'svelte';
 
   import MapMaskCanvas from '$components/MapMaskCanvas.svelte';
+  import MapUnderlay from '$components/MapUnderlay.svelte';
+  import MapZoomControls from '$components/MapZoomControls.svelte';
   import OriginPicker from '$components/OriginPicker.svelte';
   import RestartPendingBanner from '$components/RestartPendingBanner.svelte';
+  import ScanToggle from '$components/ScanToggle.svelte';
   import { ApiError, postMapEdit, postMapOrigin } from '$lib/api';
   import {
     BRUSH_RADIUS_PX_DEFAULT,
@@ -32,23 +35,35 @@
     MAP_EDIT_REDIRECT_DELAY_MS,
     ORIGIN_PICK_REDIRECT_DELAY_MS,
   } from '$lib/constants';
+  import { createMapViewport } from '$lib/mapViewport.svelte';
   import { pixelToWorld } from '$lib/originMath';
   import type {
     EditResponse,
+    LastScan,
     MapDimensions,
     OriginEditResponse,
     OriginPatchBody,
   } from '$lib/protocol';
   import { navigate } from '$lib/router';
   import { auth } from '$stores/auth';
+  import { subscribeLastScan } from '$stores/lastScan';
   import { loadMapMetadata, mapMetadata } from '$stores/mapMetadata';
   import { refresh as refreshRestartPending } from '$stores/restartPending';
+  import { scanOverlay } from '$stores/scanOverlay';
+
+  // Per-route viewport instance (Q2 — fresh per /map-edit mount).
+  // Shared between `<MapUnderlay/>`, `<MapMaskCanvas/>`, and
+  // `<MapZoomControls/>` so the buttons drive the same zoom state and
+  // the brush layer's pointer-coord conversion uses the same projection.
+  const viewport = createMapViewport();
 
   let dims = $state<MapDimensions | null>(null);
   let dimsError = $state<string | null>(null);
   let role = $state<'admin' | 'viewer' | null>(null);
   let unsubAuth: (() => void) | null = null;
   let unsubMeta: (() => void) | null = null;
+  let unsubScan: (() => void) | null = null;
+  let unsubOverlay: (() => void) | null = null;
   let brushRadius = $state(BRUSH_RADIUS_PX_DEFAULT);
   let busy = $state(false);
   let banner = $state<string | null>(null);
@@ -56,6 +71,10 @@
   let canvasRef: MapMaskCanvas | undefined = $state();
   let originPickerRef: OriginPicker | undefined = $state();
   let redirectTimer: ReturnType<typeof setTimeout> | null = null;
+  // Live LiDAR overlay — shared with `/map` via the `scanOverlay` and
+  // `lastScan` stores (Rule 3 of `.claude/memory/project_map_viewport_zoom_rules.md`).
+  let scan = $state<LastScan | null>(null);
+  let scanOn = $state(false);
 
   // Track B-MAPEDIT-2 — origin pick state.
   let originPickEnabled = $state(false);
@@ -88,6 +107,10 @@
         resolution = m.resolution;
       }
     });
+    // Track D — subscribe to the LastScan store; lifecycle is managed
+    // by the store (gated on the scanOverlay flag). Mirrors `/map`.
+    unsubScan = subscribeLastScan((s) => (scan = s));
+    unsubOverlay = scanOverlay.subscribe((v) => (scanOn = v));
     // The /map page also calls loadMapMetadata; calling here too is
     // idempotent (same store, abort-cancellable). Without this,
     // operators landing on /map-edit directly would see "loading…"
@@ -101,6 +124,8 @@
   onDestroy(() => {
     unsubAuth?.();
     unsubMeta?.();
+    unsubScan?.();
+    unsubOverlay?.();
     if (redirectTimer !== null) {
       clearTimeout(redirectTimer);
       redirectTimer = null;
@@ -210,6 +235,7 @@
         />
         <span class="brush-value">{brushRadius}</span>
       </label>
+      <ScanToggle {scan} />
       <div class="actions">
         <button
           type="button"
@@ -233,16 +259,23 @@
       </div>
     </div>
 
-    <MapMaskCanvas
-      bind:this={canvasRef}
-      width={dims.width}
-      height={dims.height}
-      mapImageUrl="/api/map/image"
-      {brushRadius}
-      disabled={busy || originBusy}
-      mode={originPickEnabled ? 'origin-pick' : 'paint'}
-      oncoordpick={onCanvasCoordPick}
-    />
+    <div class="map-stack">
+      <MapUnderlay {viewport} mapImageUrl="/api/map/image" {scan} scanOverlayOn={scanOn} />
+      <div class="mask-overlay">
+        <MapMaskCanvas
+          bind:this={canvasRef}
+          {viewport}
+          width={dims.width}
+          height={dims.height}
+          mapImageUrl="/api/map/image"
+          {brushRadius}
+          disabled={busy || originBusy}
+          mode={originPickEnabled ? 'origin-pick' : 'paint'}
+          oncoordpick={onCanvasCoordPick}
+        />
+      </div>
+      <MapZoomControls {viewport} />
+    </div>
   {/if}
 
   {#if banner}
@@ -286,6 +319,27 @@
     margin: 8px 0;
     gap: 8px;
     flex-wrap: wrap;
+  }
+  /* PR β — wraps the underlay + mask canvases so they share the same
+     box (the mask sits on top of the underlay) and `<MapZoomControls/>`
+     can absolutely-position itself in the top-left without overlapping
+     the toolbar above. The underlay drives the canvas-CSS size; the
+     mask layer is `position: absolute; inset: 0;` over the underlay. */
+  .map-stack {
+    position: relative;
+    width: 100%;
+    /* Match PoseCanvas's wrap height for visual continuity across
+       /map ↔ /map-edit. Operators see the same box on both routes. */
+    height: 600px;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    background: var(--color-bg-elev);
+    overflow: hidden;
+  }
+  .mask-overlay {
+    position: absolute;
+    inset: 0;
+    pointer-events: auto;
   }
   .brush-slider {
     display: flex;

@@ -139,12 +139,16 @@ test('map: toggling scan overlay off clears the dot count to 0', async ({ page }
   );
 });
 
-test('map: scan overlay survives wheel-zoom (Track D scale fix)', async ({ page }) => {
-  // Track D scale fix — toggle overlay ON, wheel-zoom in 3 times,
-  // assert the overlay stays at 5 dots and stays fresh. Pixel-exact
-  // alignment is covered by the deterministic unit math in §C; this
-  // case is end-to-end integration sanity (YAML + dimensions both
-  // fetched, no console errors, dot count stable through zoom).
+test('map: scan overlay survives (+) zoom button (PR β — replaces wheel-zoom case)', async ({
+  page,
+}) => {
+  // PR β — operator-locked Rule 1 forbids wheel zoom; the (+) button
+  // replaces it. Same intent as the pre-PR-β "scan overlay survives
+  // wheel-zoom" case: toggle overlay ON, click (+) three times, assert
+  // overlay stays at 5 dots + stays fresh. Pixel-exact alignment is
+  // covered by the deterministic unit math; this is end-to-end
+  // integration sanity (no console errors; dot count stable through
+  // zoom).
   await loginAs(page);
   await page.goto('/#/map');
   const toggle = page.locator('[data-testid="scan-toggle-btn"]');
@@ -155,13 +159,11 @@ test('map: scan overlay survives wheel-zoom (Track D scale fix)', async ({ page 
     { timeout: 5000 },
   );
 
-  // Move into the canvas and wheel-zoom in 3 times.
-  const canvas = page.locator('[data-testid="pose-canvas"]');
-  const box = await canvas.boundingBox();
-  if (!box) throw new Error('canvas not laid out');
-  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  // Click the (+) button three times.
+  const zoomIn = page.locator('[data-testid="map-zoom-in-btn"]');
+  await expect(zoomIn).toBeVisible();
   for (let i = 0; i < 3; i++) {
-    await page.mouse.wheel(0, -100);
+    await zoomIn.click();
   }
 
   // After zoom, dot count stays at 5 and overlay stays fresh.
@@ -173,6 +175,50 @@ test('map: scan overlay survives wheel-zoom (Track D scale fix)', async ({ page 
     'data-scan-fresh',
     'true',
   );
+});
+
+test('map: (+) button enlarges the rendered canvas dimensions (PR β NEW)', async ({ page }) => {
+  await loginAs(page);
+  await page.goto('/#/map');
+  const wrap = page.locator('[data-testid="pose-canvas-wrap"]');
+  await expect(wrap).toBeVisible();
+  const zoomInput = page.locator('[data-testid="map-zoom-input"]');
+  await expect(zoomInput).toHaveValue('100');
+
+  // Type 200 and Enter — the canvas internal zoom doubles, but the
+  // outer wrap div has fixed CSS height. The visible signal is the
+  // input value reflecting the commit.
+  const zoomIn = page.locator('[data-testid="map-zoom-in-btn"]');
+  await zoomIn.click();
+  // Step 1.25 → input renders 125.
+  await expect(zoomInput).toHaveValue('125');
+});
+
+test('map-edit: (+) button + scan overlay visible (PR β NEW — Rule 3 + Rule 4)', async ({
+  page,
+}) => {
+  await loginAs(page);
+  await page.goto('/#/map-edit');
+  await expect(page.locator('[data-testid="map-edit-page"]')).toBeVisible();
+
+  // Mode-A M2 selector fix: testid is `scan-toggle-btn` (NOT
+  // `scan-overlay-toggle`).
+  const toggle = page.locator('[data-testid="scan-toggle-btn"]');
+  await expect(toggle).toBeVisible();
+  await toggle.click();
+
+  // Wait for scan dots to render under the underlay's wrap.
+  const underlay = page.locator('[data-testid="map-underlay-wrap"]');
+  await expect(underlay).toBeVisible();
+  await expect(underlay).toHaveAttribute('data-scan-count', '5', { timeout: 5000 });
+
+  // Click (+) — verify the input ratio increments (Rule 3 + Rule 4 —
+  // the same canvas shows scan dots on /map-edit AND survives zoom).
+  const zoomIn = page.locator('[data-testid="map-zoom-in-btn"]');
+  await zoomIn.click();
+  const zoomInput = page.locator('[data-testid="map-zoom-input"]');
+  await expect(zoomInput).toHaveValue('125');
+  await expect(underlay).toHaveAttribute('data-scan-count', '5');
 });
 
 test('map: scan toggle state persists through same-tab reload (sessionStorage)', async ({

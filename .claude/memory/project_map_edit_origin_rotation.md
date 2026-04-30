@@ -33,18 +33,22 @@ LOC estimate: ~150 LOC (90 was original GUI-only estimate; numeric input adds ~6
 
 Endpoint shape (provisional): `POST /api/map/origin` admin-gated, JSON body `{x_m: float, y_m: float, mode: "absolute" | "delta"}`. Response `{ok, backup_ts, prev_origin: [x, y], new_origin: [x, y], restart_required: true}`.
 
-## B-MAPEDIT-3 (deferred, rotation) — DUAL INPUT
+## B-MAPEDIT-3 (rotation, queued P0 as PR γ after PR β) — DUAL INPUT
 
 **Purpose**: rotate the map (and YAML `origin[2]` theta) to align with the studio's reference axes. Operator hint: ±1-2° residual rotation observed in scan overlay vs walls on `04.29_v3.pgm`.
 
-**Why deferred**: ~250 LOC, lower marginal value vs LOC. CPU-bound bilinear resample at typical map sizes is ~50-200 ms — operator suggested VideoCore VII GPU acceleration as a research-grade follow-up (`.claude/memory/project_videocore_gpu_for_matrix_ops.md`).
+**Status (2026-04-30 KST eleventh-session full close + PR-β-kickoff)**: operator un-deferred. Stacks AFTER PR β (shared map viewport + Map Edit LiDAR overlay) so the rotation gizmo can leverage the shared canvas affordance and the operator sees the LiDAR overlay update live during rotation.
 
-**How to apply (when this is finally planned):** same dual-input rule as B-MAPEDIT-2. The SPA page MUST expose:
+**LOC estimate**: ~250-350 LOC. CPU-bound bilinear resample at typical map sizes is ~50-200 ms — first cut uses plain CPU resample. VideoCore VII GPU acceleration is research-grade follow-up (`.claude/memory/project_videocore_gpu_for_matrix_ops.md`); not in PR γ scope.
 
-- **Mode A — GUI rotate**: drag-rotate handle on the rendered PGM, or two-point pick (click two points on a wall → backend computes the angle to make them axis-aligned).
-- **Mode B — numeric entry**: single `theta_deg` input, sub-degree precision, negative allowed. Sign convention: counter-clockwise positive (matches ROS/REP-103, NOT screen-CCW which is opposite of math-CCW).
+**Sign convention (operator-locked 2026-04-30 KST, ADD)**: in `delta` mode the typed `theta_deg` is the *offset* — `new_theta = current_theta + theta_deg`. Both negative AND positive values must be supported (operator phrasing: "음수, 양수 모두 계산 가능해야 해"). Sign axis: **CCW-positive** matching ROS REP-103 (math convention; negative = clockwise). Same ADD pattern as B-MAPEDIT-2 origin pick — keep the convention uniform across all Map Edit mutations.
 
-Apply path: PGM bilinear resample + YAML origin theta update + auto-backup of BOTH files. Restart-pending sentinel.
+**How to apply:** dual-input rule (mandatory) — the SPA page MUST expose:
+
+- **Mode A — GUI rotate**: drag-rotate handle on the rendered PGM, or two-point pick (click two points on a wall → backend computes the angle to make them axis-aligned). On click/drag end, GUI flips Mode B toggle to `absolute` and pre-fills the numeric field (mirroring B-MAPEDIT-2 `setCandidate` pattern).
+- **Mode B — numeric entry**: single `theta_deg` input, sub-degree precision, absolute/delta toggle, negative allowed. ADD sign convention; CCW-positive. Locale-friendly decimal handling (period only).
+
+Apply path: PGM bilinear resample (sole-owner module `map_rotate.py`) + YAML `origin[2]` update + auto-backup of BOTH files (PGM bytes change in this PR — unlike B-MAPEDIT-2 which kept PGM intact). Restart-pending sentinel. Same backup-FIRST 3-step contractual sequence as B-MAPEDIT-2.
 
 ## Dual-input rationale (recurring pattern)
 

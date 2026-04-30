@@ -367,6 +367,18 @@ takes the visible pixels into account; multiplying by the LOGICAL
 `width/height` gives the canonical mask index regardless of zoom or
 DPR.
 
+PR β clarification: the brush layer is now visually composed _on top
+of_ `<MapUnderlay/>` via `position: absolute; inset: 0;` on a wrapping
+div managed by `MapEdit.svelte`. The mask buffer remains
+`<MapMaskCanvas/>`-owned (sole owner discipline preserved). When a
+`viewport` prop is supplied, the pointer-coord conversion ALSO inverts
+the viewport's zoom + pan around the mask box center before mapping
+CSS → logical. At zoom = 1, pan = 0 the math collapses to the original
+identity form so the T4 fold's DPR-coord pin survives byte-identical.
+The mask buffer is sized to logical PGM dimensions regardless of
+viewport zoom; CSS scaling handles the visual zoom (the mask layer's
+`image-rendering: pixelated` keeps tiles crisp at any ratio).
+
 Apply path (mirrors webctl invariant (aa) on the wire side):
 
 1. SPA calls `getMaskPng()` which builds a fresh canvas at the
@@ -590,6 +602,145 @@ so a single stub process is enough to drive playwright. No vite
 preview proxy needed.
 
 ## Change log
+
+### 2026-04-30 20:30 KST — PR β shared map viewport + zoom UX uniform + Map Edit LiDAR overlay
+
+Operator HIL request 2026-04-30 KST: zoom UX must be uniform across
+all map-showing tabs (top-left (+/−) buttons + numeric input — no
+mouse wheel); min-zoom captured once at first map load; LiDAR overlay
+shared between `/map` and `/map-edit` so the operator can verify
+scan-vs-map alignment in real time during edits. Operator-locked rules
+in `.claude/memory/project_map_viewport_zoom_rules.md`.
+
+#### Added
+
+- `src/components/MapUnderlay.svelte` — Sole owner of the shared PGM
+  bitmap fetch + canvas mount + LiDAR scan render path. Both `/map`
+  and `/map-edit` compose this component. Layer paint order is FIXED:
+  bitmap → scan dots → `ondraw` parent hook. Imperative `worldToCanvas`
+  / `canvasToWorld` API exposed via `bind:this` as a thin passthrough
+  to the viewport's pure helpers (Mode-A M4).
+- `src/components/MapZoomControls.svelte` — Top-left absolute-positioned
+  panel with (+) and (−) buttons + `<input type="text" inputmode="decimal">`.
+  Both Enter and blur commit triggers (Mode-A N3); locale-comma
+  rejected with Korean copy `쉼표(,) 대신 점(.)을 사용하세요. 예: 150`
+  (Mode-A N1).
+- `src/lib/mapViewport.svelte.ts` — Per-instance rune-state factory
+  (`createMapViewport()`) + the full pure-helper set (`clampZoom`,
+  `applyZoomStep`, `parsePercent`, `panClamp`, `worldToCanvas`,
+  `canvasToWorld`, `canvasToImagePixel`, `imagePixelToCanvas`). Single
+  math SSOT (Mode-A M4 — no closure leaks; the factory wraps the pure
+  helpers with `$state`). `setMapDims` is a one-shot at the FACTORY
+  level (Mode-A M5 — `_dimsCaptured` private boolean in the closure).
+- `src/lib/constants.ts` — Added `MAP_ZOOM_STEP = 1.25` (rich docstring
+  documenting alternatives + operator-experience trade-off — Mode-A S3),
+  `MAP_ZOOM_PERCENT_MIN_DEFAULT`, `MAP_ZOOM_PERCENT_MAX = 1000`,
+  `MAP_ZOOM_PERCENT_DEFAULT`, `MAP_ZOOM_PERCENT_DECIMAL_DISPLAY`,
+  `MAP_PAN_OVERSCAN_PX = 100`.
+- `tests/unit/mapViewport.test.ts` — 34 vitest cases (pure helpers +
+  factory state + round-trip identity ×3 + parsePercent boundary
+  cases + setMapDims one-shot + null→A→null→B map-switch survival +
+  no `resize` listener registered).
+- `tests/unit/mapZoomControls.test.ts` — 11 vitest cases (both Enter
+  AND blur commit triggers + locale-comma rejection + soft-clamp on
+  out-of-range + Mode-A T3 chain integration).
+- `tests/unit/mapUnderlayScan.test.ts` — 5 vitest cases (Rule 3 + Rule
+  4 single scan-render code path + Mode-A S1 layer paint order).
+- `tests/unit/mapViewportNoWheelImports.test.ts` — 3 vitest cases
+  (Mode-A T5 wheel-removal structural pin).
+
+#### Changed
+
+- `src/components/PoseCanvas.svelte` — Refactored from a 500-LOC
+  zoom/pan/scan/pose owner to a thin ~140-LOC wrapper that composes
+  `<MapUnderlay/>` and supplies a `drawPoseLayer` hook for the trail +
+  pose dot. Wheel listener DELETED. Selectors `data-testid="pose-canvas-wrap"`
+  and `data-testid="pose-canvas"` preserved (the underlay's canvas is
+  retargeted via `canvasTestId` prop).
+- `src/components/MapMaskCanvas.svelte` — Accepts an optional
+  `viewport` prop (Mode-A M4 — drop-in for the never-shipped
+  `underlayWorldToCanvas` plan-draft prop). Pointer-coord conversion
+  uses the viewport to invert zoom + pan around the mask box center;
+  collapses to identity at zoom = 1, pan = 0 (T4 fold survives
+  byte-identical). Mask buffer remains sole-owned (invariant `(u)`).
+- `src/routes/Map.svelte` — Creates a per-route `mapViewport` instance
+  via `createMapViewport()`, shared with `<PoseCanvas/>` and
+  `<MapZoomControls/>`. New `.canvas-stack` wrapper hosts the
+  absolute-positioned zoom controls.
+- `src/routes/MapEdit.svelte` — Composes `<MapUnderlay/>` (showing live
+  scan overlay) + `<MapMaskCanvas/>` (visually layered on top) +
+  `<MapZoomControls/>` + `<ScanToggle/>`. Subscribes to `lastScan` +
+  `scanOverlay` mirror of `/map` so operators verify scan-vs-map
+  alignment during edits (Rule 3).
+- `src/lib/constants.ts` — DELETED `MAP_WHEEL_ZOOM_FACTOR` (structural
+  witness that wheel zoom is gone).
+- `tests/unit/mapEdit.test.ts` — Canvas shim extended to cover
+  MapUnderlay's redraw surface (clearRect / arc / fill / stroke /
+  moveTo / lineTo / fillStyle setter / etc.).
+- `tests/e2e/map.spec.ts` — REPLACED 'wheel-zoom survives' case with
+  '(+) zoom button survives' (same intent, new mechanism). Added 2
+  NEW cases: `/map` zoom-button + `/map-edit` zoom-button-with-scan-
+  overlay (Mode-A M2 selector fix — `data-testid="scan-toggle-btn"`
+  not `scan-overlay-toggle`).
+
+#### Removed
+
+- `MAP_WHEEL_ZOOM_FACTOR` constant (structural witness that wheel zoom
+  is gone). A writer reintroducing it without first amending Rule 1 in
+  `.claude/memory/project_map_viewport_zoom_rules.md` AND updating
+  invariant `(ab)` fails Mode-A Critical (pinned by
+  `tests/unit/mapViewportNoWheelImports.test.ts`).
+
+#### Tests
+
+- vitest: 220 → 273 (+53 new = 34 mapViewport + 11 mapZoomControls +
+  5 mapUnderlayScan + 3 mapViewportNoWheelImports).
+- playwright: 38/44 → 40/46 (+2 NEW + 1 REPLACED). The pre-existing 6
+  baseline flakes (config × 4, map.spec hover, system.spec restart-409)
+  unchanged per Mode-A R7 — out of scope; do not regress, do not fix.
+- `npm run lint` clean on PR paths (5 pre-existing prettier warnings
+  in unrelated files unchanged from main).
+- `npm run build` clean. Bundle delta: JS 118.02 → 123.87 kB raw,
+  **42.76 → 44.85 kB gzipped (+2.09 kB)**; CSS 25.69 → 27.14 kB raw,
+  5.06 → 5.30 kB gzipped (+0.24 kB). Net JS+CSS gzipped: **+2.33 kB**.
+  Within the +5 kB ceiling documented in PR #43.
+
+#### Mode-A folds applied
+
+- M1 panClamp two-case spec (Q7 added) + 12b sibling test.
+- M2 e2e selector fix (`scan-toggle-btn` not `scan-overlay-toggle`) +
+  greppable-selector process pin.
+- M3 wheel-zoom rollback gated on operator amendment to Rule 1 +
+  invariant `(ab)` clause.
+- M4 single math SSOT (`mapViewport.svelte.ts`); `MapMaskCanvas`
+  consumes `viewport` directly; round-trip identity tests at zoom ∈
+  {0.5, 1.0, 2.0}.
+- M5 `setMapDims` factory-internal idempotency (`_dimsCaptured` in
+  closure, not in caller); test 10b survives null→A→null→B.
+- S1 layer paint order pinned via canvas-call-order test.
+- S2 brush-coord parametrized over zoom × DPR (T4 fold survives
+  byte-identical at zoom = 1, pan = 0).
+- S3 `MAP_ZOOM_STEP = 1.25` rich docstring; tests assert exact value.
+- S4 `MAP_DEFAULT_ZOOM` / `MAP_MIN_ZOOM` / `MAP_MAX_ZOOM` kept (no
+  rename — drive-by avoidance); documented as internal-only.
+- S5 bundle-size MEASURED (above).
+- S6 freshness gate continues to be pinned at the new sole-owner site
+  via existing `poseCanvasFreshness.test.ts` (mounts the pose-canvas
+  wrapper which now wraps MapUnderlay; the gate runs at the new site).
+- T1 `_resetLastScanForTests()` in `beforeEach` for the shared scan
+  store.
+- T2 parsePercent boundaries (empty/Infinity/-50/100.5/0).
+- T3 chain integration ((+) (+) [type 200 Enter] (−)).
+- T4 synchronous-emit-on-subscribe captures dims at mount.
+- T5 wheel-zoom-removal mechanical pins (3 cases).
+- N1 Korean copy for validation banners.
+- N2 per-instance rationale documented in invariant `(ab)`.
+- N3 BOTH onchange + onkeydown Enter commit triggers.
+
+#### Total frontend test count
+
+vitest: 273; playwright: 40/46 passing (40 if you count the 6
+baseline flakes as not-this-PR's-problem; 46 total).
 
 ### 2026-04-30 12:50 KST — Map Edit moved into Map page as a sub-tab (operator HIL request)
 
@@ -1473,6 +1624,94 @@ cases incl. mode toggle + locale-comma reject + NaN-like reject +
 MapMaskCanvas mode-prop default + origin-pick byte-identical mask
 buffer (T5 fold)), `tests/e2e/mapEdit.spec.ts` (3 new cases: admin
 numeric apply, admin GUI-pick pre-fill, viewer cannot apply).
+
+### (ab) PR β — shared map viewport + zoom UX uniform + Map Edit LiDAR overlay
+
+`<MapUnderlay/>` is the SOLE owner of the shared viewport plus
+scan-overlay render path. `<MapZoomControls/>` is the SOLE zoom-input
+UI. `mapViewport.svelte.ts::createMapViewport()` is the SOLE owner of
+zoom, pan, and min-zoom state; the factory is per-component-instance
+(Q2 — operator navigating `/map` ↔ `/map-edit` gets a fresh viewport;
+module-scope singletons would leak state across navigation and require
+manual reset between vitest cases — extends `System.svelte`'s sub-tab
+state-reset idiom from invariant `(y)`).
+
+**Mouse-wheel zoom is FORBIDDEN.** The `MAP_WHEEL_ZOOM_FACTOR` constant
+was deleted as the structural witness that wheel zoom is gone.
+Re-introducing wheel-zoom requires (a) operator confirmation in
+`.claude/memory/project_map_viewport_zoom_rules.md` (Rule 1 currently
+FORBIDS it), (b) updating this invariant's wheel-zoom-forbidden clause,
+(c) THEN re-adding the constant + listener. A writer who restores a
+wheel listener WITHOUT (a)+(b) fails Mode-A Critical. Pinned by
+`tests/unit/mapViewportNoWheelImports.test.ts` (3 mechanical cases):
+the constant is `undefined`; no `.svelte` file under `src/components`
+or `src/routes` contains `onwheel=` / `onWheel`; no `.svelte` or `.ts`
+file registers a `'wheel'` listener via `addEventListener`.
+
+**Layer paint order in `<MapUnderlay/>` is FIXED**: (1) PGM bitmap, (2)
+LiDAR scan dots (gated on `scanOverlayOn` + freshness + non-null
+`mapMetadata`), (3) `ondraw(ctx, worldToCanvas)` parent hook
+(pose+trail on Overview; `null` on Edit). A writer reordering layers
+fails Mode-A Critical. Pinned by
+`tests/unit/mapUnderlayScan.test.ts::layer paint order`.
+
+**Min-zoom semantic** (operator-locked Rule 2): captured ONCE from
+`window.innerHeight` at the FIRST `setMapDims(w, h)` call. Subsequent
+calls are NO-OPs at the FACTORY level — the `_dimsCaptured` boolean
+lives in the factory closure, NOT in the caller (Mode-A M5). A future
+writer who routes map-switch through `null → fresh-non-null` cannot
+accidentally re-trigger the capture. NO `addEventListener('resize',
+...)` anywhere; pinned by `tests/unit/mapViewport.test.ts::no resize
+listener registered`.
+
+**Single math SSOT** (Mode-A M4): `mapViewport.svelte.ts` exports the
+full pure-helper set as named exports SEPARATE from `createMapViewport`:
+`clampZoom`, `applyZoomStep`, `parsePercent`, `panClamp`,
+`worldToCanvas`, `canvasToWorld`, `canvasToImagePixel`,
+`imagePixelToCanvas`. All take inputs as parameters — no closure leak;
+unit tests exercise the math without a Svelte mount. The factory
+wraps them with `$state`. `<MapUnderlay/>`'s `bind:this` API
+(`worldToCanvas` / `canvasToWorld`) is a passthrough that supplies
+`(canvas.width, canvas.height)` and forwards to the pure helper.
+`<MapMaskCanvas/>` consumes `viewport` directly (Mode-A M4 — the draft
+plan's `underlayWorldToCanvas` prop never shipped); brush math at
+non-trivial zoom uses `viewport.canvasToImagePixel(...)` to invert
+the underlay's transform around the mask box center, collapsing to
+identity at zoom = 1, pan = 0 (T4 fold's DPR-coord pin survives
+byte-identical).
+
+**`panClamp` two-case spec** (Mode-A M1 + Parent fold Q7):
+smaller-than-viewport axis → centered (pan = 0); larger-than-viewport
+axis → clamped so the projected map keeps `MAP_PAN_OVERSCAN_PX = 100`
+overlap with the viewport on every side. Eliminates the operator's
+"map escapes off-screen" pain.
+
+**Numeric input UX** (Mode-A N1 + N3): `type="text" inputmode="decimal"`
+mirrors the OriginPicker idiom (PR #43); locale-comma `1,234` rejected
+explicitly; NaN/Inf rejected. BOTH `onchange` (blur) AND `onkeydown`
+Enter call `setZoomFromPercent`. Negative input (operator typo) clamps
+to `minZoom` per Parent fold T2.
+
+**`MAP_ZOOM_STEP = 1.25`** chosen with rich docstring covering the
+alternatives evaluated (1.25× / √2 / 1.5× / 2×) and the
+operator-experience trade-off (Mode-A S3). Tests assert the EXACT
+value via `applyZoomStep(1.0, +1) === 1.25`.
+
+**Bundle-size delta** (Mode-A S5 — measured, not estimated):
+`dist/assets/index-*.js` 118.02 → 123.87 kB raw; **42.76 → 44.85 kB
+gzipped (+2.09 kB)**. CSS 25.69 → 27.14 kB raw; 5.06 → 5.30 kB gzipped
+(+0.24 kB). Net JS+CSS gzipped: **+2.33 kB**. Within the +5 kB ceiling
+documented in PR #43.
+
+Pinned by `tests/unit/mapViewport.test.ts` (34 cases — pure helpers +
+factory state + round-trip identity + setMapDims survives null→A→null→B
+
+- no resize listener), `tests/unit/mapZoomControls.test.ts` (11 cases —
+  both Enter AND blur commit triggers + locale-comma + clamp + chain
+  integration T3), `tests/unit/mapUnderlayScan.test.ts` (5 cases — Rule 3
+- Rule 4 single code path + layer paint order S1),
+  `tests/unit/mapViewportNoWheelImports.test.ts` (3 cases — wheel-removal
+  structural pin T5), e2e `tests/e2e/map.spec.ts` (2 NEW + 1 REPLACED).
 
 ## 2026-04-30 09:00 KST — PR-C: Config tab Edit-mode UX
 

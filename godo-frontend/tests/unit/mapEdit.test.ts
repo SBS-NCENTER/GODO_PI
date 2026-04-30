@@ -39,20 +39,39 @@ function pngResp(): Response {
 }
 
 /**
- * Install jsdom canvas shims globally for this test module. Kept minimal
- * — we only stub the methods the component reads.
+ * Install jsdom canvas shims globally for this test module. Kept
+ * minimal — we only stub the methods the components read. PR β added
+ * `<MapUnderlay/>` inside `<MapEdit/>`, so the stub now also covers the
+ * underlay's redraw path (clearRect / beginPath / arc / fill / stroke /
+ * moveTo / lineTo / fillStyle / strokeStyle / globalAlpha / lineWidth).
  */
 function installCanvasShims(): void {
-  // getContext: a 2D-ish object with the methods MapMaskCanvas uses.
-  HTMLCanvasElement.prototype.getContext = vi.fn(function fakeGetContext(this: HTMLCanvasElement) {
+  HTMLCanvasElement.prototype.getContext = vi.fn(function fakeGetContext(
+    this: HTMLCanvasElement,
+    contextId: string,
+  ) {
+    if (contextId !== '2d') return null;
     const ctx = {
+      // mutable style sinks
+      fillStyle: '',
+      strokeStyle: '',
+      globalAlpha: 1,
+      lineWidth: 0,
       imageSmoothingEnabled: false,
+      // MapMaskCanvas + MapUnderlay path
+      clearRect: vi.fn(),
       drawImage: vi.fn(),
       createImageData: vi.fn(
         (w: number, h: number) =>
           ({ data: new Uint8ClampedArray(w * h * 4), width: w, height: h }) as ImageData,
       ),
       putImageData: vi.fn(),
+      beginPath: vi.fn(),
+      arc: vi.fn(),
+      fill: vi.fn(),
+      stroke: vi.fn(),
+      moveTo: vi.fn(),
+      lineTo: vi.fn(),
     };
     return ctx as unknown as CanvasRenderingContext2D;
   }) as unknown as typeof HTMLCanvasElement.prototype.getContext;

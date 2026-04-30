@@ -166,10 +166,13 @@
 
   export function getMaskPng(): Promise<Blob> {
     return new Promise((resolve, reject) => {
-      // Build a temporary single-channel canvas. We use a 2D canvas in
-      // RGBA mode (single-channel canvases require WebGL/OffscreenCanvas)
-      // — the backend converts RGBA to "L" via Pillow if alpha is present;
-      // we emit greyscale-on-RGB so the threshold path is exercised.
+      // Build a temporary RGBA canvas. The backend's decoder takes the
+      // alpha-as-paint branch first when an alpha channel is present
+      // (map_edit.py:177-181), so alpha MUST track the paint signal:
+      // unpainted -> alpha=0 (not paint), painted -> alpha=255 (paint).
+      // Setting alpha=255 unconditionally would mark every pixel as
+      // painted and nuke the entire map on Apply. RGB tracks alpha so
+      // the greyscale-threshold fallback (img.convert("L")) also works.
       const c = document.createElement('canvas');
       c.width = width;
       c.height = height;
@@ -185,7 +188,7 @@
         img.data[off] = v;
         img.data[off + 1] = v;
         img.data[off + 2] = v;
-        img.data[off + 3] = 255;
+        img.data[off + 3] = v;
       }
       ctx.putImageData(img, 0, 0);
       c.toBlob((blob) => {

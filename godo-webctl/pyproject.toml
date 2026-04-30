@@ -9,6 +9,7 @@ dependencies = [
     "bcrypt>=4.1",
     "pyjwt>=2.8",
     "pillow>=10.0",
+    "python-multipart>=0.0.9",
 ]
 
 [dependency-groups]

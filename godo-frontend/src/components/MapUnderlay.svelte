@@ -18,13 +18,13 @@
    *
    * Imperative API exposed via `bind:this`:
    *   - `worldToCanvas(wx, wy)` — thin passthrough to the viewport's
-   *     pure helper. Used by `Map.svelte`'s pose-render hook.
+   *     pure helper (Mode-A M4 — single math SSOT).
    *   - `canvasToWorld(cx, cy)` — symmetric inverse.
    *
-   * Zoom + pan + min-zoom state lives in the parent-supplied viewport
-   * (commit-2 onward — until then PoseCanvas passes literal `zoom`,
-   * `panX`, `panY` props as bindables; commit-2 replaces those with a
-   * `mapViewport` instance).
+   * Zoom + pan + min-zoom state lives in the parent-supplied
+   * `viewport` (commit-2). The factory captures `window.innerHeight`
+   * once on the FIRST `setMapDims` call. Idempotency lives inside the
+   * factory closure (Mode-A M5).
    *
    * `data-scan-count` + `data-scan-fresh` attributes are preserved on
    * the wrap div (Q-OQ-D9 selector reliability).
@@ -39,22 +39,17 @@
     MAP_SCAN_DOT_RADIUS_PX,
     MAP_SCAN_FRESHNESS_MS,
   } from '$lib/constants';
+  import type { MapViewport } from '$lib/mapViewport.svelte';
   import type { LastScan, MapMetadata } from '$lib/protocol';
   import { projectScanToWorld } from '$lib/scanTransform';
   import { loadMapMetadata, mapMetadata, mapMetadataError } from '$stores/mapMetadata';
 
   interface Props {
+    /** Shared map viewport instance (Mode-A M4 — single math SSOT). */
+    viewport: MapViewport;
     mapImageUrl?: string;
     scan?: LastScan | null;
     scanOverlayOn?: boolean;
-    /**
-     * Zoom + pan are CURRENTLY passed as bindable props by PoseCanvas
-     * (commit-1). Commit-2 replaces this with a single `viewport`
-     * prop and the bindables go away.
-     */
-    zoom: number;
-    panX: number;
-    panY: number;
     /**
      * Parent-supplied draw hook called with the layer-3 paint slot.
      * `null` skips the hook (e.g. on `/map-edit` where the brush
@@ -83,12 +78,10 @@
   }
 
   let {
+    viewport,
     mapImageUrl = '/api/map/image',
     scan = null,
     scanOverlayOn = false,
-    zoom = $bindable(1),
-    panX = $bindable(0),
-    panY = $bindable(0),
     ondraw = null,
     scanCount = $bindable(0),
     scanFreshOut = $bindable(false),
@@ -107,6 +100,12 @@
   let metaError = $state<string | null>(null);
   const _metaUnsub = mapMetadata.subscribe((v) => {
     meta = v;
+    if (v) {
+      // Mode-A M5 — factory-internal idempotency: every call after the
+      // first is a NO-OP regardless of caller, so this is safe even if
+      // map-switch routes through `null → fresh-non-null`.
+      viewport.setMapDims(v.width, v.height);
+    }
   });
   const _metaErrUnsub = mapMetadataError.subscribe((v) => {
     metaError = v;
@@ -117,11 +116,13 @@
   let scanRenderedCount = $state(0);
   let scanFresh = $state(false);
 
-  // Re-render whenever inputs or transform change.
+  // Re-render whenever inputs or transform change. Reading
+  // `viewport.zoom`/`panX`/`panY` here registers $state subscriptions
+  // (the factory exposes them via getters backed by runes).
   $effect(() => {
-    void zoom;
-    void panX;
-    void panY;
+    void viewport.zoom;
+    void viewport.panX;
+    void viewport.panY;
     void mapImageUrl;
     void scan;
     void scanOverlayOn;
@@ -164,34 +165,18 @@
    *   cx = canvas.width  / 2 + panX + (img_col - width  / 2) * zoom
    *   cy = canvas.height / 2 + panY + (img_row - height / 2) * zoom
    *
-   * When `meta === null` the scan overlay is suppressed (no anchor) but
-   * the canvas falls back to a centred Cartesian frame so the parent's
-   * `ondraw` (pose+trail) still renders something.
+   * Implementation lives in `lib/mapViewport.svelte.ts::worldToCanvas`
+   * (a pure helper); this method is a thin passthrough that supplies
+   * the canvas dims (Mode-A M4 — single math SSOT).
    */
   export function worldToCanvas(wx: number, wy: number): [number, number] {
     if (!canvas) return [0, 0];
-    const m = meta;
-    if (!m) {
-      return [canvas.width / 2 + panX + wx * zoom, canvas.height / 2 + panY - wy * zoom];
-    }
-    const imgCol = (wx - m.origin[0]) / m.resolution;
-    const imgRow = m.height - 1 - (wy - m.origin[1]) / m.resolution;
-    const cx = canvas.width / 2 + panX + (imgCol - m.width / 2) * zoom;
-    const cy = canvas.height / 2 + panY + (imgRow - m.height / 2) * zoom;
-    return [cx, cy];
+    return viewport.worldToCanvas(wx, wy, canvas.width, canvas.height, meta);
   }
 
   export function canvasToWorld(cx: number, cy: number): [number, number] {
     if (!canvas) return [0, 0];
-    const m = meta;
-    if (!m) {
-      return [(cx - canvas.width / 2 - panX) / zoom, -(cy - canvas.height / 2 - panY) / zoom];
-    }
-    const imgCol = (cx - canvas.width / 2 - panX) / zoom + m.width / 2;
-    const imgRow = (cy - canvas.height / 2 - panY) / zoom + m.height / 2;
-    const wx = imgCol * m.resolution + m.origin[0];
-    const wy = (m.height - 1 - imgRow) * m.resolution + m.origin[1];
-    return [wx, wy];
+    return viewport.canvasToWorld(cx, cy, canvas.width, canvas.height, meta);
   }
 
   function drawScanLayer(ctx: CanvasRenderingContext2D, s: LastScan): number {
@@ -214,6 +199,10 @@
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const zoom = viewport.zoom;
+    const panX = viewport.panX;
+    const panY = viewport.panY;
 
     // Layer 1 — PGM bitmap.
     if (img) {
@@ -249,16 +238,22 @@
 
   function onMouseDown(e: MouseEvent): void {
     dragging = true;
-    dragStartX = e.clientX - panX;
-    dragStartY = e.clientY - panY;
+    dragStartX = e.clientX - viewport.panX;
+    dragStartY = e.clientY - viewport.panY;
   }
   function onMouseUp(): void {
     dragging = false;
   }
   function onMouseMove(e: MouseEvent): void {
     if (dragging) {
-      panX = e.clientX - dragStartX;
-      panY = e.clientY - dragStartY;
+      viewport.setPan(e.clientX - dragStartX, e.clientY - dragStartY);
+      // Pan-clamp every drag-move so the projected map cannot retreat
+      // past `MAP_PAN_OVERSCAN_PX` on any side. The clamp is a no-op
+      // when the projected box is smaller than the viewport on both
+      // axes (smaller-axis case forces pan=0; see Q7 / Mode-A M1).
+      if (canvas) {
+        viewport.panClampInPlace(canvas.width, canvas.height);
+      }
     }
     if (canvas) {
       const rect = canvas.getBoundingClientRect();

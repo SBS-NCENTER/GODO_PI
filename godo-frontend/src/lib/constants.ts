@@ -66,13 +66,57 @@ export const STORAGE_KEY_THEME = 'godo:theme';
 export const MAP_POSE_DOT_RADIUS_PX = 6;
 // Length of the heading arrow in pixels.
 export const MAP_POSE_HEADING_LEN_PX = 22;
-// Default world-to-pixel zoom (1 px = N meters). Overridden by user wheel.
+// Default world-to-pixel zoom (1 px = N meters).
+// Internally consumed by mapViewport.svelte.ts only; no external readers
+// after PR β (Mode-A S4 — kept-not-renamed to avoid drive-by churn).
 export const MAP_DEFAULT_ZOOM = 1;
 // Wheel sensitivity (multiplier per wheel notch).
+// (PR β commit-3 deletes this constant + the listener — Rule 1 forbids
+// mouse-wheel zoom; the (+/−) buttons + numeric input are the new UX.)
 export const MAP_WHEEL_ZOOM_FACTOR = 1.1;
 // Min/max zoom clamps.
+// Internally consumed by mapViewport.svelte.ts only.
 export const MAP_MIN_ZOOM = 0.1;
 export const MAP_MAX_ZOOM = 20;
+
+/**
+ * Discrete (+/−) zoom step factor for the shared map viewport (PR β).
+ *
+ * **Chosen value: 1.25.** Operator-friendly trade-off:
+ *   - 100 % → 200 % takes 4 clicks (`100 → 125 → 156 → 195 → 244`).
+ *   - 10 % → 1000 % takes ~10 clicks; the operator reaches any target
+ *     in roughly 3-4 clicks plus a quick numeric-field correction.
+ *
+ * **Alternatives evaluated**:
+ *   - **1.5**: 100 → 150 → 225 — too coarse; missing intermediate steps.
+ *   - **√2 ≈ 1.414**: 100 → 141 → 200 — irrational, awkward percentages.
+ *   - **2.0**: 100 → 200 — too aggressive; operators can't preview.
+ *   - **1.1** (the old wheel factor): too fine for a discrete button.
+ *
+ * Precision is supplied by the numeric input (operators can type the
+ * exact percent); (+/−) buttons optimize for rough exploration.
+ *
+ * Pinned by `tests/unit/mapViewport.test.ts::applyZoomStep` (Mode-A S3 —
+ * tests assert EXACT value, so a future change here surfaces in CI).
+ */
+export const MAP_ZOOM_STEP = 1.25;
+
+// Fallback minimum zoom percentage before first map-metadata-arrival
+// freezes the actual minimum. 10 % is visibly tiny but allows
+// exploration before the first PGM lands.
+export const MAP_ZOOM_PERCENT_MIN_DEFAULT = 10;
+// Hard ceiling on the numeric input. 1000 % is "every PGM cell ~10 CSS
+// px" at our typical 0.05 m/cell resolution — already far past useful.
+export const MAP_ZOOM_PERCENT_MAX = 1000;
+// Default initial zoom percentage on first paint.
+export const MAP_ZOOM_PERCENT_DEFAULT = 100;
+// Display rounding for the percentage input. 0 = integer percentages.
+export const MAP_ZOOM_PERCENT_DECIMAL_DISPLAY = 0;
+// Minimum overlap (px) the map's projected bounding box must keep with
+// the viewport on every side once it is larger than the viewport on
+// that axis. 100 px is large enough that operators never lose track of
+// the map yet small enough that they can still pan to the edges.
+export const MAP_PAN_OVERSCAN_PX = 100;
 
 // --- Service status colours (3 systemd services on B-LOCAL) ------------
 export const SVC_NAMES = ['godo-tracker', 'godo-webctl', 'godo-irq-pin'] as const;

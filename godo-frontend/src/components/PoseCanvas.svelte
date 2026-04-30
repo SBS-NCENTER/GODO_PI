@@ -3,11 +3,13 @@
    * Map Overview canvas — a thin wrapper around `<MapUnderlay/>` that
    * adds the pose+trail layer.
    *
-   * PR β commit-1 phasing: MapUnderlay owns the canvas + bitmap fetch
-   * + scan render path; PoseCanvas owns zoom + pan (passed down as
-   * `bind:` props) + wheel zoom + pose/trail state. Commit-2 replaces
-   * the local zoom/pan state with a `mapViewport` factory instance;
-   * commit-3 removes the wheel listener entirely.
+   * PR β phasing (commit-2): MapUnderlay owns the canvas + bitmap fetch
+   * + scan render path; PoseCanvas owns pose+trail state and supplies
+   * a parent draw hook. Zoom + pan now live in a `mapViewport` factory
+   * instance — owned either by the outer route (when supplied via the
+   * `viewport` prop) or constructed locally for back-compat. The
+   * wheel listener is preserved on this wrapper for one more commit;
+   * commit-3 deletes it and adds `<MapZoomControls/>` to Map.svelte.
    *
    * Back-compat selectors preserved on this wrapper:
    *   - `data-testid="pose-canvas-wrap"` on the outer div (mirrors
@@ -18,7 +20,6 @@
   import { untrack } from 'svelte';
   import {
     DEG_TO_RAD,
-    MAP_DEFAULT_ZOOM,
     MAP_HEADING_LINE_WIDTH_PX,
     MAP_MAX_ZOOM,
     MAP_MIN_ZOOM,
@@ -31,6 +32,7 @@
     MAP_TRAIL_MAX_OPACITY,
     MAP_WHEEL_ZOOM_FACTOR,
   } from '$lib/constants';
+  import { createMapViewport, type MapViewport } from '$lib/mapViewport.svelte';
   import type { LastPose, LastScan } from '$lib/protocol';
   import MapUnderlay from './MapUnderlay.svelte';
 
@@ -39,18 +41,27 @@
     mapImageUrl?: string;
     scan?: LastScan | null;
     scanOverlayOn?: boolean;
+    /**
+     * Optional shared viewport. When `Map.svelte` (commit-3+) wants
+     * `<MapZoomControls/>` to drive the same zoom state as this canvas,
+     * it creates a viewport with `createMapViewport()` and passes it
+     * here. When omitted, this component creates a private one
+     * (back-compat for any caller that doesn't yet supply a shared
+     * viewport).
+     */
+    viewport?: MapViewport;
   }
   let {
     pose,
     mapImageUrl = '/api/map/image',
     scan = null,
     scanOverlayOn = false,
+    viewport,
   }: Props = $props();
 
+  const _viewport: MapViewport = viewport ?? createMapViewport();
+
   let trail = $state<Array<{ x: number; y: number; yaw: number }>>([]);
-  let zoom = $state(MAP_DEFAULT_ZOOM);
-  let panX = $state(0);
-  let panY = $state(0);
 
   // Mirror underlay's scan stats so the existing e2e + unit selectors
   // anchored on the wrap div continue to resolve.
@@ -111,12 +122,15 @@
     }
   }
 
-  // Wheel zoom — temporarily preserved on this wrapper for commit-1
-  // (Rule 1 of PR β plan moves this to the (+/-) buttons in commit-3).
+  // Wheel zoom — temporarily preserved on this wrapper for commit-2
+  // (Rule 1 of PR β plan moves this to the (+/-) buttons in commit-3,
+  // and the wheel listener + MAP_WHEEL_ZOOM_FACTOR constant are deleted
+  // there).
   function onWheel(e: WheelEvent): void {
     e.preventDefault();
     const factor = e.deltaY < 0 ? MAP_WHEEL_ZOOM_FACTOR : 1 / MAP_WHEEL_ZOOM_FACTOR;
-    zoom = Math.max(MAP_MIN_ZOOM, Math.min(MAP_MAX_ZOOM, zoom * factor));
+    const next = Math.max(MAP_MIN_ZOOM, Math.min(MAP_MAX_ZOOM, _viewport.zoom * factor));
+    _viewport.setZoomFromPercent(next * 100);
   }
 </script>
 
@@ -129,12 +143,10 @@
   role="presentation"
 >
   <MapUnderlay
+    viewport={_viewport}
     {mapImageUrl}
     {scan}
     {scanOverlayOn}
-    bind:zoom
-    bind:panX
-    bind:panY
     bind:scanCount
     bind:scanFreshOut
     canvasTestId="pose-canvas"

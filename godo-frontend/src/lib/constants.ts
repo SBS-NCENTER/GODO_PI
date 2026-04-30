@@ -70,10 +70,12 @@ export const MAP_POSE_HEADING_LEN_PX = 22;
 // Internally consumed by mapViewport.svelte.ts only; no external readers
 // after PR β (Mode-A S4 — kept-not-renamed to avoid drive-by churn).
 export const MAP_DEFAULT_ZOOM = 1;
-// Wheel sensitivity (multiplier per wheel notch).
-// (PR β commit-3 deletes this constant + the listener — Rule 1 forbids
-// mouse-wheel zoom; the (+/−) buttons + numeric input are the new UX.)
-export const MAP_WHEEL_ZOOM_FACTOR = 1.1;
+// (`MAP_WHEEL_ZOOM_FACTOR` was deleted in PR β commit 3 — Rule 1 of
+// `.claude/memory/project_map_viewport_zoom_rules.md` forbids
+// mouse-wheel zoom. The (+/−) buttons + numeric input are the
+// operator-locked replacement. A writer reintroducing the constant
+// without first amending Rule 1 fails Mode-A Critical (CODEBASE.md
+// invariant `(ab)`); pinned by `tests/unit/mapViewportNoWheelImports.test.ts`.)
 // Min/max zoom clamps.
 // Internally consumed by mapViewport.svelte.ts only.
 export const MAP_MIN_ZOOM = 0.1;

@@ -1,16 +1,23 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
   import MapListPanel from '$components/MapListPanel.svelte';
+  import MapZoomControls from '$components/MapZoomControls.svelte';
   import PoseCanvas from '$components/PoseCanvas.svelte';
   import ScanToggle from '$components/ScanToggle.svelte';
   import { MAP_SUBTAB_EDIT, MAP_SUBTAB_OVERVIEW } from '$lib/constants';
   import { formatDegrees, formatMeters } from '$lib/format';
+  import { createMapViewport } from '$lib/mapViewport.svelte';
   import type { LastPose, LastScan } from '$lib/protocol';
   import { navigate, route } from '$lib/router';
   import { subscribeLastPose } from '$stores/lastPose';
   import { subscribeLastScan } from '$stores/lastScan';
   import { scanOverlay } from '$stores/scanOverlay';
   import MapEdit from './MapEdit.svelte';
+
+  // Per-route viewport instance (Q2 — operator navigating /map ↔
+  // /map-edit gets a fresh viewport). Shared between `<PoseCanvas/>`
+  // and `<MapZoomControls/>` so the buttons drive the same zoom state.
+  const viewport = createMapViewport();
 
   let pose = $state<LastPose | null>(null);
   let scan = $state<LastScan | null>(null);
@@ -99,7 +106,10 @@
         ({formatMeters(pose.x_m)}, {formatMeters(pose.y_m)}) · {formatDegrees(pose.yaw_deg)}
       </div>
     {/if}
-    <PoseCanvas {pose} mapImageUrl={previewUrl} {scan} scanOverlayOn={scanOn} />
+    <div class="canvas-stack">
+      <PoseCanvas {viewport} {pose} mapImageUrl={previewUrl} {scan} scanOverlayOn={scanOn} />
+      <MapZoomControls {viewport} />
+    </div>
   {:else if activeSubtab === MAP_SUBTAB_EDIT}
     <MapEdit />
   {/if}
@@ -113,6 +123,12 @@
     display: flex;
     justify-content: flex-end;
     margin: 8px 0;
+  }
+  /* PR β — wraps the underlay canvas so `<MapZoomControls/>` can sit
+     in the top-left absolutely-positioned slot WITHOUT overlapping the
+     `<MapListPanel/>` or the pose readout above. */
+  .canvas-stack {
+    position: relative;
   }
   /* Sub-tab styling mirrors System.svelte (PR-B Processes / Extended
      resources) so the visual idiom is consistent across the SPA. */

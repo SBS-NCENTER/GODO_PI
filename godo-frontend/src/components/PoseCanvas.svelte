@@ -3,13 +3,14 @@
    * Map Overview canvas — a thin wrapper around `<MapUnderlay/>` that
    * adds the pose+trail layer.
    *
-   * PR β phasing (commit-2): MapUnderlay owns the canvas + bitmap fetch
-   * + scan render path; PoseCanvas owns pose+trail state and supplies
-   * a parent draw hook. Zoom + pan now live in a `mapViewport` factory
-   * instance — owned either by the outer route (when supplied via the
-   * `viewport` prop) or constructed locally for back-compat. The
-   * wheel listener is preserved on this wrapper for one more commit;
-   * commit-3 deletes it and adds `<MapZoomControls/>` to Map.svelte.
+   * PR β phasing (commit-3 final): MapUnderlay owns the canvas + bitmap
+   * fetch + scan render path; PoseCanvas owns pose+trail state and
+   * supplies a parent draw hook. Zoom + pan live in a `mapViewport`
+   * factory instance — owned by the outer route (`Map.svelte`) which
+   * shares it with `<MapZoomControls/>`. **No wheel listener.** The
+   * `MAP_WHEEL_ZOOM_FACTOR` constant was deleted in this commit; a
+   * writer reintroducing wheel zoom fails Mode-A Critical per
+   * CODEBASE.md invariant `(ab)`.
    *
    * Back-compat selectors preserved on this wrapper:
    *   - `data-testid="pose-canvas-wrap"` on the outer div (mirrors
@@ -21,8 +22,6 @@
   import {
     DEG_TO_RAD,
     MAP_HEADING_LINE_WIDTH_PX,
-    MAP_MAX_ZOOM,
-    MAP_MIN_ZOOM,
     MAP_POSE_COLOR,
     MAP_POSE_DOT_RADIUS_PX,
     MAP_POSE_HEADING_LEN_PX,
@@ -30,7 +29,6 @@
     MAP_TRAIL_DOT_RADIUS_RATIO,
     MAP_TRAIL_LENGTH,
     MAP_TRAIL_MAX_OPACITY,
-    MAP_WHEEL_ZOOM_FACTOR,
   } from '$lib/constants';
   import { createMapViewport, type MapViewport } from '$lib/mapViewport.svelte';
   import type { LastPose, LastScan } from '$lib/protocol';
@@ -42,12 +40,10 @@
     scan?: LastScan | null;
     scanOverlayOn?: boolean;
     /**
-     * Optional shared viewport. When `Map.svelte` (commit-3+) wants
-     * `<MapZoomControls/>` to drive the same zoom state as this canvas,
-     * it creates a viewport with `createMapViewport()` and passes it
-     * here. When omitted, this component creates a private one
-     * (back-compat for any caller that doesn't yet supply a shared
-     * viewport).
+     * Optional shared viewport. `Map.svelte` creates one with
+     * `createMapViewport()` and passes it to BOTH this canvas and
+     * `<MapZoomControls/>` so the buttons drive the same zoom state.
+     * Test-only callers can omit it and rely on a private fallback.
      */
     viewport?: MapViewport;
   }
@@ -121,17 +117,6 @@
       ctx.stroke();
     }
   }
-
-  // Wheel zoom — temporarily preserved on this wrapper for commit-2
-  // (Rule 1 of PR β plan moves this to the (+/-) buttons in commit-3,
-  // and the wheel listener + MAP_WHEEL_ZOOM_FACTOR constant are deleted
-  // there).
-  function onWheel(e: WheelEvent): void {
-    e.preventDefault();
-    const factor = e.deltaY < 0 ? MAP_WHEEL_ZOOM_FACTOR : 1 / MAP_WHEEL_ZOOM_FACTOR;
-    const next = Math.max(MAP_MIN_ZOOM, Math.min(MAP_MAX_ZOOM, _viewport.zoom * factor));
-    _viewport.setZoomFromPercent(next * 100);
-  }
 </script>
 
 <div
@@ -139,8 +124,6 @@
   data-testid="pose-canvas-wrap"
   data-scan-count={scanCount}
   data-scan-fresh={scanFreshOut ? 'true' : 'false'}
-  onwheel={onWheel}
-  role="presentation"
 >
   <MapUnderlay
     viewport={_viewport}

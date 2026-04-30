@@ -357,8 +357,8 @@ from CSS coords to LOGICAL mask cells via the canvas's
 `getBoundingClientRect()`:
 
 ```ts
-lx = floor((ev.clientX - rect.left) * width / rect.width);
-ly = floor((ev.clientY - rect.top)  * height / rect.height);
+lx = floor(((ev.clientX - rect.left) * width) / rect.width);
+ly = floor(((ev.clientY - rect.top) * height) / rect.height);
 ```
 
 So a click at CSS (50, 50) under `devicePixelRatio = 2` lands at
@@ -475,7 +475,7 @@ Discipline rationale:
    `EventSource` across multiple subscribers; the underlying SSE
    closes only when the last subscriber unsubscribes. Pinned by
    `processes.test.ts::shares one SSE across multiple subscribers
-   (refcounted)` and the equivalent in `resourcesExtended.test.ts`.
+(refcounted)` and the equivalent in `resourcesExtended.test.ts`.
 5. **`_arrival_ms` stamped per frame** (Mode-A M6, mirror of
    invariant (m)): both PR-B stores stamp `Date.now()` on every
    received SSE frame so freshness gates use arrival-wall-clock,
@@ -715,7 +715,7 @@ System's three sub-tabs are session-scoped views (Processes / Extended resources
   duplicate marker + `<details>`-style info popover (3 documented
   bullet strings per Final fold S4).
 - `src/components/ResourceBars.svelte` — per-core CPU bars + mem bar
-  + disk bar. No SVG / rings (operator decision); null-tolerant.
+  - disk bar. No SVG / rings (operator decision); null-tolerant.
 - `src/routes/System.svelte` — wraps the existing 5-panel content in
   a default `overview` sub-tab + adds `processes` and `extended`
   sub-tabs. `activeSubtab` is component-local `$state`.
@@ -1402,6 +1402,78 @@ Pinned by `tests/unit/config.test.ts`:
 
 Total: 19 cases in `tests/unit/config.test.ts` post-PR.
 
+### (aa) `OriginPicker.svelte` is the sole owner of origin-edit form state; `MapMaskCanvas` mode-prop split keeps DPR isolation (Track B-MAPEDIT-2)
+
+> Letter rationale: `(z)` is taken (PR-C, line 1320 above) and the next
+> free letter is `(aa)`. Mirrors webctl's `(aa) → (ab)` continuation
+> from PR #39.
+
+The dual-input origin form (`x_m`, `y_m`, `mode`) lives ENTIRELY inside
+`<OriginPicker/>` instance state. `<MapEdit/>` orchestrates layout +
+the brush-vs-origin click-mode toggle but does NOT mirror the form
+values in any store. The exported imperative API
+`OriginPicker.setCandidate({x_m, y_m})` is the only path by which a
+parent component (the MapEdit GUI-pick handler) can pre-fill the form;
+parents cannot read the current form values back — Apply payload is
+emitted via the `onapply` callback prop.
+
+The Origin section is a co-resident block INSIDE the Edit sub-tab
+(NOT a peer sub-tab); operator-locked decision per spec memory +
+planner §7 open question 4. A future "Origin sub-tab" refactor is a
+regression unless the operator re-asks.
+
+`MapMaskCanvas.svelte` gains a `mode: 'paint' | 'origin-pick'` prop
+(default `'paint'`). In `'origin-pick'` mode pointer events bypass the
+mask buffer entirely and emit `oncoordpick(lx, ly)` with logical PGM
+coords. Mask state is byte-identical to a paint-mode no-op pointer
+event — invariant (u) holds. T4 fold's DPR isolation continues to
+apply (logical coords are the canonical emit shape regardless of
+`devicePixelRatio` or CSS scale).
+
+`lib/originMath.ts` is the SPA-side sole-owner of pixel↔world math:
+`pixelToWorld(px, py, dims, resolution, origin)` applies the ROS
+Y-flip convention `world_y = origin[1] + (height - 1 - py) * resolution`
+exactly once. The `-1` is load-bearing — Mode-A reviewer M4 caught a
+draft missing it (would silently shift the candidate marker by one
+cell row, ~5 cm at typical 0.05 m/cell — 2× the operator's accuracy
+target). PoseCanvas's existing world↔canvas math is NOT extracted into
+this module in this PR (would be a refactor outside the LOC budget);
+the documented rule is "every NEW pixel↔world site uses originMath.ts".
+
+`resolveDelta(currentOrigin, dx, dy)` uses the **ADD sign convention**
+(operator-locked 2026-04-30 KST, see
+`.claude/memory/project_map_edit_origin_rotation.md`):
+`new_origin = currentOrigin + (dx, dy)`. Operator phrasing: "실제
+원점 위치는 여기서 (x, y)만큼 더 간 곳". Korean operator-copy in the
+picker reads "Delta: 입력한 값을 현재 origin에 **더해서** 새 origin이
+됩니다." (NOT "빼서"). SUBTRACT is a regression that would silently
+shift the origin by 2× the typed offset.
+
+Apply path mirrors webctl invariant `(ab)` on the wire side:
+
+1. SPA validates inputs (finite, magnitude bound `ORIGIN_X_Y_ABS_MAX_M
+= 1_000.0`, locale-comma rejected).
+2. SPA POSTs `/api/map/origin` via `postMapOrigin({x_m, y_m, mode})`
+   — JSON-encoded (NOT multipart; brush-edit was multipart for the
+   binary mask).
+3. On 200: success banner `완료: (prev) → (new)` + fire-and-forget
+   `refreshRestartPending` + `setTimeout(navigate('/map'),
+ORIGIN_PICK_REDIRECT_DELAY_MS = 3000)`.
+4. On 4xx/5xx: error banner inline; form values preserved (no clear).
+
+The picker uses `<input type="text" inputmode="decimal">` (NOT
+`type="number"`) so the raw string is preserved for the locale-comma
+rejection check. `Number.isFinite` is the load-bearing finiteness
+gate (mirror of webctl's `math.isfinite` discipline).
+
+Pinned by `tests/unit/originMath.test.ts` (6 cases incl. M4 Y-flip
+off-by-one + delta ADD pin), `tests/unit/originPicker.test.ts` (10
+cases incl. mode toggle + locale-comma reject + NaN-like reject +
+`setCandidate` flips mode to absolute (T1 fold) + payload shape pin +
+MapMaskCanvas mode-prop default + origin-pick byte-identical mask
+buffer (T5 fold)), `tests/e2e/mapEdit.spec.ts` (3 new cases: admin
+numeric apply, admin GUI-pick pre-fill, viewer cannot apply).
+
 ## 2026-04-30 09:00 KST — PR-C: Config tab Edit-mode UX
 
 ### Added
@@ -1762,3 +1834,78 @@ reports the service `active` and the SPA is not mid-action. The
 combination handles both the timer-fires-while-tab-hidden case and
 the operator-clicks-and-walks-away case without ever showing a stale
 error past the next successful poll.
+
+## 2026-04-30 14:37 KST — Track B-MAPEDIT-2 (Phase 4.5 P2): origin pick (dual GUI + numeric input)
+
+### Added
+
+- `src/components/OriginPicker.svelte` — Sole-owner component for the
+  dual-input origin form. Mode toggle (absolute / delta), two
+  `<input type="text" inputmode="decimal">` fields with locale-comma
+  rejection + magnitude bound + finite check. Exports
+  `setCandidate({x_m, y_m})` so the parent route's GUI-pick handler can
+  pre-fill (and force mode back to `'absolute'` per T1 fold). Apply
+  emits `OriginPatchBody` via the `onapply` callback. Korean delta-mode
+  hint reads "Delta: 입력한 값을 현재 origin에 **더해서** 새 origin이
+  됩니다." (operator-locked ADD sign convention).
+- `src/lib/originMath.ts` — Pure helpers `pixelToWorld(px, py, dims,
+resolution, origin)` (ROS Y-flip with the load-bearing `height - 1 -
+py`), `resolveDelta(currentOrigin, dx, dy)` (ADD sign convention),
+  `resolveAbsolute(absX, absY)` (identity wrapper for shape symmetry).
+- `src/lib/protocol.ts` — `OriginMode = 'absolute' | 'delta'` literal,
+  `OriginPatchBody` interface, `OriginEditResponse` interface,
+  `ERR_ORIGIN_*` mirrors of webctl's protocol constants.
+- `src/lib/constants.ts` — `ORIGIN_X_Y_ABS_MAX_M = 1_000.0` (mirror of
+  webctl), `ORIGIN_DECIMAL_DISPLAY_MM = 3` (1 mm display rounding),
+  `ORIGIN_PICK_REDIRECT_DELAY_MS = 3000`.
+- `src/lib/api.ts::postMapOrigin<T>(body)` — typed JSON POST helper
+  (distinct from `postMapEdit` which is multipart).
+- `tests/unit/originMath.test.ts` — 6 vitest cases: center/top-left/
+  bottom-left pixel mappings + negative origin + ADD sign-convention
+  pin + identity passthrough.
+- `tests/unit/originPicker.test.ts` — 10 vitest cases: mode toggle +
+  payload shape, NaN-like rejection, locale-comma rejection, negative
+  values allowed, `setCandidate` pre-fill (T1 fold flips mode to
+  absolute), payload key shape pin, role-based disable, MapMaskCanvas
+  default mode, MapMaskCanvas `'origin-pick'` mode-prop split (T5 fold:
+  mask buffer byte-identical + `oncoordpick` called once).
+- `tests/e2e/mapEdit.spec.ts` — 3 new playwright cases: admin numeric
+  absolute apply → success banner + restart-pending banner; admin
+  GUI-pick on canvas pre-fills the picker; viewer cannot apply.
+- `tests/e2e/_stub_server.py` — `POST /api/map/origin` handler (admin-
+  gated, mirrors backend success path; flips `RESTART_PENDING_FLAG`).
+
+### Changed
+
+- `src/components/MapMaskCanvas.svelte` — Added `mode: 'paint' |
+'origin-pick'` prop (default `'paint'`) + `oncoordpick?: (lx, ly) =>
+void` callback prop. In origin-pick mode pointer-down emits
+  `oncoordpick(lx, ly)` with logical PGM coords and the mask buffer is
+  NOT touched — invariant (u) holds (mask state byte-identical to a
+  paint-mode no-op). `cursor: cell` for affordance. Drag-paint
+  short-circuits in origin-pick mode (no per-move emits).
+- `src/routes/MapEdit.svelte` — Wired `<OriginPicker/>` block beside
+  the existing brush toolbar. Click-mode toggle checkbox flips
+  `MapMaskCanvas.mode` between `'paint'` and `'origin-pick'`. GUI-pick
+  callback runs `pixelToWorld` from `originMath.ts` and pushes the
+  result into `OriginPicker.setCandidate(...)`. Apply path posts via
+  `postMapOrigin`, fires `refreshRestartPending`, and redirects to
+  `/map` after `ORIGIN_PICK_REDIRECT_DELAY_MS`.
+
+### Invariants
+
+- Added `(aa)`: `OriginPicker.svelte` is the sole owner of origin-edit
+  form state; `MapMaskCanvas` mode-prop split keeps DPR isolation;
+  `lib/originMath.ts` is the SPA-side sole-owner of pixel↔world math;
+  Origin section is a co-resident block inside Edit sub-tab (NOT a peer
+  sub-tab — operator-locked); Y-flip uses `height - 1 - py` (M4 fold);
+  delta uses ADD sign convention (operator-locked 2026-04-30 KST).
+
+### Test counts
+
+- vitest: 220 (was 204; +16 new = 6 originMath + 10 originPicker).
+- playwright: 38 of 44 passing; the 6 baseline failures (config.spec ×
+  4, map.spec hover, system.spec restart-409) are pre-existing flakes
+  unrelated to this PR. The 3 new origin-pick cases all pass; 1 fix
+  to the existing brush-edit happy-path test (strict-mode locator
+  collision after PR #41 added the page-local RestartPendingBanner).

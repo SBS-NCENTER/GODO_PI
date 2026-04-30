@@ -13,6 +13,7 @@ Phase 4-2 D Unix-domain JSON-lines socket at `/run/godo/ctl.sock`.
 | POST | `/api/calibrate`    | Latch `OneShot` on the tracker (admin) |
 | POST | `/api/map/backup`   | Atomic snapshot of `.pgm + .yaml` (admin) |
 | POST | `/api/map/edit`     | Brush-erase the active PGM via multipart mask + auto-backup-first + restart-pending sentinel touch (admin; tracker restart required) |
+| POST | `/api/map/origin`   | Rewrite active YAML's `origin[0]/origin[1]` (theta + every other byte preserved); body `{x_m, y_m, mode: "absolute"\|"delta"}`; auto-backup-first + restart-pending sentinel touch (admin; tracker restart required) |
 | POST | `/api/live`         | Toggle Live ↔ Idle on the tracker (admin) |
 | GET  | `/api/last_pose`    | One-shot pose snapshot (public) |
 | GET  | `/api/last_pose/stream` | SSE: pose @ 5 Hz (public) |
@@ -389,6 +390,9 @@ field to match.
 | `mask_shape_mismatch` (HTTP 400) on `/api/map/edit` | The mask PNG dimensions do not equal the active PGM dimensions (the SPA must build the canvas at the same logical `width × height` reported by `/api/maps/<active>/dimensions`). | The SPA's `MapMaskCanvas` sizes the canvas from `mapMetadata.width × .height`. A mismatch indicates the operator opened `/map-edit` while the active map changed underneath; reload the page so `mapMetadata` re-fetches. |
 | `mask_too_large` (HTTP 413) on `/api/map/edit` | The mask PNG exceeds `MAP_EDIT_MASK_PNG_MAX_BYTES = 4 MiB`. | Reduce brush usage or lower the canvas resolution. The SPA short-circuits before upload at the same cap. |
 | `active_map_missing` (HTTP 503) on `/api/map/edit` | `${GODO_WEBCTL_MAPS_DIR}/active.pgm` symlink is missing or broken. | `ls -l ${GODO_WEBCTL_MAPS_DIR}/active.pgm`; activate a valid map via `POST /api/maps/<name>/activate` (or the SPA's `/map` page). |
+| `bad_origin_value` (HTTP 400) on `/api/map/origin` | Operator submitted NaN, ±Inf, or a magnitude > `ORIGIN_X_Y_ABS_MAX_M = 1 km`. The `detail` field disambiguates: `non_finite_x_m` / `non_finite_y_m` / `abs_value_exceeds_bound`. | Confirm the SPA form's locale-decimal handling (`.` not `,`); the studio is ~10 m so any value beyond ±1 km is almost certainly an operator typo. |
+| `origin_yaml_parse_failed` (HTTP 500) on `/api/map/origin` | The active YAML lacks a parseable single `origin: [x, y, theta]` flow-style line. The `detail` field carries the reason: `origin_missing`, `multiple_origin_lines`, `flow_style_required`, `non_numeric_origin_xy`, `non_numeric_origin_theta`. | Inspect the active YAML (`cat ${GODO_WEBCTL_MAPS_DIR}/active.yaml`); restore from `/api/map/backup/list` if the file was hand-edited into a bad shape. The `flow_style_required` case (`origin:\n  - x\n  - y\n  - theta`) needs the operator to reformat to `origin: [x, y, theta]` or re-export the map from slam_toolbox. |
+| `active_yaml_missing` (HTTP 503) on `/api/map/origin` | `${GODO_WEBCTL_MAPS_DIR}/active.yaml` symlink is missing or broken (PGM may still exist). | `ls -l ${GODO_WEBCTL_MAPS_DIR}/active.{pgm,yaml}`; re-activate a valid map via `POST /api/maps/<name>/activate`. |
 
 ## Tests
 

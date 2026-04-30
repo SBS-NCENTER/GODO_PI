@@ -998,3 +998,120 @@ TEST_CASE("Second UdsServer::open atomically replaces the path-binding (R7 inver
     godo::rt::g_running.store(false, std::memory_order_release);
     h.th.join();
 }
+
+// --------------------------------------------------------------
+// issue#3 — JSON-number parser extension for set_mode pose hint.
+// Pinned at the parse-layer first (R6 highest-risk step from the plan
+// fold). The integration with g_calibrate_hint_data publish + cold
+// writer phase-0 branch lands in subsequent commits, but the parser
+// shape MUST be stable before those callers exist.
+// --------------------------------------------------------------
+
+TEST_CASE("json_mini::parse_request — pose hint number fields are accepted") {
+    using godo::uds::parse_request;
+    using godo::uds::Request;
+
+    // Full hint shape — webctl emits this when CalibrateBody.all_or_none
+    // resolves to "all three seed_* present" + sigma overrides.
+    const auto r = parse_request(
+        "{\"cmd\":\"set_mode\",\"mode\":\"OneShot\","
+        "\"seed_x_m\":1.5,\"seed_y_m\":-2.25,\"seed_yaw_deg\":90.0,"
+        "\"sigma_xy_m\":0.5,\"sigma_yaw_deg\":20.0}");
+    CHECK(r.cmd == "set_mode");
+    CHECK(r.mode_arg == "OneShot");
+    CHECK(r.has_seed_x_m);
+    CHECK(r.seed_x_m == doctest::Approx(1.5));
+    CHECK(r.has_seed_y_m);
+    CHECK(r.seed_y_m == doctest::Approx(-2.25));
+    CHECK(r.has_seed_yaw_deg);
+    CHECK(r.seed_yaw_deg == doctest::Approx(90.0));
+    CHECK(r.has_sigma_xy_m);
+    CHECK(r.sigma_xy_m == doctest::Approx(0.5));
+    CHECK(r.has_sigma_yaw_deg);
+    CHECK(r.sigma_yaw_deg == doctest::Approx(20.0));
+}
+
+TEST_CASE("json_mini::parse_request — back-compat: set_mode without hint") {
+    using godo::uds::parse_request;
+
+    // Pre-issue#3 shape — must remain accepted, has_*=false on all hint
+    // slots so the cold writer falls through to seed_global.
+    const auto r = parse_request("{\"cmd\":\"set_mode\",\"mode\":\"OneShot\"}");
+    CHECK(r.cmd == "set_mode");
+    CHECK(r.mode_arg == "OneShot");
+    CHECK_FALSE(r.has_seed_x_m);
+    CHECK_FALSE(r.has_seed_y_m);
+    CHECK_FALSE(r.has_seed_yaw_deg);
+    CHECK_FALSE(r.has_sigma_xy_m);
+    CHECK_FALSE(r.has_sigma_yaw_deg);
+    CHECK(r.seed_x_m == 0.0);
+    CHECK(r.seed_y_m == 0.0);
+    CHECK(r.seed_yaw_deg == 0.0);
+}
+
+TEST_CASE("json_mini::parse_request — number-shape boundaries") {
+    using godo::uds::parse_request;
+
+    // Negative integer, zero, scientific notation — all valid JSON
+    // numbers per the parse_number subset.
+    auto r1 = parse_request(
+        "{\"cmd\":\"set_mode\",\"mode\":\"OneShot\","
+        "\"seed_x_m\":-0,\"seed_y_m\":1e2,\"seed_yaw_deg\":3.14e-1}");
+    CHECK(r1.cmd == "set_mode");
+    CHECK(r1.has_seed_x_m);
+    CHECK(r1.seed_x_m == 0.0);                  // -0 == 0
+    CHECK(r1.has_seed_y_m);
+    CHECK(r1.seed_y_m == doctest::Approx(100.0));
+    CHECK(r1.has_seed_yaw_deg);
+    CHECK(r1.seed_yaw_deg == doctest::Approx(0.314));
+
+    // Bare integer (no fraction) is fine.
+    auto r2 = parse_request(
+        "{\"cmd\":\"set_mode\",\"mode\":\"OneShot\","
+        "\"seed_x_m\":0,\"seed_y_m\":0,\"seed_yaw_deg\":0}");
+    CHECK(r2.cmd == "set_mode");
+    CHECK(r2.has_seed_x_m);
+    CHECK(r2.seed_x_m == 0.0);
+    CHECK(r2.has_seed_y_m);
+    CHECK(r2.has_seed_yaw_deg);
+}
+
+TEST_CASE("json_mini::parse_request — number-shape rejections") {
+    using godo::uds::parse_request;
+
+    // Quoted number on a number-valued key → parse_error (the parser
+    // dispatches BY KEY: number-valued keys reject strings).
+    CHECK(parse_request(
+        "{\"cmd\":\"set_mode\",\"mode\":\"OneShot\","
+        "\"seed_x_m\":\"1.0\"}").cmd.empty());
+
+    // NaN / Infinity literals — JSON does NOT spell these and parse_number
+    // rejects them.
+    CHECK(parse_request(
+        "{\"cmd\":\"set_mode\",\"mode\":\"OneShot\","
+        "\"seed_x_m\":NaN}").cmd.empty());
+    CHECK(parse_request(
+        "{\"cmd\":\"set_mode\",\"mode\":\"OneShot\","
+        "\"seed_x_m\":Infinity}").cmd.empty());
+
+    // Leading dot, trailing dot, leading plus — strict shape rejects.
+    CHECK(parse_request(
+        "{\"cmd\":\"set_mode\",\"mode\":\"OneShot\","
+        "\"seed_x_m\":.5}").cmd.empty());
+    CHECK(parse_request(
+        "{\"cmd\":\"set_mode\",\"mode\":\"OneShot\","
+        "\"seed_x_m\":5.}").cmd.empty());
+    CHECK(parse_request(
+        "{\"cmd\":\"set_mode\",\"mode\":\"OneShot\","
+        "\"seed_x_m\":+1.0}").cmd.empty());
+
+    // Duplicate hint key.
+    CHECK(parse_request(
+        "{\"cmd\":\"set_mode\",\"mode\":\"OneShot\","
+        "\"seed_x_m\":1.0,\"seed_x_m\":2.0}").cmd.empty());
+
+    // String value passed for `cmd`/`mode` still works (pre-issue#3
+    // shape unchanged) — sanity that we did not over-broaden.
+    CHECK(parse_request("{\"cmd\":\"set_mode\",\"mode\":\"OneShot\"}").cmd ==
+          "set_mode");
+}

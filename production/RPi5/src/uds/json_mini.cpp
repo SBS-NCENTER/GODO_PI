@@ -1,7 +1,9 @@
 #include "json_mini.hpp"
 
 #include <cctype>
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 
 #include "core/constants.hpp"
@@ -43,6 +45,98 @@ std::size_t parse_string(std::string_view sv, std::size_t i,
     return i + 1;  // skip closing quote
 }
 
+// issue#3 — Parse a JSON number into `out`. Accepted shapes (subset of
+// RFC-8259):
+//   - optional leading '-'
+//   - integer part: '0' | [1-9][0-9]*
+//   - optional fraction: '.' [0-9]+
+//   - optional exponent: ('e'|'E') ('+'|'-')? [0-9]+
+// Rejects: leading '+', leading dot ('.5'), trailing dot ('5.'), NaN /
+// Infinity literals, hex / octal forms. The value MUST be finite —
+// snprintf-friendly for the subsequent UDS handler validation.
+//
+// Returns the index after the number, or npos on error. On success, `out`
+// holds the parsed double; on error, `out` is unchanged.
+//
+// Bias-block — this is NOT a general JSON-number parser. It is exactly
+// the subset webctl emits (Pydantic float JSON serialization). Rejecting
+// "+1.0" / "1." / "Infinity" is intentional — the serializer never
+// produces those shapes.
+std::size_t parse_number(std::string_view sv, std::size_t i, double& out) {
+    const std::size_t start = i;
+    if (i < sv.size() && sv[i] == '-') ++i;
+    // Integer part: '0' OR [1-9][0-9]*.
+    if (i >= sv.size()) return std::string_view::npos;
+    if (sv[i] == '0') {
+        ++i;
+    } else if (sv[i] >= '1' && sv[i] <= '9') {
+        ++i;
+        while (i < sv.size() && sv[i] >= '0' && sv[i] <= '9') ++i;
+    } else {
+        return std::string_view::npos;  // no digits
+    }
+    // Fraction part.
+    if (i < sv.size() && sv[i] == '.') {
+        ++i;
+        const std::size_t frac_start = i;
+        while (i < sv.size() && sv[i] >= '0' && sv[i] <= '9') ++i;
+        if (i == frac_start) return std::string_view::npos;  // bare '.'
+    }
+    // Exponent part.
+    if (i < sv.size() && (sv[i] == 'e' || sv[i] == 'E')) {
+        ++i;
+        if (i < sv.size() && (sv[i] == '+' || sv[i] == '-')) ++i;
+        const std::size_t exp_start = i;
+        while (i < sv.size() && sv[i] >= '0' && sv[i] <= '9') ++i;
+        if (i == exp_start) return std::string_view::npos;  // missing exp digits
+    }
+    // Convert via strtod on a NUL-terminated copy. The substring is
+    // bounded by the request size cap (UDS_REQUEST_MAX_BYTES) so a
+    // small std::string here is fine.
+    const std::string token(sv.data() + start, i - start);
+    char* end = nullptr;
+    errno = 0;
+    const double v = std::strtod(token.c_str(), &end);
+    if (errno != 0) return std::string_view::npos;             // overflow / underflow
+    if (end == nullptr || end == token.c_str()) return std::string_view::npos;
+    if (static_cast<std::size_t>(end - token.c_str()) != token.size()) {
+        return std::string_view::npos;
+    }
+    if (!std::isfinite(v)) return std::string_view::npos;
+    out = v;
+    return i;
+}
+
+// issue#3 — Helper: try to dispatch a key whose JSON value is a NUMBER
+// (not a string) into the corresponding Request slot. Returns true if
+// the key is recognized as a NUMBER-valued issue#3 key (caller must
+// then check `*ok`); false otherwise (caller falls back to the string
+// value path). On recognized-key parse error sets `*ok=false`.
+bool try_parse_number_key(Request& req,
+                          std::string_view key,
+                          std::string_view line,
+                          std::size_t i,
+                          std::size_t* advance,
+                          bool* ok) noexcept {
+    *ok = true;
+    auto land = [&](bool& has, double& slot) -> bool {
+        if (has) { *ok = false; return true; }   // duplicate key
+        double v = 0.0;
+        const std::size_t next = parse_number(line, i, v);
+        if (next == std::string_view::npos) { *ok = false; return true; }
+        has = true;
+        slot = v;
+        *advance = next;
+        return true;
+    };
+    if (key == "seed_x_m")      return land(req.has_seed_x_m,      req.seed_x_m);
+    if (key == "seed_y_m")      return land(req.has_seed_y_m,      req.seed_y_m);
+    if (key == "seed_yaw_deg")  return land(req.has_seed_yaw_deg,  req.seed_yaw_deg);
+    if (key == "sigma_xy_m")    return land(req.has_sigma_xy_m,    req.sigma_xy_m);
+    if (key == "sigma_yaw_deg") return land(req.has_sigma_yaw_deg, req.sigma_yaw_deg);
+    return false;
+}
+
 }  // namespace
 
 Request parse_request(std::string_view line) {
@@ -75,28 +169,42 @@ Request parse_request(std::string_view line) {
         if (i == std::string_view::npos) return {};
         i = skip_ws(line, i);
 
-        std::string value;
-        i = parse_string(line, i, value);
-        if (i == std::string_view::npos) return {};
-
-        if (key == "cmd") {
-            if (got_cmd) return {};      // duplicate key
-            req.cmd = std::move(value);
-            got_cmd = true;
-        } else if (key == "mode") {
-            if (got_mode) return {};
-            req.mode_arg = std::move(value);
-            got_mode = true;
-        } else if (key == "key") {
-            if (got_key) return {};
-            req.key_arg = std::move(value);
-            got_key = true;
-        } else if (key == "value") {
-            if (got_val) return {};
-            req.value_arg = std::move(value);
-            got_val = true;
+        // issue#3 — five keys carry JSON NUMBER values; the rest carry
+        // JSON STRING values. Dispatch on the key name BEFORE parsing
+        // the value so we use the right reader. Bias-block: the number
+        // path rejects strings even if the value happens to look like
+        // a number ("1.0"), and the string path rejects bare numbers,
+        // matching uds_protocol.md §C.1.1's strict shape.
+        std::size_t after_value = std::string_view::npos;
+        bool number_ok = false;
+        if (try_parse_number_key(req, key, line, i,
+                                 &after_value, &number_ok)) {
+            if (!number_ok) return {};
+            i = after_value;
         } else {
-            return {};                   // unknown key
+            std::string value;
+            i = parse_string(line, i, value);
+            if (i == std::string_view::npos) return {};
+
+            if (key == "cmd") {
+                if (got_cmd) return {};      // duplicate key
+                req.cmd = std::move(value);
+                got_cmd = true;
+            } else if (key == "mode") {
+                if (got_mode) return {};
+                req.mode_arg = std::move(value);
+                got_mode = true;
+            } else if (key == "key") {
+                if (got_key) return {};
+                req.key_arg = std::move(value);
+                got_key = true;
+            } else if (key == "value") {
+                if (got_val) return {};
+                req.value_arg = std::move(value);
+                got_val = true;
+            } else {
+                return {};                   // unknown key
+            }
         }
     }
 

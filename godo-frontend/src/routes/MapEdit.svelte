@@ -124,9 +124,11 @@
 </script>
 
 <div data-testid="map-edit-page">
-  <div class="breadcrumb">GODO &gt; Map Edit</div>
+  <!-- Top-level breadcrumb + h2 live on the parent Map.svelte (the
+       brush editor is now an Edit sub-tab inside the Map page). The
+       data-testid is preserved so the existing e2e + unit tests
+       continue to anchor on this container. -->
   <RestartPendingBanner />
-  <h2>Map Edit</h2>
 
   {#if dimsError}
     <p class="error" data-testid="map-edit-dims-error">
@@ -190,9 +192,6 @@
 </div>
 
 <style>
-  h2 {
-    margin-top: 0;
-  }
   .toolbar {
     display: flex;
     align-items: center;

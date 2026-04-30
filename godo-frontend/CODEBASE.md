@@ -603,6 +603,50 @@ preview proxy needed.
 
 ## Change log
 
+### 2026-04-30 21:00 KST — issue#2.2 — panClamp single-case fix + pinch zoom (PR #46 HIL hotfix)
+
+#### Changed
+
+- `src/lib/mapViewport.svelte.ts` — `panClamp` rewritten from the
+  two-case spec (smaller→center, larger→bounded) to a single symmetric
+  range `panX ∈ [OVERSCAN − W/2 − mw/2, W/2 − OVERSCAN + mw/2]`.
+  Eliminates the lo/hi inversion that snapped every drag-mousemove to
+  one edge when `mw > W − 2·OVERSCAN`. Operator HIL 2026-04-30: drag
+  pan now works at every zoom level, in both directions.
+- `src/components/MapUnderlay.svelte` — `onWheel` handler added,
+  gated on `e.ctrlKey === true`. Enables trackpad pinch zoom while
+  preserving the operator-locked rule that scroll-wheel ≠ zoom.
+  Pinch in / out reuses `viewport.zoomIn() / zoomOut()` (same step
+  factor as the (+/−) buttons).
+- `tests/unit/mapViewportNoWheelImports.test.ts` — case 2 relaxed to
+  permit `onwheel=` ONLY on `MapUnderlay.svelte`, AND requires the
+  handler to reference `ctrlKey`. Cases 1 + 3 unchanged.
+- `tests/unit/mapViewport.test.ts` — `panClamp` cases 12 / 12b
+  rewritten to match the new single-formula spec; case 12c added as
+  the symmetric drag-pan regression pin. `setPan + panClampInPlace`
+  case updated to the new clamp values (200×100 map → panX ∈
+  [-400, 400], panY ∈ [-250, 250] at zoom=1, viewport 800×600).
+
+#### Spec memory
+
+- `.claude/memory/project_map_viewport_zoom_rules.md` Rule 1 updated:
+  pinch zoom (trackpad gesture, synthetic `ctrlKey`) is now ALLOWED;
+  scroll-wheel zoom remains forbidden.
+
+#### Invariants
+
+- Invariant `(ab)` extended: pinch carve-out documented; the
+  `mapViewportNoWheelImports.test.ts` case 2 relaxation is part of
+  the structural witness. `panClamp` two-case spec replaced with
+  single-case spec; the regression-prevention pin is case 12c.
+
+#### Test counts
+
+- vitest: 273 → **273** (case-count unchanged; cases 12 / 12b
+  re-anchored; case 12c added; `setPan + panClampInPlace` updated).
+- Bundle delta (measured): +0.1 kB gzip from the new `onWheel`
+  handler in MapUnderlay (negligible).
+
 ### 2026-04-30 20:30 KST — PR β shared map viewport + zoom UX uniform + Map Edit LiDAR overlay
 
 Operator HIL request 2026-04-30 KST: zoom UX must be uniform across
@@ -1636,17 +1680,27 @@ module-scope singletons would leak state across navigation and require
 manual reset between vitest cases — extends `System.svelte`'s sub-tab
 state-reset idiom from invariant `(y)`).
 
-**Mouse-wheel zoom is FORBIDDEN.** The `MAP_WHEEL_ZOOM_FACTOR` constant
-was deleted as the structural witness that wheel zoom is gone.
-Re-introducing wheel-zoom requires (a) operator confirmation in
-`.claude/memory/project_map_viewport_zoom_rules.md` (Rule 1 currently
-FORBIDS it), (b) updating this invariant's wheel-zoom-forbidden clause,
-(c) THEN re-adding the constant + listener. A writer who restores a
-wheel listener WITHOUT (a)+(b) fails Mode-A Critical. Pinned by
-`tests/unit/mapViewportNoWheelImports.test.ts` (3 mechanical cases):
-the constant is `undefined`; no `.svelte` file under `src/components`
-or `src/routes` contains `onwheel=` / `onWheel`; no `.svelte` or `.ts`
-file registers a `'wheel'` listener via `addEventListener`.
+**Mouse-wheel zoom is FORBIDDEN; pinch zoom is ALLOWED** (operator HIL
+2026-04-30 KST after PR #46 deploy). The `MAP_WHEEL_ZOOM_FACTOR` constant
+was deleted; no scroll-wheel zoom factor exists. Pinch zoom uses the
+SAME `MAP_ZOOM_STEP` as the (+/−) buttons.
+
+The carve-out is structural: `MapUnderlay.svelte`'s `onwheel` handler
+gates on `e.ctrlKey === true`. Browsers map trackpad pinch to wheel
+events with synthetic `ctrlKey` (the user is NOT actually holding
+Ctrl); regular scroll fires with `ctrlKey === false` and is ignored.
+Re-introducing scroll-wheel zoom (i.e., reacting to wheel events
+WITHOUT a `ctrlKey` gate) requires (a) operator confirmation in
+`.claude/memory/project_map_viewport_zoom_rules.md` Rule 1, (b)
+updating this invariant, (c) THEN dropping the gate. Without (a)+(b)
+the writer fails Mode-A Critical.
+
+Pinned by `tests/unit/mapViewportNoWheelImports.test.ts` (3 cases):
+(1) `MAP_WHEEL_ZOOM_FACTOR` is `undefined`; (2) ONLY
+`MapUnderlay.svelte` has `onwheel=`, AND its handler references
+`ctrlKey`; (3) no `.svelte` or `.ts` file registers a `'wheel'`
+listener via `addEventListener` (the imperative path bypasses the
+source-grep ctrlKey check).
 
 **Layer paint order in `<MapUnderlay/>` is FIXED**: (1) PGM bitmap, (2)
 LiDAR scan dots (gated on `scanOverlayOn` + freshness + non-null
@@ -1680,11 +1734,16 @@ the underlay's transform around the mask box center, collapsing to
 identity at zoom = 1, pan = 0 (T4 fold's DPR-coord pin survives
 byte-identical).
 
-**`panClamp` two-case spec** (Mode-A M1 + Parent fold Q7):
-smaller-than-viewport axis → centered (pan = 0); larger-than-viewport
-axis → clamped so the projected map keeps `MAP_PAN_OVERSCAN_PX = 100`
-overlap with the viewport on every side. Eliminates the operator's
-"map escapes off-screen" pain.
+**`panClamp` single-case spec** (issue#2.2 — replaces PR β's two-case
+spec). Symmetric range: `panX ∈ [OVERSCAN − W/2 − mw/2, W/2 − OVERSCAN
++ mw/2]` where `mw = mapPx × zoom`. Semantic: at least
+`MAP_PAN_OVERSCAN_PX = 100` of the map's projected bounding box stays
+inside the viewport on every axis. Works for ALL map sizes (tiny, equal,
+or larger than viewport) — the previous two-case spec inverted lo/hi
+when `mw > W − 2·OVERSCAN`, snapping every drag-mousemove to one edge
+(operator HIL: "툭툭 끊기면서 맵이 반 정도 밑으로 내려가버려. 다시
+안올라와"). Pinned by `tests/unit/mapViewport.test.ts::panClamp` cases
+12 / 12b / 12c (12c is the symmetric drag-pan regression pin).
 
 **Numeric input UX** (Mode-A N1 + N3): `type="text" inputmode="decimal"`
 mirrors the OriginPicker idiom (PR #43); locale-comma `1,234` rejected

@@ -88,37 +88,38 @@ export function parsePercent(text: string | null | undefined): ParsePercentResul
 }
 
 /**
- * Clamp pan so the map's projected bounding box overlaps the viewport
- * by at least `MAP_PAN_OVERSCAN_PX` on every side.
+ * Clamp pan so at least `MAP_PAN_OVERSCAN_PX` of the map's projected
+ * bounding box remains visible inside the viewport on every axis.
  *
- * Two-case spec (Mode-A M1 + Parent fold Q7):
- *   - **Smaller-than-viewport axis** — the projected map width on that
- *     axis is smaller than the viewport. Center it (pan = 0). Operator
- *     cannot lose the map by panning a small map off-screen.
- *   - **Larger-than-viewport axis** — the projected map width is
- *     bigger. Clamp the pan so the projected box keeps `OVERSCAN_PX`
- *     overlap with the viewport. The operator can pan freely so long
- *     as the map's bounding box does not retreat further than 100 px
- *     past either edge.
+ * Single-case spec (issue#2.2 fix — operator HIL 2026-04-30 KST):
  *
- * The underlay draws around the canvas center, so the map's bounding
- * box (in canvas-CSS coords) is `[cx0, cx1] = [W/2 + panX - mw/2,
- * W/2 + panX + mw/2]` where `mw = mapPx * zoom`. Constraint:
+ *   The map's bounding box in canvas-CSS coords is
+ *     `[cx0, cx1] = [W/2 + panX - mw/2, W/2 + panX + mw/2]`
+ *   where `mw = mapPx * zoom`. The viewport is `[0, W]`.
  *
- *   cx1 ≥ OVERSCAN  →  panX ≥ OVERSCAN - W/2 - mw/2 + W
- *                  →  panX ≥ OVERSCAN - W/2 - mw/2 + W   (= W/2 + OVERSCAN - mw/2 ... wait)
+ *   For (map ∩ viewport) to have at least OVERSCAN px of overlap:
+ *     - map's right edge cx1 ≥ OVERSCAN
+ *         →  panX ≥ OVERSCAN − W/2 − mw/2
+ *     - map's left  edge cx0 ≤ W − OVERSCAN
+ *         →  panX ≤ W/2 − OVERSCAN + mw/2
  *
- * Algebra (re-derived cleanly):
+ *   This gives `panX ∈ [OVERSCAN − W/2 − mw/2, W/2 − OVERSCAN + mw/2]`,
+ *   which always has `lo ≤ hi` (lo − hi = 2·OVERSCAN − mw − W ≤ 0 for
+ *   any non-negative mw) so the formula is valid for ALL map sizes:
  *
- *   right edge cx1 = W/2 + panX + mw/2  ≤  W − OVERSCAN
- *     →  panX ≤ W/2 − OVERSCAN − mw/2
+ *     - Tiny map: range width ≈ W; operator can drift the map
+ *       most of the viewport before it is pulled back.
+ *     - Map-as-big-as-viewport: range width ≈ W; same.
+ *     - Large map: range width = W + 2·(mw − OVERSCAN); operator can
+ *       pan the map by `(mw − W)/2 + OVERSCAN` past either edge.
  *
- *   left  edge cx0 = W/2 + panX − mw/2  ≥  OVERSCAN
- *     →  panX ≥ OVERSCAN + mw/2 − W/2
- *
- * Symmetric range. When `mw < W` (smaller axis), the two bounds cross
- * over (lower > upper) — the centered position pan = 0 is the only
- * point inside both — so we force pan = 0. Same algebra for Y.
+ * Why the previous "fits inside viewport with OVERSCAN borders" spec
+ * was wrong: at zoom levels where `mw > W − 2·OVERSCAN` the lo/hi
+ * bounds invert (lo > hi) and EVERY panX gets snapped to one of the
+ * two — the symptom operator HIL flagged was "툭툭 끊기면서 맵이 반
+ * 정도 밑으로 내려가버려. 다시 안올라와" (drag stutters then snaps
+ * to one edge with no return path). Pin: see
+ * `mapViewport.test.ts::panClamp large map drag pan symmetric`.
  */
 export function panClamp(
   panX: number,
@@ -132,28 +133,13 @@ export function panClamp(
   const mw = mapPx * zoom;
   const mh = mapPy * zoom;
 
-  let outX: number;
-  if (mw + 2 * MAP_PAN_OVERSCAN_PX <= viewportW) {
-    // Smaller (or equal-with-room) axis — center the map.
-    outX = 0;
-  } else {
-    const lo = MAP_PAN_OVERSCAN_PX + mw / 2 - viewportW / 2;
-    const hi = viewportW / 2 - MAP_PAN_OVERSCAN_PX - mw / 2;
-    if (panX < lo) outX = lo;
-    else if (panX > hi) outX = hi;
-    else outX = panX;
-  }
+  const loX = MAP_PAN_OVERSCAN_PX - viewportW / 2 - mw / 2;
+  const hiX = viewportW / 2 - MAP_PAN_OVERSCAN_PX + mw / 2;
+  const outX = panX < loX ? loX : panX > hiX ? hiX : panX;
 
-  let outY: number;
-  if (mh + 2 * MAP_PAN_OVERSCAN_PX <= viewportH) {
-    outY = 0;
-  } else {
-    const lo = MAP_PAN_OVERSCAN_PX + mh / 2 - viewportH / 2;
-    const hi = viewportH / 2 - MAP_PAN_OVERSCAN_PX - mh / 2;
-    if (panY < lo) outY = lo;
-    else if (panY > hi) outY = hi;
-    else outY = panY;
-  }
+  const loY = MAP_PAN_OVERSCAN_PX - viewportH / 2 - mh / 2;
+  const hiY = viewportH / 2 - MAP_PAN_OVERSCAN_PX + mh / 2;
+  const outY = panY < loY ? loY : panY > hiY ? hiY : panY;
 
   return { panX: outX, panY: outY };
 }

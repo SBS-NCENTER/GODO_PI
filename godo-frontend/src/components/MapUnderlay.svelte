@@ -266,6 +266,30 @@
     hoverWorld = null;
   }
 
+  /**
+   * Pinch-zoom on touchpads — issue#2.2 follow-up to PR #46.
+   *
+   * Browsers map trackpad pinch gestures to `wheel` events with
+   * `e.ctrlKey === true` (synthetic; the user is NOT actually
+   * holding Ctrl). Plain scroll-wheel events have `ctrlKey === false`
+   * and are still ignored — operator-locked Rule 1 in
+   * `.claude/memory/project_map_viewport_zoom_rules.md` (no scroll-
+   * wheel zoom). The narrow `ctrlKey` gate is the structural witness
+   * that distinguishes pinch from scroll.
+   *
+   * Pinch convention: deltaY < 0 (pinch out) = zoom in;
+   *                   deltaY > 0 (pinch in)  = zoom out.
+   */
+  function onWheel(e: WheelEvent): void {
+    if (!e.ctrlKey) return;
+    e.preventDefault();
+    if (e.deltaY < 0) {
+      viewport.zoomIn();
+    } else if (e.deltaY > 0) {
+      viewport.zoomOut();
+    }
+  }
+
   // --- mount / unmount -----------------------------------------------
 
   onMount(() => {
@@ -329,6 +353,7 @@
     onmouseup={onMouseUp}
     onmousemove={onMouseMove}
     onmouseleave={onMouseLeave}
+    onwheel={onWheel}
   ></canvas>
   {#if hoverWorld}
     <div class="hover-coord muted" data-testid="hover-coord">

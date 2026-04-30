@@ -3357,11 +3357,24 @@ story was never installed. PR-A closes that.
 
 ### Invariants tightened
 
-- (o) **godo-systemctl-polkit-discipline** — The set of unit names
-  AND verbs allowed by `49-godo-systemctl.rules` MUST stay equal to
-  `services.py::ALLOWED_SERVICES` × `services.py::ALLOWED_ACTIONS`
-  (modulo the `.service` suffix the polkit rule writes out). Adding
-  a new GODO unit or verb is an explicit two-file edit — `services.py`
+- (o) **godo-systemctl-polkit-discipline** — `49-godo-systemctl.rules`
+  carries TWO independent allow rules whose surfaces must stay in
+  lockstep with the webctl-side argv constants:
+  - rule (a) `org.freedesktop.systemd1.manage-units` covers `unit ×
+    verb`; the cross-product MUST stay equal to
+    `services.py::ALLOWED_SERVICES` × `services.py::ALLOWED_ACTIONS`
+    (modulo the `.service` suffix the polkit rule writes out).
+  - rule (b) `org.freedesktop.login1.{reboot,power-off}*` covers host
+    reboot / power-off; the action set MUST cover every login1 ID
+    that the systemd `shutdown` shim might evaluate when executing
+    `services.py::SHUTDOWN_REBOOT_ARGV` (`["shutdown","-r","+0"]`)
+    or `SHUTDOWN_HALT_ARGV` (`["shutdown","-h","+0"]`) as a non-login
+    systemd-service caller. The current allow-list is the full set
+    of `*-multiple-sessions` / `*-ignore-inhibit` variants — narrow
+    it only after measurement, not by hand-picking.
+
+  Adding a new GODO unit, verb, or power-management surface (suspend,
+  hibernate, halt, etc.) is an explicit two-file edit — `services.py`
   and the polkit rule — in the same PR. The rule's default-deny
   semantics mean that forgetting the polkit half of the edit does
   not silently expand authority; it surfaces immediately as
@@ -3373,11 +3386,103 @@ story was never installed. PR-A closes that.
 
 | Layer | File | Drift catch |
 |---|---|---|
-| Python whitelist | `godo-webctl/src/godo_webctl/services.py::ALLOWED_SERVICES, ALLOWED_ACTIONS` | unit tests pin literal argv `["systemctl", action, "--no-pager", svc]` |
-| polkit rule | `production/RPi5/systemd/49-godo-systemctl.rules` | hand-mirrored allow-list on `(unit, verb)` tuples; HIL `pkcheck` is the only runtime drift catch |
+| Python whitelist (services) | `godo-webctl/src/godo_webctl/services.py::ALLOWED_SERVICES, ALLOWED_ACTIONS` | unit tests pin literal argv `["systemctl", action, "--no-pager", svc]` |
+| Python argv (power) | `godo-webctl/src/godo_webctl/services.py::SHUTDOWN_REBOOT_ARGV, SHUTDOWN_HALT_ARGV` | unit tests pin literal argv `["shutdown","-r","+0"]` / `["shutdown","-h","+0"]` |
+| polkit rule (a) | `production/RPi5/systemd/49-godo-systemctl.rules` (manage-units block) | hand-mirrored allow-list on `(unit, verb)` tuples; HIL `systemctl start` (as ncenter) is the only runtime drift catch |
+| polkit rule (b) | `production/RPi5/systemd/49-godo-systemctl.rules` (login1 block) | hand-mirrored allow-list on `org.freedesktop.login1.{reboot,power-off}*` action IDs; HIL = SPA Reboot/Shutdown buttons return HTTP 200 |
 | systemd unit names | `production/RPi5/systemd/godo-{tracker,irq-pin}.service` + `godo-webctl/systemd/godo-webctl.service` | rule filename + `[Unit] Description=` keep human readers in sync |
 
 The polkit rule is the only layer without an automated parity test —
-adding a fourth GODO unit means editing all three layers. Consider a
-pre-commit grep that pins the unit-name set across the polkit rule
-file + `services.py` if a fourth unit gets added.
+adding a fourth GODO unit (or a new power-management surface like
+`suspend`) means editing both webctl `services.py` and the polkit
+rule. Consider a pre-commit grep that pins the unit-name set across
+the polkit rule file + `services.py` if the surface grows further.
+
+## 2026-04-30 06:23 KST — PR-A1: extend polkit rule to cover host reboot / power-off (login1 actions)
+
+### Why
+
+Operator HIL after the ninth-session close revealed that pressing
+**Reboot Pi** or **Shutdown Pi** in the SPA System tab returned
+HTTP 500 `subprocess_failed` — the same failure mode PR-A had
+fixed for `systemctl start/stop/restart`, but routed through a
+different polkit action family. The two endpoints
+(`POST /api/system/{reboot,shutdown}` at `app.py:1082` / `app.py:1101`)
+call `services.system_reboot()` / `services.system_shutdown()` which
+run:
+
+```python
+subprocess.run(["shutdown", "-r", "+0"], ...)   # reboot
+subprocess.run(["shutdown", "-h", "+0"], ...)   # power-off
+```
+
+The systemd `/sbin/shutdown` shim talks to systemd-logind via D-Bus,
+gated by `org.freedesktop.login1.{reboot,power-off}*` polkit actions.
+PR-A's rule only allowed `org.freedesktop.systemd1.manage-units`, so
+the call from the unprivileged `ncenter` webctl process was denied
+(`Failed to {reboot|power off} system via logind: Interactive
+authentication required.`). Both Local.svelte and System.svelte share
+the same endpoint pair, so both surfaces were affected.
+
+### Changed
+
+- `production/RPi5/systemd/49-godo-systemctl.rules` — added a second
+  `polkit.addRule()` block covering the login1 reboot / power-off
+  action family. The rule allows ncenter-group subjects to invoke
+  any of:
+  - `org.freedesktop.login1.reboot{,-multiple-sessions,-ignore-inhibit}`
+  - `org.freedesktop.login1.power-off{,-multiple-sessions,-ignore-inhibit}`
+
+  All variants are allowed because webctl runs as a non-login
+  systemd service, which can hit any of them depending on
+  inhibit-locks and other active sessions at shutdown time.
+  Narrower variants (`halt`, `suspend`, `hibernate`) are
+  intentionally excluded.
+- `production/RPi5/systemd/install.sh` — step [4/6] echo and
+  header comment now read "systemctl + login1 access".
+- `production/RPi5/systemd/README.md` §7 — split into rule (a) /
+  rule (b) sub-blocks; expected polkit-rules count incremented
+  from 13 → 14 (one extra `addRule` evaluated as one extra rule by
+  polkit's loader).
+
+### Removed
+
+- (none)
+
+### Tests
+
+- No new automated tests. The webctl integration tests for
+  `/api/system/reboot` + `/api/system/shutdown`
+  (`test_app_integration.py::test_system_{reboot,shutdown}_*`)
+  monkeypatch `services_mod.{system_reboot,system_shutdown}`, so
+  they never exercised the polkit gate before and continue to be
+  green without change.
+- HIL verification on news-pi01 (operator-driven; sequence picked
+  to avoid an actual reboot mid-test):
+  1. **Parse-OK gate**: `sudo journalctl -u polkit -n 5 | grep rules`
+     after `install.sh` re-run. Expect "executing 14 rules" (was 13).
+  2. **Negative-path runtime gate** (does NOT actually reboot —
+     `--no-wall` keeps the wall-message thread quiet, then the
+     scheduled time gets cancelled before it fires):
+     ```bash
+     # AS ncenter, NOT through sudo:
+     shutdown -r +5 ; shutdown -c    # schedule 5-min reboot, cancel it
+     echo $?
+     ```
+     Pre-rule: `Failed to schedule shutdown: Interactive
+     authentication required.` Post-rule: exit 0 + Wall message
+     `The system is going down for reboot at <time>!` follows by
+     the cancellation.
+  3. **End-to-end SPA HIL**: log in as admin → System tab →
+     **Reboot Pi**. Pre-rule: HTTP 500 `subprocess_failed`. Post-rule:
+     HTTP 200 `{"ok":true}` followed by a real reboot ~5 s later
+     (the `+0` is the schedule, the systemd grace adds ~5 s of
+     in-flight handling). Repeat for **Shutdown Pi**, again with
+     the operator's awareness that the host actually powers off.
+
+### Invariants tightened
+
+- (o) **godo-systemctl-polkit-discipline** — extended to cover the
+  login1 surface; see "Invariants tightened" block in the PR-A
+  entry above for the full text. The amendment in lock-step with
+  the new rule is what carries the discipline forward.

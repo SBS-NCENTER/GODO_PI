@@ -15,7 +15,7 @@ godo-irq-pin.sh                       Idempotent IRQ-pinning helper
 godo-irq-pin.service                  Boot-time oneshot (calls the helper)
 godo-tracker.service                  RT main process
 system.conf.d/godo-watchdog.conf      systemd PID-1 hardware watchdog
-49-godo-systemctl.rules               polkit rule (ncenter group → start/stop/restart)
+49-godo-systemctl.rules               polkit rule (ncenter group → start/stop/restart + reboot/power-off)
 install.sh                            Idempotent operator installer
 ```
 
@@ -220,12 +220,23 @@ without an explicit allow rule the subprocess fails with
 `Interactive authentication required.` and the endpoint returns HTTP
 500 `subprocess_failed`.
 
-`49-godo-systemctl.rules` grants the minimum needed:
+`49-godo-systemctl.rules` grants the minimum needed.
+
+Rule (a) — `org.freedesktop.systemd1.manage-units`:
 
 - subject must be a member of the `ncenter` group;
 - unit must be one of `godo-tracker.service`, `godo-webctl.service`,
   `godo-irq-pin.service`;
 - verb must be one of `start`, `stop`, `restart`.
+
+Rule (b) — host reboot / power-off via systemd-logind:
+
+- subject must be a member of the `ncenter` group;
+- action must be one of `org.freedesktop.login1.{reboot,power-off}`
+  or one of their `-multiple-sessions` / `-ignore-inhibit` variants
+  (the systemd `shutdown` shim picks the variant at call time
+  depending on inhibit-locks and other sessions, and webctl runs as
+  a non-login systemd service so all variants are reachable).
 
 Anything else falls through to the distro default (`50-default.rules`).
 The rule file's `49-` prefix forces evaluation BEFORE the default.
@@ -241,9 +252,10 @@ sudo journalctl -u polkit -n 10 | grep 'rules'
 ```
 
 Expected line:
-`Finished loading, compiling and executing 13 rules`
+`Finished loading, compiling and executing 14 rules`
 
-The count is `12 default rules + 1 from our 49-godo-systemctl.rules`
+The count is `12 default rules + 2 from our 49-godo-systemctl.rules`
+(rule (a) `manage-units` + rule (b) `login1.{reboot,power-off}*`)
 on a stock Trixie host. Any parse error in the .rules file would
 appear as a JS syntax error in the same journal output and the
 service would refuse to load it (the others continue to work).
@@ -294,11 +306,14 @@ HTTP 500 `subprocess_failed`; post-rule: HTTP 200
 
 ### Why the whitelist is hand-mirrored (not generated)
 
-The unit-name × verb cross-product the rule allows MUST equal
-`services.py::ALLOWED_SERVICES × ALLOWED_ACTIONS` on the webctl side
+The unit-name × verb cross-product allowed by rule (a) MUST equal
+`services.py::ALLOWED_SERVICES × ALLOWED_ACTIONS` on the webctl side.
+The login1 action set allowed by rule (b) MUST cover whatever argv
+`services.py::SHUTDOWN_REBOOT_ARGV` / `SHUTDOWN_HALT_ARGV` invoke
 (see `production/RPi5/CODEBASE.md` invariant **(o)
-godo-systemctl-polkit-discipline**). Adding a fourth GODO service is
-therefore a synchronized two-file edit. The polkit rule's
+godo-systemctl-polkit-discipline**). Adding a fourth GODO service —
+or swapping the shutdown shim for `systemctl reboot` / `loginctl` —
+is therefore a synchronized two-file edit. The polkit rule's
 default-deny semantics make a missed edit fail loudly at the first
 operator click rather than silently expanding authority.
 

@@ -10,7 +10,8 @@
 #   3. Install watchdog drop-in to /etc/systemd/system.conf.d/
 #   4. Install polkit rule to /etc/polkit-1/rules.d/ (lets the
 #      ncenter group call systemctl start/stop/restart on the GODO
-#      units without sudo, used by webctl's service-control endpoint)
+#      units AND `shutdown -r/-h +0` for host reboot / power-off
+#      without sudo; both used by webctl's admin endpoints)
 #   5. Seed /etc/godo/tracker.env from the template if absent (preserves
 #      a real .env if the operator already wrote one)
 #   6. systemctl daemon-reload
@@ -58,7 +59,7 @@ install -d -m 0755 /etc/systemd/system.conf.d
 install -m 0644 "$SCRIPT_DIR/system.conf.d/godo-watchdog.conf" \
                 /etc/systemd/system.conf.d/godo-watchdog.conf
 
-echo "[4/6] Installing polkit rule for ncenter-group systemctl access"
+echo "[4/6] Installing polkit rule for ncenter-group systemctl + login1 access"
 install -d -m 0755 /etc/polkit-1/rules.d
 install -m 0644 "$SCRIPT_DIR/49-godo-systemctl.rules" \
                 /etc/polkit-1/rules.d/49-godo-systemctl.rules

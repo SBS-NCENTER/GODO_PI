@@ -367,8 +367,8 @@ takes the visible pixels into account; multiplying by the LOGICAL
 `width/height` gives the canonical mask index regardless of zoom or
 DPR.
 
-PR β clarification: the brush layer is now visually composed *on top
-of* `<MapUnderlay/>` via `position: absolute; inset: 0;` on a wrapping
+PR β clarification: the brush layer is now visually composed _on top
+of_ `<MapUnderlay/>` via `position: absolute; inset: 0;` on a wrapping
 div managed by `MapEdit.svelte`. The mask buffer remains
 `<MapMaskCanvas/>`-owned (sole owner discipline preserved). When a
 `viewport` prop is supplied, the pointer-coord conversion ALSO inverts
@@ -1627,11 +1627,11 @@ numeric apply, admin GUI-pick pre-fill, viewer cannot apply).
 
 ### (ab) PR β — shared map viewport + zoom UX uniform + Map Edit LiDAR overlay
 
-`<MapUnderlay/>` is the SOLE owner of the shared viewport + scan-overlay
-render path. `<MapZoomControls/>` is the SOLE zoom-input UI.
-`mapViewport.svelte.ts::createMapViewport()` is the SOLE owner of zoom
-+ pan + min-zoom state; the factory is per-component-instance (Q2 —
-operator navigating `/map` ↔ `/map-edit` gets a fresh viewport;
+`<MapUnderlay/>` is the SOLE owner of the shared viewport plus
+scan-overlay render path. `<MapZoomControls/>` is the SOLE zoom-input
+UI. `mapViewport.svelte.ts::createMapViewport()` is the SOLE owner of
+zoom, pan, and min-zoom state; the factory is per-component-instance
+(Q2 — operator navigating `/map` ↔ `/map-edit` gets a fresh viewport;
 module-scope singletons would leak state across navigation and require
 manual reset between vitest cases — extends `System.svelte`'s sub-tab
 state-reset idiom from invariant `(y)`).
@@ -1705,12 +1705,13 @@ documented in PR #43.
 
 Pinned by `tests/unit/mapViewport.test.ts` (34 cases — pure helpers +
 factory state + round-trip identity + setMapDims survives null→A→null→B
-+ no resize listener), `tests/unit/mapZoomControls.test.ts` (11 cases —
-both Enter AND blur commit triggers + locale-comma + clamp + chain
-integration T3), `tests/unit/mapUnderlayScan.test.ts` (5 cases — Rule 3
-+ Rule 4 single code path + layer paint order S1),
-`tests/unit/mapViewportNoWheelImports.test.ts` (3 cases — wheel-removal
-structural pin T5), e2e `tests/e2e/map.spec.ts` (2 NEW + 1 REPLACED).
+
+- no resize listener), `tests/unit/mapZoomControls.test.ts` (11 cases —
+  both Enter AND blur commit triggers + locale-comma + clamp + chain
+  integration T3), `tests/unit/mapUnderlayScan.test.ts` (5 cases — Rule 3
+- Rule 4 single code path + layer paint order S1),
+  `tests/unit/mapViewportNoWheelImports.test.ts` (3 cases — wheel-removal
+  structural pin T5), e2e `tests/e2e/map.spec.ts` (2 NEW + 1 REPLACED).
 
 ## 2026-04-30 09:00 KST — PR-C: Config tab Edit-mode UX
 

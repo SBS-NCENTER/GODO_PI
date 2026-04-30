@@ -603,6 +603,120 @@ preview proxy needed.
 
 ## Change log
 
+### 2026-04-30 21:50 KST — issue#2.4 — Map page common header (sub-tab independent layout)
+
+#### Added (recovered from PR #47 dead-merge)
+
+- `src/components/LastPoseCard.svelte` — Subscribes to `lastPose`
+  store; renders multi-field readout (x/y/yaw/σ_xy + converged chip).
+  Mirror of Dashboard's inline pose readout, extracted as a reusable
+  component so /map (Overview) and /map-edit (Edit) share one mount
+  + one subscription.
+- `src/components/TrackerControls.svelte` — Mode chip + tracker
+  health line + Calibrate / toggleLive / doBackup handlers. Mirror
+  of Dashboard's inline control card. Auth-gated (admin-only); read-
+  only role sees buttons disabled.
+- `tests/unit/lastPoseCard.test.ts` — 4 cases pinning the rendered
+  branches (valid + converged, valid + not-converged, null, invalid).
+
+#### Changed
+
+- `src/routes/Map.svelte` — Promotes `<TrackerControls/>` +
+  `<LastPoseCard/>` ABOVE the sub-tabs row (single mount; both
+  Overview and Edit see them). Moves `<ScanToggle/>` to the right
+  end of the sub-tabs row (operator-locked: consistent screen
+  position across sub-tabs). Reorders Overview body so
+  `<PoseCanvas/>` sits ABOVE `<MapListPanel/>` (operator HIL: "map
+  미리보기 블럭이 위로, 맵 목록 블럭이 아래로").
+- `src/routes/MapEdit.svelte` — `<ScanToggle/>` import + mount
+  removed; the parent Map.svelte now hosts a single ScanToggle in
+  the sub-tabs row.
+
+#### Recovery note
+
+PR #47 (issue#2.1) was opened with `base = feat/p4.5-track-b-map-
+viewport-shared-zoom` (PR #46's feat branch — issue#2.1 was
+originally framed as a stacked PR on top of PR #46). When PR #46
+was merged into `main` and the feat branch was closed, PR #47's
+base did NOT auto-retarget to main; it merged into the now-closed
+feat branch and never reached main. GitHub showed it as "merged"
+but the changes were on a dead branch. issue#2.4 cherry-picks the
+`LastPoseCard.svelte` + `TrackerControls.svelte` + test file
+verbatim from `origin/feat/p4.5-mapedit-controls-parity` and
+adds the layout changes on top — single recovered + extended PR.
+
+#### Lesson locked
+
+`feedback_check_branch_before_commit.md` already captured the
+shared-Pi branch-switch lesson. The stacked-PR base trap is
+captured in `feedback_premerge_hil_workflow.md` (queued for next
+session): when opening a follow-up with `base = feat-branch`,
+either retarget to main after parent merges OR don't open the
+follow-up until parent merges.
+
+### 2026-04-30 21:30 KST — issue#2.3 — Map Edit overlay / pan / pinch fix (PR #46 HIL hotfix)
+
+> Retroactive change-log entry: PR #50 (merged) shipped without a
+> change-log entry. Doc gap filled here for completeness — operator
+> SSOT-cleanness audit 2026-04-30 22:30 KST.
+
+#### Changed
+
+- `src/components/MapMaskCanvas.svelte` — Dropped the `mapCanvas`
+  element + its image-fetch effect entirely. PR β added
+  `<MapUnderlay/>` underneath but the duplicate `mapCanvas`
+  remained, opaque-RGB-covering the underlay's PGM + scan overlay.
+  Removed. The `<MapUnderlay/>` is now the SOLE owner of underlay
+  PGM rendering on Edit too.
+- `src/components/MapMaskCanvas.svelte` — Repositioned the mask
+  layer to the IMAGE RECT (`width: ${width}px; height: ${height}px;`)
+  with CSS-transform `translate(-50%, -50%) translate(panX, panY)
+  scale(zoom)`. The mask now visually tracks `<MapUnderlay/>`'s PGM
+  render exactly, at every zoom level. `pointerToLogicalCoords`
+  simplified — `cssX * width / rect.width` is direct now; viewport
+  math drops out (T4 fold's DPR-isolation pin survives because the
+  mask buffer is still `width × height` independent of CSS size).
+- `src/components/MapMaskCanvas.svelte` — `.mask-stack` becomes
+  `position: absolute; inset: 0; pointer-events: none;` so the area
+  AROUND the image lets pointer events fall through to MapUnderlay
+  (drag-pan + hover-coord work in margin regions). `.mask-layer`
+  keeps `pointer-events: auto` for paint / origin-pick AND adds an
+  `onwheel` handler forwarding pinch (ctrlKey-gated) to
+  `viewport.setZoomFromPercent` — same fractional sensitivity as
+  MapUnderlay's handler (issue#2.2).
+- `tests/unit/mapViewportNoWheelImports.test.ts` — case 2 widened
+  to allow `MapMaskCanvas.svelte` as a second pinch-handler file
+  (in addition to `MapUnderlay.svelte`); both must ctrlKey-gate.
+
+#### Invariants (extended)
+
+- Invariant `(u)` (MapMaskCanvas mask-state sole-owner) clarified —
+  the mask buffer remains `<MapMaskCanvas/>`-owned (sole-owner
+  discipline preserved), AND the brush layer is now visually
+  composed at the underlay's image rect via CSS transform. The
+  underlying coordinate transform comes from the shared viewport.
+- Invariant `(ab)` (PR β shared viewport) extended pinch carve-out —
+  TWO files (MapUnderlay + MapMaskCanvas) may register `onwheel=`,
+  both gated on `ctrlKey`. Mask layer must forward pinch upward
+  because it sits ON TOP of the underlay and would otherwise absorb
+  wheel events.
+
+#### Layered-canvas alpha lesson
+
+Operator surfaced the conceptual question whether all layers should
+be alpha-aware to avoid one canvas hiding another. Verified the
+existing architecture IS already alpha-aware:
+- PGM (bottom layer): opaque, no alpha needed.
+- LiDAR scan overlay (same canvas as PGM): drawn via `ctx.fillStyle =
+  rgba(...)` after the PGM bitmap; Canvas API auto-composites.
+- Mask layer (separate canvas): `createImageData` with per-cell alpha
+  (alpha=0 unpainted, ~140 painted). DOM compositing.
+
+The bug was a redundant OPAQUE canvas (`mapCanvas`) that pre-dated
+PR β; removing it lets the alpha-aware mask layer above and the
+opaque PGM/scan layer below stack correctly. No alpha-architecture
+change needed.
+
 ### 2026-04-30 21:00 KST — issue#2.2 — panClamp single-case fix + pinch zoom (PR #46 HIL hotfix)
 
 #### Changed

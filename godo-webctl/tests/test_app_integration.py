@@ -2199,7 +2199,15 @@ async def test_get_config_returns_projected_dict(
     tmp_path: Path,
     tmp_map_pair: Path,
 ) -> None:
-    fake_uds_server.reply(b'{"ok":true,"smoother.deadband_mm":12.5,"network.ue_port":6666}')
+    """The C++ tracker emits ``{"ok":true,"keys":{...}}``; the projection
+    in `config_view.project_config_view` unwraps `keys` into the flat
+    dict the SPA consumes (`protocol.ts::ConfigGetResponse`). This test
+    pins the FULL wire path with the real C++ envelope shape so a future
+    change to the projection layer can't silently revert the SPA's
+    Config tab to "—" rendering (the bug that motivated PR-A2)."""
+    fake_uds_server.reply(
+        b'{"ok":true,"keys":{"smoother.deadband_mm":12.5,"network.ue_port":6666}}'
+    )
     s = _settings_for(
         uds_socket=fake_uds_server.path,
         map_path=tmp_map_pair,
@@ -2210,6 +2218,7 @@ async def test_get_config_returns_projected_dict(
     assert r.status_code == HTTPStatus.OK
     body = r.json()
     assert "ok" not in body
+    assert "keys" not in body
     assert body["smoother.deadband_mm"] == 12.5
     assert body["network.ue_port"] == 6666
 

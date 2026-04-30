@@ -131,9 +131,11 @@ class UdsClient:
 
     # --- Track B-CONFIG (PR-CONFIG-β) ---------------------------------
     def get_config(self, timeout: float) -> dict[str, Any]:
-        """`get_config` round-trip. Response is the projected dict
-        ``{"<key>": <value>, ...}`` plus the protocol ``ok``; callers
-        pass through `config_view.project_config_view` to drop ``ok``.
+        """`get_config` round-trip. Response shape is
+        ``{"ok":true,"keys":{<key>:<value>,...}}`` per the C++ wire
+        (`production/RPi5/src/uds/json_mini.cpp::format_ok_get_config`);
+        callers pass through `config_view.project_config_view` to unwrap
+        the `keys` envelope into the flat dict the SPA consumes.
 
         Reply size is ~2 KiB (37 rows × ~50 B); 4 KiB default cap fits.
         """

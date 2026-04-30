@@ -20,10 +20,11 @@ PR β bundles three operator-locked changes into a single shared-viewport refact
 
 - **Top-left (+) and (−) buttons** for coarse zoom — discrete stepping (factor of √2 or similar; planner picks).
 - **Numeric input field** showing the current zoom percentage (e.g. `100%` ↔ `400%`); operator can type a value directly.
-- **No mouse wheel zoom**. Operator-locked: scroll wheel is reserved for page scroll, NOT zoom. Removing wheel zoom is a behavioral change from `PoseCanvas.svelte`'s current implementation.
-- **No keyboard shortcut zoom in this PR**. (Could be added later if requested; not in PR β scope.)
+- **No mouse wheel zoom**. Operator-locked: scroll wheel is reserved for page scroll, NOT zoom.
+- **Pinch zoom on touchpads is ALLOWED** (operator HIL request 2026-04-30 KST after PR #46 deploy). Browsers map trackpad pinch to `wheel` events with `e.ctrlKey === true` (synthetic — the user is NOT actually holding Ctrl). The `MapUnderlay.svelte` `onwheel` handler MUST gate on `e.ctrlKey` — plain scroll passes through, pinch reaches `viewport.zoomIn/Out`. Test pin: `mapViewportNoWheelImports.test.ts` case 2 — only `MapUnderlay.svelte` is allowed to register `onwheel=`, AND its handler must reference `ctrlKey`.
+- **No keyboard shortcut zoom**. (Could be added later if requested.)
 
-Pan (drag with mouse) stays — only the zoom interaction changes.
+Pan (drag with mouse) stays — only the wheel interaction is restricted to pinch.
 
 ## Rule 2 — Min-zoom = first-load viewport height (NOT resize-tracking)
 

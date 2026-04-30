@@ -102,54 +102,47 @@ describe('parsePercent — Mode-A T2 boundary cases', () => {
   });
 });
 
-describe('panClamp — Mode-A M1 two-case spec (Q7)', () => {
-  it('case 12: larger-than-viewport branch clamps panX so right edge sits at viewportW − OVERSCAN', () => {
-    // Map 2000 × 1500 at zoom 1, viewport 800 × 600.
-    // Algebra (re-derived in mapViewport.svelte.ts): panX clamps to
-    //   panX ≤ viewportW/2 − OVERSCAN − mw/2 = 400 − 100 − 1000 = −700
-    //   panX ≥ OVERSCAN + mw/2 − viewportW/2 = 100 + 1000 − 400 = 700
-    // Wait — those bounds cross since map IS larger.
-    // Actually for a map LARGER than viewport, mw=2000 > W=800, and:
-    //   hi = W/2 − OVERSCAN − mw/2 = 400 − 100 − 1000 = −700
-    //   lo = OVERSCAN + mw/2 − W/2 = 100 + 1000 − 400 = 700
-    // So lo > hi → both bounds active; panX is clamped between 700 and -700.
-    // Wait: input is panX = 10000 → over hi (-700)? No, hi is -700, lo is 700.
-    // Actually looking at the code: `if panX < lo` then `outX = lo`; `else if panX > hi` then `outX = hi`.
-    // With lo=700, hi=-700: panX=10000 > hi=-700, so outX = hi = -700.
-    // That's strange — let me re-derive the algebra. The map's right edge
-    // is at canvasW/2 + panX + mw/2; we want this ≤ canvasW − OVERSCAN.
-    //   400 + panX + 1000 ≤ 800 − 100 = 700
-    //   → panX ≤ −700
-    // The map's left edge is at canvasW/2 + panX − mw/2; we want ≥ OVERSCAN.
-    //   400 + panX − 1000 ≥ 100
-    //   → panX ≥ 700
-    // Both can't be satisfied for a larger-than-viewport map → the operator
-    // can position the map so EITHER the right edge sits at OVERSCAN or
-    // the left edge sits at OVERSCAN, but not both at once.
-    // Implementation chooses: clamp `panX` into `[lo, hi]` with lo=700, hi=-700.
-    // With lo > hi, the `if panX < lo → outX = lo` triggers first only when
-    // panX < lo (i.e. panX < 700). For panX = 10000 (huge positive),
-    // the `panX > hi = -700` branch fires → outX = hi = -700.
-    // That snaps the map's RIGHT edge to OVERSCAN px from canvasW.
+describe('panClamp — issue#2.2 single-case spec (intersection ≥ OVERSCAN)', () => {
+  it('case 12: ridiculously-positive panX is clamped to the upper symmetric bound (large map)', () => {
+    // Map 2000 × 1500 at zoom 1, viewport 800 × 600, OVERSCAN 100.
+    // New formula (intersection ≥ OVERSCAN px):
+    //   panX ∈ [OVERSCAN − W/2 − mw/2, W/2 − OVERSCAN + mw/2]
+    //        = [100 − 400 − 1000, 400 − 100 + 1000]
+    //        = [-1300, 1300]
+    //   panY ∈ [OVERSCAN − H/2 − mh/2, H/2 − OVERSCAN + mh/2]
+    //        = [100 − 300 − 750, 300 − 100 + 750]
+    //        = [-950, 950]
+    // panX = 10000 → above hi=1300 → clamp to 1300.
+    // panY = 0 → inside [-950, 950] → unchanged.
     const r = panClamp(10000, 0, 2000, 1500, 800, 600, 1.0);
-    // For panX = 10000 (ridiculous positive), the map is anchored at the right edge.
-    expect(r.panX).toBe(-700);
-    // For Y: mh = 1500 > viewportH = 600 → larger axis. lo = OVERSCAN + mh/2 − H/2 = 100 + 750 − 300 = 550.
-    // hi = H/2 − OVERSCAN − mh/2 = 300 − 100 − 750 = −550.
-    // panY=0 lies between hi=-550 and lo=550, so panY=0 is OUTSIDE [lo, hi] (empty interval).
-    // Code: `if panY < lo` → 0 < 550 true → outY = lo = 550.
-    // That snaps the map's TOP edge to OVERSCAN px from y=0.
-    expect(r.panY).toBe(550);
+    expect(r.panX).toBe(1300);
+    expect(r.panY).toBe(0);
   });
 
-  it('case 12b: smaller-than-viewport axis is centered (panX = 0)', () => {
+  it('case 12b: small map — panX/panY clamp to symmetric range (no centering)', () => {
     // Map 2000 × 1500 at zoom 0.1 → projected 200 × 150.
-    // Smaller than viewport on both axes (800 × 600 with 100 px overscan):
-    //   200 + 200 (overscan) = 400 ≤ 800 → smaller branch → panX = 0.
-    //   150 + 200 (overscan) = 350 ≤ 600 → smaller branch → panY = 0.
+    //   panX ∈ [100 − 400 − 100, 400 − 100 + 100] = [-400, 400]
+    //   panY ∈ [100 − 300 − 75,  300 − 100 + 75]  = [-275, 275]
+    // panX = 10000 → clamp to 400; panY = 10000 → clamp to 275.
+    // (This DIFFERS from the pre-issue-#2.2 behaviour which forced
+    // pan=0 for small maps. The new spec lets the operator drift a
+    // small map within the viewport, only pulling it back when at
+    // least OVERSCAN px would be forced off-screen.)
     const r = panClamp(10000, 10000, 2000, 1500, 800, 600, 0.1);
-    expect(r.panX).toBe(0);
-    expect(r.panY).toBe(0);
+    expect(r.panX).toBe(400);
+    expect(r.panY).toBe(275);
+  });
+
+  it('case 12c: large map drag pan is symmetric (regression pin for issue#2.2 HIL bug)', () => {
+    // Operator HIL 2026-04-30: at high zoom, drag-pan would stutter
+    // and snap to one edge with no return. This pins the symmetry —
+    // dragging right (positive panX) and left (negative panX) by the
+    // same magnitude must produce mirror-image clamped results.
+    const right = panClamp(50, 0, 2000, 1500, 800, 600, 1.0);
+    const left = panClamp(-50, 0, 2000, 1500, 800, 600, 1.0);
+    expect(right.panX).toBe(50);
+    expect(left.panX).toBe(-50);
+    // 50 is well within [-1300, 1300] — no clamp, drag goes through.
   });
 });
 
@@ -261,14 +254,16 @@ describe('createMapViewport — factory state', () => {
     expect(vp.zoom).toBe(MAP_MAX_ZOOM);
   });
 
-  it('setPan + panClampInPlace pulls pan back into the legal range when smaller-axis', () => {
+  it('setPan + panClampInPlace pulls pan back into the legal range', () => {
     const vp = createMapViewport();
     vp.setMapDims(200, 100);
     vp.setPan(99999, 99999);
-    // Smaller-axis branch: pan = 0
+    // issue#2.2 single-case spec at zoom=1, viewport 800×600, mapPx=200×100, OVERSCAN=100:
+    //   panX ∈ [100 − 400 − 100, 400 − 100 + 100] = [-400, 400] → clamp to 400
+    //   panY ∈ [100 − 300 − 50, 300 − 100 + 50] = [-250, 250] → clamp to 250
     vp.panClampInPlace(800, 600);
-    expect(vp.panX).toBe(0);
-    expect(vp.panY).toBe(0);
+    expect(vp.panX).toBe(400);
+    expect(vp.panY).toBe(250);
   });
 });
 

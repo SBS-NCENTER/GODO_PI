@@ -1,29 +1,29 @@
 /**
- * PR β — Mode-A T5 mechanical wheel-zoom-removal pin.
+ * PR β — Mode-A T5 mechanical wheel-zoom-removal pin
+ *   + issue#2.2 pinch-zoom carve-out.
  *
- * Operator-locked Rule 1: mouse-wheel zoom is forbidden. This test
- * makes the absence of wheel-zoom code STRUCTURAL — a writer who
- * leaves a stale constant or sneaks in a `wheel`/`onwheel` listener
- * fails CI even if their UX-level test happens to pass.
+ * Operator-locked Rule 1: **scroll-wheel zoom is forbidden**. Trackpad
+ * pinch (synthetic `wheel` event with `ctrlKey === true`) is allowed —
+ * scroll = page scroll, pinch = zoom. The `ctrlKey` gate is the
+ * structural witness that distinguishes the two.
  *
- * Three pins:
- *   1. `MAP_WHEEL_ZOOM_FACTOR` is undefined in `lib/constants.ts`.
- *   2. No `.svelte` file under `src/components` or `src/routes`
- *      contains `onwheel=` or `onWheel`.
+ * Pins:
+ *   1. `MAP_WHEEL_ZOOM_FACTOR` is undefined in `lib/constants.ts`
+ *      (no scroll-wheel zoom factor; pinch uses the same `MAP_ZOOM_STEP`
+ *      as the (+/−) buttons).
+ *   2. The ONLY `.svelte` file under `src/components`/`src/routes`
+ *      that contains `onwheel=` is `MapUnderlay.svelte`, AND its handler
+ *      checks `e.ctrlKey` before reacting (pinch-only). Any other file
+ *      with `onwheel=` is a regression.
  *   3. No `.svelte` or `.ts` file under those folders registers a
- *      `'wheel'` listener via `addEventListener`.
- *
- * Belt-and-braces against drive-by-leaving (the constant is unused →
- * type-checks pass → bundle ships → "harmless" but it's structural rot).
+ *      `'wheel'` listener via `addEventListener` (the imperative path
+ *      bypasses the source-grep ctrlKey check; force the Svelte-attr
+ *      idiom).
  */
 
 import { describe, expect, it } from 'vitest';
 import * as constants from '../../src/lib/constants';
 
-// Vite's import.meta.glob with `?raw` reads file contents at build
-// time — same idiom used by other "all files satisfy X" pins in this
-// repo. The glob captures `.svelte` AND `.ts` so a writer can't sneak
-// in a non-Svelte `addEventListener('wheel', ...)`.
 const svelteFiles = import.meta.glob<string>(
   ['../../src/components/*.svelte', '../../src/routes/*.svelte'],
   { eager: true, query: '?raw', import: 'default' },
@@ -33,34 +33,41 @@ const tsFiles = import.meta.glob<string>(
   { eager: true, query: '?raw', import: 'default' },
 );
 
-describe('PR β — wheel-zoom-removal structural pin (Mode-A T5)', () => {
+const PINCH_ALLOWED_FILE = '../../src/components/MapUnderlay.svelte';
+
+describe('PR β + issue#2.2 — wheel-zoom-removal structural pin (pinch carve-out)', () => {
   it('case 1: MAP_WHEEL_ZOOM_FACTOR is gone from lib/constants.ts', () => {
-    // The constant was deleted; `(constants as Record<string, unknown>).MAP_WHEEL_ZOOM_FACTOR`
-    // resolves to undefined. A writer who re-adds it fails this case.
     const value = (constants as Record<string, unknown>).MAP_WHEEL_ZOOM_FACTOR;
     expect(value).toBeUndefined();
   });
 
-  it('case 2: no .svelte file under src/components or src/routes contains "onwheel=" or "onWheel"', () => {
+  it('case 2: only MapUnderlay.svelte has onwheel=, and its handler is ctrlKey-gated', () => {
     const offenders: string[] = [];
     for (const [path, content] of Object.entries(svelteFiles)) {
-      // Lower-cased test catches both `onwheel=` (Svelte 5 idiom) and
-      // any `onWheel` / `OnWheel` mixed-case variant.
       const lower = String(content).toLowerCase();
-      if (lower.includes('onwheel=') || lower.includes('onwheel ')) {
-        offenders.push(path);
+      const hasOnWheel = lower.includes('onwheel=') || lower.includes('onwheel ');
+      if (!hasOnWheel) continue;
+
+      if (path !== PINCH_ALLOWED_FILE) {
+        offenders.push(`${path} (only MapUnderlay may register wheel handlers)`);
+        continue;
+      }
+
+      // The MapUnderlay handler MUST check ctrlKey before zooming —
+      // operator-locked: scroll without ctrl = page scroll, NOT zoom.
+      const text = String(content);
+      if (!text.includes('e.ctrlKey') && !text.includes('event.ctrlKey')) {
+        offenders.push(`${path} (onwheel handler missing ctrlKey check)`);
       }
     }
     expect(offenders).toEqual([]);
   });
 
-  it('case 3: no .svelte or .ts file under src/components/routes/lib registers a "wheel" listener', () => {
+  it('case 3: no .svelte or .ts file registers a "wheel" listener via addEventListener', () => {
     const offenders: string[] = [];
     const all = { ...svelteFiles, ...tsFiles };
     for (const [path, content] of Object.entries(all)) {
       const text = String(content);
-      // Catches `addEventListener('wheel'` / `addEventListener("wheel"` /
-      // `addEventListener(\`wheel\``.
       if (
         text.includes("addEventListener('wheel'") ||
         text.includes('addEventListener("wheel"') ||

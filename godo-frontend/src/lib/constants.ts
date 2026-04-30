@@ -190,3 +190,21 @@ export const SYSTEM_SERVICES_STALE_MS = 3000;
 // ServiceCard / ServiceStatusCard. 4 s is long enough to read a Korean
 // sentence aloud, short enough not to linger past a successful retry.
 export const SERVICE_TRANSITION_TOAST_TTL_MS = 4000;
+
+// --- Track B-SYSTEM PR-B — process monitor + extended resources -------
+// SSE polling-fallback cadence (when the SSE stream errors). Matches
+// the backend SSE_PROCESSES_TICK_S / SSE_RESOURCES_EXTENDED_TICK_S
+// (1.0 s).
+export const PROCESSES_POLL_FALLBACK_MS = 1000;
+export const EXTENDED_RESOURCES_POLL_FALLBACK_MS = 1000;
+
+// Sub-tab keys for `routes/System.svelte`. Component-local `$state`
+// holds the current key; the URL doesn't reflect it (in-page state
+// like Map.svelte's pan/zoom — Mode-A R10 deferred per Final fold S3).
+export const SYSTEM_SUBTAB_OVERVIEW = 'overview';
+export const SYSTEM_SUBTAB_PROCESSES = 'processes';
+export const SYSTEM_SUBTAB_EXTENDED = 'extended';
+
+// Per-core CPU bar height. 12 px is dense enough to show 4–8 cores in
+// the same panel without scrolling on a 720p preview.
+export const CPU_BAR_HEIGHT_PX = 12;

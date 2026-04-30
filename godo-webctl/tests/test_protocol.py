@@ -517,3 +517,92 @@ def test_redacted_placeholder_pinned() -> None:
 def test_service_transition_error_codes_pinned() -> None:
     assert P.ERR_SERVICE_STARTING == "service_starting"
     assert P.ERR_SERVICE_STOPPING == "service_stopping"
+
+
+# --- Track B-SYSTEM PR-B — process monitor + extended resources ---------
+
+
+def test_process_fields_pinned() -> None:
+    """Pin the 10-field row tuple verbatim. Drift between this constant
+    and `processes.ProcessSampler.sample()` per-row dict is also caught
+    by the import-time assertion in `processes._ensure_field_order_pin`;
+    this test is the cross-module SSOT pin.
+
+    Mode-A M3 fold: wire field name is `category` everywhere — `class`
+    does not appear (TS reserved word + Svelte template collision).
+    """
+    assert P.PROCESS_FIELDS == (
+        "name",
+        "pid",
+        "user",
+        "state",
+        "cmdline",
+        "cpu_pct",
+        "rss_mb",
+        "etime_s",
+        "category",
+        "duplicate",
+    )
+
+
+def test_processes_response_fields_pinned() -> None:
+    """Top-level envelope of `/api/system/processes`."""
+    assert P.PROCESSES_RESPONSE_FIELDS == (
+        "processes",
+        "duplicate_alert",
+        "published_mono_ns",
+    )
+
+
+def test_extended_resources_fields_pinned() -> None:
+    """Six fields. GPU fields intentionally absent (operator decision
+    2026-04-30 06:38 KST — V3D `gpu_busy_percent` unreliable on Trixie
+    firmware; CPU temp is already covered by RESOURCES_FIELDS)."""
+    assert P.EXTENDED_RESOURCES_FIELDS == (
+        "cpu_per_core",
+        "cpu_aggregate_pct",
+        "mem_total_mb",
+        "mem_used_mb",
+        "disk_pct",
+        "published_mono_ns",
+    )
+
+
+def test_godo_process_names_match_cmake_executables() -> None:
+    """Drift catch — the C++ subset of `GODO_PROCESS_NAMES` must equal
+    the union of `add_executable(<name>` lines across each
+    `production/RPi5/src/*/CMakeLists.txt`. A future writer adding a
+    binary without updating the whitelist fails this pin.
+
+    The `godo-webctl` literal is webctl-internal (matched via argv[1..]
+    in `parse_pid_cmdline`) — pinned separately by inspection.
+    """
+    cmake_dirs = (
+        "godo_tracker_rt",
+        "godo_freed_passthrough",
+        "godo_smoke",
+        "godo_jitter",
+    )
+    found: set[str] = set()
+    pattern = re.compile(r"^add_executable\(([A-Za-z0-9_]+)", re.MULTILINE)
+    for d in cmake_dirs:
+        cm = _REPO_ROOT / "production" / "RPi5" / "src" / d / "CMakeLists.txt"
+        text = cm.read_text(encoding="utf-8")
+        m = pattern.search(text)
+        assert m is not None, f"add_executable() not found in {cm}"
+        found.add(m.group(1))
+    cpp_subset = P.GODO_PROCESS_NAMES - {"godo-webctl"}
+    assert cpp_subset == found, f"Whitelist drift: protocol={cpp_subset} CMake={found}"
+
+
+def test_managed_process_names_cardinality() -> None:
+    """Mode-A M2 fold: `MANAGED_PROCESS_NAMES` is the process-name view
+    of `services.ALLOWED_SERVICES`; binary-vs-unit asymmetry means the
+    set membership differs by exactly the substitution
+    `godo-tracker → godo_tracker_rt`."""
+    from godo_webctl import services
+
+    assert len(P.MANAGED_PROCESS_NAMES) == 3
+    assert len(services.ALLOWED_SERVICES) == 3
+    diff = P.MANAGED_PROCESS_NAMES.symmetric_difference(services.ALLOWED_SERVICES)
+    assert diff == {"godo-tracker", "godo_tracker_rt"}, f"Asymmetric-diff mismatch: {diff}"

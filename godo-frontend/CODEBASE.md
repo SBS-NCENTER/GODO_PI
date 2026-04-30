@@ -384,6 +384,71 @@ corpus with S4 fold "51 MiB" pin), and `tests/e2e/system.spec.ts`
 mixed redacted/non-redacted KEYs per T6 fold, admin restart click
 under stub 409 surfaces Korean detail toast).
 
+### (y) Track B-SYSTEM PR-B — System page sub-tab pattern + PR-B SSE stores
+
+`routes/System.svelte` switches from a single-panel-list layout to a
+sub-tab layout with three keys: `overview` (default — wraps the
+original PR-SYSTEM panels), `processes`, `extended`. The sub-tab key
+is held in component-local `$state` (`activeSubtab`); the URL doesn't
+reflect it.
+
+Discipline rationale:
+
+1. **Component-local state, intentional reset on route change**
+   (Final fold S3): operator clicks `/map` then comes back to
+   `/system`, the sub-tab returns to `overview` and the search
+   filter clears. Persisting via URL hash is a follow-up if
+   operators request it (Risk R10 deferred).
+2. **No new dependency** for the popover primitive (Final fold O2):
+   the `i 도움말` block in `<ProcessTable/>` is a vanilla HTML5
+   `<details><summary>` disclosure — click-to-toggle, NOT hover.
+3. **Filters are CLIENT-SIDE only** (Mode-A S1 fold): the SSE URL
+   carries only the `token` query param. A future writer adding
+   `?filter=foo` to the SSE wire fails the `processes.test.ts`
+   "SSE URL has only the token param" pin.
+4. **Refcounted SSE per stream** (mirror of invariant (p)):
+   `subscribeProcesses` / `subscribeResourcesExtended` share one
+   `EventSource` across multiple subscribers; the underlying SSE
+   closes only when the last subscriber unsubscribes. Pinned by
+   `processes.test.ts::shares one SSE across multiple subscribers
+   (refcounted)` and the equivalent in `resourcesExtended.test.ts`.
+5. **`_arrival_ms` stamped per frame** (Mode-A M6, mirror of
+   invariant (m)): both PR-B stores stamp `Date.now()` on every
+   received SSE frame so freshness gates use arrival-wall-clock,
+   never `published_mono_ns` across the C++/webctl boundary.
+6. **Typography over background shading** (Final fold §5 + Mode-A
+   M5 + O1): managed-category process names render in
+   `font-weight: bold` + `color: var(--color-status-warn)` — the
+   existing token, no new colors. Duplicate rows get a
+   `border-left: var(--border-width-emphasis) solid var(--color-status-err)`
+   on the name cell only. New token: `--border-width-emphasis: 3px`
+   in `tokens.css` (the only new token; reused colors from existing
+   `--color-status-{warn,err}`).
+7. **No raw hex literals** in `ProcessTable.svelte` or
+   `ResourceBars.svelte` (per invariant (d)): every color references
+   `var(--color-*)` from `tokens.css`. Verified by inspection
+   during code review; mirror of invariant (e) "no magic numbers"
+   discipline applied to colors.
+8. **Cross-language SSOT** mirrored in `lib/protocol.ts`:
+   `PROCESS_FIELDS` (10 fields), `EXTENDED_RESOURCES_FIELDS`
+   (6 fields, GPU absent), `MANAGED_PROCESS_NAMES`,
+   `GODO_PROCESS_NAMES`. Drift detected by inspection per
+   the existing wire-mirror discipline.
+
+Pinned by:
+
+- `tests/unit/processes.test.ts` (6 cases — SSE refcount,
+  `_arrival_ms` stamping, duplicate-alert propagation, token-only
+  URL, malformed-payload drop).
+- `tests/unit/resourcesExtended.test.ts` (4 cases — refcount,
+  `_arrival_ms`, null GPU-style fields, malformed-payload drop).
+- `tests/unit/processTable.test.ts` (8 cases — sort order, text
+  search, GODO-only toggle, duplicate banner + per-row marker,
+  info popover bullets, managed-category class, count summary).
+- `tests/unit/system.test.ts` (existing 11 cases continue to pass —
+  the sub-tab wrapping defaults to `overview` so existing panels
+  still render on mount).
+
 ### (j) Router is home-grown (per N9)
 
 The plan called for `svelte-spa-router@~4`. After install the package's
@@ -461,6 +526,82 @@ so a single stub process is enough to drive playwright. No vite
 preview proxy needed.
 
 ## Change log
+
+### 2026-04-30 14:00 KST — Track B-SYSTEM PR-B (frontend) — System tab sub-tabs
+
+#### Added
+
+- `src/lib/protocol.ts` — `PROCESS_FIELDS` (10), `ProcessEntry`,
+  `ProcessesSnapshot`, `EXTENDED_RESOURCES_FIELDS` (6),
+  `ExtendedResources`, `MANAGED_PROCESS_NAMES`, `GODO_PROCESS_NAMES`,
+  `ProcessCategory` literal type. Mirror of the webctl SSOT in
+  `godo_webctl/protocol.py`.
+- `src/lib/constants.ts` — `PROCESSES_POLL_FALLBACK_MS`,
+  `EXTENDED_RESOURCES_POLL_FALLBACK_MS`, `CPU_BAR_HEIGHT_PX`,
+  `SYSTEM_SUBTAB_OVERVIEW`, `SYSTEM_SUBTAB_PROCESSES`,
+  `SYSTEM_SUBTAB_EXTENDED`.
+- `src/styles/tokens.css` — `--border-width-emphasis: 3px` (NEW
+  token; reuses existing `--color-status-{warn,err}` for typography
+  colors per Mode-A M5 + Final fold O1).
+- `src/stores/processes.ts` — refcounted SSE store for
+  `/api/system/processes/stream`. One initial fetch covers
+  the SSE-connect gap; `_arrival_ms` stamped per frame.
+- `src/stores/resourcesExtended.ts` — same pattern for
+  `/api/system/resources/extended/stream`.
+- `src/components/ProcessTable.svelte` — sortable table with
+  text-search + GODO-only filter + duplicate-alert banner + per-row
+  duplicate marker + `<details>`-style info popover (3 documented
+  bullet strings per Final fold S4).
+- `src/components/ResourceBars.svelte` — per-core CPU bars + mem bar
+  + disk bar. No SVG / rings (operator decision); null-tolerant.
+- `src/routes/System.svelte` — wraps the existing 5-panel content in
+  a default `overview` sub-tab + adds `processes` and `extended`
+  sub-tabs. `activeSubtab` is component-local `$state`.
+- `tests/unit/processes.test.ts` — 6 cases (SSE refcount,
+  `_arrival_ms`, duplicate-alert propagation, token-only URL,
+  malformed-payload drop).
+- `tests/unit/resourcesExtended.test.ts` — 4 cases.
+- `tests/unit/processTable.test.ts` — 8 cases (sort, search, GODO
+  toggle, duplicate banner + row marker, popover bullets, managed
+  styling, count summary).
+
+#### Changed
+
+- Invariant (y) added (see above).
+- `routes/System.svelte` no longer flattens its 5 panels; they live
+  inside the default `overview` sub-tab. Existing
+  `tests/unit/system.test.ts` (11 cases) continues to pass —
+  defaulting to `overview` keeps the original DOM tree on mount.
+
+#### Removed
+
+- (none)
+
+#### Tests
+
+- 164 → 182 hardware-free vitest (+18 from PR-B frontend half).
+- `npm run lint` clean on all PR-B paths (no new warnings).
+
+#### Mode-A folds applied
+
+- Final fold (07:09 KST) + Operator decisions:
+  - GPU widget dropped entirely (no `gpu_pct` in
+    `EXTENDED_RESOURCES_FIELDS`, no GPU panel).
+  - All-PID enumeration with category classifier; kernel threads
+    excluded.
+  - `category` (NOT `class`) wire field name.
+  - Sub-tab + filter state component-local; resets on route change.
+  - HTML5 `<details><summary>` popover (no new component dep).
+  - `--color-status-warn` reused for managed accent; new
+    `--border-width-emphasis: 3px` token only.
+- M3 — `category` everywhere (no `class`).
+- M5 — no raw hex; only token references.
+- M6 — `_arrival_ms` stamped per frame; pinned by per-store tests.
+- S1 — token-only SSE URL; pinned by `processes.test.ts`.
+- S4 — popover-bullets test (`processTable.test.ts`).
+- S5 — single banner string (no restart-detection sub-text);
+  TODO comment in `ProcessTable.svelte` references the deferred
+  Phase 4-5 polish item.
 
 ### 2026-04-30 17:30 KST — Track D scale + Y-flip fix
 

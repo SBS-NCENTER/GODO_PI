@@ -37,12 +37,16 @@ import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any, Final
 
+from . import processes as processes_mod
 from . import resources as resources_mod
+from . import resources_extended as resources_extended_mod
 from . import services as services_mod
 from . import uds_client as uds_mod
 from .config import Settings
 from .constants import (
     SSE_HEARTBEAT_S,
+    SSE_PROCESSES_TICK_S,
+    SSE_RESOURCES_EXTENDED_TICK_S,
     SSE_SERVICES_TICK_S,
     SSE_TICK_S,
     SSE_UDS_TIMEOUT_S,
@@ -145,6 +149,80 @@ async def services_stream(
         except asyncio.CancelledError:
             raise
         elapsed_since_keepalive += SSE_SERVICES_TICK_S
+        if elapsed_since_keepalive >= SSE_HEARTBEAT_S:
+            yield _sse_keepalive()
+            elapsed_since_keepalive = 0.0
+
+
+async def processes_stream(
+    cfg: Settings,  # noqa: ARG001 — reserved for future per-stream tuning
+    *,
+    sampler: processes_mod.ProcessSampler | None = None,
+    sleep: SleepCallable = asyncio.sleep,
+) -> AsyncIterator[bytes]:
+    """PR-B — 1 Hz process-list poller.
+
+    Sampler state is per-subscriber: each connection owns its own
+    `ProcessSampler` so a previously-cancelled stream's stale prior-tick
+    map doesn't leak. The first tick after open returns ``cpu_pct=0.0``
+    for every PID by design — operator UI shows 0% for one second after
+    stream open which is acceptable (R5).
+
+    Tests inject ``sampler=`` to drive the loop with a fake `/proc`
+    fixture; production callers omit it and the default sampler walks
+    real `/proc`."""
+    s = sampler if sampler is not None else processes_mod.ProcessSampler()
+    elapsed_since_keepalive = 0.0
+    while True:
+        try:
+            payload = await asyncio.to_thread(s.sample)
+            yield _sse_event(payload)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 — defence in depth around /proc reads
+            logger.debug("sse.processes_error: %s", e)
+        try:
+            await sleep(SSE_PROCESSES_TICK_S)
+        except asyncio.CancelledError:
+            raise
+        elapsed_since_keepalive += SSE_PROCESSES_TICK_S
+        if elapsed_since_keepalive >= SSE_HEARTBEAT_S:
+            yield _sse_keepalive()
+            elapsed_since_keepalive = 0.0
+
+
+async def resources_extended_stream(
+    cfg: Settings,
+    *,
+    sampler: resources_extended_mod.ResourcesExtendedSampler | None = None,
+    sleep: SleepCallable = asyncio.sleep,
+) -> AsyncIterator[bytes]:
+    """PR-B — 1 Hz extended-resources poller.
+
+    Per-subscriber `ResourcesExtendedSampler` for the same reason as
+    `processes_stream`. First tick yields per-core pct = 0.0 (no prior
+    tick to delta against)."""
+    s = (
+        sampler
+        if sampler is not None
+        else resources_extended_mod.ResourcesExtendedSampler(
+            disk_check_path=str(cfg.disk_check_path),
+        )
+    )
+    elapsed_since_keepalive = 0.0
+    while True:
+        try:
+            payload = await asyncio.to_thread(s.sample)
+            yield _sse_event(payload)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 — defence in depth around /proc + statvfs
+            logger.debug("sse.resources_extended_error: %s", e)
+        try:
+            await sleep(SSE_RESOURCES_EXTENDED_TICK_S)
+        except asyncio.CancelledError:
+            raise
+        elapsed_since_keepalive += SSE_RESOURCES_EXTENDED_TICK_S
         if elapsed_since_keepalive >= SSE_HEARTBEAT_S:
             yield _sse_keepalive()
             elapsed_since_keepalive = 0.0

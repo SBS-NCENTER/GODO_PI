@@ -10,6 +10,93 @@
 
 ---
 
+## 2026-04-30 (오후 ~ 심야 — 14:00 KST → 22:00 KST, 열두 번째 세션 — 9 PR: B-MAPEDIT-2 origin pick 풀 파이프라인 + Map viewport 공유 + HIL 사이클로 발견된 5건 hotfix)
+
+### 한 줄 요약
+
+B-MAPEDIT-2 (원점 평행이동) 풀 파이프라인 PR (#43)으로 시작 → 운영자 HIL → 4건의 추가 PR → 다시 PR β (Map viewport 공유 인프라) 풀 파이프라인 → HIL → 또 다시 3건의 hotfix. 한 세션에 9 PR이 무더기로 처리됨. 더 중요한 발견: 운영자가 HIL 중 두 가지 다른 좌표 문제(AMCL 정확도 vs frame 재정의)를 같은 도구로 풀려는 mindset 오류 의심을 surface, 그 직교성을 메모리에 잠금. test4/test5 스크린샷으로 AMCL multi-basin yaw 문제 발견 (one-shot 5° vs live 90° 같은 물리 위치) — issue#3 (pose hint)이 다음 세션 P0.
+
+### 9개 PR
+
+| PR | issue# | 제목 | 결과 |
+|---|---|---|---|
+| #43 | — | B-MAPEDIT-2 origin pick (dual GUI + numeric, ADD 부호) | merged |
+| #44 | — | B-MAPEDIT-2 minor cleanup | merged |
+| #45 | issue#1 | service action 후 restart-pending banner refresh | merged |
+| #46 | issue#2 | shared map viewport + zoom UX 통일 + Map Edit LiDAR 오버레이 | merged |
+| #47 | issue#2.1 | Last pose card + Tracker controls (stacked PR — base 문제로 dead branch에 머지됨) | merged 표시지만 main 미적용 → #51로 복구 |
+| #48 | issue#2.2 | panClamp single-case + pinch zoom (HIL hotfix) | merged + dd348ba 직커밋 sensitivity follow-up |
+| #49 | — | branch-check feedback memory (process violation 잠금) | merged |
+| #50 | issue#2.3 | Map Edit overlay/pan/pinch (PR #46 HIL hotfix — mapCanvas 중복 제거) | merged |
+| #51 | issue#2.4 | Map page common header — TrackerControls/LastPoseCard/ScanToggle 통합 + Overview 블록 순서 | open |
+
+### B-MAPEDIT-2 (PR #43): 운영자 ADD 결정의 무게
+
+기획 단계에서 Mode-A 리뷰어가 "delta 부호 규칙이 spec memory에 모호하다 — operator-blocking" 경고. SUBTRACT 가설은 worked example과 모순. ADD로 운영자 확인 받고 잠금. 운영자 표현: "실제 원점 위치는 여기서 (x, y)만큼 더 간 곳". 이 결정이 모든 후속 ADD-기반 도구의 출발점 (B-MAPEDIT-3 yaw rotation도 동일).
+
+### PR β (#46): 공유 viewport + 4가지 운영자 잠금 규칙
+
+`.claude/memory/project_map_viewport_zoom_rules.md`에 4 규칙 잠금:
+1. zoom UX 통일 — 좌측 위 (+/−) 버튼 + 숫자 입력. **마우스 휠 zoom 금지**
+2. min-zoom = 첫 로딩 viewport height (resize 추적 X)
+3. LiDAR 오버레이 /map ↔ /map-edit 공유 (같은 코드)
+4. 코드 재사용 강제 — 페이지별 중복은 regression
+
+5개 commit으로 phasing (scan overlay 추출 → viewport factory → zoom controls + 휠 제거 → MapEdit 통합 → docs). 273 vitest pass.
+
+### HIL → 3건 hotfix in PR β의 한 라이프사이클
+
+PR #46 deploy 직후 운영자 보고:
+- **panClamp 버그**: `mw > viewportW − 2·OVERSCAN`에서 lo/hi 바운드 역전 → 매 mousemove가 한쪽 edge로 snap, 못 돌아옴. → PR #48에서 단일 대칭 공식으로 재작성.
+- **핀치 줌 부재**: 마우스 휠 제거하면서 트랙패드 핀치도 같이 죽음 → onwheel + ctrlKey 게이트로 구별. → PR #48.
+- **핀치 감도 지나침**: 한 제스처에 1.25^20 ≈ 86× 폭주 → fractional factor (deltaY/100 = 1 step). → dd348ba 직커밋 (process violation, 후술).
+- **MapMaskCanvas 중복 mapCanvas**: PR β에서 이 canvas 삭제 누락 → underlay PGM + scan을 가림. → PR #50에서 제거 + transform: scale로 viewport 추적.
+
+각 fix가 별도 PR로 풀 파이프라인 검증 거치지 않고 바로 패치된 건 운영자 통증이 즉각적이었기 때문. 다음 세션부터 HIL feedback도 plan/review 거치는 절차로 환원.
+
+### Mindset orthogonality lesson (가장 중요한 발견)
+
+세션 중반, 운영자가 mindset 오류 의심 surface:
+> "지도의 레이아웃과 현재 라이다의 오버레이가 서로 완전히 겹치지 않는 이유가 어디에서 오는 것인지 헷갈린다. 1번과 2번이 다른 것인지, 아니면 같은 것인지."
+
+함께 풀어내며 두 문제가 **직교**임을 명확히:
+- **Problem 1 (AMCL 정확도)**: 시각적 mismatch는 AMCL이 잘못된 basin에 수렴한 결과. issue#3 (pose hint), issue#4 (silent-converge 진단), issue#5 (pipelined K-step)로 처방.
+- **Problem 2 (frame 재정의)**: UE에 가는 (x, y)가 운영자 멘탈 좌표계와 어긋남. B-MAPEDIT-2 (issue 완료) + B-MAPEDIT-3 (issue#6)로 처방.
+
+같은 시각화에서 두 문제가 함께 보이지만 도구는 완전히 다름. `feedback_two_problem_taxonomy.md`로 영구 잠금.
+
+### test4/test5 — multi-basin yaw 결정적 증거
+
+운영자가 같은 물리 위치에서 캡처한 두 스크린샷:
+- test4 (one-shot): 청록 scan ~5–10° 시계방향 회전 (vs PGM)
+- test5 (live): 청록 scan **~90° 회전** (PGM의 오른쪽 세로벽이 가로선으로 표시됨)
+
+scan 형상은 두 모드 동일. 즉 LiDAR는 같은 방을 보고 있고, **AMCL이 같은 입력에 대해 90° 다른 yaw 답을 내놓는 중**. T자 스튜디오 + 낮은 feature density에서 multi-basin yaw가 활성. `σ_xy = 0.01 m, converged` 표시도 거짓 positive — particle filter가 한 basin에 모이긴 했지만 진짜 위치에서 멀리 떨어진 곳.
+
+→ issue#3 (pose hint)이 P0. 운영자가 "대략 여기" 클릭 → particle 초기 spread 좁음 → 90° basin 진입 자체 차단. issue#4 (진단 metric)로 효과 측정. `project_amcl_multi_basin_observation.md`로 잠금.
+
+### Process violation: dd348ba 직커밋
+
+핀치 감도 sensitivity hotfix를 만들면서, 운영자가 PR #48 deploy 위해 `git checkout main` 한 게 같은 Pi의 내 working tree까지 silently 전환시킴. branch 확인 안 하고 commit + push → origin/main 직접 푸시, PR review 우회. 운영자 Option C 선택 (작은 docs-grade hotfix, 이미 deploy됨, 그대로 두고 lesson만 lock). `feedback_check_branch_before_commit.md`로 잠금 (PR #49) — `git branch --show-current` + commit-output `[branch <hash>]` 토큰 확인 필수.
+
+### PR #47 dead-branch 문제
+
+PR #47이 base = `feat/p4.5-track-b-map-viewport-shared-zoom` (PR #46 feat branch)로 열림. PR #46이 main에 merge되면서 feat branch가 닫혔는데, GitHub은 PR #47 base를 자동 retarget 안 함 → PR #47이 닫힌 feat branch에 merge됨, main 미도달. GitHub에선 "merged"로 표시되지만 실제 main엔 변경 없음. 이번 세션 끝에 발견되어 PR #51 (issue#2.4)이 #47의 컴포넌트 복구 + 새 layout을 함께 처리.
+
+**향후 stacked PR 규칙**: base 가 feat-branch면 (a) parent merge 직후 main으로 retarget OR (b) parent merge까지 stacked PR open 안 함. 둘 중 하나로 강제.
+
+### 다음 세션 큐 (운영자 잠금 우선순위)
+
+```
+issue#3  pose hint (multi-basin 직격, P0)
+issue#4  AMCL silent-converge 진단 (issue#3 효과 측정용)
+issue#5  pipelined K-step Live AMCL (per-scan 안정성)
+issue#6  B-MAPEDIT-3 yaw rotation (AMCL 안정화 후)
+issue#7  boom-arm angle masking (선택, issue#4 결과 따라)
+```
+
+---
+
 ## 2026-04-30 (늦은 오전 ~ 이른 오후 — 10:08 KST → 13:30 KST, 열한 번째 세션 — 4 PR: B-MAPEDIT brush + prod hotfix 2건 + Map sub-tab 리팩터 + 계층적 SSOT doc reorg)
 
 ### 한 줄 요약

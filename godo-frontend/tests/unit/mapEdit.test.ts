@@ -207,6 +207,59 @@ describe('MapMaskCanvas (Track B-MAPEDIT)', () => {
     expect(inst._testGetMaskCell(49, 49)).toBe(0);
   });
 
+  it('getMaskPng emits alpha=0 for unpainted, alpha=255 for painted (regression: full-mask bug)', async () => {
+    // Bug landed in v1: getMaskPng wrote alpha=255 unconditionally, so
+    // every pixel — including the unpainted majority — passed the
+    // backend's alpha-as-paint branch (map_edit.py L177-181) and the
+    // entire active map got rewritten to FREE on every Apply. The fix
+    // is alpha-tracks-paint: alpha=0 unpainted, alpha=255 painted.
+    const captured: ImageData[] = [];
+    const orig = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = vi.fn(function fake(this: HTMLCanvasElement) {
+      return {
+        imageSmoothingEnabled: false,
+        drawImage: vi.fn(),
+        createImageData: (w: number, h: number) =>
+          ({ data: new Uint8ClampedArray(w * h * 4), width: w, height: h }) as ImageData,
+        putImageData: (img: ImageData): void => {
+          captured.push({
+            data: new Uint8ClampedArray(img.data),
+            width: img.width,
+            height: img.height,
+          } as ImageData);
+        },
+      } as unknown as CanvasRenderingContext2D;
+    }) as never;
+    cleanups.push(() => {
+      HTMLCanvasElement.prototype.getContext = orig;
+    });
+
+    const { target, instance } = mountCanvas({ width: 4, height: 4, brushRadius: 0 });
+    flushSync();
+    const layer = target.querySelector<HTMLCanvasElement>('[data-testid="mask-paint-layer"]');
+    // CSS box is 100x100; logical 4x4; CSS (37, 37) -> logical floor(1.48)=1
+    layer!.dispatchEvent(makePointerEvent('pointerdown', { clientX: 37, clientY: 37 }));
+    flushSync();
+
+    const inst = instance as unknown as { getMaskPng: () => Promise<Blob> };
+    await inst.getMaskPng();
+
+    // Last putImageData call is the one inside getMaskPng's temp canvas.
+    expect(captured.length).toBeGreaterThan(0);
+    const last = captured[captured.length - 1];
+    expect(last.width).toBe(4);
+    expect(last.height).toBe(4);
+    // Painted cell (1, 1): alpha=255
+    const paintedAlpha = last.data[(1 * 4 + 1) * 4 + 3];
+    expect(paintedAlpha).toBe(255);
+    // Unpainted cell (0, 0): alpha=0 (the bug emitted 255 here)
+    const unpaintedAlpha = last.data[(0 * 4 + 0) * 4 + 3];
+    expect(unpaintedAlpha).toBe(0);
+    // Unpainted cell (3, 3): alpha=0
+    const cornerAlpha = last.data[(3 * 4 + 3) * 4 + 3];
+    expect(cornerAlpha).toBe(0);
+  });
+
   it('clear() resets every painted cell to 0', () => {
     const { target, instance } = mountCanvas({ width: 4, height: 4, brushRadius: 10 });
     flushSync();

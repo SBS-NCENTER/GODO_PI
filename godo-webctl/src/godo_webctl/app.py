@@ -47,7 +47,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from http import HTTPStatus
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi import Path as FastApiPath
@@ -64,6 +64,7 @@ from . import logs as logs_mod
 from . import map_backup as map_backup_mod
 from . import map_edit as map_edit_mod
 from . import map_image as map_image_mod
+from . import map_origin as map_origin_mod
 from . import maps as maps_mod
 from . import processes as processes_mod
 from . import resources as resources_mod
@@ -88,12 +89,15 @@ from .constants import (
     LOGS_TAIL_MAX_N,
     MAP_EDIT_MASK_PNG_MAX_BYTES,
     MAPS_ACTIVE_BASENAME,
+    ORIGIN_BODY_MAX_BYTES,
+    ORIGIN_X_Y_ABS_MAX_M,
     SERVICE_TRANSITION_MESSAGES_KO,
 )
 from .local_only import loopback_only
 from .protocol import (
     AMCL_RATE_FIELDS,
     ERR_ACTIVE_MAP_MISSING,
+    ERR_ACTIVE_YAML_MISSING,
     ERR_BACKUP_NOT_FOUND,
     ERR_EDIT_FAILED,
     ERR_INVALID_MAP_NAME,
@@ -103,6 +107,9 @@ from .protocol import (
     ERR_MASK_DECODE_FAILED,
     ERR_MASK_SHAPE_MISMATCH,
     ERR_MASK_TOO_LARGE,
+    ERR_ORIGIN_BAD_VALUE,
+    ERR_ORIGIN_EDIT_FAILED,
+    ERR_ORIGIN_YAML_PARSE_FAILED,
     ERR_RESTORE_NAME_CONFLICT,
     ERR_SERVICE_STARTING,
     ERR_SERVICE_STOPPING,
@@ -162,6 +169,21 @@ class ConfigPatchBody(BaseModel):
     # accept Python int/float/bool here for SPA convenience and
     # str-coerce server-side to keep the wire shape canonical.
     value: str | int | float | bool = Field(...)
+
+
+class OriginPatchBody(BaseModel):
+    """`POST /api/map/origin` body (Track B-MAPEDIT-2).
+
+    `mode` is a Pydantic `Literal` so a typo lands as 422 BEFORE the
+    handler runs. NaN / ±Inf are guarded by the explicit `math.isfinite`
+    check inside `apply_origin_edit` (S5 fold: `math.isfinite` is the
+    load-bearing check; Pydantic's `allow_inf_nan` is best-effort
+    defence-in-depth).
+    """
+
+    x_m: float = Field(...)
+    y_m: float = Field(...)
+    mode: Literal["absolute", "delta"] = Field(...)
 
 
 # --- helpers -----------------------------------------------------------
@@ -296,6 +318,45 @@ def _map_edit_exc_to_response(exc: Exception) -> JSONResponse:
     if isinstance(exc, map_edit_mod.EditFailed):
         return JSONResponse(
             {"ok": False, "err": ERR_EDIT_FAILED, "detail": str(exc)},
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+        )
+    return JSONResponse(
+        {"ok": False, "err": "internal_error"},
+        status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+    )
+
+
+def _map_origin_exc_to_response(exc: Exception) -> JSONResponse:
+    """Local error mapper for `map_origin.*` exceptions. Kept separate
+    from `_map_edit_exc_to_response` because the two error families do
+    not overlap (CODEBASE.md invariant (c)).
+
+    Status mapping (Track B-MAPEDIT-2, see CODEBASE.md invariant (ab)):
+      - `BadOriginValue` → 400 (`bad_origin_value`, detail = reason).
+      - `OriginYamlParseFailed` → 500 (`origin_yaml_parse_failed`,
+        detail = reason).
+      - `ActiveYamlMissing` → 503 (`active_yaml_missing`).
+      - `OriginEditFailed` (atomic-write or I/O) → 500
+        (`origin_edit_failed`, detail = exception text).
+    """
+    if isinstance(exc, map_origin_mod.BadOriginValue):
+        return JSONResponse(
+            {"ok": False, "err": ERR_ORIGIN_BAD_VALUE, "detail": str(exc)},
+            status_code=HTTPStatus.BAD_REQUEST,
+        )
+    if isinstance(exc, map_origin_mod.ActiveYamlMissing):
+        return JSONResponse(
+            {"ok": False, "err": ERR_ACTIVE_YAML_MISSING},
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+        )
+    if isinstance(exc, map_origin_mod.OriginYamlParseFailed):
+        return JSONResponse(
+            {"ok": False, "err": ERR_ORIGIN_YAML_PARSE_FAILED, "detail": str(exc)},
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+        )
+    if isinstance(exc, map_origin_mod.OriginEditFailed):
+        return JSONResponse(
+            {"ok": False, "err": ERR_ORIGIN_EDIT_FAILED, "detail": str(exc)},
             status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
         )
     return JSONResponse(
@@ -750,6 +811,168 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "ok": True,
                 "backup_ts": backup_ts,
                 "pixels_changed": result.pixels_changed,
+                "restart_required": True,
+            },
+            status_code=HTTPStatus.OK,
+        )
+
+    # ---- /api/map/origin (Track B-MAPEDIT-2, admin) ---------------------
+    # Operator-triggered origin pick. Three-step sequence is contractual
+    # (see CODEBASE.md invariant (ab)):
+    #   1. backup_map(active_pgm, cfg.backup_dir) — backup-FIRST. The PGM
+    #      is unchanged but is included in the snapshot per `backup_map`'s
+    #      pair contract (one helper covers both B-MAPEDIT and -2).
+    #   2. map_origin.apply_origin_edit(active_yaml, x_m, y_m, mode) —
+    #      atomic line-level YAML rewrite; theta + every other byte
+    #      preserved; backup-failure aborts BEFORE this step.
+    #   3. restart_pending.touch(cfg.restart_pending_path) — last step;
+    #      never set on a failure path (anti-monotone partner).
+    #
+    # `map_image.invalidate_cache()` is intentionally NOT called: the
+    # PNG cache key is `PGM realpath + mtime`, both unchanged by an
+    # origin edit (S4 fold).
+    @app.post("/api/map/origin")
+    async def map_origin_endpoint(
+        request: Request,
+        claims: auth_mod.Claims = Depends(auth_mod.require_admin),
+    ) -> JSONResponse:
+        # Body-size pre-check BEFORE Pydantic parse (M3: mirror of
+        # PATCH /api/config — `bad_payload + detail=body_too_large`).
+        raw = await request.body()
+        if len(raw) > ORIGIN_BODY_MAX_BYTES:
+            return JSONResponse(
+                {"ok": False, "err": "bad_payload", "detail": "body_too_large"},
+                status_code=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+            )
+        try:
+            body = OriginPatchBody.model_validate_json(raw)
+        except ValueError as e:
+            return JSONResponse(
+                {"ok": False, "err": "bad_payload", "detail": str(e)},
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+
+        # NaN/Inf + magnitude pre-check (S5 fold: math.isfinite is the
+        # load-bearing check; Pydantic's allow_inf_nan is best-effort).
+        # Defence-in-depth: `apply_origin_edit` re-checks the COMPUTED
+        # values after delta resolution.
+        import math as _math
+
+        if not _math.isfinite(body.x_m):
+            return JSONResponse(
+                {"ok": False, "err": ERR_ORIGIN_BAD_VALUE, "detail": "non_finite_x_m"},
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+        if not _math.isfinite(body.y_m):
+            return JSONResponse(
+                {"ok": False, "err": ERR_ORIGIN_BAD_VALUE, "detail": "non_finite_y_m"},
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+        if abs(body.x_m) > ORIGIN_X_Y_ABS_MAX_M or abs(body.y_m) > ORIGIN_X_Y_ABS_MAX_M:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "err": ERR_ORIGIN_BAD_VALUE,
+                    "detail": "abs_value_exceeds_bound",
+                },
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+
+        # Resolve the active map's name + YAML realpath via maps.py.
+        active_name = await asyncio.to_thread(maps_mod.read_active_name, cfg.maps_dir)
+        if active_name is None:
+            return JSONResponse(
+                {"ok": False, "err": ERR_ACTIVE_MAP_MISSING},
+                status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+        try:
+            active_pgm = maps_mod.pgm_for(cfg.maps_dir, active_name)
+            active_yaml = maps_mod.yaml_for(cfg.maps_dir, active_name)
+        except maps_mod.InvalidName as e:
+            return _map_maps_exc_to_response(e)
+        if not active_pgm.is_file():
+            return JSONResponse(
+                {"ok": False, "err": ERR_ACTIVE_MAP_MISSING},
+                status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+        if not active_yaml.is_file():
+            return JSONResponse(
+                {"ok": False, "err": ERR_ACTIVE_YAML_MISSING},
+                status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+
+        # Step 1: auto-backup. Backup-failure aborts BEFORE the YAML is
+        # touched. Mirror of /api/map/edit's mapping.
+        try:
+            backup_dir_path = await asyncio.to_thread(
+                backup_mod.backup_map,
+                active_pgm,
+                cfg.backup_dir,
+            )
+        except backup_mod.BackupError as e:
+            err = str(e)
+            if err == "concurrent_backup_in_progress":
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "err": err,
+                        "detail": "다른 백업이 진행 중입니다.",
+                    },
+                    status_code=HTTPStatus.CONFLICT,
+                )
+            if err == "map_path_not_found":
+                return JSONResponse(
+                    {"ok": False, "err": ERR_ACTIVE_MAP_MISSING},
+                    status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+                )
+            return JSONResponse(
+                {"ok": False, "err": "backup_failed", "detail": err},
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+        backup_ts = backup_dir_path.name
+
+        # Step 2: atomic YAML rewrite via the sole-owner module.
+        try:
+            result = await asyncio.to_thread(
+                map_origin_mod.apply_origin_edit,
+                active_yaml,
+                body.x_m,
+                body.y_m,
+                body.mode,
+            )
+        except map_origin_mod.OriginEditError as e:
+            return _map_origin_exc_to_response(e)
+
+        # Step 3: restart-pending sentinel. Last step on the success
+        # path; never touched on the failure path (anti-monotone).
+        try:
+            await asyncio.to_thread(
+                restart_pending_mod.touch,
+                cfg.restart_pending_path,
+            )
+        except OSError as e:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "err": ERR_ORIGIN_EDIT_FAILED,
+                    "detail": f"restart_pending_touch: {e}",
+                },
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+        prev_x, prev_y, prev_th = result.prev_origin
+        new_x, new_y, new_th = result.new_origin
+        activity_log.append(
+            "map_origin",
+            f"mode={body.mode}, prev={prev_x:.3f},{prev_y:.3f} "
+            f"new={new_x:.3f},{new_y:.3f} by {claims.username}",
+        )
+        return JSONResponse(
+            {
+                "ok": True,
+                "backup_ts": backup_ts,
+                "prev_origin": [prev_x, prev_y, prev_th],
+                "new_origin": [new_x, new_y, new_th],
                 "restart_required": True,
             },
             status_code=HTTPStatus.OK,

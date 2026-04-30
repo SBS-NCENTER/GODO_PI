@@ -26,7 +26,6 @@
   import MapZoomControls from '$components/MapZoomControls.svelte';
   import OriginPicker from '$components/OriginPicker.svelte';
   import RestartPendingBanner from '$components/RestartPendingBanner.svelte';
-  import ScanToggle from '$components/ScanToggle.svelte';
   import { ApiError, postMapEdit, postMapOrigin } from '$lib/api';
   import {
     BRUSH_RADIUS_PX_DEFAULT,
@@ -235,7 +234,6 @@
         />
         <span class="brush-value">{brushRadius}</span>
       </label>
-      <ScanToggle {scan} />
       <div class="actions">
         <button
           type="button"

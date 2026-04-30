@@ -1,9 +1,11 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
+  import LastPoseCard from '$components/LastPoseCard.svelte';
   import MapListPanel from '$components/MapListPanel.svelte';
   import MapZoomControls from '$components/MapZoomControls.svelte';
   import PoseCanvas from '$components/PoseCanvas.svelte';
   import ScanToggle from '$components/ScanToggle.svelte';
+  import TrackerControls from '$components/TrackerControls.svelte';
   import { MAP_SUBTAB_EDIT, MAP_SUBTAB_OVERVIEW } from '$lib/constants';
   import { formatDegrees, formatMeters } from '$lib/format';
   import { createMapViewport } from '$lib/mapViewport.svelte';
@@ -77,30 +79,40 @@
   </div>
   <h2>Map</h2>
 
-  <div class="subtabs" role="tablist" data-testid="map-subtabs">
-    <button
-      class="subtab"
-      class:active={activeSubtab === MAP_SUBTAB_OVERVIEW}
-      role="tab"
-      aria-selected={activeSubtab === MAP_SUBTAB_OVERVIEW}
-      onclick={() => selectSubtab(MAP_SUBTAB_OVERVIEW)}
-      data-testid="map-subtab-overview">Overview</button
-    >
-    <button
-      class="subtab"
-      class:active={activeSubtab === MAP_SUBTAB_EDIT}
-      role="tab"
-      aria-selected={activeSubtab === MAP_SUBTAB_EDIT}
-      onclick={() => selectSubtab(MAP_SUBTAB_EDIT)}
-      data-testid="map-subtab-edit">Edit</button
-    >
+  <!-- issue#2.4 — common header above the sub-tab row. Operator HIL
+       2026-04-30 KST late evening: TrackerControls + LastPoseCard
+       must show on BOTH Overview and Edit. Promoted out of per-sub-tab
+       blocks so they share a single mount lifecycle and a single
+       lastPose / mode subscription pair. -->
+  <TrackerControls />
+  <LastPoseCard />
+
+  <div class="subtabs-row">
+    <div class="subtabs" role="tablist" data-testid="map-subtabs">
+      <button
+        class="subtab"
+        class:active={activeSubtab === MAP_SUBTAB_OVERVIEW}
+        role="tab"
+        aria-selected={activeSubtab === MAP_SUBTAB_OVERVIEW}
+        onclick={() => selectSubtab(MAP_SUBTAB_OVERVIEW)}
+        data-testid="map-subtab-overview">Overview</button
+      >
+      <button
+        class="subtab"
+        class:active={activeSubtab === MAP_SUBTAB_EDIT}
+        role="tab"
+        aria-selected={activeSubtab === MAP_SUBTAB_EDIT}
+        onclick={() => selectSubtab(MAP_SUBTAB_EDIT)}
+        data-testid="map-subtab-edit">Edit</button
+      >
+    </div>
+    <!-- ScanToggle pinned to the right end of the sub-tabs row. Single
+         mount; shows on both sub-tabs (the toggle's effect — LiDAR
+         overlay on/off — applies to whichever map view is active). -->
+    <ScanToggle {scan} />
   </div>
 
   {#if activeSubtab === MAP_SUBTAB_OVERVIEW}
-    <MapListPanel {onPreviewSelect} />
-    <div class="map-toolbar">
-      <ScanToggle {scan} />
-    </div>
     {#if pose && pose.valid}
       <div class="muted" style="margin-bottom: 8px;" data-testid="pose-readout">
         ({formatMeters(pose.x_m)}, {formatMeters(pose.y_m)}) · {formatDegrees(pose.yaw_deg)}
@@ -110,6 +122,9 @@
       <PoseCanvas {viewport} {pose} mapImageUrl={previewUrl} {scan} scanOverlayOn={scanOn} />
       <MapZoomControls {viewport} />
     </div>
+    <!-- Operator HIL 2026-04-30 KST: "map 미리보기 블럭이 위로, 맵
+         목록 블럭이 아래로" — MapListPanel moved BELOW the canvas. -->
+    <MapListPanel {onPreviewSelect} />
   {:else if activeSubtab === MAP_SUBTAB_EDIT}
     <MapEdit />
   {/if}
@@ -119,24 +134,30 @@
   h2 {
     margin-top: 0;
   }
-  .map-toolbar {
+  /* issue#2.4 — sub-tabs row hosts the tab buttons (left) and the
+     ScanToggle (right end). Operator-locked: ScanToggle must sit at a
+     consistent screen position across sub-tabs; the right end of the
+     sub-tab row is the choice (mirrors Map title row but stays close
+     to the content it controls). */
+  .subtabs-row {
     display: flex;
-    justify-content: flex-end;
-    margin: 8px 0;
+    align-items: center;
+    justify-content: space-between;
+    margin: 12px 0;
+    border-bottom: 1px solid var(--color-border);
   }
   /* PR β — wraps the underlay canvas so `<MapZoomControls/>` can sit
-     in the top-left absolutely-positioned slot WITHOUT overlapping the
-     `<MapListPanel/>` or the pose readout above. */
+     in the top-left absolutely-positioned slot WITHOUT overlapping
+     surrounding content. */
   .canvas-stack {
     position: relative;
+    margin-bottom: 12px;
   }
   /* Sub-tab styling mirrors System.svelte (PR-B Processes / Extended
      resources) so the visual idiom is consistent across the SPA. */
   .subtabs {
     display: flex;
     gap: 0;
-    margin: 12px 0;
-    border-bottom: 1px solid var(--color-border);
   }
   .subtab {
     background: none;

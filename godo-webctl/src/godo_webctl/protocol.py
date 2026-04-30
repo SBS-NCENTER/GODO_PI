@@ -259,6 +259,39 @@ EDIT_RESPONSE_FIELDS: Final[tuple[str, ...]] = (
     "restart_required",
 )
 
+# --- Track B-MAPEDIT-2 — POST /api/map/origin error codes ---------------
+# Webctl-internal (no C++ wire counterpart). Mirror in the SPA's
+# `lib/protocol.ts`. Pinned by `tests/test_protocol.py::
+# test_origin_error_codes_pinned`.
+ERR_ORIGIN_BAD_VALUE: Final[str] = "bad_origin_value"
+ERR_ORIGIN_YAML_PARSE_FAILED: Final[str] = "origin_yaml_parse_failed"
+ERR_ORIGIN_EDIT_FAILED: Final[str] = "origin_edit_failed"
+ERR_ACTIVE_YAML_MISSING: Final[str] = "active_yaml_missing"
+
+# `POST /api/map/origin` success response field order. SOLE Python mirror
+# of the JSON keys emitted by `app.py::map_origin_endpoint` on the 200
+# path. `prev_origin` and `new_origin` are 3-element JSON arrays
+# `[x, y, theta]`; `restart_required` is always `True` for B-MAPEDIT-2
+# (origin lives in the YAML, tracker reads YAML at boot only — same
+# shape as B-MAPEDIT's `restart_required`).
+ORIGIN_EDIT_RESPONSE_FIELDS: Final[tuple[str, ...]] = (
+    "ok",
+    "backup_ts",
+    "prev_origin",
+    "new_origin",
+    "restart_required",
+)
+
+# Mode literals for the `mode` field of `OriginPatchBody`. Pydantic's
+# `Literal` enforces the value at parse time; this Python tuple mirrors
+# the SPA-side `OriginMode` literal type.
+ORIGIN_MODE_ABSOLUTE: Final[str] = "absolute"
+ORIGIN_MODE_DELTA: Final[str] = "delta"
+
+VALID_ORIGIN_MODES: Final[frozenset[str]] = frozenset(
+    {ORIGIN_MODE_ABSOLUTE, ORIGIN_MODE_DELTA},
+)
+
 # --- Track B-BACKUP — map-backup history error codes ---------------------
 # Webctl-internal (no C++ wire counterpart). Mirror in the SPA's
 # `lib/protocol.ts`. Per Mode-A M5 fold there is no `backup_dir_missing`

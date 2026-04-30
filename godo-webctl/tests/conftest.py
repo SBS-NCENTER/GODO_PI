@@ -229,6 +229,12 @@ def tmp_active_map_pair(tmp_path: Path) -> tuple[Path, Path]:
     - `active_pgm` is the `Path` of `active.pgm` (symlink); the realpath
       is `<maps_dir>/studio_v1.pgm`.
 
+    The YAML carries a representative `origin: [-1.5, -2.0, 0.0]` line
+    (Track B-MAPEDIT-2 fixture extension) so origin-edit tests have a
+    non-zero baseline to round-trip against. Tests that need a different
+    origin shape (no theta, scientific notation, multiple lines) should
+    overwrite the file directly.
+
     Tests that need a non-default PGM size or fill value should call
     `make_test_pgm_bytes` directly and overwrite the file.
     """
@@ -239,12 +245,36 @@ def tmp_active_map_pair(tmp_path: Path) -> tuple[Path, Path]:
     pgm_bytes = make_test_pgm_bytes(8, 8, fill=100)
     (maps_dir / "studio_v1.pgm").write_bytes(pgm_bytes)
     (maps_dir / "studio_v1.yaml").write_text(
-        "image: studio_v1.pgm\nresolution: 0.05\norigin: [0,0,0]\n"
-        "occupied_thresh: 0.65\nfree_thresh: 0.196\nnegate: 0\n",
+        "image: studio_v1.pgm\nresolution: 0.05\n"
+        "origin: [-1.5, -2.0, 0.0]\n"
+        "occupied_thresh: 0.65\nfree_thresh: 0.196\nnegate: 0\nmode: trinary\n",
     )
     os.symlink("studio_v1.pgm", maps_dir / "active.pgm")
     os.symlink("studio_v1.yaml", maps_dir / "active.yaml")
     return maps_dir, maps_dir / "active.pgm"
+
+
+def read_active_yaml_origin(maps_dir: Path) -> tuple[float, float, float]:
+    """Helper: re-parse the active.yaml symlink target's `origin:` line
+    and return `(x, y, theta)` as floats.
+
+    Used by Track B-MAPEDIT-2 tests for round-trip assertions: write
+    via `apply_origin_edit`, then re-read the on-disk YAML to confirm
+    the bytes actually changed (vs the in-memory return value alone).
+    """
+    import re as _re
+
+    active_yaml = maps_dir / "active.yaml"
+    text = active_yaml.read_text("utf-8")
+    m = _re.search(
+        r"^\s*origin\s*:\s*\[\s*([^,\]\s][^,\]]*?)\s*,\s*([^,\]\s][^,\]]*?)\s*,"
+        r"\s*([^,\]\s][^,\]]*?)\s*\]",
+        text,
+        _re.MULTILINE,
+    )
+    if m is None:
+        raise AssertionError(f"no origin: line in {active_yaml}: {text!r}")
+    return float(m.group(1)), float(m.group(2)), float(m.group(3))
 
 
 @pytest.fixture

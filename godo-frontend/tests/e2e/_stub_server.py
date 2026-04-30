@@ -979,6 +979,70 @@ def _h_map_edit(req: StubHandler) -> None:
     )
 
 
+def _h_map_origin(req: StubHandler) -> None:
+    """Track B-MAPEDIT-2 — admin-gated origin pick.
+
+    Mirrors the real backend's three-step happy path: success → flip
+    `RESTART_PENDING_FLAG` to True so the next /api/system/restart_pending
+    GET returns `{pending: true}`. The stub does not parse the YAML
+    on disk; it returns canonical (-1.5, -2.0, 0) → (typed_x, typed_y, 0)
+    pre/new origins for absolute mode, or (prev + typed) for delta.
+    """
+    c = req._require_admin()
+    if c is None:
+        return
+    cl = int(req.headers.get("content-length", "0"))
+    if cl > 256:
+        # Mirror M3 Option A: 413 with bad_payload + body_too_large.
+        req._send_json(
+            HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+            {"ok": False, "err": "bad_payload", "detail": "body_too_large"},
+        )
+        return
+    raw = req.rfile.read(cl) if cl > 0 else b"{}"
+    try:
+        body = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        req._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "err": "bad_payload"})
+        return
+    x_m = body.get("x_m")
+    y_m = body.get("y_m")
+    mode = body.get("mode")
+    if mode not in ("absolute", "delta"):
+        req._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "err": "bad_payload"})
+        return
+    if not isinstance(x_m, (int, float)) or not isinstance(y_m, (int, float)):
+        req._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "err": "bad_payload"})
+        return
+    prev = (-1.5, -2.0, 0.0)
+    if mode == "absolute":
+        new = (float(x_m), float(y_m), 0.0)
+    else:
+        # ADD sign convention.
+        new = (prev[0] + float(x_m), prev[1] + float(y_m), 0.0)
+    RESTART_PENDING_FLAG["value"] = True
+    ts = "20260430T010203Z"
+    BACKUPS_STATE[ts] = {
+        "files": ["studio_v1.pgm", "studio_v1.yaml"],
+        "size_bytes": 2048,
+    }
+    _activity_append(
+        "map_origin",
+        f"mode={mode}, prev={prev[0]:.3f},{prev[1]:.3f} "
+        f"new={new[0]:.3f},{new[1]:.3f} by {c['sub']}",
+    )
+    req._send_json(
+        HTTPStatus.OK,
+        {
+            "ok": True,
+            "backup_ts": ts,
+            "prev_origin": list(prev),
+            "new_origin": list(new),
+            "restart_required": True,
+        },
+    )
+
+
 def _h_backup_restore(req: StubHandler, ts: str) -> None:
     """Admin-only restore. Mirrors the backend wire shape:
     - 422 (or 404) on malformed `<ts>` (FastAPI Path constraint).
@@ -1096,6 +1160,7 @@ POST_ROUTES: dict[str, Callable[[StubHandler], None]] = {
     "/api/live": _h_live,
     "/api/map/backup": _h_backup,
     "/api/map/edit": _h_map_edit,
+    "/api/map/origin": _h_map_origin,
     "/api/system/reboot": _h_system_reboot,
     "/api/system/shutdown": _h_system_shutdown,
 }

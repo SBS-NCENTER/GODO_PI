@@ -470,6 +470,38 @@ export interface EditResponse {
   restart_required: true;
 }
 
+// --- Track B-MAPEDIT-2 — POST /api/map/origin wire shapes -------------
+// Mirror of `godo_webctl.protocol::ERR_ORIGIN_*` /
+// `ORIGIN_EDIT_RESPONSE_FIELDS` / `ORIGIN_MODE_*`. Drift detected by
+// inspection per godo-frontend/CODEBASE.md invariant (aa).
+export const ERR_ORIGIN_BAD_VALUE = 'bad_origin_value';
+export const ERR_ORIGIN_YAML_PARSE_FAILED = 'origin_yaml_parse_failed';
+export const ERR_ORIGIN_EDIT_FAILED = 'origin_edit_failed';
+export const ERR_ACTIVE_YAML_MISSING = 'active_yaml_missing';
+
+// `mode` literal type — Pydantic Literal["absolute","delta"] mirror.
+export type OriginMode = 'absolute' | 'delta';
+
+// POST /api/map/origin request body.
+export interface OriginPatchBody {
+  x_m: number;
+  y_m: number;
+  mode: OriginMode;
+}
+
+// POST /api/map/origin success response. `prev_origin` and `new_origin`
+// are 3-element tuples `[x, y, theta]`. Theta is preserved
+// byte-for-byte on disk (the YAML's theta token bytes are NOT
+// reformatted); the wire value here is a Python-float parse for SPA
+// display convenience only (see invariant (ab) on the webctl side).
+export interface OriginEditResponse {
+  ok: true;
+  backup_ts: string; // canonical "YYYYMMDDTHHMMSSZ"
+  prev_origin: [number, number, number];
+  new_origin: [number, number, number];
+  restart_required: true;
+}
+
 // --- Track B-SYSTEM PR-2 — service observability wire shapes ---------
 // Mirror of `godo_webctl.protocol::SYSTEM_SERVICES_FIELDS` and the
 // `services.ServiceShow` dataclass. Drift detected by inspection per

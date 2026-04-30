@@ -245,6 +245,23 @@ MAP_EDIT_FREE_PIXEL_VALUE: Final[int] = 254
 # alone"). RGBA masks use alpha > 0 instead per `map_edit.py`.
 MAP_EDIT_PAINT_THRESHOLD: Final[int] = 128
 
+# --- Track B-MAPEDIT-2 — POST /api/map/origin body + bound constants ----
+# Server-side ceiling on the JSON body. A canonical body is ~80 B
+# (`{"x_m":-1.5,"y_m":-2.0,"mode":"absolute"}`). 256 covers
+# floating-point representations with full repr precision plus modest
+# whitespace; bigger than that is malformed or DoS. Mirrors the
+# discipline of `CONFIG_PATCH_BODY_MAX_BYTES` (1 KiB) but tighter
+# because the origin payload is even smaller.
+ORIGIN_BODY_MAX_BYTES: Final[int] = 256
+
+# Magnitude bound on `x_m` / `y_m` (after delta resolution). Studio is
+# ~10 m square; 1 km bound covers the studio (~100×) plus headroom for
+# shared-frame debug scenarios with multiple studios in the same world
+# frame. Values >1 km are flagged as operator typos rather than valid
+# geometry. Reviewer N2 nudge to 1 000.0 (vs. the planner's initial
+# 10 000.0 default) accepted by Parent 2026-04-30 KST.
+ORIGIN_X_Y_ABS_MAX_M: Final[float] = 1_000.0
+
 # Korean transition-warning strings keyed by `(svc, transition)`. Used
 # by the 409-translation arm of `local_service_action` and
 # `system_service_action` (both share `services.control()` underneath).

@@ -338,6 +338,7 @@ The auth model splits cleanly along read-vs-write:
 - **Login-gated mutations** (`Depends(require_admin)`): `/api/calibrate`,
   `/api/live`, `/api/map/backup`, `/api/map/backup/<ts>/restore`
   (Track B-BACKUP), `/api/map/edit` (Track B-MAPEDIT),
+  `/api/map/origin` (Track B-MAPEDIT-2),
   `/api/maps/<name>/activate`, `DELETE /api/maps/<name>`,
   `/api/local/service/<name>/<action>` (loopback + admin),
   `/api/system/service/<name>/<action>` (admin-non-loopback;
@@ -679,6 +680,132 @@ Pinned by:
 - `tests/test_app_integration.py::test_map_edit_appends_activity_log`
   (M2 fold — type literal `"map_edit"` pin).
 
+### (ab) `map_origin.py` is the SOLE owner of the YAML origin metadata-rewrite (Track B-MAPEDIT-2, Phase 4.5 P2)
+
+> Letter rationale: invariants (a)..(aa) are all taken on main as of
+> 2026-04-30 (PR #39 closed at (aa) Track B-MAPEDIT); next free letter
+> is (ab).
+
+Every byte change to an active map's `origin:` line as a result of
+`POST /api/map/origin` goes through `map_origin.apply_origin_edit`.
+`app.py` orchestrates the three-step sequence (mirror of B-MAPEDIT
+invariant `(aa)`):
+
+1. `backup.backup_map(active_pgm, cfg.backup_dir)` — backup-FIRST.
+   The PGM is unchanged but is included in the snapshot per
+   `backup_map`'s pair contract (single backup helper covers both
+   B-MAPEDIT and B-MAPEDIT-2 — uniform on-disk shape; switching to a
+   YAML-only backup helper would break that invariant). Backup-failure
+   aborts BEFORE the YAML rewrite (R1 mitigation).
+2. `map_origin.apply_origin_edit(active_yaml, x_m, y_m, mode)` —
+   line-level YAML rewrite via tmp + `os.replace` (mode 0644, mirror of
+   `auth.py::_write_atomic` / `map_edit.py::_atomic_write`). On
+   edit-failure the backup snapshot stays intact for manual recovery.
+3. `restart_pending.touch(cfg.restart_pending_path)` — LAST step.
+   Anti-monotone (never set on a failure path). Tracker C++ has no
+   awareness of edits — it reads YAML at boot only via its existing
+   `Config::load` path. Operator restarts via `/local` (loopback) or
+   `/system` (admin-non-loopback, PR #27) to apply.
+
+`map_origin.py` does NOT import `maps.py` (Track E uncoupled-leaves) —
+caller resolves the active YAML realpath via `maps.read_active_name`
++ `maps.yaml_for` and passes the `Path` in. Concurrency-correctness
+inherits from invariant (e) (single uvicorn worker = serial handler).
+
+**Theta passthrough**: `origin[2]` (theta) is NEVER parsed-and-reformatted.
+The token bytes between the second and third comma in the
+`origin: [..]` list are preserved VERBATIM. This protects against
+accidental drift when `repr(float)` reformats edge cases (e.g.
+`1.5707963267948966 → 1.5707963267948965` round-trip). The wire
+response `prev_origin[2]` / `new_origin[2]` carries a Python-float
+parse PURELY for SPA display convenience; the on-disk theta token
+stays byte-identical pre/post.
+
+**PGM untouched**: only the YAML changes. The active PGM realpath's
+bytes are byte-for-byte unchanged (pinned by the integration suite).
+
+**Sign convention for `mode == "delta"` is ADD** (operator-locked
+2026-04-30 KST, see `.claude/memory/project_map_edit_origin_rotation.md`):
+
+  `new_origin = current_origin + (x_m, y_m)`
+
+i.e. the typed `(x_m, y_m)` is the offset of the **new origin from
+the current origin**. Operator phrasing: "실제 원점 위치는 여기서
+(x, y)만큼 더 간 곳". A Mode-A reviewer caught the spec memory's
+ambiguity (literal "subtract" wording vs. example "ADD" semantics);
+operator confirmed ADD. SUBTRACT is wrong (would shift the origin by
+2× the typed offset). Pinned by
+`tests/test_map_origin.py::test_apply_origin_edit_delta_happy_path`,
+`tests/test_app_integration.py::test_post_map_origin_admin_delta_happy_path`,
+`tests/unit/originMath.test.ts::resolveDelta adds`.
+
+**Block-scalar YAML form is rejected**: ROS map_server emits flow-style
+`origin: [x, y, theta]`; if an operator hand-edits the file to use
+the block-scalar form (`origin:\n  - x\n  - y\n  - theta`), the
+rewriter raises `OriginYamlParseFailed("flow_style_required")` rather
+than risking a partial-file edit. Operator must reformat or re-export
+(README troubleshooting entry).
+
+**`map_image.invalidate_cache()` is intentionally NOT called** (S4
+fold dropped per Parent decision). The `/api/map/image` PNG cache key
+is `PGM realpath + mtime`, both unchanged by an origin edit (origin
+lives in YAML; the PNG is rendered from PGM bytes). Brush-edit's
+`invalidate_cache()` call exists because brush-edit *does* rewrite
+PGM bytes — there is no symmetric coupling here.
+
+**Backup scope**: same `backup.backup_map(active_pgm, ...)` as
+B-MAPEDIT. Because `backup_map` archives both `<stem>.pgm` and
+`<stem>.yaml`, the on-disk snapshot includes a redundant PGM copy
+(unchanged by this feature). Acceptable cost; uniform with brush-edit;
+refactoring to a YAML-only backup helper is a future optimization,
+not a blocker.
+
+**Activity log type literal**: `"map_origin"` (NOT `"map_origin_edit"`,
+NOT `"origin_set"`) — imperative-style convention shared with
+`map_edit`, `map_backup`, `map_activate`, `map_delete`. Pinned by
+`tests/test_app_integration.py::test_post_map_origin_appends_activity_log`
+via literal-string equality (NOT `startswith` / `in`).
+
+**Magnitude bound**: `ORIGIN_X_Y_ABS_MAX_M = 1_000.0` covers the
+studio (~10 m) plus 100× headroom for shared-frame debug scenarios.
+Values >1 km are flagged as operator typos (constants.py docstring
+locks the rationale).
+
+**Body-size envelope**: `bad_payload + detail=body_too_large` at 413
+(M3 Option A — mirror of `PATCH /api/config` precedent at
+`app.py:888-892`). No new top-level constant; the `body_too_large`
+token sits in `detail` rather than `err`.
+
+**`math.isfinite` is the load-bearing NaN/Inf check** (S5 fold).
+Pydantic's `allow_inf_nan` is best-effort defence-in-depth — the
+explicit `isfinite` check inside `apply_origin_edit` (and the
+pre-handler check in `app.py`) is the contract.
+
+Pinned by:
+
+- `tests/test_map_origin.py::test_module_does_not_import_maps`,
+- `tests/test_map_origin.py::test_apply_origin_edit_atomic_write`
+  (S2 fold — `*.tmp` cleanup-on-failure),
+- `tests/test_map_origin.py::test_apply_origin_edit_preserves_theta_byte_for_byte`
+  (T2 fold — parametrized over `1.5e-3`, `-0.0`, high-precision token),
+- `tests/test_map_origin.py::test_apply_origin_edit_preserves_other_yaml_keys_byte_for_byte`,
+- `tests/test_map_origin.py::test_apply_origin_edit_origin_line_whitespace_variants`
+  (T3 fold),
+- `tests/test_map_origin.py::test_apply_origin_edit_preserves_crlf_line_endings`,
+- `tests/test_app_integration.py::test_post_map_origin_backup_failure_aborts_yaml_untouched`,
+- `tests/test_app_integration.py::test_post_map_origin_yaml_rewrite_failure_leaves_no_restart_pending`
+  (S3 fold — anti-monotone partner of `_touches_restart_pending`),
+- `tests/test_app_integration.py::test_post_map_origin_backup_ts_matches_disk_snapshot`
+  (S1 fold — snapshot YAML reflects pre-edit origin bytes),
+- `tests/test_app_integration.py::test_post_map_origin_appends_activity_log`
+  (M5 fold — type literal `"map_origin"` pin),
+- `tests/test_app_integration.py::test_post_map_origin_oversize_returns_413`
+  (M3 fold — Option A envelope),
+- `tests/test_app_integration.py::test_post_map_origin_locale_comma_string_returns_400`
+  (T4 fold),
+- `tests/test_protocol.py::test_origin_edit_response_fields_pinned`,
+- `tests/test_protocol.py::test_origin_modes_pinned`.
+
 ## Phase 4.5 follow-up candidates
 
 - Deadline-based UDS timeout (single shared `monotonic()` budget per
@@ -690,6 +817,91 @@ Pinned by:
   different uid.
 
 ## Change log
+
+### 2026-04-30 14:37 KST — Track B-MAPEDIT-2 (Phase 4.5 P2) — origin pick (dual GUI + numeric input)
+
+#### Added
+
+- `src/godo_webctl/map_origin.py` — Sole-owner module for the YAML
+  `origin:` line rewrite. `apply_origin_edit(active_yaml, x_m, y_m, mode)`
+  reads the YAML text, locates the unique flow-style `origin: [x, y, theta]`
+  line, rewrites ONLY `origin[0]` and `origin[1]` (theta + every other
+  byte preserved), and writes atomically through tmp + `os.replace` (mode
+  0644). Custom exceptions `OriginEditError`, `ActiveYamlMissing`,
+  `OriginYamlParseFailed`, `BadOriginValue`, `OriginEditFailed`. Theta
+  passthrough rule: theta token bytes are preserved VERBATIM (never
+  parse + repr). Sign convention for `mode == "delta"` is ADD (operator-
+  locked 2026-04-30 KST): `new = current + typed`. Block-scalar YAML form
+  rejected with `flow_style_required`. Module discipline: does NOT import
+  `maps.py` (Track E uncoupled-leaves).
+- `src/godo_webctl/protocol.py` — `ERR_ORIGIN_BAD_VALUE`,
+  `ERR_ORIGIN_YAML_PARSE_FAILED`, `ERR_ORIGIN_EDIT_FAILED`,
+  `ERR_ACTIVE_YAML_MISSING`, `ORIGIN_EDIT_RESPONSE_FIELDS = ("ok",
+  "backup_ts", "prev_origin", "new_origin", "restart_required")`,
+  `ORIGIN_MODE_ABSOLUTE = "absolute"`, `ORIGIN_MODE_DELTA = "delta"`,
+  `VALID_ORIGIN_MODES`. SPA mirror in `lib/protocol.ts`.
+- `src/godo_webctl/constants.py` — `ORIGIN_BODY_MAX_BYTES = 256`
+  (single-key JSON body cap), `ORIGIN_X_Y_ABS_MAX_M = 1_000.0` (magnitude
+  bound covering studio + 100× headroom; rationale comment).
+- `src/godo_webctl/app.py` — `OriginPatchBody` Pydantic class
+  (`x_m: float`, `y_m: float`, `mode: Literal["absolute","delta"]`),
+  `_map_origin_exc_to_response` shape mapper, `POST /api/map/origin`
+  admin-gated handler. Three-step sequence (mirror of `/api/map/edit`):
+  resolve active YAML via `maps.read_active_name + maps.yaml_for` →
+  backup via `backup.backup_map(active_pgm, cfg.backup_dir)` (PGM
+  unchanged but archived per `backup_map`'s pair contract) →
+  `map_origin.apply_origin_edit(...)` → `restart_pending.touch(...)` →
+  activity log `"map_origin"`. Body-size pre-check returns 413
+  `bad_payload + detail=body_too_large` (mirror of `PATCH /api/config`
+  precedent at app.py:888-892). NaN/Inf load-bearing check is
+  `math.isfinite` (Pydantic's `allow_inf_nan` is best-effort defence-
+  in-depth). `map_image.invalidate_cache()` is intentionally NOT called
+  (PNG cache key is PGM realpath + mtime, both unchanged by an origin
+  edit).
+- `tests/test_map_origin.py` — 23 unit cases: absolute/delta happy paths,
+  ADD sign-convention pin, theta passthrough parametrized over `1.5e-3`
+  / `-0.0` / high-precision tokens, all-non-origin-lines byte-for-byte,
+  inline comment preserved, missing/duplicate/block-scalar `origin:`
+  rejection, atomic-write `*.tmp` cleanup-on-failure, bad-mode defence,
+  module-discipline (no maps.py import), high-precision round-trip,
+  whitespace variants (T3 fold), CRLF preservation, delta overflow.
+- `tests/test_app_integration.py` — 15 new integration cases:
+  admin/anon/viewer auth gating, absolute/delta happy paths, NaN/Inf
+  rejection (S5), bad-mode 422-or-400, active-map-missing 503,
+  backup-failure-aborts-yaml-untouched (R1), restart-pending
+  touched-on-success and not-touched-on-failure (S3), activity log
+  `"map_origin"` literal pin (M5), `backup_ts` matches snapshot AND
+  snapshot YAML reflects pre-edit origin bytes (S1),
+  oversize-returns-413 (M3 Option A), locale-comma-string-rejected
+  (T4 fold).
+- `tests/test_protocol.py` — `test_origin_error_codes_pinned`,
+  `test_origin_edit_response_fields_pinned`, `test_origin_modes_pinned`
+  (cross-language drift catches against `lib/protocol.ts`).
+- `tests/test_constants.py` — `test_origin_body_max_bytes_pinned`,
+  `test_origin_x_y_abs_max_m_pinned`.
+
+#### Changed
+
+- `tests/conftest.py::tmp_active_map_pair` — fixture YAML now writes
+  `origin: [-1.5, -2.0, 0.0]` (instead of `[0, 0, 0]`) plus
+  `mode: trinary` so origin-edit tests have a non-zero baseline to
+  round-trip against. Existing `test_map_edit.py` tests do NOT inspect
+  the YAML origin and continue to pass.
+- `tests/conftest.py::read_active_yaml_origin` — new helper for
+  round-trip assertions (re-parses on-disk YAML).
+
+#### Invariants
+
+- Added `(ab)`: `map_origin.py` is the SOLE owner of the YAML origin
+  metadata-rewrite. Three-step sequence (backup → YAML rewrite →
+  sentinel) is contractual; theta byte passthrough; ADD sign convention;
+  block-scalar form rejected; activity log type literal `"map_origin"`.
+- Extended `(n)` (admin-gated mutations): added `POST /api/map/origin`.
+
+#### Test counts
+
+- Backend: 671 tests (was 628 baseline; +43 new). Full suite
+  `uv run pytest -m "not hardware_tracker"` green.
 
 ### 2026-04-30 11:30 KST — Track B-MAPEDIT (Phase 4.5 P2 Step 3) — brush-erase + auto-backup + restart-required
 

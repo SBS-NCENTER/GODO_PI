@@ -239,6 +239,21 @@ def test_map_edit_paint_threshold_pinned() -> None:
     assert C.MAP_EDIT_PAINT_THRESHOLD == 128
 
 
+# --- Track B-MAPEDIT-2 — POST /api/map/origin constants -----------------
+
+
+def test_origin_body_max_bytes_pinned() -> None:
+    # Body-size cap for `POST /api/map/origin`. Single-key JSON ~80 B
+    # in practice; 256 covers full-precision floats + modest whitespace.
+    assert C.ORIGIN_BODY_MAX_BYTES == 256
+
+
+def test_origin_x_y_abs_max_m_pinned() -> None:
+    # Magnitude bound; reviewer N2 fold accepted by Parent — 1 km covers
+    # the studio (~10 m) plus 100× headroom for shared-frame debug.
+    assert C.ORIGIN_X_Y_ABS_MAX_M == 1_000.0
+
+
 def test_service_transition_messages_ko_covers_allowed_services() -> None:
     """Drift-catch: every ALLOWED_SERVICE has both a starting + stopping
     entry. Adding a new service to ALLOWED_SERVICES requires extending

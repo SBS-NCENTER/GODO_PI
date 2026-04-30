@@ -23,7 +23,9 @@ The Map Edit feature ships as three separate PRs to keep each change reviewable 
 **How to apply:** when planning B-MAPEDIT-2, the SPA page MUST expose BOTH input modes side-by-side, NOT one or the other:
 
 - **Mode A — GUI pick**: click a pixel on the rendered PGM. Frontend converts pixel → world coords using current YAML `resolution` + `origin`, then pre-fills the numeric fields. Operator can adjust before Apply.
-- **Mode B — numeric entry**: two number inputs `dx_m` + `dy_m` (delta in meters from current origin), or absolute `x_m` + `y_m` (toggle). Locale-friendly decimal handling (period, not comma). Sub-mm precision in input but display rounds to 1 mm. Negative values allowed.
+- **Mode B — numeric entry**: two number inputs `x_m` + `y_m` with absolute / delta toggle. Locale-friendly decimal handling (period, not comma). Sub-mm precision in input but display rounds to 1 mm. Negative values allowed.
+
+  **Sign convention (operator-locked 2026-04-30 KST, ADD)**: in `delta` mode the typed `(x_m, y_m)` is the *offset of the new origin from the current origin* — i.e. `new_origin = current_origin + (x_m, y_m)`. Operator phrasing: "실제 원점 위치는 여기서 (x, y)만큼 더 간 곳". Use case: operator measures the studio's real center is at `(+0.32, -0.18)` in the *current* world frame, types those numbers in delta mode → new origin lands on the studio center → studio center reads as world `(0, 0)` in the NEW frame. **SUBTRACT is wrong** and was caught by Mode-A reviewer (would shift origin by `2× typed_offset`).
 
 Apply path is unified: both modes resolve to a single `(new_x, new_y)` pair → backend updates YAML `origin[0]` and `origin[1]` only. PGM bytes unchanged. Auto-backup of the YAML (PGM does not need backup since it's not touched). Restart-pending sentinel touched.
 

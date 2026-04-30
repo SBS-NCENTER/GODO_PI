@@ -96,8 +96,31 @@ class UdsClient:
     def get_mode(self, timeout: float) -> dict[str, Any]:
         return self._roundtrip(encode_get_mode(), timeout)
 
-    def set_mode(self, mode: str, timeout: float) -> dict[str, Any]:
-        return self._roundtrip(encode_set_mode(mode), timeout)
+    def set_mode(
+        self,
+        mode: str,
+        timeout: float,
+        *,
+        seed: tuple[float, float, float] | None = None,
+        sigma_xy_m: float | None = None,
+        sigma_yaw_deg: float | None = None,
+    ) -> dict[str, Any]:
+        """`set_mode` round-trip.
+
+        issue#3 (pose hint) — when `seed` is supplied as
+        `(x_m, y_m, yaw_deg)` the wire payload carries the operator-
+        placed pose hint as JSON numbers. Empty `seed=None` calls are
+        byte-identical to the pre-issue#3 wire (back-compat).
+        """
+        return self._roundtrip(
+            encode_set_mode(
+                mode,
+                seed=seed,
+                sigma_xy_m=sigma_xy_m,
+                sigma_yaw_deg=sigma_yaw_deg,
+            ),
+            timeout,
+        )
 
     def get_last_pose(self, timeout: float) -> dict[str, Any]:
         """Track B `get_last_pose` round-trip; response shape pinned by
@@ -228,6 +251,12 @@ class UdsClient:
 async def call_uds(
     fn: Callable[..., dict[str, Any]],
     *args: Any,
+    **kwargs: Any,
 ) -> dict[str, Any]:
-    """Run a sync ``UdsClient`` method on a worker thread."""
-    return await asyncio.to_thread(fn, *args)
+    """Run a sync ``UdsClient`` method on a worker thread.
+
+    issue#3 — `**kwargs` forwards keyword-only args (e.g. `seed=`,
+    `sigma_xy_m=`) to `UdsClient.set_mode`. Pre-issue#3 callers that
+    only used positional args are unaffected.
+    """
+    return await asyncio.to_thread(fn, *args, **kwargs)

@@ -21,12 +21,14 @@
    */
   import { onDestroy, onMount } from 'svelte';
 
+  import LastPoseCard from '$components/LastPoseCard.svelte';
   import MapMaskCanvas from '$components/MapMaskCanvas.svelte';
   import MapUnderlay from '$components/MapUnderlay.svelte';
   import MapZoomControls from '$components/MapZoomControls.svelte';
   import OriginPicker from '$components/OriginPicker.svelte';
   import RestartPendingBanner from '$components/RestartPendingBanner.svelte';
   import ScanToggle from '$components/ScanToggle.svelte';
+  import TrackerControls from '$components/TrackerControls.svelte';
   import { ApiError, postMapEdit, postMapOrigin } from '$lib/api';
   import {
     BRUSH_RADIUS_PX_DEFAULT,
@@ -215,6 +217,9 @@
        data-testid is preserved so the existing e2e + unit tests
        continue to anchor on this container. -->
   <RestartPendingBanner />
+
+  <TrackerControls />
+  <LastPoseCard />
 
   {#if dimsError}
     <p class="error" data-testid="map-edit-dims-error">

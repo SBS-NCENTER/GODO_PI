@@ -1,9 +1,11 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
+  import LastPoseCard from '$components/LastPoseCard.svelte';
   import MapListPanel from '$components/MapListPanel.svelte';
   import MapZoomControls from '$components/MapZoomControls.svelte';
   import PoseCanvas from '$components/PoseCanvas.svelte';
   import ScanToggle from '$components/ScanToggle.svelte';
+  import TrackerControls from '$components/TrackerControls.svelte';
   import { MAP_SUBTAB_EDIT, MAP_SUBTAB_OVERVIEW } from '$lib/constants';
   import { formatDegrees, formatMeters } from '$lib/format';
   import { createMapViewport } from '$lib/mapViewport.svelte';
@@ -98,6 +100,8 @@
 
   {#if activeSubtab === MAP_SUBTAB_OVERVIEW}
     <MapListPanel {onPreviewSelect} />
+    <TrackerControls />
+    <LastPoseCard />
     <div class="map-toolbar">
       <ScanToggle {scan} />
     </div>

@@ -173,9 +173,9 @@ describe('PoseHintLayer (issue#3)', () => {
     expect(captured[0]!.yaw_deg).toBeCloseTo(0, 1);
   });
 
-  it('B path: drag < MIN_PX (sub-MIN) → placing-yaw-await, second click commits yaw', () => {
+  it('B path: drag < MIN_PX (sub-MIN) → placing-yaw-await, second click commits yaw + affordance badge visibility (Mode-B B-M3)', () => {
     const captured: (HintPose | null)[] = [];
-    const { canvas } = mountLayer({
+    const { target, canvas } = mountLayer({
       onhintchange: (h) => captured.push(h),
     });
     flushSync();
@@ -193,6 +193,12 @@ describe('PoseHintLayer (issue#3)', () => {
     // No commit yet — we're in placing-yaw-await.
     expect(captured.length).toBe(0);
     expect(canvas.getAttribute('data-state')).toBe('placing-yaw-await');
+    // Mode-B B-M3 — affordance badge visible during placing-yaw-await,
+    // contains the operator-locked Korean prompt.
+    const badge = target.querySelector<HTMLDivElement>('[data-testid="pose-hint-affordance"]');
+    expect(badge).not.toBeNull();
+    expect(badge!.textContent).toContain('이제 방향을 클릭하세요');
+
     // Second click north → yaw 90°.
     canvas.dispatchEvent(makePointerEvent('pointerdown', { clientX: 300, clientY: 100 }));
     flushSync();
@@ -200,6 +206,8 @@ describe('PoseHintLayer (issue#3)', () => {
     expect(captured[0]).not.toBeNull();
     expect(captured[0]!.yaw_deg).toBeCloseTo(90, 1);
     expect(canvas.getAttribute('data-state')).toBe('idle');
+    // Affordance badge gone now.
+    expect(target.querySelector('[data-testid="pose-hint-affordance"]')).toBeNull();
   });
 
   it('ESC during placing-yaw-await aborts to idle and clears hint', () => {

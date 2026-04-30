@@ -17,7 +17,7 @@ Usage::
 
     from godo_webctl.config_schema import load_schema
     rows = load_schema()
-    assert len(rows) == 40
+    assert len(rows) == 42
 """
 
 from __future__ import annotations

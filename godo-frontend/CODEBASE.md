@@ -2292,7 +2292,9 @@ void` callback prop. In origin-pick mode pointer-down emits
 ### Invariants
 
 - **(ac) pose-hint-layer-sibling-canvas-discipline** — issue#3 UI.
-  Mirror of webctl's `(ab) → (aa) → (ac)` letter progression.
+  Mirrors the webctl `(ab) → (ac)` issue#3 invariant pair (webctl
+  `(ab)` is PR #51 `map_origin.py`, webctl `(ac)` is the issue#3
+  CalibrateBody pipeline).
 
   1. **Sibling DOM canvas, NOT an `ondraw` consumer** (Mode-A C1).
      `<PoseCanvas/>` already owns `<MapUnderlay/>`'s layer-3

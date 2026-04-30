@@ -2235,7 +2235,7 @@ the rule unblocks at runtime.
 
 ### Invariants
 
-- **(ab) calibrate-hint-forward-compat-discipline** — issue#3
+- **(ac) calibrate-hint-forward-compat-discipline** — issue#3
   CalibrateBody pipeline. Three layers must agree on the wire shape;
   drift between any pair is a code-review block.
 

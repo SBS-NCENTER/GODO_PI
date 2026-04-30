@@ -52,7 +52,7 @@ enum class AmclMode : std::uint8_t {
 extern std::atomic<bool>     g_running;
 extern std::atomic<AmclMode> g_amcl_mode;
 
-// issue#3 — calibrate hint payload. Five doubles (~40 B); plain POD,
+// issue#3 — calibrate hint payload. Five doubles (40 B); plain POD,
 // trivially copyable per the Seqlock<T> contract. The webctl all-or-none
 // validator already guarantees the seed triple is fully populated; the
 // tracker still re-checks finite + in-bounds in `uds_server.cpp` before

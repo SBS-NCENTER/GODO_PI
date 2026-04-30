@@ -38,22 +38,30 @@
   let parseErr = $state<'empty' | 'locale_comma' | 'not_finite' | null>(null);
 
   // Re-render the buffer whenever zoom changes externally (e.g. (+/−)
-  // click) AND the operator isn't mid-edit.
+  // click) AND the operator isn't mid-edit AND there's no sticky parse
+  // error to display. A sticky parse error means the operator's last
+  // commit was rejected; the input keeps the invalid value visible
+  // until they type something else.
   $effect(() => {
-    if (!editing) {
+    if (!editing && parseErr === null) {
       inputBuf = formatZoomPercent(viewport.zoom);
-      parseErr = null;
     } else {
       // Touch viewport.zoom so the effect retracks; intentional re-read.
       void viewport.zoom;
     }
   });
 
-  function commitInput(): void {
+  /**
+   * Try to commit the current input buffer. Returns `true` on success
+   * (caller can end the edit), `false` on validation error (caller
+   * should leave editing-mode active so the operator sees the
+   * highlighted invalid input).
+   */
+  function commitInput(): boolean {
     const parsed = parsePercent(inputBuf);
     if (parsed.error !== null) {
       parseErr = parsed.error;
-      return;
+      return false;
     }
     parseErr = null;
     if (parsed.value !== null) {
@@ -63,22 +71,31 @@
       // Re-render the buffer to whatever the factory clamped to.
       inputBuf = formatZoomPercent(viewport.zoom);
     }
+    return true;
   }
 
   function onInputFocus(): void {
     editing = true;
+    // Clear any sticky parse error from a previous commit so the
+    // first keystroke shows green again.
+    parseErr = null;
   }
 
   function onInputBlur(): void {
-    editing = false;
-    commitInput();
+    if (commitInput()) {
+      editing = false;
+    }
   }
 
   function onInputKeydown(e: KeyboardEvent): void {
     if (e.key === 'Enter') {
-      commitInput();
-      // Re-read so the buffer reflects the clamped value.
-      inputBuf = formatZoomPercent(viewport.zoom);
+      if (commitInput()) {
+        // Operator mental model: Enter ends the edit (matches blur).
+        // Without this, subsequent external zoom changes (e.g. (+/−)
+        // clicks while focus stays on the input) wouldn't update the
+        // displayed value.
+        editing = false;
+      }
     }
   }
 
@@ -96,7 +113,6 @@
     if (err === 'empty') return '값을 입력하세요.';
     return '';
   }
-
 </script>
 
 <div class="map-zoom-controls" data-testid="map-zoom-controls">

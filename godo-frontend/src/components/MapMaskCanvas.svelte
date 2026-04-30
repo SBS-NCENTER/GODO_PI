@@ -28,6 +28,7 @@
    * mask state is byte-identical to a paint-mode no-op pointer event.
    */
   import { onMount } from 'svelte';
+  import type { MapViewport } from '$lib/mapViewport.svelte';
 
   interface Props {
     width: number; // logical PGM width
@@ -37,6 +38,15 @@
     disabled?: boolean;
     mode?: 'paint' | 'origin-pick';
     oncoordpick?: (lx: number, ly: number) => void;
+    /**
+     * Optional shared viewport (PR β commit 4). When supplied, pointer
+     * events use `viewport.canvasToImagePixel(...)` to invert the
+     * underlay's zoom + pan before mapping to logical mask cells. When
+     * omitted (back-compat for any caller that does not yet share a
+     * viewport), the math collapses to the pre-PR-β
+     * `getBoundingClientRect()` form which is identity at zoom=1.
+     */
+    viewport?: MapViewport;
   }
 
   let {
@@ -47,6 +57,7 @@
     disabled = false,
     mode = 'paint',
     oncoordpick,
+    viewport,
   }: Props = $props();
 
   let mapCanvas: HTMLCanvasElement | undefined = $state();
@@ -102,15 +113,49 @@
    * `devicePixelRatio` (T4 fold). A pointer at CSS (x, y) within a
    * canvas whose CSS box is `bw × bh` lands at logical
    * `(x * width / bw, y * height / bh)`.
+   *
+   * PR β (Mode-A M4): when a `viewport` prop is supplied, the
+   * conversion ALSO inverts the viewport's zoom + pan so a pointer at
+   * the visual center of the mask box always paints into the logical
+   * mask center even when the operator has zoomed/panned. At zoom=1,
+   * panX=panY=0 the math collapses to the pre-PR-β identity form (T4
+   * pin survives byte-identical).
    */
   function pointerToLogicalCoords(ev: PointerEvent): { lx: number; ly: number } | null {
     if (!maskCanvas) return null;
     const rect = maskCanvas.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return null;
-    const lx = Math.floor(((ev.clientX - rect.left) * width) / rect.width);
-    const ly = Math.floor(((ev.clientY - rect.top) * height) / rect.height);
-    if (lx < 0 || lx >= width || ly < 0 || ly >= height) return null;
-    return { lx, ly };
+    const cssX = ev.clientX - rect.left;
+    const cssY = ev.clientY - rect.top;
+
+    // CSS → logical mask coords. The mask CSS box maps 1:1 to
+    // logical `width × height` cells (image-rendering: pixelated).
+    let lx = (cssX * width) / rect.width;
+    let ly = (cssY * height) / rect.height;
+
+    // PR β: when a viewport is supplied, invert the viewport's
+    // zoom + pan around the box center. This is mathematically
+    // equivalent to viewport.canvasToImagePixel(...) when the mask
+    // CSS box has the same size + center as the underlay's canvas.
+    if (viewport) {
+      const cxBox = rect.width / 2;
+      const cyBox = rect.height / 2;
+      // Inverse-zoom + inverse-pan around the box center, expressed in
+      // logical mask units (so the pan-px is converted via the
+      // CSS→logical scale factor). Identity at zoom=1, pan=0.
+      const sx = width / rect.width;
+      const sy = height / rect.height;
+      const z = viewport.zoom;
+      const dx = cssX - cxBox - viewport.panX;
+      const dy = cssY - cyBox - viewport.panY;
+      lx = cxBox * sx + (dx * sx) / z;
+      ly = cyBox * sy + (dy * sy) / z;
+    }
+
+    const flx = Math.floor(lx);
+    const fly = Math.floor(ly);
+    if (flx < 0 || flx >= width || fly < 0 || fly >= height) return null;
+    return { lx: flx, ly: fly };
   }
 
   function paintCircle(cx: number, cy: number, radius: number): void {

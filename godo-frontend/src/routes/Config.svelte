@@ -55,7 +55,6 @@
   let mode = $state<'view' | 'edit'>('view');
   let pending = $state<Record<string, string>>({});
   let isApplying = $state(false);
-  let applyProgress = $state<{ k: number; n: number } | null>(null);
   let applyResults = $state<Record<string, { ok: boolean; error?: string }>>({});
   let applyResultTimer: ReturnType<typeof setTimeout> | null = null;
   let applySummary = $state<{ ok: number; fail: number } | null>(null);
@@ -153,8 +152,6 @@
     }
 
     isApplying = true;
-    const total = Object.keys(typed).length + Object.keys(upfrontFailures).length;
-    applyProgress = { k: 0, n: total };
 
     let results: ApplyBatchResult[] = [];
     if (Object.keys(typed).length > 0) {
@@ -168,7 +165,6 @@
     }
 
     applyResults = merged;
-    applyProgress = null;
 
     // Drop succeeded keys from pending; keep failures so the operator
     // can fix them inline. Memory: "Cancel semantics: don't undo
@@ -204,13 +200,6 @@
       applyResultTimer = null;
     }, CONFIG_APPLY_RESULT_MARKER_TTL_MS);
   }
-
-  function trackerActiveLabel(): string {
-    if (trackerActive === true) return 'active';
-    if (trackerActive === false) return 'inactive';
-    return 'unknown';
-  }
-  void trackerActiveLabel; // referenced indirectly via the banner gate
 
   onMount(() => {
     unsubAuth = auth.subscribe((s) => {
@@ -295,8 +284,8 @@
             onclick={onApplyClick}
             data-testid="config-apply"
           >
-            {#if isApplying && applyProgress}
-              적용 중… ({applyProgress.k}/{applyProgress.n})
+            {#if isApplying}
+              적용 중…
             {:else}
               Apply
             {/if}

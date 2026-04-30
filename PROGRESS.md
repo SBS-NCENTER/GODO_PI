@@ -174,6 +174,40 @@ All host-side bring-up steps complete. See per-step session log entry below. The
 
 ## Session log
 
+### 2026-04-30 (late morning — 10:08 KST → 12:35 KST, eleventh-session — B-MAPEDIT brush erase shipped + 2 prod hotfixes + degenerate-metric audit memo)
+
+Eleventh-session shipped Track B-MAPEDIT (brush-erase + auto-backup + restart-required) as a single PR through the full agent pipeline, then caught **two prod regressions during HIL** that bypassed both writer self-checks and Mode-B review. Both regressions were instances of the cross-language "tests pass + prod breaks" pattern surfaced by PR-A2 in the previous session — confirmed it is a structural gap, not a one-off.
+
+- **2 PRs merged on main** (final = `9c5166e`):
+  - **PR #39 → main** (`feat(map-edit): B-MAPEDIT brush erase + auto-backup + restart-required`, +2876 / -20, 4 commits): Adds `POST /api/map/edit` (admin-gated multipart) + new SPA `/map-edit` route. Operator paints a circular brush over fixtures → auto-backup of active PGM/YAML → atomic in-place rewrite of masked pixels to canonical free value (254) → restart-pending sentinel touched. Three modules: `map_edit.py` (sole owner of mask→PGM transform; atomic mkstemp + os.replace mirroring `auth.py::_write_atomic`), extended `restart_pending.touch()` (webctl sets, tracker clears at boot — both run as `ncenter`), `app.py` orchestrates backup-first ordering. Frontend: `/map-edit` route + `MapMaskCanvas` component (sole owner of mask `Uint8ClampedArray`; logical PGM coords NOT CSS pixels — DPR-safe). Two new invariants: webctl `(aa)` map_edit-sole-ownership + frontend `(u)` MapMaskCanvas-sole-mask-state. Mode-A folded plan applied 14 items (M1-M3 mandatory + S1-S3 + T1-T4 + N1-N3); Mode-B verdict APPROVE-WITH-NITS (F1 dir-mode 0750→0755 folded as `ec3c6e8`; F2 mask_decode_failed naming deferred). Plan-time invariant letter `(y)` was stale; writer correctly shifted to `(aa)` after rechecking main.
+  - **PR #40 → main** (`fix(B-MAPEDIT): prod hotfixes (multipart dep + alpha-tracks-paint)`, +138 / -5, 3 commits): Two regressions caught in 30 minutes of operator HIL on news-pi01.
+    - **Fix 1 — `python-multipart` runtime dep missing**: `POST /api/map/edit` returned HTTP 500 with `AssertionError: The python-multipart library must be installed`. Starlette's `request.form()` requires it at runtime; dev `.venv` had it installed transitively (so 11/11 integration tests passed locally and CI), but prod `uv sync --no-dev` did not pull it. Both writer and Mode-B reviewer accepted the wrong claim ("Starlette 1.0 ships its own multipart parser") because the dev test green-light masked the env drift. Fix: pin `python-multipart>=0.0.9` as runtime dep + regen `uv.lock`.
+    - **Fix 2 — `getMaskPng` alpha=255 for every pixel**: After Fix 1 unblocked the request, the FIRST Apply (single small brush stroke) nuked the entire active map to 100% FREE. Root cause: `MapMaskCanvas.svelte::getMaskPng()` set `img.data[off + 3] = 255` unconditionally for every pixel — painted AND unpainted. The backend decoder (`map_edit.py:177-181`) takes the alpha-as-paint branch first when the PNG has an alpha channel, so every unpainted pixel passed the "paint" test. Backup-first ordering rescued operator's work — `04.29_v3.pgm` restored from `/var/lib/godo/map-backups/20260430T031846Z/`. Fix: alpha tracks paint signal (unpainted → 0, painted → 255). Regression test added: spies `putImageData` inside `getMaskPng`'s temp canvas → asserts alpha at painted vs unpainted indices. Old test pass missed this because the canvas shim's `toBlob` returned a fixed 4-byte placeholder; the real mask round-trip (JS getMaskPng → PNG → backend Pillow decode) was never end-to-end.
+
+- **Side observation logged** (`.claude/memory/project_silent_degenerate_metric_audit.md`): when the map was 100% FREE, AMCL one-shot reported `σ_xy=0` (looked converged) while `pose.yaw` bounced 165° → 135° → 333° → 292° between ticks. Classic degenerate convergence: no likelihood gradient → all particles tie → variance collapses → metric trivially passes. 10 audit candidates listed across AMCL/FreeD/UE/webctl/systemd subsystems where similar "metric trivially passes when input degenerates" patterns could hide bugs. Scheduled to run after B-MAPEDIT-2 lands.
+
+- **Operator decision captured into in-repo memory**: `.claude/memory/project_map_edit_origin_rotation.md` — Map Edit family spec recording the **dual-input rule**: every continuous correction value (B-MAPEDIT-2 origin pick + B-MAPEDIT-3 rotation) MUST support GUI click AND numeric entry side-by-side, not one or the other. GUI is for coarse exploration; numeric is for fine reproduction from a measured offset. Single-input proposals are flagged as regression in future plans. Operator decision 2026-04-30 11:35 KST when scoping B-MAPEDIT-2.
+
+- **HIL verification on news-pi01 post-hotfix-deploy**:
+  - `python-multipart==0.0.27` installed via `uv sync --no-dev` on `/opt/godo-webctl/.venv/`.
+  - Frontend bundle rebuilt + redeployed to `/opt/godo-frontend/dist/` (`index-CPi2ceQe.js`).
+  - PGM restored from auto-backup `20260430T031846Z` after the alpha-bug nuke.
+  - Three successful Apply operations: two on real obstacles, one on empty space — every backup snapshot present (`20260430T031846Z` / `033105Z` / `033202Z` / `033221Z`); active PGM histogram healthy (1386 occupied / 5258 unknown / 5004 free, walls preserved); no yaw tripwire warnings post-restart.
+
+- **Test deltas**:
+  - Backend pytest 615 → 628 (+13 net from PR #39's +33 minus pre-existing slot accounting).
+  - Frontend unit 197 → 204 (+6 from PR #39 mapEdit cases, +1 from PR #40 alpha regression).
+  - Frontend e2e 37 → 40 (+3 from PR #39 playwright cases).
+
+- **Operator-prioritized next-session priority order** (refreshed 2026-04-30 12:35 KST close):
+  1. **Map Edit sub-tab refactor** — operator's HIL request: move `/map-edit` from top-level sidebar to a sub-tab inside `/map`, mirroring System tab's Processes / Extended resources sub-tabs (PR-B pattern at `System.svelte:180-203`). Frontend-only, ~80 LOC, single PR.
+  2. **B-MAPEDIT-2 origin pick (dual-input GUI + numeric)** — ~150 LOC, spec at `project_map_edit_origin_rotation.md`.
+  3. **Doc hierarchy reorg** (Task #4 from this session) — root `CODEBASE.md` + root `DESIGN.md` as scaffold/TOC linking per-stack files; cascade-edit rule + NEXT_SESSION.md cache-role rule landed in memory + CLAUDE.md.
+  4. **Silent degenerate-metric audit** (Task #6 — new) — schedule after B-MAPEDIT-2.
+  5. **Wire-shape SSOT pin retrospective** (carryover) — applies regex-extract pattern from PR-B to `json_mini.cpp::format_ok_*` + frontend canvas-PNG round-trip CI.
+  6. (deferred) B-MAPEDIT-3 rotation + GPU POC + Track D-5-Live + Track D-5-P.
+  7. (low priority) `test_jitter_ring` flake fix.
+
 ### 2026-04-30 (morning — 06:07 KST → 10:08 KST, tenth-session — 4 PRs landed: PR-A1 + PR-A2 + PR-B + PR-C)
 
 Tenth-session ran the full agent pipeline four times in parallel for the System tab + Config tab feature set. Single-session record: **4 PRs merged on `main`** (5d3cb95, 9c52446, b701f83, 43e100c) plus a session-close docs commit. Operator did GH UI merges + news-pi01 deploy; Parent orchestrated planner → Mode-A → writer → Mode-B for the two larger PRs, direct-write for the two hotfixes.

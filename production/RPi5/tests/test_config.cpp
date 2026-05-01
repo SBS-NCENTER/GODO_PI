@@ -739,8 +739,8 @@ TEST_CASE("Config::make_default — wires issue#5 Live carry-hint defaults") {
     CHECK(c.amcl_live_carry_schedule_m[0] == 0.2);
     CHECK(c.amcl_live_carry_schedule_m[1] == 0.1);
     CHECK(c.amcl_live_carry_schedule_m[2] == 0.05);
-    // Default ships OFF for HIL safety.
-    CHECK(c.live_carry_pose_as_hint == false);
+    // issue#5 follow-up: default flipped 0 → 1 post-PR-#62 HIL approval.
+    CHECK(c.live_carry_pose_as_hint == true);
 }
 
 TEST_CASE("Config::load — issue#5 Live carry-hint TOML round-trip (positive)") {
@@ -905,6 +905,93 @@ TEST_CASE("Config::load — issue#5 unknown amcl.live_carry.* TOML key rejected"
     auto tmp = write_temp_toml(
         "[amcl]\n"
         "live_carry_phantom = 1.0\n"
+    );
+    Argv argv({});
+    Env  env({"GODO_CONFIG_PATH=" + tmp.path.string()});
+    CHECK_THROWS_AS(Config::load(argv.argc, argv.argv.data(), env.ptr()),
+                    std::runtime_error);
+}
+
+// ---------------------------------------------------------------------------
+// issue#5 follow-up — default-flip pin. PR-#62 HIL approval flipped the
+// compile-time default `LIVE_CARRY_POSE_AS_HINT` from false to true.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Config::make_default — issue#5 follow-up: live_carry_pose_as_hint defaults to true") {
+    Config c = Config::make_default();
+    CHECK(c.live_carry_pose_as_hint == true);
+    CHECK(godo::config::defaults::LIVE_CARRY_POSE_AS_HINT == true);
+}
+
+// ---------------------------------------------------------------------------
+// issue#12 — smoother default ramp 500 → 100 ms; webctl-owned schema
+// rows. webctl.* keys are first-class Config fields per Parent decision
+// A1 — tracker stores them through apply_one + read_effective + render_toml
+// but no tracker logic path reads the value (CODEBASE.md (r)). webctl
+// reads /var/lib/godo/tracker.toml directly via webctl_toml.py.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Config::make_default — issue#12: T_RAMP_NS default lowered 500 → 100 ms") {
+    Config c = Config::make_default();
+    CHECK(c.t_ramp_ns == 100'000'000LL);
+    CHECK(godo::config::defaults::T_RAMP_NS == 100'000'000LL);
+}
+
+TEST_CASE("Config::make_default — issue#12: webctl pose/scan stream Hz defaults to 30") {
+    Config c = Config::make_default();
+    CHECK(c.webctl_pose_stream_hz == 30);
+    CHECK(c.webctl_scan_stream_hz == 30);
+    CHECK(godo::config::defaults::WEBCTL_POSE_STREAM_HZ_DEFAULT == 30);
+    CHECK(godo::config::defaults::WEBCTL_SCAN_STREAM_HZ_DEFAULT == 30);
+}
+
+TEST_CASE("Config::load — issue#12: webctl.* TOML keys parse without unknown-key throw") {
+    auto tmp = write_temp_toml(
+        "[webctl]\n"
+        "pose_stream_hz = 45\n"
+        "scan_stream_hz = 50\n"
+    );
+    Argv argv({});
+    Env  env({"GODO_CONFIG_PATH=" + tmp.path.string()});
+    Config c = Config::load(argv.argc, argv.argv.data(), env.ptr());
+    CHECK(c.webctl_pose_stream_hz == 45);
+    CHECK(c.webctl_scan_stream_hz == 50);
+}
+
+TEST_CASE("Config::load — issue#12: webctl env override beats TOML") {
+    auto tmp = write_temp_toml(
+        "[webctl]\n"
+        "pose_stream_hz = 20\n"
+    );
+    Argv argv({});
+    Env  env({
+        "GODO_CONFIG_PATH=" + tmp.path.string(),
+        "GODO_WEBCTL_POSE_STREAM_HZ=40",
+    });
+    Config c = Config::load(argv.argc, argv.argv.data(), env.ptr());
+    CHECK(c.webctl_pose_stream_hz == 40);  // env wins
+}
+
+TEST_CASE("Config::load — issue#12: webctl CLI overrides env + TOML") {
+    auto tmp = write_temp_toml(
+        "[webctl]\n"
+        "scan_stream_hz = 10\n"
+    );
+    Argv argv({"--webctl-scan-stream-hz=55"});
+    Env  env({
+        "GODO_CONFIG_PATH=" + tmp.path.string(),
+        "GODO_WEBCTL_SCAN_STREAM_HZ=20",
+    });
+    Config c = Config::load(argv.argc, argv.argv.data(), env.ptr());
+    CHECK(c.webctl_scan_stream_hz == 55);  // CLI wins
+}
+
+TEST_CASE("Config::load — issue#12: webctl.* unknown key rejected (positive control)") {
+    // Only pose_stream_hz / scan_stream_hz are accepted; any other
+    // [webctl] leaf must trip allowed_keys() rejection.
+    auto tmp = write_temp_toml(
+        "[webctl]\n"
+        "phantom_key = 1\n"
     );
     Argv argv({});
     Env  env({"GODO_CONFIG_PATH=" + tmp.path.string()});

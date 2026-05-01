@@ -4,14 +4,14 @@ Track B-CONFIG (PR-CONFIG-β, TB1 fold) — cross-language schema parity.
 Loads `production/RPi5/src/core/config_schema.hpp` BY REAL PATH (mirrors
 `tests/test_protocol.py`'s LAST_POSE_FIELDS pattern) and asserts:
 
-  - row count == 46 (issue#5 fold pin: 42 + 4 Live-carry rows),
+  - row count == 48 (issue#12 fold pin: 46 + 2 webctl.* rows),
   - every row's `reload_class` is one of the 3 known strings,
   - every row's `type` is one of the 3 known strings,
   - the default_repr is non-empty.
 
 Also cross-checks that the schema's sorted name set matches the
 section-prefix coverage operators expect (`amcl.* / gpio.* / ipc.* /
-network.* / rt.* / serial.* / smoother.*`).
+network.* / rt.* / serial.* / smoother.* / webctl.*`).
 
 Drift between the C++ source and the Python parser fails this test;
 the failure message names the diverged row.
@@ -33,16 +33,35 @@ def test_real_source_exists() -> None:
     assert _CPP_SCHEMA_HPP.exists(), f"C++ schema source missing: {_CPP_SCHEMA_HPP}"
 
 
-def test_row_count_pinned_at_46() -> None:
-    """issue#5 fold pin: schema row count is 46 (42 + 4 Live-carry rows)."""
+def test_row_count_pinned_at_48() -> None:
+    """issue#12 fold pin: schema row count is 48 (46 + 2 webctl.* rows)."""
     rows = schema_mod.load_schema()
-    assert len(rows) == 46
+    assert len(rows) == 48
 
 
-def test_static_assert_in_cpp_says_46_too() -> None:
+def test_static_assert_in_cpp_says_48_too() -> None:
     """Cross-pin: the C++ static_assert text contains the count."""
     text = _CPP_SCHEMA_HPP.read_text(encoding="utf-8")
-    assert "CONFIG_SCHEMA.size() == 46" in text
+    assert "CONFIG_SCHEMA.size() == 48" in text
+
+
+def test_webctl_rows_present() -> None:
+    """issue#12 — webctl.* rows must appear after the existing 46-row
+    set; presence + reload_class pin."""
+    rows = schema_mod.load_schema()
+    by_name = {r.name: r for r in rows}
+    pose = by_name.get("webctl.pose_stream_hz")
+    scan = by_name.get("webctl.scan_stream_hz")
+    assert pose is not None
+    assert scan is not None
+    assert pose.type == "int"
+    assert scan.type == "int"
+    assert pose.min_d == 1.0
+    assert pose.max_d == 60.0
+    assert pose.default_repr == "30"
+    assert scan.default_repr == "30"
+    assert pose.reload_class == "restart"
+    assert scan.reload_class == "restart"
 
 
 def test_every_reload_class_in_known_set() -> None:
@@ -65,10 +84,20 @@ def test_every_default_non_empty() -> None:
 
 
 def test_sections_match_design() -> None:
-    """The 7 design-time sections all appear at least once."""
+    """The 8 design-time sections all appear at least once (issue#12
+    added webctl)."""
     rows = schema_mod.load_schema()
     sections = {r.name.split(".", 1)[0] for r in rows}
-    expected = {"amcl", "gpio", "ipc", "network", "rt", "serial", "smoother"}
+    expected = {
+        "amcl",
+        "gpio",
+        "ipc",
+        "network",
+        "rt",
+        "serial",
+        "smoother",
+        "webctl",
+    }
     assert sections == expected, (
         f"section drift: extra={sections - expected} missing={expected - sections}"
     )

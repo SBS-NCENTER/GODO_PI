@@ -24,7 +24,14 @@ from godo_webctl.constants import (
 )
 
 
-def _settings() -> Settings:
+def _settings(tracker_toml_path: Path | None = None) -> Settings:
+    """Test fixture Settings.
+
+    `tracker_toml_path` defaults to a non-existent path so
+    ``webctl_toml.read_webctl_section`` returns the schema defaults
+    (30 Hz pose, 30 Hz scan) without requiring a fixture file. Tests
+    that pin a specific cadence pass an explicit path.
+    """
     return Settings(
         host="127.0.0.1",
         port=0,
@@ -41,6 +48,9 @@ def _settings() -> Settings:
         disk_check_path=Path("/"),
         restart_pending_path=Path("/tmp/rp"),
         pidfile_path=Path("/tmp/pid"),
+        tracker_toml_path=tracker_toml_path
+        if tracker_toml_path is not None
+        else Path("/tmp/no_such_tracker.toml"),
     )
 
 
@@ -71,9 +81,14 @@ async def _drain(stream: AsyncIterator[bytes]) -> list[bytes]:
 # ---- last_pose_stream ---------------------------------------------------
 
 
-async def test_last_pose_stream_emits_5hz_sleep_sequence() -> None:
-    """Sleep duration sequence is `[0.2, 0.2, ...]` → 5 Hz cadence by
-    construction. No wall-clock involved."""
+_DEFAULT_POSE_TICK_S = 1.0 / 30  # webctl_toml.WEBCTL_POSE_STREAM_HZ_DEFAULT
+_DEFAULT_SCAN_TICK_S = 1.0 / 30  # webctl_toml.WEBCTL_SCAN_STREAM_HZ_DEFAULT
+
+
+async def test_last_pose_stream_emits_default_30hz_sleep_sequence() -> None:
+    """Sleep duration sequence is `[1/30, 1/30, ...]` → 30 Hz cadence
+    when no tracker.toml override is present (issue#12 default).
+    No wall-clock involved."""
     sleep = RecordingSleep(max_calls=3)
     fake_client = mock.MagicMock(spec=uds_client.UdsClient)
     pose = {
@@ -92,7 +107,11 @@ async def test_last_pose_stream_emits_5hz_sleep_sequence() -> None:
     fake_client.get_last_pose.return_value = pose
     chunks = await _drain(sse.last_pose_stream(fake_client, _settings(), sleep=sleep))
     # 3 ticks attempted before recorder cancels the loop.
-    assert sleep.calls == [SSE_TICK_S, SSE_TICK_S, SSE_TICK_S]
+    assert sleep.calls == [
+        _DEFAULT_POSE_TICK_S,
+        _DEFAULT_POSE_TICK_S,
+        _DEFAULT_POSE_TICK_S,
+    ]
     # At least the first tick produced a data frame.
     assert any(c.startswith(b"data:") for c in chunks)
 
@@ -104,16 +123,15 @@ async def test_last_pose_stream_skips_frame_on_uds_error() -> None:
     fake_client = mock.MagicMock(spec=uds_client.UdsClient)
     fake_client.get_last_pose.side_effect = uds_client.UdsUnreachable("down")
     chunks = await _drain(sse.last_pose_stream(fake_client, _settings(), sleep=sleep))
-    assert sleep.calls == [SSE_TICK_S, SSE_TICK_S]
-    # No data frames emitted at all (only would-be-keepalives, but with
-    # 2 ticks of 0.2 s = 0.4 s virtual elapsed we are well below 15 s).
+    assert sleep.calls == [_DEFAULT_POSE_TICK_S, _DEFAULT_POSE_TICK_S]
+    # No data frames emitted at all.
     assert all(not c.startswith(b"data:") for c in chunks)
 
 
 async def test_last_pose_stream_emits_keepalive_after_heartbeat_window() -> None:
     """Keepalive comment line must appear once virtual elapsed time
     crosses SSE_HEARTBEAT_S."""
-    n_ticks_to_keepalive = int(SSE_HEARTBEAT_S / SSE_TICK_S) + 1
+    n_ticks_to_keepalive = int(SSE_HEARTBEAT_S / _DEFAULT_POSE_TICK_S) + 1
     sleep = RecordingSleep(max_calls=n_ticks_to_keepalive + 1)
     fake_client = mock.MagicMock(spec=uds_client.UdsClient)
     fake_client.get_last_pose.return_value = {"ok": True, "valid": 0}
@@ -176,13 +194,18 @@ def _canned_scan() -> dict[str, object]:
     }
 
 
-async def test_last_scan_stream_emits_5hz_sleep_sequence() -> None:
-    """Sleep sequence is `[0.2, 0.2, 0.2]` → 5 Hz cadence by construction."""
+async def test_last_scan_stream_emits_default_30hz_sleep_sequence() -> None:
+    """Sleep sequence is `[1/30, 1/30, 1/30]` → 30 Hz cadence by
+    construction (issue#12 default)."""
     sleep = RecordingSleep(max_calls=3)
     fake_client = mock.MagicMock(spec=uds_client.UdsClient)
     fake_client.get_last_scan.return_value = _canned_scan()
     chunks = await _drain(sse.last_scan_stream(fake_client, _settings(), sleep=sleep))
-    assert sleep.calls == [SSE_TICK_S, SSE_TICK_S, SSE_TICK_S]
+    assert sleep.calls == [
+        _DEFAULT_SCAN_TICK_S,
+        _DEFAULT_SCAN_TICK_S,
+        _DEFAULT_SCAN_TICK_S,
+    ]
     assert any(c.startswith(b"data:") for c in chunks)
 
 
@@ -193,14 +216,14 @@ async def test_last_scan_stream_skips_frame_on_uds_error() -> None:
     fake_client = mock.MagicMock(spec=uds_client.UdsClient)
     fake_client.get_last_scan.side_effect = uds_client.UdsUnreachable("down")
     chunks = await _drain(sse.last_scan_stream(fake_client, _settings(), sleep=sleep))
-    assert sleep.calls == [SSE_TICK_S, SSE_TICK_S]
+    assert sleep.calls == [_DEFAULT_SCAN_TICK_S, _DEFAULT_SCAN_TICK_S]
     assert all(not c.startswith(b"data:") for c in chunks)
 
 
 async def test_last_scan_stream_emits_keepalive_after_heartbeat_window() -> None:
     """Keepalive comment line must appear once virtual elapsed time
     crosses SSE_HEARTBEAT_S."""
-    n_ticks_to_keepalive = int(SSE_HEARTBEAT_S / SSE_TICK_S) + 1
+    n_ticks_to_keepalive = int(SSE_HEARTBEAT_S / _DEFAULT_SCAN_TICK_S) + 1
     sleep = RecordingSleep(max_calls=n_ticks_to_keepalive + 1)
     fake_client = mock.MagicMock(spec=uds_client.UdsClient)
     fake_client.get_last_scan.return_value = _canned_scan()
@@ -219,6 +242,91 @@ async def test_last_scan_stream_cancellation_propagates() -> None:
     with pytest.raises(asyncio.CancelledError):
         async for _ in sse.last_scan_stream(fake_client, _settings(), sleep=cancel_immediately):
             pass
+
+
+# ---- issue#12: tracker.toml [webctl] cadence injection -----------------
+
+
+async def test_last_pose_stream_honours_toml_pose_stream_hz(tmp_path: Path) -> None:
+    """When tracker.toml carries `[webctl] pose_stream_hz = 10`, the
+    `last_pose_stream` loop sleeps for 1/10 = 0.1 s per tick (issue#12
+    config-driven cadence)."""
+    p = tmp_path / "tracker.toml"
+    p.write_text("[webctl]\npose_stream_hz = 10\n")
+    sleep = RecordingSleep(max_calls=2)
+    fake_client = mock.MagicMock(spec=uds_client.UdsClient)
+    fake_client.get_last_pose.return_value = {"ok": True, "valid": 1}
+    chunks = await _drain(
+        sse.last_pose_stream(
+            fake_client,
+            _settings(tracker_toml_path=p),
+            sleep=sleep,
+        ),
+    )
+    assert sleep.calls == [pytest.approx(0.1), pytest.approx(0.1)]
+    assert any(c.startswith(b"data:") for c in chunks)
+
+
+async def test_last_scan_stream_honours_toml_scan_stream_hz(tmp_path: Path) -> None:
+    """Twin of `test_last_pose_stream_honours_toml_pose_stream_hz` for
+    the scan stream."""
+    p = tmp_path / "tracker.toml"
+    p.write_text("[webctl]\nscan_stream_hz = 20\n")
+    sleep = RecordingSleep(max_calls=2)
+    fake_client = mock.MagicMock(spec=uds_client.UdsClient)
+    fake_client.get_last_scan.return_value = _canned_scan()
+    chunks = await _drain(
+        sse.last_scan_stream(
+            fake_client,
+            _settings(tracker_toml_path=p),
+            sleep=sleep,
+        ),
+    )
+    assert sleep.calls == [pytest.approx(0.05), pytest.approx(0.05)]
+    assert any(c.startswith(b"data:") for c in chunks)
+
+
+async def test_last_pose_stream_env_var_overrides_toml(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`GODO_WEBCTL_POSE_STREAM_HZ=60` in the environment beats the
+    tracker.toml value (precedence: env > TOML > default)."""
+    p = tmp_path / "tracker.toml"
+    p.write_text("[webctl]\npose_stream_hz = 10\n")
+    monkeypatch.setenv("GODO_WEBCTL_POSE_STREAM_HZ", "60")
+    sleep = RecordingSleep(max_calls=2)
+    fake_client = mock.MagicMock(spec=uds_client.UdsClient)
+    fake_client.get_last_pose.return_value = {"ok": True, "valid": 1}
+    await _drain(
+        sse.last_pose_stream(
+            fake_client,
+            _settings(tracker_toml_path=p),
+            sleep=sleep,
+        ),
+    )
+    assert sleep.calls == [pytest.approx(1 / 60), pytest.approx(1 / 60)]
+
+
+async def test_last_pose_stream_falls_back_on_toml_error(tmp_path: Path) -> None:
+    """Mode-A M6 (Parent A6) — malformed tracker.toml does NOT crash
+    the stream; it falls back to the default 30 Hz cadence."""
+    p = tmp_path / "tracker.toml"
+    # Out-of-range value would raise WebctlTomlError if the SSE loop
+    # called read_webctl_section directly; the `_resolve_pose_tick_s`
+    # wrapper catches and returns the default tick instead.
+    p.write_text("[webctl]\npose_stream_hz = 9999\n")
+    sleep = RecordingSleep(max_calls=2)
+    fake_client = mock.MagicMock(spec=uds_client.UdsClient)
+    fake_client.get_last_pose.return_value = {"ok": True, "valid": 1}
+    await _drain(
+        sse.last_pose_stream(
+            fake_client,
+            _settings(tracker_toml_path=p),
+            sleep=sleep,
+        ),
+    )
+    assert sleep.calls == [_DEFAULT_POSE_TICK_S, _DEFAULT_POSE_TICK_S]
 
 
 # ---- diag_stream (PR-DIAG) ---------------------------------------------
@@ -289,6 +397,11 @@ async def test_diag_stream_emits_one_frame_per_tick() -> None:
         return_value=_canned_resources(),
     ):
         chunks = await _drain(sse.diag_stream(fake_client, _settings(), sleep=sleep))
+    # issue#12 regression pin (operator-locked "지도 부분에만 적용"):
+    # diag_stream still uses SSE_TICK_S (5 Hz / 0.2 s per tick),
+    # NOT the new webctl.* config-driven cadence — only pose+scan
+    # streams pick up the new rate.
+    assert sleep.calls == [SSE_TICK_S, SSE_TICK_S, SSE_TICK_S]
     # One emit per tick.
     data_chunks = [c for c in chunks if c.startswith(b"data:")]
     assert len(data_chunks) == 3

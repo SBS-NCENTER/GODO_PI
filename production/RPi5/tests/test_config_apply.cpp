@@ -228,7 +228,7 @@ TEST_CASE("apply_set: write to non-existent parent → write_failed; live_cfg un
     CHECK_FALSE(fs::exists(toml));
 }
 
-TEST_CASE("apply_get_all returns 46 keys, alphabetical, valid JSON-ish") {
+TEST_CASE("apply_get_all returns 48 keys, alphabetical, valid JSON-ish") {
     Config live_cfg = Config::make_default();
     std::mutex mtx;
     const std::string body = apply_get_all(live_cfg, mtx);
@@ -236,8 +236,8 @@ TEST_CASE("apply_get_all returns 46 keys, alphabetical, valid JSON-ish") {
     CHECK_FALSE(body.empty());
     CHECK(body.front() == '{');
     CHECK(body.back()  == '}');
-    // Count commas as "key separators" — exactly 45 between 46 items
-    // (issue#5 fold added 4 Live-carry rows on top of issue#3's 2).
+    // Count commas as "key separators" — exactly 47 between 48 items
+    // (issue#12 fold added 2 webctl.* rows on top of issue#5's 4).
     int commas = 0;
     int depth = 0;
     bool in_str = false;
@@ -249,7 +249,7 @@ TEST_CASE("apply_get_all returns 46 keys, alphabetical, valid JSON-ish") {
             else if (c == ',' && depth == 1) ++commas;
         }
     }
-    CHECK(commas == 45);
+    CHECK(commas == 47);
     // First key (alphabetical): "amcl.anneal_iters_per_phase" (Track D-5).
     CHECK(body.find("\"amcl.anneal_iters_per_phase\":") != std::string::npos);
     // issue#3 — hint default rows.
@@ -260,11 +260,15 @@ TEST_CASE("apply_get_all returns 46 keys, alphabetical, valid JSON-ish") {
     CHECK(body.find("\"amcl.live_carry_schedule_m\":") != std::string::npos);
     CHECK(body.find("\"amcl.live_carry_sigma_xy_m\":") != std::string::npos);
     CHECK(body.find("\"amcl.live_carry_sigma_yaw_deg\":") != std::string::npos);
-    // Last key (alphabetical): "smoother.t_ramp_ms".
-    CHECK(body.find("\"smoother.t_ramp_ms\":") != std::string::npos);
+    // issue#12 — webctl-owned rows. Default value is 30 for each
+    // (Config::make_default wires WEBCTL_*_STREAM_HZ_DEFAULT).
+    CHECK(body.find("\"webctl.pose_stream_hz\":30") != std::string::npos);
+    CHECK(body.find("\"webctl.scan_stream_hz\":30") != std::string::npos);
+    // Last key (alphabetical): "webctl.scan_stream_hz".
+    CHECK(body.find("\"webctl.scan_stream_hz\":") != std::string::npos);
 }
 
-TEST_CASE("apply_get_schema returns 46-element JSON array") {
+TEST_CASE("apply_get_schema returns 48-element JSON array") {
     const std::string body = apply_get_schema();
     CHECK(body.front() == '[');
     CHECK(body.back()  == ']');
@@ -279,7 +283,7 @@ TEST_CASE("apply_get_schema returns 46-element JSON array") {
             else if (c == ',' && depth == 1) ++commas;
         }
     }
-    CHECK(commas == 45);
+    CHECK(commas == 47);
     // Spot-check schema field names.
     CHECK(body.find("\"reload_class\":\"hot\"")         != std::string::npos);
     CHECK(body.find("\"reload_class\":\"restart\"")     != std::string::npos);
@@ -287,6 +291,58 @@ TEST_CASE("apply_get_schema returns 46-element JSON array") {
     CHECK(body.find("\"type\":\"int\"")    != std::string::npos);
     CHECK(body.find("\"type\":\"double\"") != std::string::npos);
     CHECK(body.find("\"type\":\"string\"") != std::string::npos);
+    // issue#12 — webctl-owned rows surface in the schema endpoint.
+    CHECK(body.find("\"name\":\"webctl.pose_stream_hz\"") != std::string::npos);
+    CHECK(body.find("\"name\":\"webctl.scan_stream_hz\"") != std::string::npos);
+}
+
+TEST_CASE("apply_set webctl.pose_stream_hz: round-trips through render_toml") {
+    // issue#12 / Mode-A C2 + C3 fix (post Parent decision A1, A5):
+    // webctl.* keys are first-class Config fields; apply_set must
+    // succeed (not return internal_error), the rendered tracker.toml
+    // must carry the new value, and apply_get_all must reflect it.
+    TempDir td("webctl_pose");
+    Config live_cfg = Config::make_default();
+    std::mutex mtx;
+    Seqlock<HotConfig> hot_seq;
+    hot_seq.store(godo::core::snapshot_hot(live_cfg));
+    const auto toml = td.path / "tracker.toml";
+    const auto flag = td.path / "restart_pending";
+
+    const auto r = apply_set("webctl.pose_stream_hz", "45",
+                             live_cfg, mtx, hot_seq, toml, flag);
+    CHECK(r.ok);
+    CHECK(r.reload_class == ReloadClass::Restart);
+    CHECK(live_cfg.webctl_pose_stream_hz == 45);
+    CHECK(is_pending(flag));
+    const auto body = read_file(toml);
+    CHECK(body.find("[webctl]") != std::string::npos);
+    CHECK(body.find("pose_stream_hz = 45") != std::string::npos);
+
+    // apply_get_all reflects the post-edit value (Mode-A C3 RESOLVED).
+    const std::string snap = apply_get_all(live_cfg, mtx);
+    CHECK(snap.find("\"webctl.pose_stream_hz\":45") != std::string::npos);
+}
+
+TEST_CASE("apply_set webctl.scan_stream_hz: out-of-range rejected at validate") {
+    // Schema range is [1, 60]. apply_set must fail bad_value and leave
+    // live_cfg untouched.
+    TempDir td("webctl_scan_oor");
+    Config live_cfg = Config::make_default();
+    std::mutex mtx;
+    Seqlock<HotConfig> hot_seq;
+    hot_seq.store(godo::core::snapshot_hot(live_cfg));
+    const auto toml = td.path / "tracker.toml";
+    const auto flag = td.path / "restart_pending";
+
+    const auto pre = live_cfg.webctl_scan_stream_hz;
+
+    const auto r = apply_set("webctl.scan_stream_hz", "100",
+                             live_cfg, mtx, hot_seq, toml, flag);
+    CHECK_FALSE(r.ok);
+    CHECK(r.err == "bad_value");
+    CHECK(live_cfg.webctl_scan_stream_hz == pre);
+    CHECK_FALSE(fs::exists(toml));
 }
 
 TEST_CASE("render_toml round-trips through apply_set") {

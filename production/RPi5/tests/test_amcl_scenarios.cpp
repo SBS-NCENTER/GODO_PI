@@ -254,6 +254,7 @@ TEST_CASE("AMCL Scenario B — small displacement converges with loose seed") {
 #include <limits>
 
 using godo::localization::converge_anneal;
+using godo::localization::converge_anneal_with_hint;
 
 namespace {
 
@@ -504,4 +505,72 @@ TEST_CASE("AMCL Scenario D — annealing recovers from global ambiguity") {
         CHECK(std::isfinite(result.pose.y));
         CHECK(std::isfinite(result.pose.yaw_deg));
     }
+}
+
+// ===========================================================================
+// Scenario E — issue#5: converge_anneal_with_hint stays in the hint basin
+// under tight σ. Operator-locked semantics: hint is a directive — tightening
+// σ must NOT degrade convergence to the hint basin.
+// ===========================================================================
+//
+// Bias-block: hint pose is OFFSET from the true pose by a small displacement
+// (hint != true). With σ_xy = 0.05 m and σ_yaw = 5°, the kernel should
+// converge within the hint cloud (≤ ~3σ ~ 0.15 m of the hint, ideally
+// closer to the truth). Pin asserts that final xy_err vs. truth is within
+// the hint cloud's spread × a small margin — NOT zero pose accuracy.
+TEST_CASE("AMCL Scenario E — converge_anneal_with_hint stays in hint basin under tight σ") {
+    const Config        cfg_base = make_test_config();
+    const OccupancyGrid grid     = load_fixture();
+
+    // Truth at the centre; hint offset by 10 cm in x.
+    const Pose2D truth{2.00, 2.00, 0.0};
+    const Pose2D hint{1.90, 2.00, 0.0};
+
+    const auto beams = synth_beams(grid, truth, 180);
+    REQUIRE(beams.size() > 60u);
+
+    Config cfg = cfg_base;
+    cfg.amcl_seed                    = 42;
+    cfg.amcl_anneal_iters_per_phase  = 10;
+    // Tight σ pair: matches the issue#5 default for Live carry.
+    const double sigma_xy_m   = 0.05;
+    const double sigma_yaw_deg = 5.0;
+    // Short schedule: matches the issue#5 default for Live carry.
+    const std::vector<double> schedule_m = {0.2, 0.1, 0.05};
+
+    LikelihoodField lf = build_likelihood_field(grid, schedule_m.front());
+    Amcl amcl(cfg, lf);
+    Rng  rng(cfg.amcl_seed);
+    Pose2D pose_inout{};
+
+    const auto result = converge_anneal_with_hint(
+        cfg, beams, grid, lf, amcl,
+        hint, sigma_xy_m, sigma_yaw_deg, schedule_m,
+        pose_inout, rng);
+
+    const double xy_err_truth = std::hypot(result.pose.x - truth.x,
+                                           result.pose.y - truth.y);
+    const double xy_err_hint  = std::hypot(result.pose.x - hint.x,
+                                           result.pose.y - hint.y);
+    CAPTURE(result.iterations);
+    CAPTURE(result.pose.x);
+    CAPTURE(result.pose.y);
+    CAPTURE(result.pose.yaw_deg);
+    CAPTURE(result.xy_std_m);
+    CAPTURE(xy_err_truth);
+    CAPTURE(xy_err_hint);
+
+    // Operator-locked: stay inside the hint basin. Final pose should be
+    // within ~3σ of the hint (3 × 0.05 = 0.15 m), with a small margin
+    // for AMCL's converged-mean drift.
+    CHECK(xy_err_hint < 0.30);
+    // And ideally close to truth (the scan was synthesized at truth, so
+    // an honest converge-to-likelihood will pull pose toward truth even
+    // with the hint anchor).
+    CHECK(xy_err_truth < 0.30);
+    // Iteration cap honoured.
+    const int upper = static_cast<int>(schedule_m.size()) *
+                      cfg.amcl_anneal_iters_per_phase;
+    CHECK(result.iterations <= upper);
+    CHECK(result.iterations >= 1);
 }

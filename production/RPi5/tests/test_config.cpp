@@ -719,3 +719,195 @@ TEST_CASE("Config::load — Track D-5 sigma_hit_m bound bump (1.5 accepted, 5.01
     // accepted. The schema-bound check belongs to test_config_validate.
     // The bound-check pin therefore lives in the schema test itself.
 }
+
+// ---------------------------------------------------------------------------
+// issue#5 — Live pipelined-hint kernel keys (4 new Tier-2 entries).
+// Every key gets at least one positive (round-trip) and one negative
+// (range / type) case. Bool-as-Int wire shape: TOML accepts true/false
+// AND 0/1; env + CLI accept 0/1/true/false (case-insensitive).
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Config::make_default — wires issue#5 Live carry-hint defaults") {
+    Config c = Config::make_default();
+    CHECK(c.live_carry_pose_as_hint        ==
+          godo::config::defaults::LIVE_CARRY_POSE_AS_HINT);
+    CHECK(c.amcl_live_carry_sigma_xy_m     ==
+          godo::config::defaults::AMCL_LIVE_CARRY_SIGMA_XY_M);
+    CHECK(c.amcl_live_carry_sigma_yaw_deg  ==
+          godo::config::defaults::AMCL_LIVE_CARRY_SIGMA_YAW_DEG);
+    REQUIRE(c.amcl_live_carry_schedule_m.size() == 3u);
+    CHECK(c.amcl_live_carry_schedule_m[0] == 0.2);
+    CHECK(c.amcl_live_carry_schedule_m[1] == 0.1);
+    CHECK(c.amcl_live_carry_schedule_m[2] == 0.05);
+    // Default ships OFF for HIL safety.
+    CHECK(c.live_carry_pose_as_hint == false);
+}
+
+TEST_CASE("Config::load — issue#5 Live carry-hint TOML round-trip (positive)") {
+    auto tmp = write_temp_toml(
+        "[amcl]\n"
+        "live_carry_pose_as_hint = true\n"
+        "live_carry_sigma_xy_m = 0.07\n"
+        "live_carry_sigma_yaw_deg = 4.0\n"
+        "live_carry_schedule_m = \"0.3,0.1,0.05\"\n"
+    );
+    Argv argv({});
+    Env  env({"GODO_CONFIG_PATH=" + tmp.path.string()});
+    Config c = Config::load(argv.argc, argv.argv.data(), env.ptr());
+    CHECK(c.live_carry_pose_as_hint        == true);
+    CHECK(c.amcl_live_carry_sigma_xy_m     == 0.07);
+    CHECK(c.amcl_live_carry_sigma_yaw_deg  == 4.0);
+    REQUIRE(c.amcl_live_carry_schedule_m.size() == 3u);
+    CHECK(c.amcl_live_carry_schedule_m[0] == 0.3);
+}
+
+TEST_CASE("Config::load — issue#5 Live carry-hint TOML accepts 0/1 for bool key") {
+    auto tmp = write_temp_toml(
+        "[amcl]\n"
+        "live_carry_pose_as_hint = 1\n"
+    );
+    Argv argv({});
+    Env  env({"GODO_CONFIG_PATH=" + tmp.path.string()});
+    Config c = Config::load(argv.argc, argv.argv.data(), env.ptr());
+    CHECK(c.live_carry_pose_as_hint == true);
+}
+
+TEST_CASE("Config::load — issue#5 Live carry-hint env round-trip (positive)") {
+    Argv argv({});
+    Env  env({
+        "GODO_LIVE_CARRY_POSE_AS_HINT=true",
+        "GODO_AMCL_LIVE_CARRY_SIGMA_XY_M=0.08",
+        "GODO_AMCL_LIVE_CARRY_SIGMA_YAW_DEG=3.5",
+        "GODO_AMCL_LIVE_CARRY_SCHEDULE_M=0.4,0.2,0.1,0.05",
+    });
+    Config c = Config::load(argv.argc, argv.argv.data(), env.ptr());
+    CHECK(c.live_carry_pose_as_hint        == true);
+    CHECK(c.amcl_live_carry_sigma_xy_m     == 0.08);
+    CHECK(c.amcl_live_carry_sigma_yaw_deg  == 3.5);
+    REQUIRE(c.amcl_live_carry_schedule_m.size() == 4u);
+}
+
+TEST_CASE("Config::load — issue#5 Live carry-hint CLI round-trip (positive)") {
+    Argv argv({
+        "--live-carry-pose-as-hint=true",
+        "--amcl-live-carry-sigma-xy-m=0.06",
+        "--amcl-live-carry-sigma-yaw-deg", "3.0",
+        "--amcl-live-carry-schedule-m=0.5,0.2,0.05",
+    });
+    Env  env({});
+    Config c = Config::load(argv.argc, argv.argv.data(), env.ptr());
+    CHECK(c.live_carry_pose_as_hint        == true);
+    CHECK(c.amcl_live_carry_sigma_xy_m     == 0.06);
+    CHECK(c.amcl_live_carry_sigma_yaw_deg  == 3.0);
+    REQUIRE(c.amcl_live_carry_schedule_m.size() == 3u);
+    CHECK(c.amcl_live_carry_schedule_m[0] == 0.5);
+}
+
+TEST_CASE("Config::load — issue#5 CLI > env > TOML precedence holds for Live carry-hint keys") {
+    auto tmp = write_temp_toml(
+        "[amcl]\n"
+        "live_carry_sigma_xy_m = 0.10\n"
+    );
+    Argv argv({"--amcl-live-carry-sigma-xy-m=0.08"});
+    Env  env({
+        "GODO_CONFIG_PATH=" + tmp.path.string(),
+        "GODO_AMCL_LIVE_CARRY_SIGMA_XY_M=0.09",
+    });
+    Config c = Config::load(argv.argc, argv.argv.data(), env.ptr());
+    CHECK(c.amcl_live_carry_sigma_xy_m == 0.08);  // CLI wins
+}
+
+TEST_CASE("Config::load — issue#5 σ_xy out-of-range rejected") {
+    {
+        // Below schema lower bound 0.001.
+        Argv argv({"--amcl-live-carry-sigma-xy-m=0.0005"});
+        Env  env({});
+        CHECK_THROWS_AS(Config::load(argv.argc, argv.argv.data(), env.ptr()),
+                        std::runtime_error);
+    }
+    {
+        // Above schema upper bound 0.5.
+        Argv argv({"--amcl-live-carry-sigma-xy-m=0.6"});
+        Env  env({});
+        CHECK_THROWS_AS(Config::load(argv.argc, argv.argv.data(), env.ptr()),
+                        std::runtime_error);
+    }
+    {
+        // Negative.
+        Argv argv({"--amcl-live-carry-sigma-xy-m=-0.05"});
+        Env  env({});
+        CHECK_THROWS_AS(Config::load(argv.argc, argv.argv.data(), env.ptr()),
+                        std::runtime_error);
+    }
+}
+
+TEST_CASE("Config::load — issue#5 σ_yaw out-of-range rejected") {
+    {
+        // Below schema lower bound 0.05.
+        Argv argv({"--amcl-live-carry-sigma-yaw-deg=0.01"});
+        Env  env({});
+        CHECK_THROWS_AS(Config::load(argv.argc, argv.argv.data(), env.ptr()),
+                        std::runtime_error);
+    }
+    {
+        // Above schema upper bound 30.0.
+        Argv argv({"--amcl-live-carry-sigma-yaw-deg=45"});
+        Env  env({});
+        CHECK_THROWS_AS(Config::load(argv.argc, argv.argv.data(), env.ptr()),
+                        std::runtime_error);
+    }
+}
+
+TEST_CASE("Config::load — issue#5 schedule monotonicity + bounds enforced") {
+    {
+        // Non-monotonic.
+        Argv argv({"--amcl-live-carry-schedule-m=0.2,0.5,0.05"});
+        Env  env({});
+        CHECK_THROWS_AS(Config::load(argv.argc, argv.argv.data(), env.ptr()),
+                        std::runtime_error);
+    }
+    {
+        // Out-of-range entry (5.01 > 5.0).
+        Argv argv({"--amcl-live-carry-schedule-m=5.01,1.0,0.1"});
+        Env  env({});
+        CHECK_THROWS_AS(Config::load(argv.argc, argv.argv.data(), env.ptr()),
+                        std::runtime_error);
+    }
+    {
+        // Empty.
+        auto tmp = write_temp_toml(
+            "[amcl]\n"
+            "live_carry_schedule_m = \"\"\n"
+        );
+        Argv argv({});
+        Env  env({"GODO_CONFIG_PATH=" + tmp.path.string()});
+        CHECK_THROWS_AS(Config::load(argv.argc, argv.argv.data(), env.ptr()),
+                        std::runtime_error);
+    }
+}
+
+TEST_CASE("Config::load — issue#5 bool flag rejects non-bool/non-{0,1} values") {
+    {
+        Argv argv({"--live-carry-pose-as-hint=maybe"});
+        Env  env({});
+        CHECK_THROWS_AS(Config::load(argv.argc, argv.argv.data(), env.ptr()),
+                        std::runtime_error);
+    }
+    {
+        Argv argv({});
+        Env  env({"GODO_LIVE_CARRY_POSE_AS_HINT=2"});
+        CHECK_THROWS_AS(Config::load(argv.argc, argv.argv.data(), env.ptr()),
+                        std::runtime_error);
+    }
+}
+
+TEST_CASE("Config::load — issue#5 unknown amcl.live_carry.* TOML key rejected") {
+    auto tmp = write_temp_toml(
+        "[amcl]\n"
+        "live_carry_phantom = 1.0\n"
+    );
+    Argv argv({});
+    Env  env({"GODO_CONFIG_PATH=" + tmp.path.string()});
+    CHECK_THROWS_AS(Config::load(argv.argc, argv.argv.data(), env.ptr()),
+                    std::runtime_error);
+}

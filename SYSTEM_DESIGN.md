@@ -400,7 +400,75 @@ cold_writer::run_one_iteration (acquire-load on g_amcl_mode)
 
 σ override semantics: when the operator supplies explicit σ values (numeric panel tweak), they apply directly. When omitted, the cold writer falls back to `cfg.amcl_hint_sigma_xy_m_default = 0.50 m` and `cfg.amcl_hint_sigma_yaw_deg_default = 20.0°` (Tier-2, recalibrate class). Both defaults are bumped vs. the existing `amcl_sigma_seed_*` because they cover operator click imprecision (±0.5 m) AND drag-yaw imprecision (±10°), which the existing seeds (tuned for warm-restart) do not.
 
-Live-mode hint is out of scope (the live-tracking step() lacks the convergence depth to escape a wrong basin even with a tight initial seed; issue#5 pipelined K-step Live is the proper fix). GPIO-button calibrate keeps its current uniform-seed behaviour — there is no canvas to click for a GPIO trigger.
+GPIO-button calibrate keeps its current uniform-seed behaviour — there is no canvas to click for a GPIO trigger.
+
+### Live mode pipelined-hint kernel (issue#5, 2026-05-01)
+
+Phase 4-2 D's per-scan single `Amcl::step` Live body locks onto the
+wrong basin and drifts ~4 m / ~90° even after a clean OneShot at the
+same physical pose (`.claude/memory/project_amcl_multi_basin_observation.md`):
+the `seed_global` first-iteration entry is the principal cause, and a
+single `step()` per scan lacks the convergence depth to escape once a
+wrong basin locks in. Operator-locked solution
+(`project_calibration_alternatives.md` "Live mode hint pipeline"):
+re-shape Live to a sequential pipelined one-shot driven by the
+previous-tick pose as hint.
+
+**Two Live kernels, one selector**:
+
+```
+cfg.live_carry_pose_as_hint:
+  false (default this PR, rollback path)
+    → run_live_iteration: per-scan Amcl::step with the wider Live σ
+      pair (cfg.amcl_sigma_xy_jitter_live_m / _yaw_jitter_live_deg);
+      seed_global on first iter, seed_around(last_pose, …) thereafter.
+      Behaviour pre-issue#5; kept as the rollback path until HIL
+      approves the carry-hint default.
+  true (HIL operator opt-in)
+    → run_live_iteration_pipelined: per-scan converge_anneal_with_hint
+      driven by `last_pose` (carried from the most recent OneShot or
+      from the previous Live tick) with TIGHT σ
+      (cfg.amcl_live_carry_sigma_xy_m = 0.05 m,
+       cfg.amcl_live_carry_sigma_yaw_deg = 5°) and a SHORT schedule
+      (cfg.amcl_live_carry_schedule_m = "0.2,0.1,0.05" by default).
+```
+
+**Hint source contract**:
+
+```
+Tick t=0 (Live just toggled ON):
+   hint = last_pose, which carries:
+       - the most recent OneShot pose (run_one_iteration end), OR
+       - the last Live pose from a previous Live session (preserved
+         across Idle re-entry).
+   Cold-start guard: if `last_pose_set` flag is false (no OneShot has
+   run AND no prior pipelined Live tick has produced a converged pose),
+   reject Live entry with an actionable stderr message and bounce to
+   Idle. Operator must Calibrate first.
+
+Tick t≥1:
+   hint = pose[t-1], i.e. the previous tick's converged pose.
+```
+
+**σ + schedule semantics** (`project_hint_strong_command_semantics.md`):
+
+- σ_xy = 0.05 m: matches inter-tick crane-base drift (100 ms tick × 30 cm/s peak ≈ 30 mm; default leaves margin). NOT padded for AMCL search comfort. Operators widen via tracker.toml without rebuild.
+- σ_yaw = 5°: conservative for non-rotating SHOTOKU dolly base (CLAUDE.md §1).
+- Short schedule: with a tight carry-σ, basin lock is automatic; the wide-σ phases of OneShot's anneal (1.0, 0.5) waste depth. 3 phases × ~10 ms ≈ 30 ms per-tick wall-clock keeps headroom under the 100 ms LiDAR period.
+
+**Hint-flag discipline (extends invariant (p))**: the pipelined path NEVER touches `g_calibrate_hint_*`. Consume-once clearing is OneShot-only (`run_one_iteration` end). The pure kernel `converge_anneal_with_hint` accepts the hint pose + σ pair as parameters, so it is reachable from both the OneShot wrapper (`converge_anneal`, which DOES consult the flag and forwards via the pure kernel) and the Live carry path (which sources hint from `last_pose`) without a flag-clear race.
+
+**Mid-Live re-anchor is out of scope**: clicking the SPA pose-hint while Live is ticking does NOT re-anchor the carry path — the pipelined Live kernel never reads `g_calibrate_hint_*`. Operator must (a) toggle Live OFF, (b) place hint, (c) Calibrate (OneShot consumes the hint), (d) toggle Live ON again. Live then carries forward from the freshly-converged OneShot pose. This is intentional; a future PR can revisit if HIL surfaces a UX gap.
+
+**Sequential ships first, pipelined-parallel deferred**: per `project_pipelined_compute_pattern.md`, the K-step pipeline runs sequentially in this PR (single thread, one σ schedule pass per tick). Multi-thread parallel pipelining (multiple concurrent AMCL chains at different σ tiers, picking the best) is scaffolded for a future PR.
+
+**Default-flip rollout**: this PR ships with `cfg.live_carry_pose_as_hint = false` for HIL safety. Operator A/B's the kernel via tracker.toml override + restart, compares to the legacy ~4 m drift on the same physical scenario, decides. A follow-up PR (~3 LOC: flip the compile-time default, bump CONFIG_SCHEMA `default_repr` "0" → "1") flips the default after HIL approval.
+
+**Pinned by**:
+- `production/RPi5/CODEBASE.md` invariant (q) — kernel ownership + Bool-as-Int convention.
+- `tests/test_cold_writer_live_pipelined.cpp` — 8 cases covering the contract surface.
+- `tests/test_amcl_scenarios.cpp` Scenario E — `converge_anneal_with_hint` stays in hint basin under tight σ.
+- `tests/test_cold_writer_live_iteration.cpp` — explicit rollback-path baseline pin.
 
 ### Yaw safety tripwire (post-Track-D-5)
 

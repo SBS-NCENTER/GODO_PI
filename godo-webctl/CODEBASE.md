@@ -818,6 +818,42 @@ Pinned by:
 
 ## Change log
 
+### 2026-05-01 15:17 KST — issue#5: schema row count 42 → 46 (Live-carry mirror bump)
+
+Leaf-only change-log entry per CLAUDE.md cascade rule. The C++ tracker
+adds four Tier-2 keys for the Live pipelined-hint kernel (see
+`production/RPi5/CODEBASE.md` invariant (q) + the dated entry under the
+same date); webctl mirrors only the row-count assertions because the
+regex parser auto-extracts new rows without code changes. No new
+invariant; existing invariant (b) "Cross-language SSOT (no auto-sync)"
+covers the parity contract.
+
+#### Changed
+
+- `src/godo_webctl/config_schema.py::EXPECTED_ROW_COUNT` 42 → 46. The
+  regex parser auto-extracts the four new C++ rows
+  (`amcl.live_carry_pose_as_hint` Bool-as-Int selector,
+  `amcl.live_carry_schedule_m` schedule string,
+  `amcl.live_carry_sigma_xy_m`, `amcl.live_carry_sigma_yaw_deg`) without
+  parser-code change; only the row-count assertion needs to track the
+  C++ static_assert. Module docstring example bumped in lockstep.
+- `tests/test_config_schema.py` — `test_load_schema_real_source_returns_42_rows`
+  → `..._46_rows`; `test_parse_rejects_short_row_count` synthetic
+  fixture wrapper bumped 42 → 46.
+- `tests/test_config_schema_parity.py` — `test_row_count_pinned_at_42`
+  → `..._46`; `test_static_assert_in_cpp_says_42_too` →
+  `..._46_too`; docstring header bumped.
+- `tests/test_config_view.py::test_project_schema_view_real_source` —
+  expected list length 42 → 46.
+- `tests/test_app_integration.py` — `GET /api/config/schema` row-count
+  assertion 42 → 46.
+
+#### Test counts
+
+- Backend: 683 passed, 1 deselected (unchanged; this PR adds zero new
+  webctl-side tests — only the row-count literals shift to track the
+  C++ schema's `static_assert`).
+
 ### 2026-04-30 14:37 KST — Track B-MAPEDIT-2 (Phase 4.5 P2) — origin pick (dual GUI + numeric input)
 
 #### Added

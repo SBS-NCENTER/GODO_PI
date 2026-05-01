@@ -529,6 +529,94 @@ Operator rollback recipe: to revert to pre-Track-D-5 single-σ behaviour,
 set BOTH `amcl.sigma_hit_schedule_m = "0.05"` AND
 `amcl.anneal_iters_per_phase = 25`.
 
+### (q) Live pipelined-hint kernel ownership
+
+`run_live_iteration_pipelined` is the SOLE caller of
+`converge_anneal_with_hint` from the Live cold-path branch. The legacy
+`run_live_iteration` (Phase 4-2 D bare-`Amcl::step` body) is kept as the
+rollback path, gated behind `cfg.live_carry_pose_as_hint = false`. Both
+paths publish through the deadband; both call `amcl_rate_accum.record`;
+neither is ever reached on the same Live tick (the `run_cold_writer`
+loop branches on the cfg flag at the top of the Live case body).
+
+**Hint-flag discipline (extends invariant (p))**: Live MUST NEVER touch
+`g_calibrate_hint_*`. Consume-once clearing belongs to OneShot
+(`run_one_iteration` end). `converge_anneal_with_hint` accepts the hint
+pose + σ pair as parameters and does NOT read or write the global flag;
+this lets it be reachable from both the OneShot wrapper
+(`converge_anneal`, which DOES consult the flag) and the Live carry
+path (which uses `last_pose` as the hint source) without a flag-clear
+race.
+
+**Cold-start guard**: a stack-local `bool last_pose_set` in
+`run_cold_writer` gates the pipelined Live entry. Initialised to false;
+flipped to true ONLY at the end of a successful `run_one_iteration`
+call AND at the end of the first successful pipelined Live tick. The
+guard is read in the Live case body (BEFORE the blocking scan) — when
+`cfg.live_carry_pose_as_hint == true` AND `last_pose_set == false`, the
+mode is bounced to Idle with an actionable stderr message. Reading the
+flag is preferred over comparing `last_pose` to (0,0,0): a legitimate
+OneShot result of (0,0,0°) is operator-allowed (calibration origin
+defaults are 0).
+
+**Rollback path latch (`live_first_iter`)**: the legacy
+`live_first_iter` latch is consulted ONLY by the rollback path
+(`run_live_iteration`); the pipelined path bypasses it entirely (its
+signature does not even take the parameter). On every Live exit,
+`on_leave_live` re-arms the latch so a subsequent rollback-path Live
+re-entry seeds globally — this is unaffected by the pipelined path.
+Tests pin both: the pipelined kernel's signature distinctness via
+`static_assert(!std::is_same_v<decltype(pipelined), decltype(legacy)>)`,
+and the round-trip "flag-on Live → Idle → flag-off Live: rollback's
+seed_global still fires" via a public-surface integration check in
+`test_cold_writer_live_pipelined.cpp` case (h).
+
+**σ + schedule semantics**: `cfg.amcl_live_carry_sigma_xy_m` /
+`amcl_live_carry_sigma_yaw_deg` are TIGHT (matched to inter-tick
+crane-base drift, NOT padded for AMCL search comfort, per
+`project_hint_strong_command_semantics.md`). `cfg.amcl_live_carry_schedule_m`
+is SHORT (typically 3 phases) — basin lock is automatic at the carry-σ;
+the wide-σ phases of OneShot's anneal would waste depth. Both keys
+are Tier-2 Recalibrate-class so an operator can widen via tracker.toml
+without rebuild if HIL shows wider drift.
+
+**Bool-as-Int convention**: `live_carry_pose_as_hint` is the project's
+first Bool flag in CONFIG_SCHEMA. Encoded as `Int` with `min=0`,
+`max=1`, `default_repr="0"|"1"` until a future PR adds first-class
+`ValueType::Bool`. New Bool keys SHOULD follow this convention.
+TOML accepts both `true/false` (toml++ bool) AND `0/1` (toml++ int);
+env + CLI accept `0/1/true/false` case-insensitively. The selector's
+default ships OFF in this PR for HIL safety (`cfg.live_carry_pose_as_hint
+= false`); a follow-up PR flips the compile-time default after operator
+HIL approval.
+
+Pinned by:
+- `tests/test_cold_writer_live_pipelined.cpp` — 8 cases covering t=0
+  hint source, t=1 carryover, σ-override propagation, deadband seam,
+  Live re-entry post-OneShot, signature distinctness, round-trip
+  rollback, and the no-touch hint-flag invariant on
+  `converge_anneal_with_hint`.
+- `tests/test_cold_writer_live_iteration.cpp` — explicit
+  `cfg.live_carry_pose_as_hint = false` baseline pin (rollback path).
+- `tests/test_amcl_scenarios.cpp::TEST_CASE("AMCL Scenario E — converge_anneal_with_hint
+  stays in hint basin under tight σ")` — algorithmic pin that the
+  hint-driven kernel converges within the hint basin under the issue#5
+  default σ pair (0.05 m / 5°) and short schedule.
+- `tests/test_config_schema.cpp::TEST_CASE("issue#5: Live-carry rows
+  present (count went 42 → 46)")` — schema row presence + types.
+- `tests/test_config.cpp` — 11 cases covering the four cfg keys'
+  defaults, TOML / env / CLI round-trips, precedence, range bounds,
+  schedule monotonicity, bool rejection, unknown-key rejection.
+
+Empirical motivation: `.claude/memory/project_amcl_multi_basin_observation.md`
+(Live mode drifts ~4 m without the carry-hint kernel),
+`.claude/memory/project_hint_strong_command_semantics.md` (σ matches
+physical drift, not AMCL search comfort),
+`.claude/memory/project_pipelined_compute_pattern.md` (sequential ships
+first; pipelined-parallel deferred),
+`.claude/memory/project_calibration_alternatives.md` "Live mode hint
+pipeline" anchor.
+
 ### Known scaffolding
 
 - (Removed 2026-04-26 with Wave 2.) `thread_stub_cold_writer` and the
@@ -566,6 +654,129 @@ Expect `ctest -L hardware-free` to report every listed test green. If
 has been synced (`uv sync`).
 
 ---
+
+## 2026-05-01 15:17 KST — issue#5: Live mode pipelined-hint kernel scaffold
+
+### Why
+
+HIL evidence (`project_amcl_multi_basin_observation.md`): Live mode
+drifts ~4 m and ~90° in yaw vs. ground truth even when the same physical
+pose converges to ~0.5 m via OneShot. Root cause: Live's `seed_global`
+first-iteration entry locks onto the wrong basin; per-scan single
+`Amcl::step` lacks the convergence depth to escape it.
+
+Operator-locked solution (`project_calibration_alternatives.md` "Live
+mode hint pipeline"): re-shape Live to a sequential pipelined one-shot
+driven by the previous-tick pose as hint. Cold-start anchor sources from
+the most recent OneShot pose (or future automated rough-hint, deferred).
+σ matches physical inter-tick drift, NOT padded for AMCL search comfort
+(`project_hint_strong_command_semantics.md`). Sequential K-step ships
+first; pipelined-parallel deferred (`project_pipelined_compute_pattern.md`).
+
+### Added
+
+- `core/config.{hpp,cpp}` — four new Tier-2 keys (Recalibrate-class):
+    * `bool live_carry_pose_as_hint` (Bool-as-Int wire shape;
+      precedent-setting for the convention; default OFF for HIL safety).
+    * `double amcl_live_carry_sigma_xy_m` (default 0.050 m; tight,
+      matches inter-tick crane-base drift at 30 cm/s × 100 ms).
+    * `double amcl_live_carry_sigma_yaw_deg` (default 5.0°; conservative
+      for non-rotating SHOTOKU dolly base).
+    * `std::vector<double> amcl_live_carry_schedule_m` (default
+      "0.2,0.1,0.05"; short by design — basin lock is automatic at
+      carry-σ, no need for OneShot's wide-σ phases).
+  Wired through CLI / env / TOML / defaults precedence chain mirroring
+  the issue#3 hint-σ default precedent. CLI flag accepts
+  `--live-carry-pose-as-hint=true|false|0|1` (case-insensitive); env
+  `GODO_LIVE_CARRY_POSE_AS_HINT` accepts the same; TOML accepts both
+  bool `true|false` and int `0|1`. Range bounds enforced in
+  `validate_amcl` AND in the schema (`min_d`/`max_d`).
+- `core/config_schema.hpp` — 4 new rows, alphabetical insertion under
+  `amcl.*`. `static_assert(CONFIG_SCHEMA.size() == 46)` (was 42).
+  `live_carry_pose_as_hint` row encodes Bool-as-Int with min=0/max=1/
+  default_repr="0"; first such row in the project. Recommended pattern
+  for future Bool keys until a `ValueType::Bool` PR lands.
+- `localization/cold_writer.{hpp,cpp}::converge_anneal_with_hint` —
+  pure pipelined-hint kernel. Caller supplies hint pose, σ pair, and
+  schedule; phase 0 always seed_arounds the hint; phases k>0 derive
+  seed_xy from base σ_xy × σ_k / σ_0 (tight in lockstep with σ_hit
+  narrowing). Auto-minima + patience-2 early break unchanged from the
+  pre-issue#5 OneShot path. Independent of OneShot's
+  `amcl_sigma_seed_xy_schedule_m` (which is length-matched to the wide
+  OneShot schedule and would over-spread the Live carry cloud). NEVER
+  reads or writes `g_calibrate_hint_*`.
+- `localization/cold_writer.cpp::run_anneal_kernel` — anonymous-namespace
+  shared body for `converge_anneal` + `converge_anneal_with_hint`.
+  Phase-0 seed strategy parameterised via `std::variant<Phase0SeedHint,
+  Phase0SeedGlobal>`; per-phase seed σ_xy via `std::variant<
+  PerPhaseSeedFromSchedule, PerPhaseSeedFromBase>`.
+- `localization/cold_writer.{hpp,cpp}::run_live_iteration_pipelined` —
+  per-Live-tick caller of `converge_anneal_with_hint`. Hint =
+  `last_pose_inout`; σ + schedule from cfg.amcl_live_carry_*. Side
+  effects mirror `run_live_iteration` (deadband publish, LastPose,
+  LastScan, AmclRate accumulator). Forced=false; deadband applies. NEVER
+  touches `g_calibrate_hint_*`. Signature does NOT take
+  `live_first_iter_inout` (the latch belongs to the rollback path).
+- `localization/cold_writer.cpp::run_cold_writer` Live-case body —
+  branches on `cfg.live_carry_pose_as_hint`. False → rollback path
+  unchanged. True → cold-start guard via `bool last_pose_set` stack
+  local (flips to true at the end of every successful OneShot AND at the
+  end of the first successful pipelined Live tick); reject Live entry
+  with actionable stderr if `last_pose_set == false` (no prior OneShot
+  / pipelined-Live pose available); else call
+  `run_live_iteration_pipelined`.
+- `config/apply.cpp` — read_effective + apply_one wired so `/api/config`
+  exposes the four new keys. `amcl.live_carry_schedule_m` cross-field
+  monotonicity + range check at apply-time, mirroring the OneShot
+  schedule's apply-time validation.
+
+### Tests
+
+- `tests/test_cold_writer_live_pipelined.cpp` (NEW, 8 cases):
+    (a) tick t=0 uses last_pose hint, ignores g_calibrate_hint_*;
+    (b) tick t=1 uses pose[t-1] carryover;
+    (c) σ-override propagates (xy_std_m differs > 1e-6 across σ pair);
+    (d) forced=false; deadband suppresses near-identical frames;
+    (e) Live re-entry post-OneShot uses last_pose, not hint flag;
+    (g) signature distinctness (compile-time `static_assert` pin);
+    (h) flag-on Live → Idle → flag-off Live round-trip: rollback path's
+        seed_global still fires after the flag flip;
+    + converge_anneal_with_hint no-touch hint-flag contract pin.
+- `tests/test_cold_writer_live_iteration.cpp` — added explicit
+  `cfg.live_carry_pose_as_hint = false` to the shared fixture.
+- `tests/test_amcl_scenarios.cpp` — Scenario E added:
+  `converge_anneal_with_hint` stays in hint basin under tight σ.
+- `tests/test_config.cpp` — 11 new cases (defaults wiring, TOML / env /
+  CLI round-trip + precedence, σ_xy + σ_yaw range bounds, schedule
+  monotonicity + bounds + emptiness, bool rejection, unknown-key).
+- `tests/test_config_schema.cpp` — row count 42 → 46; new
+  `issue#5: Live-carry rows present` case pinning Bool-as-Int encoding.
+- `tests/test_config_apply.cpp` — apply_get_all/apply_get_schema
+  comma-count assertions 41 → 45; new key-name spot checks.
+
+### Removed
+
+- (none)
+
+### Invariants
+
+- New `(q)` **Live pipelined-hint kernel ownership** — see body above.
+  Sub-pins: hint-flag discipline (Live NEVER touches the flag),
+  cold-start guard via `last_pose_set` stack flag, rollback latch
+  ownership, σ + schedule semantics, Bool-as-Int convention.
+
+### Default-flip rollout
+
+This PR ships with `live_carry_pose_as_hint = false` for HIL safety.
+Operator A/B's via tracker.toml override; a follow-up PR flips the
+compile-time default to `true` after HIL approval. Tracked as a TL;DR
+follow-up in NEXT_SESSION.md (Parent's responsibility at session-close).
+
+### Test counts
+
+- RPi5: 46 hardware-free tests (was 45; +1 new
+  test_cold_writer_live_pipelined). Full ctest -L hardware-free green.
+- Webctl mirror: 683 tests pass post-row-count bump.
 
 ## 2026-05-01 09:15 KST — fix(install): tracker.toml moved to /var/lib/godo (RW under sandbox)
 

@@ -267,6 +267,19 @@ When converting from the host's clock, use `TZ='Asia/Seoul' date '+%Y-%m-%d %H:%
 
 Why this matters: a single day frequently spans 2–3 distinct sessions with different scope (operator HIL, planner runs, writer kickoffs). Without time stamps, a future cold-start cannot tell which `2026-04-29` block describes the state being inherited.
 
+### Issue labelling — `issue#N` / `issue#N.M` decimal scheme
+
+When labelling a new work unit (bug, feature, follow-up) discovered during a session, use the following operator-locked convention:
+
+- **`issue#N`** — distinct sequential integer for an independent work unit (e.g., `issue#3`, `issue#4`, `issue#5`). Pick the next free integer at the time of writing.
+- **`issue#N.M`** — decimal sub-issue for tightly-coupled follow-ups stacked on parent `issue#N` (e.g., `issue#2.1`, `issue#2.2`).
+- **Greek letters (α, β, γ, ε, ζ) are deprecated** — typing-unfriendly on KR/EN keyboards. Do not introduce new ones; existing references in older docs may stay as historical artefacts.
+- **Feature codes** (`B-MAPEDIT`, `B-MAPEDIT-2`, `B-MAPEDIT-3`, etc.) are a separate axis from issue numbers and stay as-is — they describe the *feature surface*, while `issue#N` describes the *work unit*.
+
+Apply the label consistently across: NEXT_SESSION.md TL;DR, plan files under `.claude/tmp/`, PR titles, commit messages, per-stack `CODEBASE.md` change-log entries, and design-doc cross-references.
+
+The currently active list (and the next free integer) is tracked in `NEXT_SESSION.md` — this CLAUDE.md section is the SSOT for *why* the scheme exists, not *what's in flight*.
+
 ### Memory storage — in-repo, not host cache
 
 GODO is collaborated on via GitHub, so every auto-memory operation

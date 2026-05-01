@@ -109,6 +109,22 @@
     const target = e.target as HTMLInputElement;
     setPending(name, target.value);
   }
+
+  // Operator UX 2026-05-02 KST: small amber dot before the key name when
+  // the live value differs from the schema default — operators can scan
+  // the column and immediately see which keys have been overridden from
+  // factory. `current` is the typed live value; `row.default` is the
+  // schema string. Coerce per row.type, then strict-equality compare.
+  function isAtDefault(row: ConfigSchemaRow, value: ConfigValue | undefined): boolean {
+    // Unknown current → suppress the dot (we can't tell, no point flashing
+    // it on every row while /api/config is loading or the tracker is down).
+    if (value === undefined || value === null) return true;
+    const def = row.default;
+    if (row.type === 'int') return parseInt(def, 10) === value;
+    if (row.type === 'double') return Number(def) === value;
+    if (row.type === 'bool') return (def === 'true') === value;
+    return def === value;
+  }
 </script>
 
 <table class="config-table" data-testid="config-table">
@@ -130,7 +146,17 @@
         <td class="col-glyph">
           <span class="glyph {glyph.cls}" title={glyph.tooltip}>{glyph.text}</span>
         </td>
-        <td class="col-key"><code>{row.name}</code></td>
+        <td class="col-key">
+          {#if !isAtDefault(row, current[row.name])}
+            <span
+              class="modified-dot"
+              title="기본값과 다름"
+              aria-label="modified from default"
+              data-testid="modified-dot-{row.name}">●</span
+            >
+          {/if}
+          <code>{row.name}</code>
+        </td>
         <td class="col-desc">{row.description}</td>
         <td class="col-current">
           <div class="current-value">{fmtCurrent(current[row.name])}</div>
@@ -252,6 +278,12 @@
     color: var(--color-text-muted);
     background: var(--color-bg-elev);
     cursor: not-allowed;
+  }
+  .modified-dot {
+    color: var(--color-warn, #f57c00);
+    font-size: 0.85em;
+    margin-right: 4px;
+    cursor: help;
   }
   .glyph {
     display: inline-flex;

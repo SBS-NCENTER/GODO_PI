@@ -634,6 +634,139 @@ describe('Config.svelte — state machine (PR-C)', () => {
   });
 });
 
+describe('Config.svelte — input clearing UX (Bug C 2026-05-01 hotfix)', () => {
+  // Pre-fix: `setPending(key, '')` deleted the row from `pending`,
+  // which made the reactive `inputValue = pending[row.name] ?? fmtCurrent(...)`
+  // chain fall through to the current applied value the moment the
+  // operator cleared the input. The input box auto-repopulated with
+  // the current value, so delete-and-retype was unwinnable on int/double
+  // fields whose schema `min` is > 0.
+  //
+  // Post-fix: bare `oninput=""` preserves an empty string in `pending`
+  // so the input box stays empty mid-edit. Explicit Escape uses
+  // `clearPending` (the historic key-removal semantics) so Escape
+  // still restores the current-value display.
+
+  it('clearing the input mid-edit keeps the box empty (NOT reset to current)', async () => {
+    stubInitialRefreshOnly();
+    setSession('admin');
+
+    const target = mountConfig();
+    const editBtn = await waitFor<HTMLButtonElement>(
+      () => target.querySelector<HTMLButtonElement>('[data-testid="config-edit"]'),
+      'config-edit button',
+    );
+    editBtn.click();
+    flushSync();
+
+    const input = await waitFor<HTMLInputElement>(
+      () => target.querySelector<HTMLInputElement>('[data-testid="input-network.ue_port"]'),
+      'network.ue_port input',
+    );
+
+    // Step 1: type a partial value → pending populated, input shows it.
+    input.value = '70';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(input.value).toBe('70');
+
+    // Step 2: clear the input → input MUST stay empty (regression pin).
+    // Pre-fix this re-rendered as the current value (e.g. '6666') and
+    // the operator could not delete-and-retype.
+    input.value = '';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(input.value).toBe('');
+
+    // Step 3: type the desired value → input updates correctly.
+    input.value = '7000';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(input.value).toBe('7000');
+  });
+
+  it('Escape after clearing reverts the box to the current applied value', async () => {
+    stubInitialRefreshOnly();
+    setSession('admin');
+
+    const target = mountConfig();
+    const editBtn = await waitFor<HTMLButtonElement>(
+      () => target.querySelector<HTMLButtonElement>('[data-testid="config-edit"]'),
+      'config-edit button',
+    );
+    editBtn.click();
+    flushSync();
+
+    const input = await waitFor<HTMLInputElement>(
+      () => target.querySelector<HTMLInputElement>('[data-testid="input-network.ue_port"]'),
+      'network.ue_port input',
+    );
+
+    // Type and then Escape → input shows current value again.
+    input.value = '7000';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(input.value).toBe('7000');
+
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    flushSync();
+    // Current value is whatever FAKE_CURRENT carries for network.ue_port —
+    // we don't pin the exact number, only that it's not the user's stale
+    // pending text and not empty.
+    expect(input.value).not.toBe('7000');
+    expect(input.value).not.toBe('');
+  });
+
+  it('Apply with an empty pending value surfaces a per-row error (not silent commit)', async () => {
+    let patchCalls = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+      const u = String(url);
+      const m = (init as RequestInit | undefined)?.method ?? 'GET';
+      if (u === '/api/config/schema') return jsonResp(FAKE_SCHEMA);
+      if (u === '/api/config' && m === 'GET') return jsonResp(FAKE_CURRENT);
+      if (m === 'PATCH') {
+        patchCalls += 1;
+        return jsonResp({ ok: true, reload_class: 'hot' });
+      }
+      if (u === '/api/system/restart_pending') return jsonResp({ pending: false });
+      if (u === '/api/health') return jsonResp({ webctl: 'ok', tracker: 'ok', mode: 'Idle' });
+      if (u === '/api/system/services') return jsonResp({ services: [] });
+      return jsonResp({});
+    });
+
+    setSession('admin');
+    const target = mountConfig();
+    const editBtn = await waitFor<HTMLButtonElement>(
+      () => target.querySelector<HTMLButtonElement>('[data-testid="config-edit"]'),
+      'config-edit button',
+    );
+    editBtn.click();
+    flushSync();
+
+    const input = await waitFor<HTMLInputElement>(
+      () => target.querySelector<HTMLInputElement>('[data-testid="input-network.ue_port"]'),
+      'network.ue_port input',
+    );
+
+    // Type, clear, Apply with empty pending → reject up-front, no PATCH.
+    input.value = '7000';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    input.value = '';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+
+    target.querySelector<HTMLButtonElement>('[data-testid="config-apply"]')!.click();
+    await new Promise((r) => setTimeout(r, 30));
+    flushSync();
+
+    expect(patchCalls).toBe(0);
+    expect(target.querySelector('[data-testid="marker-network.ue_port"]')!.textContent).toContain(
+      '✗',
+    );
+  });
+});
+
 describe('Config.svelte — tracker-inactive banner (PR-C)', () => {
   it('tracker active → no banner', async () => {
     stubInitialRefreshOnly();

@@ -50,10 +50,20 @@
     pending: Record<string, string>;
     applyResults: Record<string, ApplyResult>;
     setPending: (key: string, raw: string) => void;
+    clearPending: (key: string) => void;
   }
 
-  let { admin, mode, isApplying, schema, current, pending, applyResults, setPending }: Props =
-    $props();
+  let {
+    admin,
+    mode,
+    isApplying,
+    schema,
+    current,
+    pending,
+    applyResults,
+    setPending,
+    clearPending,
+  }: Props = $props();
 
   function fmtCurrent(value: ConfigValue | undefined): string {
     if (value === undefined || value === null) return '—';
@@ -86,8 +96,12 @@
   function onKeydown(e: KeyboardEvent, row: ConfigSchemaRow): void {
     if (e.key === 'Escape') {
       e.preventDefault();
-      // Drop this row's pending edit back to the current value display.
-      setPending(row.name, '');
+      // Bug C fix: explicit Escape uses `clearPending` (drops the key,
+      // box reverts to current-value display). Bare empty input via
+      // `oninput` no longer drops the key — it preserves the empty
+      // string so the operator can delete-and-retype mid-edit. The two
+      // gestures map to two different functions.
+      clearPending(row.name);
     }
   }
 

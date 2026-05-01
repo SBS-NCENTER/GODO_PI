@@ -648,10 +648,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def map_backup(
         claims: auth_mod.Claims = Depends(auth_mod.require_admin),
     ) -> JSONResponse:
+        # Resolve the active PGM via maps_dir/active.pgm symlink (mirrors
+        # /api/map/edit + /api/map/origin patterns above). The previous
+        # implementation passed `cfg.map_path` directly — that field is
+        # the deprecated Track-E pre-symlink hook (default value points
+        # at a non-existent path on hosts that never set it), so the
+        # backup endpoint was unconditionally returning
+        # `map_path_not_found`. Fix: read the active symlink target via
+        # maps_mod and pass the realpath through to backup_map.
+        active_name = await asyncio.to_thread(maps_mod.read_active_name, cfg.maps_dir)
+        if active_name is None:
+            return JSONResponse(
+                {"ok": False, "err": ERR_ACTIVE_MAP_MISSING},
+                status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+        try:
+            active_pgm = maps_mod.pgm_for(cfg.maps_dir, active_name)
+        except maps_mod.InvalidName as e:
+            return _map_maps_exc_to_response(e)
+        if not active_pgm.is_file():
+            return JSONResponse(
+                {"ok": False, "err": ERR_ACTIVE_MAP_MISSING},
+                status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
         try:
             path = await asyncio.to_thread(
                 backup_mod.backup_map,
-                cfg.map_path,
+                active_pgm,
                 cfg.backup_dir,
             )
         except backup_mod.BackupError as e:

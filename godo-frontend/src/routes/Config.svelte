@@ -86,14 +86,30 @@
   }
 
   function setPending(key: string, raw: string): void {
-    if (raw === '') {
-      // Empty input → drop the key (matches Escape-to-clear UX).
-      const { [key]: _drop, ...rest } = pending;
-      void _drop;
-      pending = rest;
-      return;
-    }
+    // Bug C fix (2026-05-01 KST): preserve the empty string instead of
+    // dropping the key. Pre-fix, clearing the input mid-edit caused the
+    // reactive `inputValue = pending[row.name] ?? fmtCurrent(current)`
+    // chain to fall through to the current value, so the operator could
+    // not delete-and-retype a numeric field — the moment they cleared
+    // it, the box was repopulated with the active value and the keystroke
+    // race was unwinnable. We now retain `''` in `pending` so the input
+    // stays blank while the operator types the new value.
+    //
+    // Apply-time semantics (`parseValue`) reject empty/whitespace-only
+    // strings as `null` for int/double types, which the existing apply
+    // loop surfaces as a per-row error — operators see "유효하지 않은
+    // 값" rather than a silent commit of the prior value.
+    //
+    // Explicit-drop UX (Escape key) lives in `clearPending` below; that
+    // path keeps the historic key-removal semantics so Escape still
+    // restores the current-value display in one keystroke.
     pending = { ...pending, [key]: raw };
+  }
+
+  function clearPending(key: string): void {
+    const { [key]: _drop, ...rest } = pending;
+    void _drop;
+    pending = rest;
   }
 
   function pendingCount(): number {
@@ -322,6 +338,7 @@
     {pending}
     {applyResults}
     {setPending}
+    {clearPending}
   />
 
   <ConfirmDialog

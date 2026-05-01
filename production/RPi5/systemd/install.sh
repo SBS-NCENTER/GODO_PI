@@ -14,8 +14,13 @@
 #      without sudo; both used by webctl's admin endpoints)
 #   5. Seed /etc/godo/tracker.env from the template if absent (preserves
 #      a real .env if the operator already wrote one)
-#   6. systemctl daemon-reload
-#   7. (Does NOT enable the units — operator decides; instructions printed)
+#   6. Seed /var/lib/godo/tracker.toml (empty, ncenter-owned) so the
+#      tracker's atomic-rename writer can land Config-tab edits there.
+#      /etc/godo is ReadOnlyPaths under ProtectSystem=strict, so the
+#      live-mutable runtime config lives under /var/lib (which is
+#      already in ReadWritePaths via StateDirectory=godo).
+#   7. systemctl daemon-reload
+#   8. (Does NOT enable the units — operator decides; instructions printed)
 #
 # This installer covers the RPi5 tracker side ONLY. godo-webctl install
 # (rsync to /opt/godo-webctl, uv sync, unit + envfile, frontend dist) is
@@ -36,7 +41,7 @@ if [[ ! -x "$BIN_SRC" ]]; then
     exit 1
 fi
 
-echo "[1/6] Installing /opt/godo-tracker/"
+echo "[1/8] Installing /opt/godo-tracker/"
 install -d -m 0755 -o root -g root /opt/godo-tracker
 install -d -m 0755 -o root -g root /opt/godo-tracker/share
 install -m 0755 -o root -g root "$BIN_SRC"                          /opt/godo-tracker/godo_tracker_rt
@@ -50,16 +55,16 @@ install -m 0755 -o root -g root "$SCRIPT_DIR/godo-irq-pin.sh"       /opt/godo-tr
 install -m 0644 -o root -g root "$RPI5_DIR/src/core/config_schema.hpp" \
                                 /opt/godo-tracker/share/config_schema.hpp
 
-echo "[2/6] Installing systemd units to /etc/systemd/system/"
+echo "[2/8] Installing systemd units to /etc/systemd/system/"
 install -m 0644 "$SCRIPT_DIR/godo-irq-pin.service"  /etc/systemd/system/godo-irq-pin.service
 install -m 0644 "$SCRIPT_DIR/godo-tracker.service"  /etc/systemd/system/godo-tracker.service
 
-echo "[3/6] Installing watchdog drop-in"
+echo "[3/8] Installing watchdog drop-in"
 install -d -m 0755 /etc/systemd/system.conf.d
 install -m 0644 "$SCRIPT_DIR/system.conf.d/godo-watchdog.conf" \
                 /etc/systemd/system.conf.d/godo-watchdog.conf
 
-echo "[4/6] Installing polkit rule for ncenter-group systemctl + login1 access"
+echo "[4/8] Installing polkit rule for ncenter-group systemctl + login1 access"
 install -d -m 0755 /etc/polkit-1/rules.d
 install -m 0644 "$SCRIPT_DIR/49-godo-systemctl.rules" \
                 /etc/polkit-1/rules.d/49-godo-systemctl.rules
@@ -71,7 +76,7 @@ if ! systemctl is-active --quiet polkit; then
     echo "install: warning — polkit unit is not active; rule will load when polkit starts" >&2
 fi
 
-echo "[5/6] Seeding /etc/godo/tracker.env (preserves existing real .env)"
+echo "[5/8] Seeding /etc/godo/tracker.env (preserves existing real .env)"
 install -d -m 0755 -o root -g root /etc/godo
 if [[ ! -e /etc/godo/tracker.env ]]; then
     install -m 0644 -o root -g root "$SCRIPT_DIR/godo-tracker.env.example" /etc/godo/tracker.env
@@ -82,7 +87,36 @@ else
     echo "    Compare with $SCRIPT_DIR/godo-tracker.env.example for new keys."
 fi
 
-echo "[6/6] systemctl daemon-reload"
+echo "[6/8] Seeding /var/lib/godo/tracker.toml (empty, ncenter-owned)"
+# /var/lib/godo itself is created by the unit's StateDirectory=godo, but
+# the install path is also valid before the unit ever runs (the directory
+# tree is harmless if /var/lib/godo/maps/ etc. arrive later).
+install -d -m 0750 -o ncenter -g ncenter /var/lib/godo
+if [[ ! -e /var/lib/godo/tracker.toml ]]; then
+    install -m 0644 -o ncenter -g ncenter /dev/null /var/lib/godo/tracker.toml
+    echo "  → /var/lib/godo/tracker.toml created empty (ncenter:ncenter 0644)."
+    echo "    SPA Config-tab edits land here via atomic mkstemp+rename."
+else
+    echo "  → /var/lib/godo/tracker.toml already present; left untouched."
+fi
+# Migrate a pre-fix install that wrote tracker.toml under /etc/godo (where
+# it would have been read-only at runtime anyway). The file is harmless to
+# leave behind, but moving it makes the new RW path the SSOT and avoids
+# operator confusion about which file is "current".
+if [[ -e /etc/godo/tracker.toml ]]; then
+    if [[ -s /var/lib/godo/tracker.toml ]]; then
+        echo "  → WARN: both /etc/godo/tracker.toml AND /var/lib/godo/tracker.toml exist;"
+        echo "    /var/lib is the new SSOT. Leaving /etc copy in place — operator"
+        echo "    must reconcile manually." >&2
+    else
+        mv /etc/godo/tracker.toml /var/lib/godo/tracker.toml
+        chown ncenter:ncenter /var/lib/godo/tracker.toml
+        chmod 0644 /var/lib/godo/tracker.toml
+        echo "  → migrated /etc/godo/tracker.toml → /var/lib/godo/tracker.toml"
+    fi
+fi
+
+echo "[7/8] systemctl daemon-reload"
 systemctl daemon-reload
 
 echo

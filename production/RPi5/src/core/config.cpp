@@ -718,8 +718,13 @@ Config Config::make_default() {
 Config Config::load(int argc, char** argv, char** envp) {
     Config c = make_default();
 
-    // TOML — optional file; explicit path via env var wins over the default
-    // /etc/godo/tracker.toml. Silently skip if neither exists.
+    // TOML — optional file; explicit path via env var wins over the
+    // default /var/lib/godo/tracker.toml. Default lives under /var/lib
+    // because the systemd unit declares ReadOnlyPaths=/etc/godo +
+    // ProtectSystem=strict; the atomic-rename writer needs a parent
+    // directory the tracker process can mkstemp+rename in. Operators
+    // who want a different path override via GODO_CONFIG_PATH in
+    // /etc/godo/tracker.env. Silently skip if neither exists.
     std::filesystem::path toml_path;
     if (auto p = env_get(envp, "GODO_CONFIG_PATH"); p) {
         toml_path = *p;
@@ -728,8 +733,8 @@ Config Config::load(int argc, char** argv, char** envp) {
                 "config: GODO_CONFIG_PATH='" + toml_path.string() +
                 "' was set but the file does not exist");
         }
-    } else if (std::filesystem::exists("/etc/godo/tracker.toml")) {
-        toml_path = "/etc/godo/tracker.toml";
+    } else if (std::filesystem::exists("/var/lib/godo/tracker.toml")) {
+        toml_path = "/var/lib/godo/tracker.toml";
     }
     if (!toml_path.empty()) {
         apply_toml_file(c, toml_path);

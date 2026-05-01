@@ -1218,8 +1218,12 @@ update (UE project file, legacy Arduino rollback etc.).
 
 Values that operators change per-host or per-operating-condition. Defaults
 live in `core/config_defaults.hpp` as `constexpr`; effective values are
-loaded from `/etc/godo/tracker.toml` at tracker startup, with an env-var
-override layer underneath.
+loaded from `/var/lib/godo/tracker.toml` at tracker startup, with an env-var
+override layer underneath. (The TOML lives under `/var/lib/godo` rather
+than `/etc/godo` because the systemd unit declares
+`ReadOnlyPaths=/etc/godo` + `ProtectSystem=strict`; the SPA Config tab's
+atomic-rename writer needs a parent directory the tracker process can
+mkstemp + rename in. `/var/lib/godo` is in `ReadWritePaths`.)
 
 ```cpp
 namespace godo::config::defaults {
@@ -1251,7 +1255,7 @@ inline constexpr std::string_view UDS_SOCKET       = "/run/godo/ctl.sock";
 }  // namespace godo::config::defaults
 ```
 
-Example `/etc/godo/tracker.toml`:
+Example `/var/lib/godo/tracker.toml`:
 
 ```toml
 [network]

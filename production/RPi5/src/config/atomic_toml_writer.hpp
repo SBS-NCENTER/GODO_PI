@@ -1,6 +1,6 @@
 #pragma once
 
-// Atomic POSIX-rename writer for /etc/godo/tracker.toml. Track B-CONFIG
+// Atomic POSIX-rename writer for /var/lib/godo/tracker.toml. Track B-CONFIG
 // (PR-CONFIG-α) — sole owner of writes against the TOML file. Build
 // grep `[atomic-toml-write-grep]` enforces this exclusivity.
 //

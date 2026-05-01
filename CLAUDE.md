@@ -267,6 +267,19 @@ When converting from the host's clock, use `TZ='Asia/Seoul' date '+%Y-%m-%d %H:%
 
 Why this matters: a single day frequently spans 2–3 distinct sessions with different scope (operator HIL, planner runs, writer kickoffs). Without time stamps, a future cold-start cannot tell which `2026-04-29` block describes the state being inherited.
 
+### Issue labelling — `issue#N` / `issue#N.M` decimal scheme
+
+When labelling a new work unit (bug, feature, follow-up) discovered during a session, use the following operator-locked convention:
+
+- **`issue#N`** — distinct sequential integer for an independent work unit (e.g., `issue#3`, `issue#4`, `issue#5`). Pick the next free integer at the time of writing.
+- **`issue#N.M`** — decimal sub-issue for tightly-coupled follow-ups stacked on parent `issue#N` (e.g., `issue#2.1`, `issue#2.2`).
+- **Greek letters (α, β, γ, ε, ζ) are deprecated** — typing-unfriendly on KR/EN keyboards. Do not introduce new ones; existing references in older docs may stay as historical artefacts.
+- **Feature codes** (`B-MAPEDIT`, `B-MAPEDIT-2`, `B-MAPEDIT-3`, etc.) are a separate axis from issue numbers and stay as-is — they describe the *feature surface*, while `issue#N` describes the *work unit*.
+
+Apply the label consistently across: NEXT_SESSION.md TL;DR, plan files under `.claude/tmp/`, PR titles, commit messages, per-stack `CODEBASE.md` change-log entries, and design-doc cross-references.
+
+The currently active list (and the next free integer) is tracked in `NEXT_SESSION.md` — this CLAUDE.md section is the SSOT for *why* the scheme exists, not *what's in flight*.
+
 ### Memory storage — in-repo, not host cache
 
 GODO is collaborated on via GitHub, so every auto-memory operation
@@ -334,7 +347,70 @@ Planner ──► Reviewer (Mode-A) ──► (approve) Writer ──► Reviewe
 
 ---
 
-## 8. Open questions
+## 8. Deployment + PR workflow (operator-driven)
+
+After Parent (or any contributor) opens a PR, the **operator** drives a standard install → HIL → merge pipeline on `news-pi01`. Parent does not auto-deploy — every install step is operator-initiated, mirroring the broader "every cold-path update is operator-initiated" rule.
+
+### Standard pipeline
+
+```text
+PR opened
+  ↓
+1. Fetch + checkout the PR branch on news-pi01
+  ↓
+2. Build per stack (see matrix)
+  ↓
+3. Deploy per stack (see matrix)
+  ↓
+4. Operator HIL — drive the SPA / trigger the changed scenario in a browser
+  ↓
+5. Merge → `gh pr merge <N> --squash --delete-branch`
+  ↓
+6. Local main sync → `git switch main && git pull --ff-only origin main`
+```
+
+### Stack-deploy matrix
+
+| Stack touched | Build (in repo tree) | Deploy (to `/opt`) | Service restart |
+| --- | --- | --- | --- |
+| `godo-frontend` only | `cd godo-frontend && npm install && npm run build` | `sudo rsync -a --delete /home/ncenter/projects/GODO/godo-frontend/dist /opt/godo-frontend/` | none — FastAPI `StaticFiles` reads disk; browser hard-reload (Ctrl+Shift+R) is enough |
+| `godo-webctl` only | `cd godo-webctl && uv sync --no-dev` (only if `pyproject.toml` changed) | `sudo rsync -a --delete --exclude='.venv' --exclude='__pycache__' /home/ncenter/projects/GODO/godo-webctl/ /opt/godo-webctl/` then `cd /opt/godo-webctl && sudo -u ncenter uv sync --no-dev` | `sudo systemctl restart godo-webctl` |
+| `production/RPi5` (tracker) | `bash production/RPi5/scripts/build.sh` | `sudo bash production/RPi5/systemd/install.sh` (idempotent — rsyncs binary + `share/config_schema.hpp` mirror, polkit, units, env templates) | `sudo systemctl restart godo-tracker` (or via SPA System tab Restart, per the operator service-management policy) |
+| Multi-stack PR | each of the above | each of the above | webctl + tracker as touched |
+
+### Critical rsync detail — trailing slash
+
+`rsync -a SOURCE DEST` semantics depend on the SOURCE trailing slash:
+
+- ✅ `rsync -a /…/godo-frontend/dist /opt/godo-frontend/` — **dist itself** lands at `/opt/godo-frontend/dist/`. Correct, because `GODO_WEBCTL_SPA_DIST=/opt/godo-frontend/dist`.
+- ❌ `rsync -a /…/godo-frontend/dist/ /opt/godo-frontend/` — **contents** of dist land at `/opt/godo-frontend/{index.html,assets,…}`, AND `--delete` wipes the `dist/` subdirectory if it existed. Breaks the SPA: webctl looks at `/opt/godo-frontend/dist/`, finds nothing.
+
+Recovery from the broken case is the same correct command — `--delete` cleans the stray top-level files and recreates `/opt/godo-frontend/dist/`.
+
+### HIL verification (operator)
+
+Each PR's commit message / PR body documents the golden-path HIL scenario. Generic checklist:
+
+- Hard-reload the SPA (Ctrl+Shift+R) so the new hashed bundle loads.
+- DevTools Network tab confirms the new endpoint / cadence is live.
+- Drive the scenario described in the PR body. Verify the expected behaviour change happens without a manual reload.
+- For tracker-side changes: `journalctl -u godo-tracker -n 50` immediately after restart to confirm clean boot (no segfault, no `clear_pending_flag` panic, no AMCL convergence regression).
+
+### Merge etiquette
+
+- `gh pr merge <N> --squash --delete-branch` — squash keeps `main` history one-PR-per-line; `--delete-branch` removes the origin branch automatically.
+- After merge: `git switch main && git pull --ff-only origin main`. Then optionally `git branch -d <merged-branch>` to clean the local ref.
+- Merge order matters when one PR's commit message references files from another PR's branch (e.g., a fix PR citing a memory file added by a docs PR). Merge the prerequisite first so the references resolve on `main`.
+
+### Pre-deploy traps
+
+1. **`/var/lib/godo/tracker.toml` ↔ branch `Config` compatibility** — when the deploying branch's `production/RPi5/src/core/config_schema.hpp` lacks a key already present in the live `tracker.toml`, the tracker rejects the file at parse time and systemd auto-restart loops. Strip the unknown key first OR stage the deploy. Reference: `.claude/memory/feedback_toml_branch_compat.md`.
+2. **godo-tracker is NOT `enable`d** — operator starts/stops/restarts via the SPA System tab. Do not `systemctl enable godo-tracker` casually. Reference: `.claude/memory/project_godo_service_management_model.md`.
+3. **Working tree shared between shells on news-pi01** — Parent's open shell may sit on a different branch than the operator's deploy shell. Both share `/home/ncenter/projects/GODO/`; a `git switch` in either shell reshapes the working tree both see. Coordinate before destructive operations. Reference: `.claude/memory/feedback_check_branch_before_commit.md`.
+
+---
+
+## 9. Open questions
 
 | # | Question | Status | Blocks |
 | --- | --- | --- | --- |
@@ -353,7 +429,7 @@ Planner ──► Reviewer (Mode-A) ──► (approve) Writer ──► Reviewe
 
 ---
 
-## 9. Reference documents
+## 10. Reference documents
 
 ### Root navigation hubs
 

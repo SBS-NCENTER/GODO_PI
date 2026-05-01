@@ -10,6 +10,87 @@
 
 ---
 
+## 2026-05-01 (새벽 ~ 늦은 오전 — 00:00 KST → 12:18 KST, 열세 번째 세션 — issue#3 pose hint UI + install fix + AMCL frame y-flip 잠재 버그 fix)
+
+### 한 줄 요약
+
+issue#3 (pose hint UI) 풀 파이프라인 PR을 끝내고 운영자 HIL에 들어간 순간, 프로젝트 시작 이래 잠복하던 두 개의 production-critical 버그가 동시에 노출됐다. (1) `/etc/godo` ReadOnlyPaths 때문에 SPA Config-tab의 모든 write가 실패 → install fix PR (PR #55) 별도로 처리. (2) PGM raster 순서와 AMCL kernel의 cell convention 불일치로 모든 AMCL 결과가 캔버스 중심 기준 (x, y, yaw) 점대칭 mirror → frame fix PR (PR #56) 별도로 처리. 운영자가 "yaw와 위치가 x축 대칭되어있는 듯한 느낌" 직감으로 root cause를 가리킨 게 결정적. 본 issue#3 σ 튜닝은 frame 정상화 후 운영자가 "hint = 운영자의 강한 명령" semantic으로 lock-in.
+
+### 3개 PR
+
+| PR | issue# | 제목 | 결과 |
+|---|---|---|---|
+| #54 | issue#3 | initial pose hint UI for AMCL multi-basin fix | 머지 |
+| #55 | — | install fix — tracker.toml moved to /var/lib/godo for RW under sandbox | 머지 |
+| #56 | — | AMCL row-flip PGM at load to match bottom-first cell convention | 머지 |
+
+### issue#3 풀 파이프라인 — UX 두 번 재구성
+
+Planner → Reviewer Mode-A (1 Critical + 6 Must + 8 Should + 5 Nit) → Writer (6 commits) → Reviewer Mode-B (1 Critical + 4 Must + 10 Should + 5 Nit). 운영자 입력으로 plan을 두 번 재구성:
+
+1. **Blended (A click+drag) + (B two-click) + C numeric companion 제스처** — 처음에 Planner가 옵션 A 단독 + numeric companion으로 추천했는데 운영자가 "A, B 둘 다 같이 녹이는 것은 어때? C도 x,y numeric 옆에 yaw numeric 입력창 함께"라고 지시. drag threshold 8 px로 A/B를 implicit 분기하는 단일 상태 머신.
+2. **issue#6 reuse hook 미루기** — 운영자가 "issue#6도 회전 중심 대신 지금처럼 두 점으로 해도 될 것 같은데, 어차피 map edit 탭에 위치를 찍어서 진행할 수 있으니까~~ 이건 그때 가서 생각해보자" → component naming 그대로 (`<PoseHintLayer/>`). issue#6 작업 시점에 reuse 결정.
+
+운영자가 보내준 정량 측정 (one-shot ~0.5 m, Live ~4 m) 데이터가 plan의 σ default 결정 기반.
+
+### Production-critical revelation #1 — install ReadOnlyPaths
+
+운영자가 SPA Config 탭에서 σ 튜닝하려고 했는데 PATCH가 모두 `write_failed`. webctl 로그에 traceback 없음 (handled exception). 직접 UDS로 set_config 보내서 응답 보니 `parent_not_writable: Read-only file system`. mount 보면 `/`는 `rw,noatime`, ncenter shell에서 직접 mktemp `/etc/godo/`도 성공. 결정타: `systemctl show godo-tracker | grep ReadOnly` → **`ReadOnlyPaths=/etc/godo`** + `ProtectSystem=strict`. systemd sandbox가 tracker process 입장에서만 read-only 만든 것. `mkstemp + rename` for atomic TOML write가 EROFS로 실패.
+
+해결 방향: tracker.toml의 default 경로를 `/var/lib/godo` (이미 `ReadWritePaths`)로 이동. install.sh 새 step `[6/8]` — 빈 토ml seed + `/etc/godo/tracker.toml` 마이그레이션. `production/RPi5/CODEBASE.md`의 design separation: `/etc/godo` = read-only system config (env), `/var/lib/godo` = mutable runtime state (TOML, maps, JWT secret).
+
+이 버그는 **잠재(latent)**였다. 프로젝트 내내 SPA Config-tab의 write 경로를 누구도 사용하지 않았기 때문. issue#3가 Tier-2 σ 튜닝을 위해 처음 그 경로를 사용 → 발견.
+
+### Production-critical revelation #2 — AMCL y-flip frame bug
+
+PR #54 머지 + production deploy 후 운영자가 calibrate 결과를 보다가 **"x, y, yaw 모두 캔버스 중심 기준 점대칭"** 패턴을 발견. PGM 검은색 벽과 LiDAR 청록색 scan은 같은 모양인데 180° 회전된 위치. 운영자가 명확히 가설 제시: "AMCL은 정상이고, 반환 좌표 방향이나 부호가 달라서 map pgm과 오버레이가 일치하지 않는 듯 한 느낌이라면?".
+
+코드 트레이스로 확인:
+- PGM (P5) raster: row-major top-row-first (byte 0 = top-left).
+- ROS YAML `origin: [ox, oy, 0]`: bottom-left pixel의 world coord.
+- GODO AMCL kernels (`Amcl::seed_global` at amcl.cpp:92-97, `evaluate_scan` at scan_ops.cpp:84-85): `cells[cy * W + cx]` indexing, treating `(cx, cy=0)` as cell anchored at world `(origin_x, origin_y)`.
+
+**불일치**: kernel은 `cells[0..W-1]`이 BOTTOM row여야 한다고 가정하지만 PGM bytes는 TOP row first. 결과: AMCL 내부 frame이 vertically inverted. 자기 frame 안에서는 self-consistent (likelihood + seed가 둘 다 inverted convention 사용 → 수렴 작동), 하지만 출력 pose가 YAML 의미와 mirror된 frame.
+
+**Fix 옵션 비교**:
+- Option X (load-time row flip): `occupancy_grid.cpp::load_map`에서 PGM bytes를 row 단위로 뒤집어 cells 저장. 한 곳만 수정.
+- Option Y (per-lookup flip): scan_ops.cpp 등에서 매 cell lookup에 `(height-1) - cy` 추가. 다중 site.
+
+Option Y는 **fix가 안 됨**. 왜냐하면 `build_likelihood_field`의 EDT 패스가 `grid.cells`를 array order로 처리 → EDT 거리 자체가 inverted frame에서 측정됨 → lookup-side flip만으로 cancel 안 됨. **Option X 단일 fix**가 정답.
+
+PR #56 row-flip 추가, 운영자 HIL: 50% 완벽 정합 + 45% 약한 yaw bias + 5% 가짜 basin (multi-basin 잔존 — issue#3가 정확히 처방하는 패턴).
+
+이 버그도 **잠재**였다. 음수 origin이던 시절에는 운영자가 이 frame에 익숙해져서 "정상"으로 받아들임. PR #43 (B-MAPEDIT-2 origin pick) 이후 origin이 ADD convention으로 누적되며 양수 origin이 되자 시각적으로 더 극단화 → 노출.
+
+### 운영자 잠금 결정 (메모리 entries)
+
+세 가지 핵심 lock-in:
+
+1. **Hint = 강한 명령, 약한 prior 아님** (`project_hint_strong_command_semantics.md`). frame 정상화 후 σ sweep: σ_xy ∈ {0.3, 0.4, 0.5} 모두 hint 위치 우세 (likelihood가 hint cloud 못 깸). 운영자: "가까운 곳 두면 실제위치 우세. 이상한 곳 두면 먼 곳 우세. 일단 난 지금의 힌트도 좋은 것 같아. hint 안에 있을 때에는 정밀도가 저하되면 안 된다는 것이 내 생각". σ default 0.5 m / 20° 잠금.
+2. **Live mode = pipelined one-shot driven by previous-pose-as-hint** (`project_calibration_alternatives.md` Live mode 섹션). 운영자: "Live 모드도 힌트 기능을 적용해야할 것 같아. 시동만 걸어주면 그 뒤부터는 이전 프레임을 힌트삼아 calibration하는 작업을 pipeline으로 serial하게 진행하는 것이 좋겠어." issue#5 재정의: bare `step()`을 폐기하고 매 tick `converge_anneal(hint=pose[t-1])`로. Live carry-over σ는 inter-tick crane 이동 한계 기반 (작게).
+3. **Far-range automated rough-hint — production hint 자동화 방향** (`project_calibration_alternatives.md` Automated rough-hint 섹션). 운영자: "그 뒤에는 hint 자동화 방안 생각하는 것이 좋겠다 — 먼 곳의 점들로부터 러프하게 hint 위치, 방향 잡고 그 hint를 발판삼아 전체 범위에서 다시 정확하게 현재위치 계산. 왜냐하면 먼 곳의 점들은 고정된 스튜디오 지형지물인 확률 높음, 또한 특징점 추출이 빠름". Two-stage: stage 1 = far-range feature → rough hint, stage 2 = AMCL precise. 이전에 적힌 approach A (image match) / B (GPU features) / C (pre-marked landmarks)를 흡수 — far-range pre-filter가 핵심 innovation.
+
+세 결정 모두 카메라 AF 비유의 일관된 framing: 위상차 검출 (빠른 거친 phase) + 콘트라스트 검출 (정밀한 narrow refine) + 수동 초점 (operator override).
+
+### 프로세스 lesson
+
+- **production tracker.toml ↔ branch Config struct 호환성** (`feedback_toml_branch_compat.md`). PR #56 deploy 시 init failed: `/var/lib/godo/tracker.toml`에 PR #54의 σ 키들이 있었고, PR #56은 main에서 분기되어 그 키 모름 → `unknown TOML key` 무한 restart. 해결: hint 두 줄 직접 sed 삭제 후 deploy. 미래 mitigation: pre-deploy hygiene check.
+- **restart-pending banner stale recurrence** (`project_restart_pending_banner_stale.md` 업데이트). PR #45가 service-action 직후 새로고침은 cover했지만, **다른 path에서 발생할 때 stale lock**. self-healing 가설 무효 — 매번 reload 필요. 작은 frontend follow-up PR.
+- **PR 머지 순서 실수**: 운영자가 PR #54 (issue#3)를 PR #56 (frame fix) 전에 머지. 회복 가능 — PR #56을 새 main에 rebase, conflict 0건, force-push. 안전한 순서는 frame fix 먼저였지만 cosmetic.
+- **origin pick 누적 cosmetic**: `04.29_v3.yaml` origin이 SLAM-원본 `[-10.855, -7.336, 0]`에서 4번 ADD pick 누적되어 `[14.995, 26.164, 0]`. frame fix가 origin 부호 무관하게 작동 → 정리는 cosmetic 후속 작업.
+
+### 다음 세션 큐 (운영자 잠금 우선순위)
+
+1. **issue#5 — Live mode pipelined hint** (재정의된 형태). bare step() 폐기 + 매 tick 이전 pose를 hint로 carry. `project_calibration_alternatives.md` Live 섹션 참조.
+2. **Far-range automated rough-hint** (NEW direction). two-stage: 먼 점 feature → 거친 hint → AMCL 정밀. operator-friendly automation의 핵심 path.
+3. **issue#4 — AMCL silent-converge diagnostic**. issue#5 + far-range 자동화 효과 정량 측정. 이번 세션 HIL data가 baseline.
+4. **restart-pending banner real fix** (small frontend PR). polling/SSE guard flag 정상화.
+5. **B-MAPEDIT-2 origin reset** (cosmetic). yaml origin을 SLAM-원본 또는 운영자 의미 있는 값으로 reset.
+6. **issue#6 — B-MAPEDIT-3 yaw rotation** (deferred). 운영자가 "그때 가서 생각해보자" 했던 reuse 시점 검토.
+7. **issue#7 — boom-arm angle masking** (optional, issue#4 결과에 따라).
+
+---
+
 ## 2026-04-30 (오후 ~ 심야 — 14:00 KST → 22:00 KST, 열두 번째 세션 — 9 PR: B-MAPEDIT-2 origin pick 풀 파이프라인 + Map viewport 공유 + HIL 사이클로 발견된 5건 hotfix)
 
 ### 한 줄 요약

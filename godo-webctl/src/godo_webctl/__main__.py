@@ -17,15 +17,19 @@ lock.
 
 from __future__ import annotations
 
+import logging
 import signal
 import sys
 from types import FrameType
 
 import uvicorn
 
+from . import webctl_toml
 from .app import create_app
-from .config import load_settings
+from .config import Settings, load_settings
 from .pidfile import LockHeld, LockSetupError, PidFileLock, format_lock_held_message
+
+_logger = logging.getLogger("godo_webctl")
 
 
 def _factory():  # pragma: no cover — invoked by uvicorn at process start
@@ -53,8 +57,34 @@ def _install_release_on_signal_handlers(lock: PidFileLock) -> None:  # pragma: n
     signal.signal(signal.SIGINT, _release_and_exit)
 
 
+def _log_resolved_sse_rates(settings: Settings) -> None:  # pragma: no cover — entrypoint
+    """issue#12 / Mode-A M6 (Parent A6) — log the resolved SSE pose/scan
+    cadence at startup. Wrapped in try/except so a malformed
+    tracker.toml never blocks service boot. Defaults apply silently on
+    failure; the operator gets a WARNING log line and webctl still
+    listens on its socket."""
+    try:
+        section = webctl_toml.read_webctl_section(settings.tracker_toml_path)
+    except (webctl_toml.WebctlTomlError, OSError) as e:
+        _logger.warning(
+            "webctl_toml: falling back to defaults (%d Hz pose, %d Hz scan): %s",
+            webctl_toml.WEBCTL_POSE_STREAM_HZ_DEFAULT,
+            webctl_toml.WEBCTL_SCAN_STREAM_HZ_DEFAULT,
+            e,
+        )
+        return
+    _logger.info(
+        "SSE pose stream rate = %d Hz, scan stream rate = %d Hz "
+        "(source: %s)",
+        section.pose_stream_hz,
+        section.scan_stream_hz,
+        settings.tracker_toml_path,
+    )
+
+
 def main() -> None:  # pragma: no cover — entrypoint shim
     settings = load_settings()
+    _log_resolved_sse_rates(settings)
     lock = PidFileLock(settings.pidfile_path)
     try:
         lock.acquire()

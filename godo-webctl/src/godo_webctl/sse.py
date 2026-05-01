@@ -42,6 +42,7 @@ from . import resources as resources_mod
 from . import resources_extended as resources_extended_mod
 from . import services as services_mod
 from . import uds_client as uds_mod
+from . import webctl_toml as webctl_toml_mod
 from .config import Settings
 from .constants import (
     SSE_HEARTBEAT_S,
@@ -62,6 +63,38 @@ SSE_RESPONSE_HEADERS: Final[dict[str, str]] = {
 }
 
 
+def _resolve_pose_tick_s(cfg: Settings) -> float:
+    """Resolve the ``last_pose_stream`` tick period (seconds) from
+    ``[webctl] pose_stream_hz`` in tracker.toml, with env-var override
+    and a hard fallback to ``WEBCTL_POSE_STREAM_HZ_DEFAULT``.
+
+    Resolved per-stream-open (NOT cached at module import) so an
+    operator who edits tracker.toml + restarts godo-webctl picks up
+    the new value on the next stream open. issue#12 reload class is
+    Restart — webctl restart IS the propagation path; per-tick
+    re-resolution is not implemented (would race the SSE async loop).
+
+    On ``WebctlTomlError`` (malformed TOML / out-of-range) the loop
+    falls back to defaults rather than crashing the stream — the
+    operator already gets a startup WARNING in ``__main__.py`` (A6).
+    """
+    try:
+        section = webctl_toml_mod.read_webctl_section(cfg.tracker_toml_path)
+        return 1.0 / section.pose_stream_hz
+    except webctl_toml_mod.WebctlTomlError:
+        return 1.0 / webctl_toml_mod.WEBCTL_POSE_STREAM_HZ_DEFAULT
+
+
+def _resolve_scan_tick_s(cfg: Settings) -> float:
+    """Twin of ``_resolve_pose_tick_s`` for ``last_scan_stream``.
+    Reads the ``scan_stream_hz`` key; same fallback semantics."""
+    try:
+        section = webctl_toml_mod.read_webctl_section(cfg.tracker_toml_path)
+        return 1.0 / section.scan_stream_hz
+    except webctl_toml_mod.WebctlTomlError:
+        return 1.0 / webctl_toml_mod.WEBCTL_SCAN_STREAM_HZ_DEFAULT
+
+
 def _sse_event(payload: dict[str, Any]) -> bytes:
     return ("data: " + json.dumps(payload, separators=(",", ":")) + "\n\n").encode("utf-8")
 
@@ -72,12 +105,16 @@ def _sse_keepalive() -> bytes:
 
 async def last_pose_stream(
     client: uds_mod.UdsClient,
-    cfg: Settings,  # noqa: ARG001 — reserved for future per-stream tuning
+    cfg: Settings,
     *,
     sleep: SleepCallable = asyncio.sleep,
 ) -> AsyncIterator[bytes]:
-    """5 Hz get_last_pose poller. Yields one frame per tick or skips on
-    tracker fault. Heartbeat every `SSE_HEARTBEAT_S` of virtual time."""
+    """get_last_pose poller. Tick cadence resolves at stream open
+    from ``[webctl] pose_stream_hz`` in tracker.toml (default 30 Hz,
+    operator-tunable in [1, 60]; issue#12). Yields one frame per tick
+    or skips on tracker fault. Heartbeat every ``SSE_HEARTBEAT_S`` of
+    virtual time."""
+    tick_s = _resolve_pose_tick_s(cfg)
     elapsed_since_keepalive = 0.0
     while True:
         try:
@@ -89,10 +126,10 @@ async def last_pose_stream(
             logger.debug("sse.last_pose_uds_error: %s", e)
             # Skip this frame; loop continues.
         try:
-            await sleep(SSE_TICK_S)
+            await sleep(tick_s)
         except asyncio.CancelledError:
             raise
-        elapsed_since_keepalive += SSE_TICK_S
+        elapsed_since_keepalive += tick_s
         if elapsed_since_keepalive >= SSE_HEARTBEAT_S:
             yield _sse_keepalive()
             elapsed_since_keepalive = 0.0
@@ -100,14 +137,17 @@ async def last_pose_stream(
 
 async def last_scan_stream(
     client: uds_mod.UdsClient,
-    cfg: Settings,  # noqa: ARG001 — reserved for future per-stream tuning
+    cfg: Settings,
     *,
     sleep: SleepCallable = asyncio.sleep,
 ) -> AsyncIterator[bytes]:
-    """Track D — 5 Hz get_last_scan poller. Identical lifecycle/error
+    """get_last_scan poller. Tick cadence resolves at stream open
+    from ``[webctl] scan_stream_hz`` in tracker.toml (default 30 Hz,
+    operator-tunable in [1, 60]; issue#12). Identical lifecycle/error
     pattern to ``last_pose_stream``: one frame per tick or skip on
     tracker fault, heartbeat every ``SSE_HEARTBEAT_S`` of virtual time,
     cancel-safe."""
+    tick_s = _resolve_scan_tick_s(cfg)
     elapsed_since_keepalive = 0.0
     while True:
         try:
@@ -119,10 +159,10 @@ async def last_scan_stream(
             logger.debug("sse.last_scan_uds_error: %s", e)
             # Skip this frame; loop continues.
         try:
-            await sleep(SSE_TICK_S)
+            await sleep(tick_s)
         except asyncio.CancelledError:
             raise
-        elapsed_since_keepalive += SSE_TICK_S
+        elapsed_since_keepalive += tick_s
         if elapsed_since_keepalive >= SSE_HEARTBEAT_S:
             yield _sse_keepalive()
             elapsed_since_keepalive = 0.0

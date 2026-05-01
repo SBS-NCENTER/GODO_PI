@@ -132,9 +132,58 @@ How this composes with the broader plan:
 
 When implementing: Live mode opt-in flag (cfg `live_carry_pose_as_hint`) so operators can A/B test against today's seed-global-per-tick behaviour. issue#5 PR is the natural home.
 
+## Live mode hint pipeline — operator-locked design (2026-05-01 12:00+ KST)
+
+After PR #56 (frame fix) + PR #54 (issue#3 hint UI) merged, operator observed a strong asymmetry: **one-shot calibrate is now extremely accurate** ("거의 완전 일치할 확률 매우 높음") while **Live mode remains poor** (the original ~4 m drift quantified pre-fix in `project_amcl_multi_basin_observation.md`). The localization kernels are nearly identical — convergence depth + per-tick re-seeding policy are the only major axes of difference. Operator-locked design:
+
+> "Live 모드도 힌트 기능을 적용해야할 것 같아. 시동만 걸어주면 그 뒤부터는 이전 프레임을 힌트삼아 calibration하는 작업을 pipeline으로 serial하게 진행하는 것이 좋겠어."
+
+Concrete shape — re-frames issue#5 from "make Live's per-scan step() deeper" into **"Live = pipelined one-shot driven by previous-pose-as-hint, never goes back to bare step()."**
+
+1. **Boot** — operator's pose hint (or future automated rough-hint, see next section) gives the cold-start anchor.
+2. **Live tick t=0** — runs `converge_anneal` (the one-shot kernel) using the cold-start hint.
+3. **Live tick t=N** — runs `converge_anneal` AGAIN, but the hint is `pose[t-1]` (the previous tick's converged pose). σ matches the maximum plausible inter-tick crane-base drift; per `project_hint_strong_command_semantics.md` the σ is NOT padded — it matches physical motion bounds.
+4. **Pipeline serial K-step** (issue#5 + `project_pipelined_compute_pattern.md`): each tick gets full-depth convergence at near-Live throughput by distributing K iterations across K consecutive ticks.
+
+Implementation impact:
+- `cold_writer.cpp` Live branch now calls `converge_anneal` with hint=`pose[t-1]` instead of `Amcl::step`.
+- `Amcl::step` likely retired or relegated to a legacy / fallback path.
+- New cfg keys: `live_carry_pose_as_hint = true` (operator-locked default ON after issue#5 HIL); separate σ family `amcl.live_carry_sigma_xy_m / _yaw_deg` (tight, matches per-tick drift) distinct from `amcl.hint_sigma_*` (operator-set, wider).
+
+Why this subsumes the simpler "Live previous-pose-as-hint" design earlier in this file: that earlier design assumed `Amcl::step` would still run; the locked design is bolder — Live IS pipelined one-shot.
+
+## Automated rough-hint via far-range LiDAR features — operator-locked direction (2026-05-01 12:00+ KST)
+
+After Live-pipeline lands, the next axis is **eliminating the operator click for cold-start** — the original "production-friendly" goal that motivated this whole memory file. Operator-locked direction:
+
+> "그 뒤에는 hint 자동화 방안 생각하는 것이 좋겠다 — 먼 곳의 점들로부터 러프하게 hint 위치, 방향 잡고 그 hint를 발판삼아 전체 범위에서 다시 정확하게 현재위치 계산. 왜냐하면 먼 곳의 점들은 고정된 스튜디오 지형지물인 확률 높음, 또한 특징점 추출이 빠름."
+
+**Two-stage architecture**:
+
+**Stage 1 — rough hint from far-range LiDAR returns**
+- LiDAR scan beams at range > `r_far` (candidate: 3 m for the T-shape studio) hit fixed studio walls / corners with high probability. Near-range points are people, equipment, transient obstacles.
+- Extract distinctive features (corners, line segments, the chroma-wall rounded ㄷ shape) from the far-range subset only.
+- Match to PGM features → rough (x, y, yaw) transform via RANSAC, template matching, or phase correlation.
+- Fast because feature count is small, far-range subset has high signal-to-noise, and the matcher works on a downsampled image rather than a full-resolution likelihood field.
+
+**Stage 2 — precise localization seeded by stage 1**
+- Stage 1's rough pose feeds AMCL as the cold-start hint (the existing PR #54 path, σ tight per `project_hint_strong_command_semantics.md`).
+- AMCL converges precisely within the hint basin.
+- Full-resolution scan (all ranges) used for the convergence step — close-range points contribute when the basin is already correct.
+
+**Composition with the AF analogy**: stage 1 = phase detection (fast, coarse, range-finding); stage 2 = contrast detection (precise, narrow, high-fidelity). Operator clicking a hint becomes the **manual focus** override path, kept as fallback / debug tool.
+
+**Why this is the operator's preferred automation path** (vs. the earlier A/B/C alternatives):
+- A (image matching) and B (GPU features) treat the WHOLE scan; far-range filtering pre-selects the high-information subset, dropping cost dramatically while improving accuracy (no near-range transient-obstacle pollution).
+- C (pre-marked landmarks) requires operator effort during studio change.
+- This far-range approach is **automatic** AND **physical-prior-aware** ("people are near, walls are far") — captures the studio-specific structure without any operator marking.
+
+Subsumes A and B: the underlying matcher can still use OpenCV `matchTemplate` / RANSAC / GPU features; the structural innovation is the **far-range pre-filter** + the **two-stage refine pattern** that hands off to existing AMCL.
+
 ## Status
 
 - File created 2026-04-30 23:30 KST.
 - Extended 2026-04-30 23:50 KST with first-seed pattern + distance-weighted AMCL + AF analogy.
 - Extended 2026-05-01 08:38 KST with Live previous-pose-as-hint (operator-proposed during issue#3 HIL).
+- Extended 2026-05-01 12:00+ KST with Live mode hint pipeline (operator-locked) + Automated rough-hint via far-range features (operator-locked direction). These two are the next two work fronts after issue#3 lands.
 - MEMORY.md index entry deferred at operator's request — re-indexing happens at session-close (chronicler skill) or upon explicit request.

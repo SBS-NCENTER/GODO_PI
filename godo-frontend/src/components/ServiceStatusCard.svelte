@@ -31,6 +31,7 @@
     type SystemServiceEntry,
   } from '$lib/protocol';
   import { statusChipClass } from '$lib/serviceStatus';
+  import { refreshMode } from '$stores/mode';
   import { refresh as refreshRestartPending } from '$stores/restartPending';
 
   interface Props {
@@ -77,6 +78,10 @@
       // the SPA store so the banner clears without a page reload.
       // No-op for non-tracker services.
       void refreshRestartPending();
+      // issue#9 — also refresh mode.ts so the App.svelte tracker-down
+      // banner reflects the new state within HTTP RTT instead of
+      // waiting up to 1 s for the next polling tick.
+      void refreshMode();
       onAction?.(act);
     } catch (e) {
       const err = e as ApiError;

@@ -101,6 +101,23 @@ struct Config {
     double              amcl_hint_sigma_xy_m_default{};
     double              amcl_hint_sigma_yaw_deg_default{};
 
+    // issue#5 — Live mode pipelined-hint kernel selector + per-tick σ +
+    // schedule (recalibrate class). When `live_carry_pose_as_hint` is true
+    // the cold writer routes Live ticks through `run_live_iteration_pipelined`
+    // (sequential `converge_anneal_with_hint` driven by the previous-tick
+    // pose) instead of the bare `Amcl::step` rollback path. σ defaults are
+    // tight (matched to inter-tick crane-base drift, not padded for AMCL
+    // search comfort, per `project_hint_strong_command_semantics.md`); the
+    // schedule is short (avoids the wide-σ phases the OneShot anneal needs
+    // for basin lock — a tight carry-hint already locks the basin). Default
+    // OFF in this PR; HIL operator flips on via tracker.toml + restart, then
+    // a follow-up PR flips the compile-time default. See
+    // production/RPi5/CODEBASE.md invariant (q).
+    bool                live_carry_pose_as_hint{};
+    double              amcl_live_carry_sigma_xy_m{};
+    double              amcl_live_carry_sigma_yaw_deg{};
+    std::vector<double> amcl_live_carry_schedule_m;
+
     // Build a Config with defaults applied from core/config_defaults.hpp.
     static Config make_default();
 

@@ -79,6 +79,10 @@ const std::set<std::string>& allowed_keys() {
         "amcl.anneal_iters_per_phase",
         "amcl.hint_sigma_xy_m_default",
         "amcl.hint_sigma_yaw_deg_default",
+        "amcl.live_carry_pose_as_hint",
+        "amcl.live_carry_schedule_m",
+        "amcl.live_carry_sigma_xy_m",
+        "amcl.live_carry_sigma_yaw_deg",
         "gpio.calibrate_pin",
         "gpio.live_toggle_pin",
     };
@@ -189,6 +193,26 @@ void apply_toml_file(Config& c, const std::filesystem::path& path) {
     }
     if (auto v = tbl["amcl"]["hint_sigma_yaw_deg_default"].value<double>(); v) {
         c.amcl_hint_sigma_yaw_deg_default = *v;
+    }
+
+    // issue#5 — Live pipelined-hint kernel selector + per-tick σ + schedule.
+    // Bool-as-Int wire shape: TOML bool true/false maps to 1/0. Accept both
+    // bool and int so operator-friendly `live_carry_pose_as_hint = true`
+    // works identically to a raw `1`.
+    if (auto vb = tbl["amcl"]["live_carry_pose_as_hint"].value<bool>(); vb) {
+        c.live_carry_pose_as_hint = *vb;
+    } else if (auto vi = tbl["amcl"]["live_carry_pose_as_hint"].value<int64_t>(); vi) {
+        c.live_carry_pose_as_hint = (*vi != 0);
+    }
+    if (auto v = tbl["amcl"]["live_carry_sigma_xy_m"].value<double>();    v) {
+        c.amcl_live_carry_sigma_xy_m = *v;
+    }
+    if (auto v = tbl["amcl"]["live_carry_sigma_yaw_deg"].value<double>(); v) {
+        c.amcl_live_carry_sigma_yaw_deg = *v;
+    }
+    if (auto v = tbl["amcl"]["live_carry_schedule_m"].value<std::string>(); v) {
+        c.amcl_live_carry_schedule_m =
+            parse_csv_doubles_or_throw(*v, "amcl.live_carry_schedule_m");
     }
 
     if (auto v = tbl["gpio"]["calibrate_pin"].value<int64_t>();    v) c.gpio_calibrate_pin   = static_cast<int>(*v);
@@ -437,6 +461,39 @@ void apply_env(Config& c, char** envp) {
             parse_double_or_throw(*v, "GODO_AMCL_HINT_SIGMA_YAW_DEG_DEFAULT");
     }
 
+    // issue#5 — Live pipelined-hint kernel keys. Bool-as-Int env wire form:
+    // accept "0", "1", "true", "false" (case-insensitive) for the flag.
+    if (auto v = env_get(envp, "GODO_LIVE_CARRY_POSE_AS_HINT")) {
+        const std::string s = *v;
+        std::string lower;
+        lower.reserve(s.size());
+        for (char ch : s) {
+            lower.push_back(static_cast<char>(std::tolower(
+                static_cast<unsigned char>(ch))));
+        }
+        if (lower == "true" || lower == "1") {
+            c.live_carry_pose_as_hint = true;
+        } else if (lower == "false" || lower == "0") {
+            c.live_carry_pose_as_hint = false;
+        } else {
+            throw std::runtime_error(
+                std::string("config: GODO_LIVE_CARRY_POSE_AS_HINT='") + s +
+                "' must be one of {0, 1, true, false}");
+        }
+    }
+    if (auto v = env_get(envp, "GODO_AMCL_LIVE_CARRY_SIGMA_XY_M")) {
+        c.amcl_live_carry_sigma_xy_m =
+            parse_double_or_throw(*v, "GODO_AMCL_LIVE_CARRY_SIGMA_XY_M");
+    }
+    if (auto v = env_get(envp, "GODO_AMCL_LIVE_CARRY_SIGMA_YAW_DEG")) {
+        c.amcl_live_carry_sigma_yaw_deg =
+            parse_double_or_throw(*v, "GODO_AMCL_LIVE_CARRY_SIGMA_YAW_DEG");
+    }
+    if (auto v = env_get(envp, "GODO_AMCL_LIVE_CARRY_SCHEDULE_M")) {
+        c.amcl_live_carry_schedule_m =
+            parse_csv_doubles_or_throw(*v, "GODO_AMCL_LIVE_CARRY_SCHEDULE_M");
+    }
+
     if (auto v = env_get(envp, "GODO_GPIO_CALIBRATE_PIN"))             c.gpio_calibrate_pin             = parse_int_or_throw(*v, "GODO_GPIO_CALIBRATE_PIN");
     if (auto v = env_get(envp, "GODO_GPIO_LIVE_TOGGLE_PIN"))           c.gpio_live_toggle_pin           = parse_int_or_throw(*v, "GODO_GPIO_LIVE_TOGGLE_PIN");
 }
@@ -520,6 +577,27 @@ void apply_cli(Config& c, int argc, char** argv) {
         {"amcl-anneal-iters-per-phase",    [](Config& cc, const std::string& v){ cc.amcl_anneal_iters_per_phase    = parse_int_or_throw(v, "--amcl-anneal-iters-per-phase"); }},
         {"amcl-hint-sigma-xy-m-default",   [](Config& cc, const std::string& v){ cc.amcl_hint_sigma_xy_m_default   = parse_double_or_throw(v, "--amcl-hint-sigma-xy-m-default"); }},
         {"amcl-hint-sigma-yaw-deg-default",[](Config& cc, const std::string& v){ cc.amcl_hint_sigma_yaw_deg_default = parse_double_or_throw(v, "--amcl-hint-sigma-yaw-deg-default"); }},
+        // issue#5 — Live pipelined-hint kernel keys. Flag accepts the
+        // {0, 1, true, false} CLI tokens; sigma + schedule pair with
+        // the existing AMCL keys' parser pattern.
+        {"live-carry-pose-as-hint",        [](Config& cc, const std::string& v){
+            std::string lower;
+            lower.reserve(v.size());
+            for (char ch : v) {
+                lower.push_back(static_cast<char>(std::tolower(
+                    static_cast<unsigned char>(ch))));
+            }
+            if (lower == "true" || lower == "1") cc.live_carry_pose_as_hint = true;
+            else if (lower == "false" || lower == "0") cc.live_carry_pose_as_hint = false;
+            else {
+                throw std::runtime_error(
+                    std::string("config: --live-carry-pose-as-hint='") + v +
+                    "' must be one of {0, 1, true, false}");
+            }
+        }},
+        {"amcl-live-carry-sigma-xy-m",     [](Config& cc, const std::string& v){ cc.amcl_live_carry_sigma_xy_m     = parse_double_or_throw(v, "--amcl-live-carry-sigma-xy-m"); }},
+        {"amcl-live-carry-sigma-yaw-deg",  [](Config& cc, const std::string& v){ cc.amcl_live_carry_sigma_yaw_deg  = parse_double_or_throw(v, "--amcl-live-carry-sigma-yaw-deg"); }},
+        {"amcl-live-carry-schedule-m",     [](Config& cc, const std::string& v){ cc.amcl_live_carry_schedule_m     = parse_csv_doubles_or_throw(v, "--amcl-live-carry-schedule-m"); }},
         {"gpio-calibrate-pin",             [](Config& cc, const std::string& v){ cc.gpio_calibrate_pin             = parse_int_or_throw(v, "--gpio-calibrate-pin"); }},
         {"gpio-live-toggle-pin",           [](Config& cc, const std::string& v){ cc.gpio_live_toggle_pin           = parse_int_or_throw(v, "--gpio-live-toggle-pin"); }},
     };
@@ -587,6 +665,47 @@ void validate_amcl(const Config& c) {
     require_positive_double(c.amcl_sigma_yaw_jitter_live_deg, "amcl_sigma_yaw_jitter_live_deg");
     require_positive_double(c.amcl_sigma_seed_xy_m,           "amcl_sigma_seed_xy_m");
     require_positive_double(c.amcl_sigma_seed_yaw_deg,        "amcl_sigma_seed_yaw_deg");
+    // issue#5 — Live carry σ + schedule bounds (matches config_schema.hpp).
+    if (!(c.amcl_live_carry_sigma_xy_m >= 0.001 &&
+          c.amcl_live_carry_sigma_xy_m <= 0.5)) {
+        throw std::runtime_error(
+            "config: amcl_live_carry_sigma_xy_m must be in [0.001, 0.5] "
+            "(got " + std::to_string(c.amcl_live_carry_sigma_xy_m) + ")");
+    }
+    if (!(c.amcl_live_carry_sigma_yaw_deg >= 0.05 &&
+          c.amcl_live_carry_sigma_yaw_deg <= 30.0)) {
+        throw std::runtime_error(
+            "config: amcl_live_carry_sigma_yaw_deg must be in [0.05, 30.0] "
+            "(got " + std::to_string(c.amcl_live_carry_sigma_yaw_deg) + ")");
+    }
+    if (c.amcl_live_carry_schedule_m.empty()) {
+        throw std::runtime_error(
+            "config: amcl_live_carry_schedule_m must be non-empty");
+    }
+    {
+        constexpr double kSigmaMin = 0.005;
+        constexpr double kSigmaMax = 5.0;
+        for (std::size_t i = 0; i < c.amcl_live_carry_schedule_m.size(); ++i) {
+            const double v = c.amcl_live_carry_schedule_m[i];
+            if (!(v >= kSigmaMin) || !(v <= kSigmaMax)) {
+                throw std::runtime_error(
+                    "config: amcl_live_carry_schedule_m[" + std::to_string(i) +
+                    "] = " + std::to_string(v) +
+                    " out of range [" + std::to_string(kSigmaMin) + ", " +
+                    std::to_string(kSigmaMax) + "]");
+            }
+            if (i > 0) {
+                const double prev = c.amcl_live_carry_schedule_m[i - 1];
+                if (!(v < prev)) {
+                    throw std::runtime_error(
+                        "config: amcl_live_carry_schedule_m must be strictly "
+                        "monotonically decreasing; entry " + std::to_string(i) +
+                        " (" + std::to_string(v) + ") is not < entry " +
+                        std::to_string(i - 1) + " (" + std::to_string(prev) + ")");
+                }
+            }
+        }
+    }
     // issue#3 — hint default σ bounds (Mode-A schema bounds; matches
     // config_schema.hpp + webctl Pydantic CalibrateBody).
     if (!(c.amcl_hint_sigma_xy_m_default >= 0.05 &&
@@ -749,6 +868,14 @@ Config Config::make_default() {
     // issue#3 — hint-σ defaults.
     c.amcl_hint_sigma_xy_m_default    = cfg_defaults::AMCL_HINT_SIGMA_XY_M_DEFAULT;
     c.amcl_hint_sigma_yaw_deg_default = cfg_defaults::AMCL_HINT_SIGMA_YAW_DEG_DEFAULT;
+
+    // issue#5 — Live pipelined-hint kernel defaults.
+    c.live_carry_pose_as_hint        = cfg_defaults::LIVE_CARRY_POSE_AS_HINT;
+    c.amcl_live_carry_sigma_xy_m     = cfg_defaults::AMCL_LIVE_CARRY_SIGMA_XY_M;
+    c.amcl_live_carry_sigma_yaw_deg  = cfg_defaults::AMCL_LIVE_CARRY_SIGMA_YAW_DEG;
+    c.amcl_live_carry_schedule_m     =
+        parse_csv_doubles_or_throw(cfg_defaults::AMCL_LIVE_CARRY_SCHEDULE_M,
+                                   "AMCL_LIVE_CARRY_SCHEDULE_M");
 
     return c;
 }

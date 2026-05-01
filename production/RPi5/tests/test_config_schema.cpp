@@ -20,8 +20,8 @@ using godo::core::config_schema::reload_class_to_string;
 using godo::core::config_schema::ValueType;
 using godo::core::config_schema::value_type_to_string;
 
-TEST_CASE("CONFIG_SCHEMA has exactly 42 rows (issue#3 fold added 2 hint-σ rows)") {
-    CHECK(CONFIG_SCHEMA.size() == 42);
+TEST_CASE("CONFIG_SCHEMA has exactly 46 rows (issue#5 fold added 4 Live-carry rows)") {
+    CHECK(CONFIG_SCHEMA.size() == 46);
 }
 
 TEST_CASE("CONFIG_SCHEMA rows are alphabetically ordered by name") {
@@ -117,6 +117,31 @@ TEST_CASE("Track D-5: amcl.sigma_hit_m upper bound bumped 1.0 → 5.0") {
     const auto* row = find("amcl.sigma_hit_m");
     REQUIRE(row != nullptr);
     CHECK(row->max_d == 5.0);
+}
+
+TEST_CASE("issue#5: Live-carry rows present (count went 42 → 46)") {
+    // Bool-as-Int selector + tight σ pair + per-tick schedule. All four
+    // are recalibrate-class because flipping the kernel mid-flight or
+    // shifting σ invalidates the particle cloud.
+    const auto* flag       = find("amcl.live_carry_pose_as_hint");
+    const auto* sched      = find("amcl.live_carry_schedule_m");
+    const auto* sigma_xy   = find("amcl.live_carry_sigma_xy_m");
+    const auto* sigma_yaw  = find("amcl.live_carry_sigma_yaw_deg");
+    REQUIRE(flag      != nullptr);
+    REQUIRE(sched     != nullptr);
+    REQUIRE(sigma_xy  != nullptr);
+    REQUIRE(sigma_yaw != nullptr);
+    CHECK(flag->type      == ValueType::Int);     // Bool-as-Int convention
+    CHECK(flag->min_d     == 0.0);
+    CHECK(flag->max_d     == 1.0);
+    CHECK(flag->default_repr == "0");             // ships OFF
+    CHECK(sched->type     == ValueType::String);
+    CHECK(sigma_xy->type  == ValueType::Double);
+    CHECK(sigma_yaw->type == ValueType::Double);
+    CHECK(flag->reload_class      == ReloadClass::Recalibrate);
+    CHECK(sched->reload_class     == ReloadClass::Recalibrate);
+    CHECK(sigma_xy->reload_class  == ReloadClass::Recalibrate);
+    CHECK(sigma_yaw->reload_class == ReloadClass::Recalibrate);
 }
 
 TEST_CASE("Each row has a non-empty description and consistent name format") {

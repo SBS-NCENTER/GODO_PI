@@ -13,20 +13,21 @@
    */
 
   import { onDestroy, onMount } from 'svelte';
-  import { restartPending, refresh as refreshFlag } from '$stores/restartPending';
+  import { subscribeRestartPending } from '$stores/restartPending';
 
   let pending = $state(false);
   let trackerOk = $state(true);
   let unsub: (() => void) | null = null;
 
+  // issue#8 — subscribe via subscribeRestartPending so the first mount
+  // also starts the 1 Hz polling backstop. Without polling, the banner
+  // sticks after a service-restart action because the post-action
+  // refresh fires before tracker boot clears the sentinel.
   onMount(() => {
-    unsub = restartPending.subscribe((s) => {
+    unsub = subscribeRestartPending((s) => {
       pending = s.pending;
       trackerOk = s.trackerOk;
     });
-    // Fire-and-forget initial refresh — no point blocking the parent
-    // page's layout on the flag fetch.
-    void refreshFlag();
   });
 
   onDestroy(() => {

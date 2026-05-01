@@ -603,6 +603,56 @@ preview proxy needed.
 
 ## Change log
 
+### 2026-05-01 14:09 KST — issue#9 — action-driven mode refresh hook
+
+#### Changed
+
+- `src/stores/mode.ts` — added `refreshMode()` export. Fires one
+  immediate `pollOnce` (which writes both `mode` and `trackerOk`)
+  and resets the polling-interval phase so the NEXT regular tick is
+  `HEALTH_POLL_MS` after the refresh, not at the original mount-time
+  phase. Mirrors PR #45's pattern (action-driven `refresh()`) and
+  pairs with the polling backstop already established by PR #59.
+  Also added `reset()` test helper so unit tests can isolate
+  module-level state (`subscriberCount`, `pollTimer`).
+- `src/components/ServiceCard.svelte` — action handler now calls
+  `void refreshMode()` after `void refreshRestartPending()`.
+- `src/components/ServiceStatusCard.svelte` — same dual refresh.
+- `tests/unit/mode.test.ts` — new file. 6 tests covering subscribe-
+  driven polling (on / on-error), `refreshMode` immediate fetch,
+  `refreshMode` flipping `trackerOk` within HTTP RTT, polling-phase
+  reset semantics, and `refreshMode` working without an active
+  subscriber.
+
+#### Why an explicit refresh, not just polling
+
+Operator HIL after PR #59 deploy reported the App.svelte tracker-
+down banner ("godo-tracker가 응답하지 않습니다") clearing almost
+instantly on Start / Restart click. Code-trace analysis confirmed
+PR #59 did NOT directly affect `mode.trackerOk` (PR #59 only updates
+the separate `restartPending` store). The observed speedup was an
+emergent property of mount-time polling-phase alignment after the
+hard reload — fragile and undocumented. This PR makes the same
+behaviour explicit and deterministic:
+
+- **Stop click**: banner appears within HTTP RTT (~tens of ms)
+  instead of waiting up to 1 s for the polling tick.
+- **Restart click**: catches the transient `unreachable` window
+  during the bounce, showing the operator that the action took
+  effect before the tracker reboots.
+- **Start click**: still bounded by tracker boot time, not polling
+  cadence — `refreshMode()` fires immediately after `apiPost`
+  returns, but the response typically still shows
+  `tracker:"unreachable"` because the tracker is still booting.
+  The polling backstop (1 Hz) catches the up-transition.
+
+#### Out of scope
+
+- Burst polling (e.g. 200 ms cadence for 5 s after a tracker action)
+  to catch the up-transition faster than 1 Hz. Operator's perception
+  is already in the "feels instant" range; revisit only if HIL
+  surfaces a genuinely slow up-detection.
+
 ### 2026-05-01 13:29 KST — issue#8 — restart-pending banner polling backstop
 
 #### Changed

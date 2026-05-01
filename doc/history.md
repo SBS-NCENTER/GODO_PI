@@ -10,6 +10,106 @@
 
 ---
 
+## 2026-05-01 (오후 ~ 저녁 — 14:30 KST → 20:30 KST, 열다섯 번째 세션 — issue#5 Live pipelined-hint kernel ships + HIL 압도적 + issue#12 latency defaults + issue#13-cand mapping 해상도 + 프론트엔드 timestamps + issue#14 SPA mapping pipeline plan)
+
+### 한 줄 요약
+
+PR #62 (issue#5 Live pipelined-hint kernel)이 머지되며 Live drift가 ~4 m → ±5 cm, yaw drift ~90° → ±1°로 개선됨. 이어서 PR #63이 issue#5 default-flip + issue#12 latency defaults + issue#13-cand 매핑 해상도 + 프론트엔드 timestamps 묶음으로 머지. Plan #14 (SPA mapping pipeline 통합, 1393 줄 + Parent SSE-separation amendment) 작성 완료, Mode-A는 다음 세션으로 이월. σ tighten 실험은 명확히 거부되어 σ semantics가 양방향(widen 금지 + tighten 금지)으로 잠금됨.
+
+### 2 PR + 1 Plan
+
+| PR / Plan | issue | 제목 | 결과 |
+|---|---|---|---|
+| #62 | issue#5 | feat(rpi5): issue#5 — Live mode pipelined-hint kernel | merged (squash) |
+| #63 | issue#5 follow-up + #12 + #13-cand | feat: issue#5 default-flip + issue#12 latency + issue#13-cand 매핑 해상도 + 프론트엔드 timestamps | merged (squash) |
+| Plan #14 | issue#14 | SPA Mapping pipeline + monitoring (1393 줄 + S1-S6 SSE-separation amendment) | `.claude/tmp/plan_issue_14_mapping_pipeline_spa.md`에 작성, Mode-A는 열여섯 번째 세션으로 이월 |
+
+### 결정 #1 — Live mode = "pipelined one-shot driven by previous-pose-as-hint, never bare step()"
+
+issue#5의 핵심은 Live mode를 깊은 convergence로 만드는 것이 **아니고**, kernel 자체를 바꾸는 것이었음. 기존 `Amcl::step` per-scan 방식은 first-iteration `seed_global`이 가끔 wrong basin lock하면 ~4 m drift가 발생 (열두 번째 세션의 `project_amcl_multi_basin_observation.md` 참조). 새 kernel은 매 tick `converge_anneal_with_hint(hint=pose[t-1], σ=tight)` 호출 — `pose[t-1]`이 hint anchor 역할이라 carry-hint cloud 안에서만 흔들리고 multi-basin 탈출 자체가 봉쇄됨.
+
+운영자 인용 (HIL 직후): **"완전 잘 맞아. 오히려 이전 상태가 힌트가 되서 그런지 튀는 증상 없이 계속 자기 위치를 찾아."** 이전 4 m drift 대비 ±5 cm 정지 / ±10 cm 이동 정밀도 — 약 **20× 개선**. yaw도 ±90° → ±1°로 **~100× 개선**.
+
+PR #62는 default-OFF로 ship (rollback safety). PR #63 후속에서 default-ON으로 flip — 운영자 HIL 승인 직후 ~3 LOC 변경. tracker.toml의 `amcl.live_carry_pose_as_hint = 0`로 여전히 옛 동작 복귀 가능.
+
+### 결정 #2 — σ는 양방향으로 잠금됨 (widen 금지 + tighten 금지)
+
+`project_hint_strong_command_semantics.md`는 원래 "do NOT widen for AMCL search comfort" 한쪽 방향만 잠갔는데, 이번 세션에 σ_xy 0.05 → 0.02 실험으로 반대 방향까지 잠금됨. 운영자가 정지 ±2-3 cm jitter를 줄이려 시도 — 결과: yaw range가 0.338° → 0.844° (2.5×) **악화**, max yaw_std 0.224° → 1.925° (8.6×) **악화**, 600 frame 중 2 frame이 수렴 실패. 5000-particle budget이 좁은 xy로 압축되면서 yaw 자유도 entropy가 풀려나는 것.
+
+운영자 즉각 σ 0.05로 복원. 메모리 `project_hint_strong_command_semantics.md`에 σ tighten 실험 결과 추가 — 향후 σ 좁히려는 시도가 반복되지 않도록 negative result로 기록. 진짜 floor는 map cell 양자화 (0.05 m/cell × 0.73 cells = ~36 mm range 측정) — issue#13-cand로 SLAM 기본 해상도를 0.05 → 0.025로 절반 줄임 (PR #63 commit `3225149`). 기존 맵은 그대로, 향후 SLAM 실행 시에만 4× cell 적용.
+
+### 결정 #3 — issue#12 latency defaults
+
+운영자 HIL에서 SPA pose marker가 0.5 s 지연되는 것을 발견. SPA path는 smoother를 거치지 않으므로 분석 결과 (a) 5 Hz SSE polling이 200 ms 추가 + (b) Smoother가 OneShot UX 위해 500 ms ramp 적용된 것이 두 원인.
+
+운영자 결정 (직접 인용): **"논리적으로 이게 맞으니까 이걸로 고정하는 것이 좋겠어. (SPA config에서 수정 가능하게끔)"** + **"웹 갱신 주기는 30으로 하자. 그 지도 부분에만 적용하면 될 듯"**.
+
+PR #63 변경:
+- `smoother.t_ramp_ms` default 500 → 100 ms (1 LiDAR tick 분량). SYSTEM_DESIGN.md §6.4 design intent (Live-primary)와 일치.
+- 두 webctl-namespaced cfg key 신규: `webctl.pose_stream_hz` + `webctl.scan_stream_hz` default 30 Hz, [1, 60] 범위. SPA Config tab에서 수정 가능.
+- 다른 SSE stream (services 1 Hz, processes 1 Hz, resources_extended 1 Hz, diag 5 Hz)는 그대로 — "지도 부분에만 적용" 운영자 의도 보존.
+
+### 결정 #4 — Route α (Config-struct-mapped)로 webctl-namespaced key 처리
+
+PR #63 Mode-A가 schema-row-only Route 1을 **REWORK**로 거부함. 3개 critical 결함:
+1. `apply_set` (SPA edit path) — `apply_one`이 unmapped key에 `internal_error` 응답 → SPA edit 깨짐.
+2. `render_toml` — unmapped key에 0 emit → tracker.toml이 매 commit마다 0으로 덮어쓰임.
+3. `apply_get_all` — 0 반환 → SPA "current value" 컬럼 잘못된 값.
+
+Parent 결정 — Route α로 전환: tracker `Config` struct에 `webctl_pose_stream_hz`/`webctl_scan_stream_hz` int field 추가. tracker는 저장만 하고 **읽지 않음**. webctl가 `webctl_toml.read_webctl_section`으로 `/var/lib/godo/tracker.toml`에서 직접 읽음. RPi5 invariant `(r)` + webctl invariant `(ac)` 신규.
+
+별도 Planner 재호출 없이 Parent decision A1-A10으로 Writer가 직접 흡수. Mode-B가 Route α invariant end-to-end 검증 (tracker logic path가 새 field를 읽지 않는지 grep로 확인) — ACCEPT-AS-IS.
+
+### 결정 #5 — issue#14 SPA mapping pipeline (Plan only)
+
+운영자가 SLAM 매핑 워크플로를 SPA 안으로 가져오자고 제안. 현재는 ssh + docker run + Ctrl+C + scp 흐름인데, "Mapping" 4번째 system mode를 도입하여 SPA에서 컨트롤 + 모니터링하는 Plan 작성.
+
+운영자 결정 14개 (L1-L14):
+- Map tab 하위 sub-tab 3개 (Overview/Edit/Mapping)
+- Mapping mode 진입 시 tracker 자동 stop, 종료 후 운영자가 수동으로 tracker 재시작
+- LiDAR USB 포트는 tracker config의 `serial.lidar_port` 값을 dynamic inject (단일 SSOT)
+- 맵 이름 정규식 `^[A-Za-z0-9._\-(),]+$` 1-64자, 공백 미허용
+- `/var/lib/godo/maps/` 직접 bind-mount, staging 디렉터리 없음
+- 종료 후 수동 activate (Map > Overview에서)
+- `godo-mapping@<name>.service` systemd template, NOT enabled (tracker 패턴 일치)
+- 1 Hz 별도 Python rclpy ROS2 node가 `/map` 토픽 구독 + PGM dump (bash loop + map_saver_cli 매번 호출보다 안정적)
+- Docker 권한 `usermod -aG docker ncenter` install.sh에 추가
+- polkit rule for `godo-mapping@.service`
+- 매핑 중 다른 mode 진입 차단 + banner 경고
+
+Parent post-Plan amendment (S1-S6 — SSE 분리 결정): 운영자 추가 인사이트로 monitoring SSE를 분리하기로 함. 운영자 인용: **"SSE 프로세스를 분리해서 쓰는 것이 더 좋을 것 같아. 기존 SSE는 영향 받지 않도록... 도커 맵 제작시에는 추가적인 SSE 프로세스를 실행하여 리소스 모니터링 하자. 그리고 맵 제작 끝나면 SSE는 종료, 브라우저에서는 맵 제작 종료 되면 폴백 안하고 RPi5의 리소스만 계속 보냄. Docker의 리소스는 -중단됨-으로 표시 전환"**
+
+→ Mapping monitor SSE는 **Docker stats + disk + map size만**. RPi5 system stats는 기존 stream에 그대로. SPA Mapping strip이 두 SSE 동시 구독; Docker SSE 종료 시 마지막 frame freeze + "중단됨" 배지로 전환 (HTTP 폴링 폴백 없음).
+
+총 ~2000 LOC 예상. Mode-A부터 Writer까지 풀 파이프라인 작업이 열여섯 번째 세션의 P0.
+
+### LiDAR USB 포트 swap 사고
+
+세션 중간 16:15:45에 LiDAR USB-C 케이블이 끊어졌다 다시 꽂히면서 `/dev/ttyUSB0` → `/dev/ttyUSB1`로 슬롯 변경됨. tracker config는 여전히 ttyUSB0 가리키고 있어 `getDeviceInfo failed` 반복. 운영자가 tracker.toml `serial.lidar_port`를 ttyUSB1로 업데이트 + restart로 즉시 복구.
+
+근본 해결: udev rule로 USB 시리얼 (`2eca2bbb4d6eef1182aae9c2c169b110`) 기반 stable symlink (`/dev/rplidar`) 만들기 — **issue#10**으로 backlog. dmesg 히스토리 보면 swap 직전 1시간 동안 `set request 0x12 status: -110` 에러가 누적됨 — 잠재 문제가 acute해진 케이스.
+
+### Mode-A REWORK 두 번 — 둘 다 Parent decision으로 해결
+
+이번 세션의 process notable: planner가 두 번 모두 architectural simplicity를 과대평가했음. 둘 다 별도 Planner 재호출 없이 Parent decision으로 amendment fold + Writer 직접 흡수로 해결.
+
+- **PR #62 Mode-A**: 5 majors. M1 (`share/config_schema.hpp` mirror file이 tracked file 아님 — install-time generated), M2 (`bool last_pose_set` cold-start guard 도입; pose 값 비교는 위험), M3 (Bool-as-Int convention 명시), M4 (4번째 cfg key `amcl.live_carry_schedule_m` 추가 — R1 wall-clock budget 보호), M5 (round-trip rollback test case 추가).
+- **PR #63 Mode-A**: 3 critical (REWORK). Route 1 schema-row-only가 architecturally infeasible. Parent가 Route α (Config-struct-mapped)로 전환. webctl-namespaced key의 tracker 측 처리 방식이 새 패턴 — RPi5 invariant `(r)` + webctl invariant `(ac)` 잠금.
+
+플래너 정확도가 100%일 필요 없음. Mode-A의 가치는 정확히 이런 architectural mismatch를 Writer에 도달하기 전에 잡는 것 — 두 번 다 작동.
+
+### 다음 세션 큐
+
+1. **issue#14 — SPA Mapping pipeline + monitoring** (P0, 풀 파이프라인). 1393 줄 plan + S1-S6 amendment 준비됨. 열여섯 번째 세션 = Mode-A → Writer (~2000 LOC, 4 stack) → Mode-B → PR → multi-stack deploy → HIL Scenarios A-F.
+2. **issue#10 — udev rule for stable LiDAR symlink** (이번 세션 USB swap으로 acute해짐). `/etc/udev/rules.d/99-rplidar.rules` + tracker.toml `/dev/rplidar` 전환.
+3. **issue#11 — Live pipelined-parallel multi-thread**. 운영자 PR #62 HIL 인사이트: "OneShot처럼 정밀하게 + CPU pipeline like 계산". carry-hint locked basin 전제 하에 K-step parallel across cores 0/1/2. `project_pipelined_compute_pattern.md` "Why sequential ships first"의 약속된 follow-up.
+4. **issue#13 (continued) — distance-weighted AMCL likelihood**. `project_calibration_alternatives.md` "Distance-weighted AMCL likelihood." 단일-knob 알고리즘 실험.
+5. **issue#4 — AMCL silent-converge diagnostic** (carryover; 이번 세션 HIL 데이터가 baseline 됨).
+6. **issue#6 — B-MAPEDIT-3 yaw rotation** (carryover).
+7. **issue#7 — boom-arm angle masking** (carryover, contingent on issue#4).
+
+---
+
 ## 2026-05-01 (오후 — 12:30 KST → 14:30 KST, 열네 번째 세션 — issue#8 banner polling backstop + issue#9 mode action-hook + CLAUDE.md §8 Deployment + PR workflow 거버넌스 정리)
 
 ### 한 줄 요약

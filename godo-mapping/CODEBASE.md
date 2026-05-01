@@ -245,6 +245,35 @@ A reviewer or maintainer who removes the rf2o (or B/C equivalent) from the launc
 
 ## Change log
 
+### 2026-05-01 18:36 KST — issue#13-candidate (partial): SLAM default resolution 0.05 → 0.025 m/cell
+
+#### Changed
+
+- `config/slam_toolbox_async.yaml` — `resolution: 0.05 → 0.025`. The σ_xy
+  tighten experiment on PR-#62 (logged in
+  `.claude/memory/project_hint_strong_command_semantics.md`) demonstrated that
+  the standstill ±2-3 cm AMCL jitter floor is map-cell quantization-bounded:
+  observed y range 36 mm = 0.73 cells at the previous 0.05 m/cell. Halving
+  the cell width halves the quantization floor; AMCL likelihood-field memory
+  grows ~4× (2× along each axis), still well under Pi 5 8 GB.
+- Inline comment block on the `resolution:` key rewritten to record the
+  rationale, the operator HIL data point, and the existing-map non-migration
+  rule.
+- "Directory layout" pointer to the YAML key updated from `resolution: 0.05`
+  to `resolution: 0.025` so doc and YAML stay in sync.
+
+#### Out of scope
+
+- Existing PGM/YAML maps under `/var/lib/godo/maps/` stay at 0.05 m/cell.
+  Only new SLAM runs pick up the new default.
+- Distance-weighted likelihood (separate issue#13 follow-up).
+- AMCL likelihood-field code untouched (memory budget covered by Pi 5 8 GB).
+
+#### Tests
+
+- (none — mapping pipeline runs in Docker per CLAUDE.md §3, not unit-tested
+  in repo; YAML diff is a single literal change.)
+
 ### 2026-04-27 — Phase 4 Track A initial scaffold
 
 #### Added
@@ -257,7 +286,8 @@ A reviewer or maintainer who removes the rf2o (or B/C equivalent) from the launc
   defaults) with `slam_toolbox/async_slam_toolbox_node`. Plan F1 Option A:
   no `static_transform_publisher`.
 - `config/slam_toolbox_async.yaml` — `base_frame: laser`, `odom_frame: odom`,
-  `map_frame: map`, `resolution: 0.05`, `save_map_timeout: 10.0`,
+  `map_frame: map`, `resolution: 0.025` (halved 2026-05-01; see change log),
+  `save_map_timeout: 10.0`,
   `min_laser_range: 0.05`, `max_laser_range: 12.0`, plus update-rate
   defaults. Each numeric literal carries an inline origin/rationale
   comment per F3.

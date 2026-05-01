@@ -23,10 +23,16 @@ slam_toolbox:
     mode: mapping            # async mapping (vs. localization)
 
     # ── Resolution ────────────────────────────────────────────────────────
-    # 5 cm/cell; below project 1–2 cm accuracy target leaves Nyquist headroom
-    # on the cell grid. C1 angular resolution at 5 m wall is ~0.7 cm of arc,
-    # well under one cell.
-    resolution: 0.05
+    # 2.5 cm/cell. Lowered from 0.05 on 2026-05-01 (issue#13-candidate, partial)
+    # after the σ_xy tighten experiment on PR-#62 showed the standstill ±2-3 cm
+    # AMCL jitter floor was map-cell quantization-bounded (observed y range
+    # 36 mm = 0.73 cells at 0.05 m/cell). Halving the cell width halves the
+    # quantization floor; AMCL likelihood-field memory grows ~4× (2× along each
+    # axis), still well under Pi 5 8 GB. Existing 0.05-cell maps under
+    # /var/lib/godo/maps/ are NOT migrated — only new SLAM runs pick up this
+    # default. C1 angular resolution at 5 m wall is ~0.7 cm of arc, still well
+    # under one cell at 2.5 cm.
+    resolution: 0.025
 
     # ── Map saver timeout ─────────────────────────────────────────────────
     # 10 s; nav2_map_server uses double seconds, NOT ms.

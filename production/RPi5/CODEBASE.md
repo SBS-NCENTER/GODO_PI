@@ -567,6 +567,71 @@ has been synced (`uv sync`).
 
 ---
 
+## 2026-05-01 09:15 KST — fix(install): tracker.toml moved to /var/lib/godo (RW under sandbox)
+
+### Why
+
+Pre-existing production install bug surfaced during issue#3 HIL on
+news-pi01. The systemd unit declares `ReadOnlyPaths=/etc/godo` plus
+`ProtectSystem=strict` for defence-in-depth, which makes the directory
+read-only from the tracker process's namespace view. The atomic-rename
+TOML writer needs to `mkstemp(parent_dir/.tracker.toml.XXXXXX) +
+rename`, so a read-only parent meant **every** SPA Config-tab edit
+returned `write_failed` (`parent_not_writable: Read-only file
+system`).
+
+The earlier production code defaulted `tracker.toml` to `/etc/godo/`,
+which would have surfaced this the first time anyone tried to edit a
+config from the SPA. It went unnoticed because the operator had not
+exercised the Config tab write path until issue#3 needed it for the
+hint-σ Tier-2 keys.
+
+### What changed
+
+- `production/RPi5/src/godo_tracker_rt/main.cpp` — default `toml_path`
+  now `/var/lib/godo/tracker.toml` (was `/etc/godo/tracker.toml`).
+  `GODO_CONFIG_PATH` env override unchanged.
+- `production/RPi5/src/core/config.cpp::Config::load` — fallback
+  search target now `/var/lib/godo/tracker.toml` (was
+  `/etc/godo/tracker.toml`).
+- `production/RPi5/systemd/install.sh` — added step `[6/8]` that
+  creates `/var/lib/godo/tracker.toml` (empty, ncenter:ncenter, 0644)
+  if absent, AND migrates an existing `/etc/godo/tracker.toml` file
+  written by a pre-fix install. Renumbered headers (now `[1/8]`..
+  `[8/8]`).
+- Comment cascades — `config.hpp`, `config_defaults.hpp`,
+  `atomic_toml_writer.hpp`, `production/RPi5/README.md`,
+  `SYSTEM_DESIGN.md` §11.2.
+
+### Migration for existing news-pi01 install
+
+Re-running `sudo bash production/RPi5/systemd/install.sh` after this
+PR lands:
+
+1. Creates `/var/lib/godo/tracker.toml` with the right ownership.
+2. Moves any existing `/etc/godo/tracker.toml` over (preserves operator
+   edits made before the fix; warns if both files exist non-empty).
+
+Operator-applied workaround on news-pi01 prior to this PR (env var
+override) becomes redundant and may be removed from
+`/etc/godo/tracker.env`.
+
+### Tests
+
+No new tests. The atomic_toml_writer tests already use a tmp dir per
+test case (independent of the production path); the path change is
+purely a default-value swap and is exercised by the existing config
+loader tests through the env override layer.
+
+### Invariant updates
+
+None — invariant `(a)` … `(o)` text references the abstract concept of
+the TOML file (the path itself is not part of any invariant body). The
+atomic_toml_writer's `[atomic-toml-write-grep]` exclusivity invariant
+also ignores path; it pins the write *function*.
+
+---
+
 ## 2026-04-23 — Initial scaffold (Plan B v2, P3-1…P3-10)
 
 ### Added

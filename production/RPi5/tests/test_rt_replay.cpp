@@ -35,6 +35,7 @@ TEST_CASE("E2E replay — Linux only; skipped on this platform") {
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -134,6 +135,22 @@ TEST_CASE("E2E: tracker_rt forwards FreeD-in to UDP-out with offset applied") {
                   static_cast<int>(::getpid()));
     ::unlink(tmp_pid);  // sweep stale leftover from a prior crash.
 
+    // Test isolation: force tracker to use an empty per-run TOML so the
+    // production /var/lib/godo/tracker.toml on a developer host (which
+    // may carry runtime-injected keys the in-tree Config struct doesn't
+    // know about yet — e.g., during a stacked PR) cannot reach into
+    // this E2E test. Without this override the tracker default-search
+    // would land on the developer host's runtime TOML and fail with
+    // "unknown TOML key" before the FreeD path is even exercised.
+    char tmp_toml[256];
+    std::snprintf(tmp_toml, sizeof(tmp_toml),
+                  "/tmp/godo_rt_replay_%d.toml",
+                  static_cast<int>(::getpid()));
+    {
+        std::ofstream(tmp_toml).close();  // create empty file
+    }
+    ::setenv("GODO_CONFIG_PATH", tmp_toml, /*overwrite=*/1);
+
     std::vector<std::string> args_store = {
         find_tracker_binary(),
         "--freed-port",   slave,
@@ -221,6 +238,9 @@ TEST_CASE("E2E: tracker_rt forwards FreeD-in to UDP-out with offset applied") {
     // Sweep tracker's tmp pidfile (dtor unlinks on graceful shutdown,
     // but a SIGKILL path leaves it). ENOENT is fine.
     ::unlink(tmp_pid);
+    // Sweep the test isolation TOML + restore env.
+    ::unlink(tmp_toml);
+    ::unsetenv("GODO_CONFIG_PATH");
 }
 
 #endif  // __linux__

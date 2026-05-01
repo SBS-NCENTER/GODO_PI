@@ -6,7 +6,7 @@
 //   1. CLI flags               (--ue-host, --ue-port, --freed-port, ...)
 //   2. Environment variables   (GODO_UE_HOST, GODO_UE_PORT, ...)
 //   3. TOML file               (path from $GODO_CONFIG_PATH, default
-//                               /etc/godo/tracker.toml; optional)
+//                               /var/lib/godo/tracker.toml; optional)
 //   4. Compile-time defaults   (config_defaults.hpp)
 //
 // Unknown TOML keys are rejected with an actionable error message.

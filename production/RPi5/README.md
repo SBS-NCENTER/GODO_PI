@@ -215,7 +215,7 @@ Configuration precedence (highest first):
 
 1. CLI flags
 2. Environment (`GODO_UE_HOST`, `GODO_UE_PORT`, ...)
-3. TOML file at `GODO_CONFIG_PATH` or `/etc/godo/tracker.toml`
+3. TOML file at `GODO_CONFIG_PATH` or `/var/lib/godo/tracker.toml`
 4. Compile-time defaults in `src/core/config_defaults.hpp`
 
 ### Measure jitter

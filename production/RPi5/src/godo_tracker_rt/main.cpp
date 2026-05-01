@@ -364,7 +364,13 @@ int main(int argc, char** argv, char** envp) {
         }
         return nullptr;
     };
-    std::filesystem::path toml_path = "/etc/godo/tracker.toml";
+    // Default lives under /var/lib/godo because the systemd unit declares
+    // ReadOnlyPaths=/etc/godo + ProtectSystem=strict for defence-in-depth.
+    // The atomic-rename writer needs a parent directory the tracker process
+    // can mkstemp+rename in, and /var/lib/godo is already in
+    // ReadWritePaths. Operators who want a different path override via
+    // GODO_CONFIG_PATH in /etc/godo/tracker.env.
+    std::filesystem::path toml_path = "/var/lib/godo/tracker.toml";
     if (const char* p = env_lookup("GODO_CONFIG_PATH"); p != nullptr) {
         toml_path = p;
     }

@@ -1,7 +1,7 @@
 #pragma once
 
 // Tier-2 runtime-tunable defaults. Operators override these through
-// /etc/godo/tracker.toml, GODO_* environment variables, or CLI flags.
+// /var/lib/godo/tracker.toml, GODO_* environment variables, or CLI flags.
 // See SYSTEM_DESIGN.md §11.2.
 
 #include <cstdint>

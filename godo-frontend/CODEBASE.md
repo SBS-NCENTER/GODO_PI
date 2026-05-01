@@ -603,6 +603,30 @@ preview proxy needed.
 
 ## Change log
 
+### 2026-05-01 18:36 KST — Map + Backup list timestamps: include date (YYYY-MM-DD HH:MM)
+
+#### Changed
+
+- `src/lib/format.ts` — added `formatDateTime(unixSec: number) => "YYYY-MM-DD HH:MM"`.
+  Built from `Date` getters (no `Intl.DateTimeFormat` / `toLocaleString`) so
+  output is identical across Mac / Windows / Linux hosts; no timezone marker
+  suffix (the SPA is served from the studio host and reads its local clock).
+- `src/components/MapListPanel.svelte` — last-modified column switched from
+  `formatTimeOfDay` to `formatDateTime`. Multi-day-old map entries are now
+  distinguishable at a glance (operator HIL request 2026-05-01).
+- `src/routes/Backup.svelte` — "로컬 시각" column switched from
+  `formatTimeOfDay(tsToUnix(entry.ts))` to `formatDateTime(...)`. Comment on
+  `tsToUnix` updated to point at the new helper.
+- `formatTimeOfDay` retained for `src/routes/Dashboard.svelte` (alarm activity
+  feed; time-of-day is the right grain there).
+
+#### Tests
+
+- `tests/unit/format.test.ts` — 4 new cases for `formatDateTime` (TZ-independent
+  shape pin, single-digit zero-padding, exact 16-char length to rule out
+  accidental TZ suffix, unix-epoch sanity), 1 new sanity-pin case for
+  `formatTimeOfDay`.
+
 ### 2026-05-01 14:09 KST — issue#9 — action-driven mode refresh hook
 
 #### Changed

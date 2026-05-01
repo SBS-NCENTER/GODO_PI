@@ -20,7 +20,14 @@ inline constexpr std::string_view FREED_PORT   = "/dev/ttyAMA0";  // PL011 UART0
 inline constexpr int              FREED_BAUD   = 38'400;
 
 // Smoother & deadband.
-inline constexpr int64_t          T_RAMP_NS      = 500'000'000;   // 500 ms
+// issue#12: T_RAMP_NS lowered 500 ms → 100 ms after operator HIL approval.
+// Live-primary architecture (SYSTEM_DESIGN.md §6.4): at 10 Hz LiDAR cadence,
+// a 1-tick ramp (~100 ms) hides per-tick step changes without visible lag.
+// The 500 ms value was tuned for the OneShot UX which inherits the
+// smoother as a side-benefit; OneShot is operator-triggered and rare, so
+// its comfort no longer dominates the trade-off. Operators may restore
+// the legacy 500 ms via `smoother.t_ramp_ms = 500` in tracker.toml.
+inline constexpr int64_t          T_RAMP_NS      = 100'000'000;   // 100 ms
 inline constexpr double           DEADBAND_MM    = 10.0;           // 1 cm
 inline constexpr double           DEADBAND_DEG   = 0.1;
 inline constexpr double           DIVERGENCE_MM  = 2000.0;
@@ -112,9 +119,12 @@ inline constexpr int              GPIO_LIVE_TOGGLE_PIN     = 20;
 inline constexpr double           AMCL_HINT_SIGMA_XY_M_DEFAULT     = 0.50;
 inline constexpr double           AMCL_HINT_SIGMA_YAW_DEG_DEFAULT  = 20.0;
 
-// issue#5 — Live mode pipelined-hint kernel (default OFF in this PR for
-// rollback safety; flip on via tracker.toml + restart per
-// production/RPi5/CODEBASE.md invariant (q)).
+// issue#5 — Live mode pipelined-hint kernel (default ON post-PR-#62 HIL
+// approval, 2026-05-01 KST). HIL evidence: Live drift ~4 m → ±5 cm
+// stationary / ±10 cm in motion; yaw ~90° → ±1°. R1 wall-clock budget
+// validated (iters mode=16, max=21, mean=15.7 of 30-iter ceiling).
+// Operators can roll back to the legacy `Amcl::step` per-scan kernel by
+// setting `amcl.live_carry_pose_as_hint = 0` in tracker.toml + restart.
 //
 // σ derivation: operator memory cites "50 ms × 1 m/s = 50 mm"; actual
 // LiDAR tick is ~100 ms (10 Hz). At realistic 30 cm/s crane peak,
@@ -130,12 +140,22 @@ inline constexpr double           AMCL_HINT_SIGMA_YAW_DEG_DEFAULT  = 20.0;
 // can lengthen via tracker.toml if HIL shows undersettling.
 //
 // Bool-as-Int convention: `live_carry_pose_as_hint` is encoded as
-// CONFIG_SCHEMA `Int` with `min=0, max=1, default_repr="0"` until a
+// CONFIG_SCHEMA `Int` with `min=0, max=1, default_repr="0|1"` until a
 // future PR adds `ValueType::Bool`. Precedent-setting key.
-inline constexpr bool             LIVE_CARRY_POSE_AS_HINT          = false;
+inline constexpr bool             LIVE_CARRY_POSE_AS_HINT          = true;
 inline constexpr double           AMCL_LIVE_CARRY_SIGMA_XY_M       = 0.050;
 inline constexpr double           AMCL_LIVE_CARRY_SIGMA_YAW_DEG    = 5.0;
 inline constexpr std::string_view AMCL_LIVE_CARRY_SCHEDULE_M       =
     "0.2,0.1,0.05";
+
+// issue#12 — webctl SSE stream cadence (Hz). Tracker stores these in
+// Config and emits them through the apply.cpp / render_toml round-trip
+// so the SPA's schema-driven Config tab can edit them, but no tracker
+// logic path reads the stored value. The actual consumer is godo-webctl
+// which reads `/var/lib/godo/tracker.toml` directly via
+// `godo_webctl/webctl_toml.py`. See production/RPi5/CODEBASE.md
+// invariant (r). Range [1, 60] Hz mirrors the schema row bounds.
+inline constexpr int              WEBCTL_POSE_STREAM_HZ_DEFAULT    = 30;
+inline constexpr int              WEBCTL_SCAN_STREAM_HZ_DEFAULT    = 30;
 
 }  // namespace godo::config::defaults

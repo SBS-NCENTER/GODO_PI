@@ -49,33 +49,41 @@ struct ConfigSchemaRow {
     std::string_view description;
 };
 
-// 46 rows — issue#5 fold (2026-05-01). Adding 4 Live-carry rows brought
-// the count from 42 to 46 (`amcl.live_carry_pose_as_hint` Int-as-Bool
-// selector, `amcl.live_carry_schedule_m` schedule string,
-// `amcl.live_carry_sigma_xy_m`, `amcl.live_carry_sigma_yaw_deg`).
-// issue#3 fold (40 → 42) added 2 hint-σ default rows. Track D-5 fold
-// (37 → 40) added 3 annealing rows; see git history for the earlier folds.
+// 48 rows — issue#12 fold (2026-05-01 PM KST). Two new webctl-owned
+// schema rows (`webctl.pose_stream_hz`, `webctl.scan_stream_hz`,
+// default 30 Hz, Restart class) round out the count from 46 to 48.
+// Tracker stores them in Config via the standard apply/read_effective
+// round-trip but no tracker logic path reads the value — godo-webctl is
+// the sole consumer (see production/RPi5/CODEBASE.md invariant (r)).
+// issue#5 fold (2026-05-01) added 4 Live-carry rows (42 → 46). issue#3
+// fold (40 → 42) added 2 hint-σ default rows. Track D-5 fold (37 → 40)
+// added 3 annealing rows; see git history for the earlier folds.
 //
 // Ordering: alphabetical by `name`. Section grouping (network, serial,
-// smoother, rt, ipc, amcl, gpio) emerges naturally from the alphabet.
+// smoother, rt, ipc, amcl, gpio, webctl) emerges naturally from the
+// alphabet.
 //
 // NOTE: `t_ramp_ms` reload_class is `restart` (Mode-A M2 fold) — mid-
 // run ramp duration changes would race the smoother's state machine.
+// issue#12 lowered its `default_repr` "500" → "100" in lockstep with
+// the C++ T_RAMP_NS default (Live-primary architecture).
 //
 // NOTE (issue#5): `amcl.live_carry_pose_as_hint` is the project's first
-// Bool-as-Int row — encoded as `Int` with `min=0, max=1, default_repr="0"`
+// Bool-as-Int row — encoded as `Int` with `min=0, max=1, default_repr="1"`
 // until a future PR adds first-class `ValueType::Bool`. Precedent-setting
-// key for the convention. See production/RPi5/CODEBASE.md invariant (q).
+// key for the convention. issue#5 follow-up (2026-05-01 PM KST) flipped
+// the default 0 → 1 after operator HIL approval. See production/RPi5/
+// CODEBASE.md invariant (q).
 
 // clang-format off
-inline constexpr std::array<ConfigSchemaRow, 46> CONFIG_SCHEMA = {{
+inline constexpr std::array<ConfigSchemaRow, 48> CONFIG_SCHEMA = {{
     {"amcl.anneal_iters_per_phase",     ValueType::Int,    1.0,      200.0,    "10",                             ReloadClass::Recalibrate, "Track D-5: per-phase upper-bound iteration count for sigma annealing."},
     {"amcl.converge_xy_std_m",          ValueType::Double, 0.001,    1.0,      "0.015",                          ReloadClass::Recalibrate, "AMCL converge() xy_std exit threshold (m)."},
     {"amcl.converge_yaw_std_deg",       ValueType::Double, 0.01,     30.0,     "0.3",                            ReloadClass::Recalibrate, "AMCL converge() yaw_std exit threshold (deg)."},
     {"amcl.downsample_stride",          ValueType::Int,    1.0,      16.0,     "2",                              ReloadClass::Recalibrate, "LiDAR beam decimation stride."},
     {"amcl.hint_sigma_xy_m_default",    ValueType::Double, 0.05,     5.0,      "0.50",                           ReloadClass::Recalibrate, "issue#3: default σ_xy (m) for the calibrate pose hint when the operator omits an override."},
     {"amcl.hint_sigma_yaw_deg_default", ValueType::Double, 1.0,      90.0,     "20.0",                           ReloadClass::Recalibrate, "issue#3: default σ_yaw (deg) for the calibrate pose hint when the operator omits an override."},
-    {"amcl.live_carry_pose_as_hint",    ValueType::Int,    0.0,      1.0,      "0",                              ReloadClass::Recalibrate, "issue#5: Live mode kernel selector (Bool-as-Int). 0 = legacy `Amcl::step` per-scan path (rollback). 1 = pipelined `converge_anneal_with_hint` driven by previous-tick pose. Default OFF; flip via tracker.toml + restart after HIL approval."},
+    {"amcl.live_carry_pose_as_hint",    ValueType::Int,    0.0,      1.0,      "1",                              ReloadClass::Recalibrate, "issue#5: Live mode kernel selector (Bool-as-Int). 0 = legacy `Amcl::step` per-scan path (rollback). 1 = pipelined `converge_anneal_with_hint` driven by previous-tick pose. Default ON post-PR-#62 HIL approval (Live drift ~4 m → ±5 cm; yaw ~90° → ±1°); operator may set 0 in tracker.toml + restart to roll back."},
     {"amcl.live_carry_schedule_m",      ValueType::String, 0.0,      0.0,      "0.2,0.1,0.05",                   ReloadClass::Recalibrate, "issue#5: CSV sigma_hit schedule for Live pipelined-hint kernel (per-tick anneal). Distinct from amcl.sigma_hit_schedule_m (OneShot). Short by design — tight carry-hint already locks the basin."},
     {"amcl.live_carry_sigma_xy_m",      ValueType::Double, 0.001,    0.5,      "0.050",                          ReloadClass::Recalibrate, "issue#5: Live (pipelined-hint kernel) per-tick carry σ_xy (m). Tight value matches inter-tick crane-base drift; do NOT widen for AMCL search comfort."},
     {"amcl.live_carry_sigma_yaw_deg",   ValueType::Double, 0.05,     30.0,     "5.0",                            ReloadClass::Recalibrate, "issue#5: Live (pipelined-hint kernel) per-tick carry σ_yaw (deg). Pair with amcl.live_carry_sigma_xy_m."},
@@ -114,11 +122,13 @@ inline constexpr std::array<ConfigSchemaRow, 46> CONFIG_SCHEMA = {{
     {"smoother.deadband_mm",            ValueType::Double, 0.0,      200.0,    "10.0",                           ReloadClass::Hot,         "Deadband on translation (mm)."},
     {"smoother.divergence_deg",         ValueType::Double, 1.0,      45.0,     "10.0",                           ReloadClass::Restart,     "Divergence reject threshold (deg)."},
     {"smoother.divergence_mm",          ValueType::Double, 100.0,    10000.0,  "2000.0",                         ReloadClass::Restart,     "Divergence reject threshold (mm)."},
-    {"smoother.t_ramp_ms",              ValueType::Int,    50.0,     5000.0,   "500",                            ReloadClass::Restart,     "Smoother ramp duration (ms)."},
+    {"smoother.t_ramp_ms",              ValueType::Int,    50.0,     5000.0,   "100",                            ReloadClass::Restart,     "Smoother ramp duration (ms). issue#12 default 500 → 100 ms (Live-primary architecture, 10 Hz LiDAR tick)."},
+    {"webctl.pose_stream_hz",           ValueType::Int,    1.0,      60.0,     "30",                             ReloadClass::Restart,     "issue#12: SSE pose stream poll cadence (Hz). Webctl-owned — tracker stores the value through render_toml round-trip but never reads it; godo-webctl reads /var/lib/godo/tracker.toml via webctl_toml.read_webctl_section. See production/RPi5/CODEBASE.md invariant (r)."},
+    {"webctl.scan_stream_hz",           ValueType::Int,    1.0,      60.0,     "30",                             ReloadClass::Restart,     "issue#12: SSE scan stream poll cadence (Hz). Webctl-owned schema row; same convention as webctl.pose_stream_hz."},
 }};
 // clang-format on
 
-static_assert(CONFIG_SCHEMA.size() == 46,
+static_assert(CONFIG_SCHEMA.size() == 48,
               "CONFIG_SCHEMA row count drifted; update tests + schema mirror");
 
 // O(N) lookup. N=40 keeps this trivially fine; O(log N) binary search is

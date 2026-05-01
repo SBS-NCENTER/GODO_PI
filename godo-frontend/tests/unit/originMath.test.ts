@@ -7,7 +7,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { pixelToWorld, resolveAbsolute, resolveDelta } from '../../src/lib/originMath';
+import { pixelToWorld, resolveAbsolute, resolveDelta, yawFromDrag } from '../../src/lib/originMath';
 
 describe('originMath.pixelToWorld (M4 fold — Y-flip uses height-1-py)', () => {
   it('center pixel of a 200x100 map at resolution 0.05 returns world (0, 0)', () => {
@@ -58,5 +58,42 @@ describe('originMath.resolveDelta (ADD sign convention pin)', () => {
   it('resolveAbsolute is identity-shaped (passthrough)', () => {
     const out = resolveAbsolute(0.32, -0.18);
     expect(out).toEqual({ x_m: 0.32, y_m: -0.18 });
+  });
+});
+
+describe('originMath.yawFromDrag (issue#3 — CCW REP-103 [0, 360))', () => {
+  // World-frame deltas — caller has already passed clicks through
+  // viewport.canvasToWorld (which applies the ROS Y-flip). So +X is
+  // east, +Y is north, atan2 gives standard CCW math angle.
+  it('east  → 0°', () => {
+    expect(yawFromDrag(0, 0, 1, 0)).toBeCloseTo(0, 6);
+  });
+  it('north → 90°', () => {
+    expect(yawFromDrag(0, 0, 0, 1)).toBeCloseTo(90, 6);
+  });
+  it('west  → 180°', () => {
+    expect(yawFromDrag(0, 0, -1, 0)).toBeCloseTo(180, 6);
+  });
+  it('south → 270° (atan2(-1, 0) = -90° → wraps to 270°)', () => {
+    expect(yawFromDrag(0, 0, 0, -1)).toBeCloseTo(270, 6);
+  });
+  it('NE diagonal → 45°', () => {
+    expect(yawFromDrag(0, 0, 1, 1)).toBeCloseTo(45, 6);
+  });
+  it('NW diagonal → 135°', () => {
+    expect(yawFromDrag(0, 0, -1, 1)).toBeCloseTo(135, 6);
+  });
+  it('SW diagonal → 225° (atan2(-1, -1) = -135° → wraps)', () => {
+    expect(yawFromDrag(0, 0, -1, -1)).toBeCloseTo(225, 6);
+  });
+  it('SE diagonal → 315° (atan2(-1, 1) = -45° → wraps)', () => {
+    expect(yawFromDrag(0, 0, 1, -1)).toBeCloseTo(315, 6);
+  });
+  it('zero-length drag returns null', () => {
+    expect(yawFromDrag(0, 0, 0, 0)).toBeNull();
+    expect(yawFromDrag(1, 1, 1, 1)).toBeNull();
+  });
+  it('translation invariance — drag from (5,5) east is still 0°', () => {
+    expect(yawFromDrag(5, 5, 6, 5)).toBeCloseTo(0, 6);
   });
 });

@@ -1,6 +1,7 @@
 #include "uds_server.hpp"
 
 #include <cerrno>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <stdexcept>
@@ -27,6 +28,53 @@ namespace {
 std::string strerror_safe(int e) {
     char buf[128];
     return std::string(::strerror_r(e, buf, sizeof(buf)));
+}
+
+// issue#3 — hint validation bounds (Mode-A M-A schema bounds + Pydantic
+// mirror in webctl). Tier-2 σ defaults live on Config (cold writer
+// applies them when σ override is 0.0); these bounds are a defensive
+// re-check at the wire seam so a misbehaving / non-webctl client cannot
+// publish out-of-range values. The hard bounds match webctl's Pydantic
+// constraints byte-exactly.
+constexpr double HINT_X_Y_ABS_MAX_M    = 100.0;
+constexpr double HINT_YAW_DEG_MIN      = 0.0;
+constexpr double HINT_YAW_DEG_LT       = 360.0;
+constexpr double HINT_SIGMA_XY_MIN_M   = 0.05;
+constexpr double HINT_SIGMA_XY_MAX_M   = 5.0;
+constexpr double HINT_SIGMA_YAW_MIN_DEG = 1.0;
+constexpr double HINT_SIGMA_YAW_MAX_DEG = 90.0;
+
+// Returns true if every supplied hint field is finite and in-range. The
+// caller has already checked `has_seed_*` are all-true (seed triple is
+// all-or-none, enforced by webctl Pydantic + checked here at the wire
+// seam by `bad_seed_partial`).
+bool hint_within_bounds(const Request& req) noexcept {
+    if (req.has_seed_x_m) {
+        if (!std::isfinite(req.seed_x_m)) return false;
+        if (req.seed_x_m < -HINT_X_Y_ABS_MAX_M ||
+            req.seed_x_m >  HINT_X_Y_ABS_MAX_M) return false;
+    }
+    if (req.has_seed_y_m) {
+        if (!std::isfinite(req.seed_y_m)) return false;
+        if (req.seed_y_m < -HINT_X_Y_ABS_MAX_M ||
+            req.seed_y_m >  HINT_X_Y_ABS_MAX_M) return false;
+    }
+    if (req.has_seed_yaw_deg) {
+        if (!std::isfinite(req.seed_yaw_deg)) return false;
+        if (req.seed_yaw_deg <  HINT_YAW_DEG_MIN ||
+            req.seed_yaw_deg >= HINT_YAW_DEG_LT) return false;
+    }
+    if (req.has_sigma_xy_m) {
+        if (!std::isfinite(req.sigma_xy_m)) return false;
+        if (req.sigma_xy_m < HINT_SIGMA_XY_MIN_M ||
+            req.sigma_xy_m > HINT_SIGMA_XY_MAX_M) return false;
+    }
+    if (req.has_sigma_yaw_deg) {
+        if (!std::isfinite(req.sigma_yaw_deg)) return false;
+        if (req.sigma_yaw_deg < HINT_SIGMA_YAW_MIN_DEG ||
+            req.sigma_yaw_deg > HINT_SIGMA_YAW_MAX_DEG) return false;
+    }
+    return true;
 }
 
 }  // namespace
@@ -263,6 +311,62 @@ void UdsServer::handle_one_request(int conn_fd) noexcept {
             (void)::send(conn_fd, resp.data(), resp.size(), MSG_NOSIGNAL);
             return;
         }
+
+        // issue#3 — pose hint validation + publish (production CODEBASE
+        // invariant (p)). The seed triple is all-or-none; sigma overrides
+        // are independent. Order discipline (Mode-A M3):
+        //   1. validate
+        //   2. seqlock store of bundle
+        //   3. atomic flag store(true, release)
+        //   4. set_mode_(OneShot) — wraps g_amcl_mode.store(release)
+        // so the cold writer's acquire-load of g_amcl_mode happens-after
+        // both the seqlock store and the flag set.
+        const int n_seed = (req.has_seed_x_m ? 1 : 0) +
+                           (req.has_seed_y_m ? 1 : 0) +
+                           (req.has_seed_yaw_deg ? 1 : 0);
+        if (n_seed != 0 && n_seed != 3) {
+            // Defence-in-depth — webctl Pydantic already enforces this.
+            const auto resp = format_err("bad_seed_partial");
+            (void)::send(conn_fd, resp.data(), resp.size(), MSG_NOSIGNAL);
+            return;
+        }
+        const bool has_sigma_overrides =
+            req.has_sigma_xy_m || req.has_sigma_yaw_deg;
+        if (n_seed == 0 && has_sigma_overrides) {
+            const auto resp = format_err("bad_sigma_without_seed");
+            (void)::send(conn_fd, resp.data(), resp.size(), MSG_NOSIGNAL);
+            return;
+        }
+        if (n_seed == 3 && m != godo::rt::AmclMode::OneShot) {
+            // Live-mode hint is out of scope (operator-locked plan §Scope).
+            const auto resp = format_err("bad_seed_with_non_oneshot");
+            (void)::send(conn_fd, resp.data(), resp.size(), MSG_NOSIGNAL);
+            return;
+        }
+        if (!hint_within_bounds(req)) {
+            const auto resp = format_err("bad_seed_value");
+            (void)::send(conn_fd, resp.data(), resp.size(), MSG_NOSIGNAL);
+            return;
+        }
+        if (n_seed == 3) {
+            godo::rt::HintBundle b{};
+            b.x_m            = req.seed_x_m;
+            b.y_m            = req.seed_y_m;
+            b.yaw_deg        = req.seed_yaw_deg;
+            b.sigma_xy_m     = req.has_sigma_xy_m    ? req.sigma_xy_m    : 0.0;
+            b.sigma_yaw_deg  = req.has_sigma_yaw_deg ? req.sigma_yaw_deg : 0.0;
+            // Step 2: seqlock store (sole writer is this UDS handler).
+            godo::rt::g_calibrate_hint_data.store(b);
+            // Step 3: lift the validity flag with release ordering so a
+            // subsequent acquire-load on the cold writer sees the
+            // bundle's payload bytes.
+            godo::rt::g_calibrate_hint_valid.store(
+                true, std::memory_order_release);
+        }
+
+        // Step 4: set_mode_ wraps g_amcl_mode.store(OneShot, release).
+        // The hint store happens-before the mode store as observed by
+        // the cold writer's acquire-load on g_amcl_mode (M3 pin).
         if (set_mode_) set_mode_(m);
         const auto resp = format_ok();
         (void)::send(conn_fd, resp.data(), resp.size(), MSG_NOSIGNAL);

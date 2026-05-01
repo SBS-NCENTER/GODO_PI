@@ -8,10 +8,37 @@ type: project
 
 Operator captured two LiDAR-overlay screenshots on news-pi01 with the same physical crane position:
 
-- **test4.png** (one-shot calibrate): cyan scan dots form a clean T-shape but rotated ~5–10° clockwise relative to the PGM walls.
-- **test5.png** (live mode): cyan scan dots form the SAME T-shape (operator-confirmed: "오버레이의 형태는 one shot과 live가 동일") but rotated ~90° from the PGM. What appears as a horizontal cyan line through the center is in fact the studio's right vertical wall projected through a wrong AMCL yaw.
+- **test4.png** (one-shot calibrate): cyan scan dots form a clean T-shape but **shifted in (x, y) AND rotated ~5–10° clockwise** relative to the walls. Visual estimate of shift was misleading; later the operator measured by reading PGM-frame coords (see "Quantitative re-measurement" below) — one-shot (x, y) error is actually small (~0.5 m), the visual impression of large shift came from the yaw rotation propagating linearly with range to the far walls.
+- **test5.png** (live mode): scan dots dramatically displaced and rotated ~90° from the PGM. Both (x, y) and yaw are large.
 
 Pose readout for both: `σ_xy ≈ 0.01 m, converged`. The convergence flag is **lying** — particle filter is dense at one basin but that basin is far from ground truth.
+
+## Quantitative re-measurement (2026-04-30 23:10 KST)
+
+Operator re-ran with the LiDAR at the same physical pose AND read off PGM-frame coordinates from the SPA pose readout:
+
+| Mode | Ground-truth (operator-measured) | AMCL output | Δ(x, y) | Δ yaw |
+|---|---|---|---|---|
+| One-shot | (26, 34) | (26, 34.5) | **~0.5 m** | ~5–10° |
+| Live | (26, 34) | (22.34, 35.58) | **~4.0 m** | ~90° |
+
+Operator note: "구체적인 수치는 매번 달라지니 대략 이렇구나 알면 될 것 같아요" — these are typical magnitudes, not deterministic values.
+
+## What this implies (revised 2026-04-30 23:10 KST)
+
+**One-shot vs Live convergence quality is dramatically different.** One-shot's `converge_anneal` (multi-phase, sigma annealing) achieves much tighter convergence than Live's per-scan `step()`:
+
+- **One-shot**: (x, y) is recovered to within ~0.5 m of true pose; yaw retains a ~5–10° bias (multi-basin signature in yaw, but the (x, y) basin is correct).
+- **Live**: both (x, y) and yaw are wrong. (x, y) drifts ~4 m and yaw flips by ~90°. step() does NOT escape the wrong basin.
+
+The earlier framing "multi-basin localization in yaw" was incomplete. Refined picture:
+- One-shot's annealing schedule pulls (x, y) into the correct basin reliably; multi-basin issue surfaces mainly in yaw fine-tuning.
+- Live's per-scan single-iteration step() lacks the convergence depth to escape the wrong (x, y, yaw) basin once entered. This is exactly what issue#5 (Pipelined K-step Live AMCL) is meant to address.
+
+**Implications for the issue priority order**:
+- **issue#3 (pose hint)** is still the right next move. σ_xy=0.50 m default is well-matched to one-shot's typical ~0.5 m (x, y) bias (1σ catches it). It will improve one-shot yaw multi-basin escape AND give Live a strong-enough seed that step() can hold the basin until issue#5 lands.
+- **issue#4 (silent-converge diagnostic)** — even more important than thought. The (x, y) gap between one-shot (good) and Live (bad) is exactly the kind of "converged flag lying differently between modes" that needs a unified metric.
+- **issue#5 (Pipelined K-step Live)** — operator's quantitative data confirms this is a real, not theoretical, fix. Live's 4 m drift makes the operator effectively unable to use Live mode without a hint preceding it. issue#5 elevates from "future" to "needed soon".
 
 ## What this rules out
 
@@ -22,7 +49,9 @@ Pose readout for both: `σ_xy ≈ 0.01 m, converged`. The convergence flag is **
 
 ## What this implies
 
-**Multi-basin yaw localization** in the T-shape studio. AMCL's likelihood landscape over yaw has multiple local maxima with similar match scores; particle filter converges to whichever basin the initial spread happens to favor. With uniform-ish initial yaw, basins ~90° apart are sometimes selected (the studio's "narrow top + wide bottom" geometry doesn't have full 90° symmetry but features are sparse enough that a 90°-rotated scan can match low-information regions of the map).
+**Multi-basin full 3-DoF pose localization** (NOT yaw-only) in the T-shape studio. AMCL's likelihood landscape has multiple local maxima with similar match scores spanning the (x, y, yaw) joint space. Particle filter converges to whichever basin the initial spread happens to favor. With uniform-ish initial pose, basins ~1 m apart in (x, y) AND ~90° apart in yaw can be selected. The studio's low-feature density (long bare walls without distinctive geometry) lets a translated + rotated scan match low-information regions of the map nearly as well as the true pose.
+
+The fix scope is therefore broader than originally framed: pose hint must narrow particle initial spread in **all three DoF** (x, y, yaw) — not just yaw.
 
 ## Priority implications
 

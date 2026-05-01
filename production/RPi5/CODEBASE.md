@@ -3551,3 +3551,131 @@ the same endpoint pair, so both surfaces were affected.
   login1 surface; see "Invariants tightened" block in the PR-A
   entry above for the full text. The amendment in lock-step with
   the new rule is what carries the discipline forward.
+
+## 2026-05-01 00:30 KST — issue#3: calibrate pose-hint UI (AMCL multi-basin fix)
+
+### Added
+
+- `core/rt_flags.{hpp,cpp}` — `struct HintBundle` (5 doubles +
+  trivially-copyable static_assert) plus the synchronization
+  primitive split that guards it (Mode-A M2):
+    * `Seqlock<HintBundle> g_calibrate_hint_data` — single-writer
+      payload (UDS handler is the only writer).
+    * `std::atomic<bool>   g_calibrate_hint_valid` — release/acquire
+      sentinel. UDS handler stores `true` AFTER the seqlock store;
+      cold writer (`run_one_iteration`) is the SOLE clearer
+      (consume-once after every OneShot completion).
+- `uds/json_mini.{hpp,cpp}` — `Request` struct grows five `has_*`
+  flags + five doubles. Parser dispatches on key NAME so
+  number-valued keys (`seed_x_m`, `seed_y_m`, `seed_yaw_deg`,
+  `sigma_xy_m`, `sigma_yaw_deg`) accept JSON NUMBERS only — string-
+  quoted "1.0" on a number key is a parse error. Bias-block:
+  parse_number is a strict subset of RFC-8259 (no leading +, no bare
+  '.', no NaN/Infinity) matching webctl Pydantic + repr(float)
+  serialization byte-exactly.
+- `uds/uds_server.cpp` — `set_mode` handler validates the hint
+  payload (all-or-none seed triple, σ-without-seed rejected, finite +
+  in-range), then publishes via the M3 ordering chain
+  (seqlock store → flag set(release) → set_mode_(release)). Mode-A M1
+  pin: ModeSetter callback signature unchanged; the publish is INLINE
+  in the handler.
+- `core/{config_defaults,config_schema,config}.{hpp,cpp}` —
+  `amcl_hint_sigma_xy_m_default = 0.50` ∈ [0.05, 5.0] m and
+  `amcl_hint_sigma_yaw_deg_default = 20.0` ∈ [1.0, 90.0] deg
+  (recalibrate class). Schema row count 40 → 42; Python mirror
+  `EXPECTED_ROW_COUNT` bumped in lockstep.
+- `localization/cold_writer.cpp::converge_anneal` — phase-0 hint
+  branch: when `g_calibrate_hint_valid.load(acquire)` returns true,
+  phase 0 calls `seed_around(hint_pose, σ_xy_or_default,
+  σ_yaw_or_default)` instead of `seed_global`. σ override semantics:
+  hint.sigma_*=0.0 → cfg fallback; hint.sigma_*>0.0 → use override.
+- `config/apply.cpp` — `read_effective` + `apply_one` wired so
+  `/api/config` can read + edit the new keys via Track B-CONFIG.
+
+### Tests
+
+- `tests/test_uds_server.cpp` — 11 new cases (was 31, now 42):
+    4 dedicated json_mini parser tests (the highest-risk step per
+    Mode-A N5 commit-1 — landed alone first to get green CI),
+    7 hint-publish handler tests (full hint, no hint, partial hint,
+    non-OneShot rejection, range validation 4 sub-cases, σ-without-
+    seed, M3 ordering torture: 5000 round-trips with a concurrent
+    reader → ZERO observed `(mode==OneShot, hint_valid==false)`
+    triples).
+- `tests/test_cold_writer_offset_invariant.cpp` — 3 new cases:
+    consume-once after OneShot, back-compat (no hint flag still
+    false), 2-consecutive hint OneShots both consume.
+- `tests/test_config_schema.cpp`, `test_config_apply.cpp` — bump
+  row-count assertions 40 → 42; pin new key names appear in
+  `apply_get_all` body.
+
+### Removed
+
+- (none)
+
+### Invariants
+
+- (p) **calibrate-hint-publish-consume-discipline** — issue#3
+  ownership chain. The pose hint webctl forwards from
+  `POST /api/calibrate` lives at three layers in the tracker; ALL
+  three layers MUST observe the contract below or the cold writer
+  will either skip a fresh hint or use a stale one.
+
+  1. **Storage**: two process-wide globals in `core/rt_flags.{hpp,cpp}`:
+     - `Seqlock<HintBundle> g_calibrate_hint_data` (single-writer
+       Seqlock payload — bundle of 5 doubles).
+     - `std::atomic<bool>   g_calibrate_hint_valid` (release/acquire
+       sentinel that gates whether the bundle is fresh).
+
+  2. **Single-writer for the bundle**: `uds_server.cpp::handle_one_request`
+     is the SOLE writer of `g_calibrate_hint_data`. No other module
+     (cold writer, GPIO, diag publisher) ever stores into it. The
+     Seqlock contract requires single-writer; violating this would
+     produce torn reads on the cold-path acquire-load.
+
+  3. **Sole clearer for the flag**: `cold_writer::run_one_iteration`
+     is the SOLE site that stores `false` into
+     `g_calibrate_hint_valid`. The store happens at the END of the
+     function, after every OneShot completion (consume-once). The
+     UDS handler NEVER stores `false` — only `true`. Tests
+     (`test_cold_writer_offset_invariant::run_one_iteration — hint
+     flag is consumed (cleared) after OneShot completes`) pin this.
+
+  4. **Memory ordering** (Mode-A M3): UDS handler ordering chain is
+     ```
+         g_calibrate_hint_data.store(b);          // seqlock
+         g_calibrate_hint_valid.store(true,       // sentinel
+             memory_order_release);
+         g_amcl_mode.store(OneShot,               // mode dispatch
+             memory_order_release);
+     ```
+     Cold writer reads in reverse:
+     ```
+         mode = g_amcl_mode.load(memory_order_acquire);
+         if (mode == OneShot) {
+             have_hint = g_calibrate_hint_valid.load(
+                 memory_order_acquire);
+             if (have_hint) bundle = g_calibrate_hint_data.load();
+             ...
+             g_calibrate_hint_valid.store(false,  // consume
+                 memory_order_release);
+         }
+     ```
+     so the seqlock-store + flag-set happen-before any cold-writer
+     observation of `mode==OneShot`. Ordering torture test pins
+     ZERO observed `(mode==OneShot, hint_valid==false)` triples
+     across 5000 rounds.
+
+  5. **Wire-shape validation at the seam**: the UDS handler
+     re-validates the hint (all-or-none seed triple, finite +
+     range) before publishing. webctl Pydantic CalibrateBody is
+     the upstream gate; the C++ check is defence-in-depth so a
+     non-webctl client (raw socat) cannot publish a malformed
+     bundle. Range bounds match webctl byte-exactly; drift is a
+     CODEBASE invariant violation.
+
+  6. **σ override fallback**: when `hint.sigma_*m == 0.0`, cold
+     writer uses `cfg.amcl_hint_sigma_*_default` (Tier-2,
+     recalibrate class). Webctl handler emits the σ keys to the
+     wire ONLY when the operator supplied them; tracker omits the
+     σ override when the wire omits the key (no-op default applies).

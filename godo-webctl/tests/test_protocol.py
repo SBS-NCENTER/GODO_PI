@@ -72,6 +72,60 @@ def test_encode_set_mode_rejects_unknown() -> None:
         P.encode_set_mode("Calibrate")
 
 
+# --- issue#3 (pose hint) — encoder shape pin ----------------------------
+def test_encode_set_mode_no_hint_byte_identical_to_pre_issue3() -> None:
+    """Anti-regression pin: when seed=None, the wire shape is identical
+    to the pre-issue#3 `encode_set_mode("OneShot")` byte sequence. A
+    writer who introduces an unconditional `,"seed_x_m":...` would fail
+    this case."""
+    assert P.encode_set_mode("OneShot") == b'{"cmd":"set_mode","mode":"OneShot"}\n'
+    assert P.encode_set_mode("OneShot", seed=None) == \
+        b'{"cmd":"set_mode","mode":"OneShot"}\n'
+    assert P.encode_set_mode("Live", seed=None) == \
+        b'{"cmd":"set_mode","mode":"Live"}\n'
+
+
+def test_encode_set_mode_with_full_hint() -> None:
+    payload = P.encode_set_mode(
+        "OneShot",
+        seed=(1.5, -2.25, 90.0),
+        sigma_xy_m=0.5,
+        sigma_yaw_deg=20.0,
+    )
+    assert payload == (
+        b'{"cmd":"set_mode","mode":"OneShot","seed_x_m":1.5,'
+        b'"seed_y_m":-2.25,"seed_yaw_deg":90.0,'
+        b'"sigma_xy_m":0.5,"sigma_yaw_deg":20.0}\n'
+    )
+
+
+def test_encode_set_mode_seed_only_no_sigma() -> None:
+    """Operator places hint without σ overrides. Wire MUST NOT carry
+    the σ keys (so the tracker's cfg default takes effect)."""
+    payload = P.encode_set_mode("OneShot", seed=(0.0, 0.0, 0.0))
+    assert payload == (
+        b'{"cmd":"set_mode","mode":"OneShot","seed_x_m":0.0,'
+        b'"seed_y_m":0.0,"seed_yaw_deg":0.0}\n'
+    )
+
+
+def test_encode_set_mode_rejects_sigma_without_seed() -> None:
+    """σ override without seed is a programming error — encoder rejects
+    as defence-in-depth (Pydantic catches the same shape upstream)."""
+    with pytest.raises(ValueError, match="sigma overrides require seed"):
+        P.encode_set_mode("OneShot", seed=None, sigma_xy_m=0.5)
+
+
+def test_encode_set_mode_rejects_non_finite_hint() -> None:
+    """NaN / Infinity in any hint field is a programming error
+    (Pydantic + the C++ parser already reject it; encoder is the
+    third defence layer)."""
+    with pytest.raises(ValueError, match="non-finite"):
+        P.encode_set_mode("OneShot", seed=(float("nan"), 0.0, 0.0))
+    with pytest.raises(ValueError, match="non-finite"):
+        P.encode_set_mode("OneShot", seed=(0.0, float("inf"), 0.0))
+
+
 # --- Track B: get_last_pose mirror ----------------------------------------
 
 

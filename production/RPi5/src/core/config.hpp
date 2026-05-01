@@ -93,6 +93,14 @@ struct Config {
     std::vector<double> amcl_sigma_seed_xy_schedule_m;
     int                 amcl_anneal_iters_per_phase{};
 
+    // issue#3 — calibrate pose-hint default σ (recalibrate class).
+    // Cold writer falls back to these when the UDS hint payload omits
+    // sigma_xy_m / sigma_yaw_deg overrides (i.e. the operator placed a
+    // hint position+yaw without touching the σ inputs). Defaults match
+    // config_defaults.hpp::AMCL_HINT_SIGMA_*_DEFAULT (0.50 m / 20°).
+    double              amcl_hint_sigma_xy_m_default{};
+    double              amcl_hint_sigma_yaw_deg_default{};
+
     // Build a Config with defaults applied from core/config_defaults.hpp.
     static Config make_default();
 

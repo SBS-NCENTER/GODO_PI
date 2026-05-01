@@ -336,6 +336,47 @@ After OneShot completes, `lf` is rebuilt back to `cfg.amcl_sigma_hit_m` so Live 
 
 The pattern generalizes per `.claude/memory/project_pipelined_compute_pattern.md` — pipelined-parallel variants (multiple concurrent AMCL chains at different σ tiers, picking the best result) are scaffolded as Track D-5-P future work.
 
+### Pose-hint phase-0 branch (issue#3, 2026-05-01)
+
+Operator-placed initial pose hints feed AMCL phase 0 of `converge_anneal` directly. Test4/test5 HIL on news-pi01 showed the studio's likelihood landscape has multiple ~equal-score basins separated by ~1 m in (x, y) AND ~90° in yaw — single-σ + uniform global seed converges into the wrong basin once every few calibrates. The fix narrows phase 0 from `seed_global` (5000 uniformly-distributed particles) to `seed_around(hint, σ_xy, σ_yaw)` (500 particles in a Gaussian basin around the operator's clicked pose) so only one basin's particles survive to phase 1.
+
+Wire path (production CODEBASE invariant (p)):
+
+```
+SPA <PoseHintLayer/>             ─┐
+  ↓ click + drag (or click+click) │
+  ↓ viewport.canvasToWorld(...)   │ Mode-A M5 — single math SSOT
+  ↓ yawFromDrag(...)              │
+TrackerControls "Calibrate from hint" button
+  ↓ apiPostCalibrate(body)        │
+                                  ▼
+godo-webctl POST /api/calibrate
+  ↓ Pydantic CalibrateBody (all-or-none seed triple, σ-without-seed
+  ↓     rejected, range bounds matching the C++ wire seam)
+  ↓ encode_set_mode(seed=...) → JSON NUMBER fields appended to wire
+  ↓                                                                 │
+                                                                    ▼
+godo-tracker UDS handler `set_mode` with hint
+  ↓ re-validate hint at the wire seam (defence-in-depth)
+  ↓ M3 ordering chain:
+  ↓   1. g_calibrate_hint_data.store(bundle)         // Seqlock
+  ↓   2. g_calibrate_hint_valid.store(true, release) // sentinel
+  ↓   3. g_amcl_mode.store(OneShot, release)         // dispatch
+                                                                    ▼
+cold_writer::run_one_iteration (acquire-load on g_amcl_mode)
+  ↓ if (g_calibrate_hint_valid.load(acquire)) {
+  ↓     bundle = g_calibrate_hint_data.load();          // seqlock-fenced
+  ↓     converge_anneal phase 0: seed_around(bundle, σ_xy, σ_yaw)
+  ↓     instead of seed_global
+  ↓     ...
+  ↓     g_calibrate_hint_valid.store(false, release);   // consume-once
+  ↓ } else { converge_anneal phase 0: seed_global; ... }
+```
+
+σ override semantics: when the operator supplies explicit σ values (numeric panel tweak), they apply directly. When omitted, the cold writer falls back to `cfg.amcl_hint_sigma_xy_m_default = 0.50 m` and `cfg.amcl_hint_sigma_yaw_deg_default = 20.0°` (Tier-2, recalibrate class). Both defaults are bumped vs. the existing `amcl_sigma_seed_*` because they cover operator click imprecision (±0.5 m) AND drag-yaw imprecision (±10°), which the existing seeds (tuned for warm-restart) do not.
+
+Live-mode hint is out of scope (the live-tracking step() lacks the convergence depth to escape a wrong basin even with a tight initial seed; issue#5 pipelined K-step Live is the proper fix). GPIO-button calibrate keeps its current uniform-seed behaviour — there is no canvas to click for a GPIO trigger.
+
 ### Yaw safety tripwire (post-Track-D-5)
 
 The tripwire fires ONCE on the final result of `converge_anneal` (intermediate-phase poses are not tripwire candidates — the schedule's wider phases produce intentionally noisy poses that would spam stderr if checked).

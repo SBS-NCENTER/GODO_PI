@@ -34,6 +34,7 @@
 
 #include "core/config.hpp"
 #include "core/hot_config.hpp"
+#include "core/rt_flags.hpp"
 #include "core/rt_types.hpp"
 #include "core/seqlock.hpp"
 #include "rt/amcl_rate.hpp"
@@ -238,4 +239,226 @@ TEST_CASE("run_one_iteration — second call still uses seed_global (no warm-see
     const int delta  = std::abs(r2.iterations - r1.iterations);
     const int budget = std::max(2, r1.iterations / 5);    // ±20% or ±2
     CHECK(delta <= budget);
+}
+
+// --------------------------------------------------------------
+// issue#3 — pose hint phase-0 branch + consume-once.
+// `g_calibrate_hint_data` + `g_calibrate_hint_valid` lifecycle is
+// pinned at the cold-writer seam. UDS handler is exercised in
+// test_uds_server.cpp; here we drive `run_one_iteration` directly to
+// pin the branch + consume-once invariant without spinning the whole
+// UDS thread.
+// --------------------------------------------------------------
+
+namespace {
+
+// Build a Config tuned for fast OneShot kernel runs (tight schedule,
+// small particle counts). Tests that don't care about cm-scale
+// accuracy can use this to keep iteration < 1 s.
+Config make_fast_oneshot_cfg() {
+    Config cfg = Config::make_default();
+    cfg.amcl_seed                     = 42;
+    cfg.amcl_origin_x_m               = 0.0;
+    cfg.amcl_origin_y_m               = 0.0;
+    cfg.amcl_origin_yaw_deg           = 0.0;
+    cfg.amcl_max_iters                = 5;
+    cfg.amcl_particles_local_n        = 200;
+    cfg.amcl_particles_global_n       = 200;
+    cfg.amcl_sigma_hit_schedule_m     = {0.05};
+    cfg.amcl_sigma_seed_xy_schedule_m = {std::numeric_limits<double>::quiet_NaN()};
+    cfg.amcl_anneal_iters_per_phase   = 5;
+    cfg.amcl_map_path =
+        std::string(GODO_FIXTURES_MAPS_DIR) + "/synthetic_4x4.pgm";
+    return cfg;
+}
+
+void reset_hint_state() noexcept {
+    godo::rt::g_calibrate_hint_valid.store(false, std::memory_order_release);
+    godo::rt::HintBundle b{};
+    godo::rt::g_calibrate_hint_data.store(b);
+}
+
+}  // namespace
+
+TEST_CASE("run_one_iteration — hint flag is consumed (cleared) after OneShot completes") {
+    Config cfg = make_fast_oneshot_cfg();
+
+    OccupancyGrid grid = load_map(cfg.amcl_map_path);
+    LikelihoodField lf = build_likelihood_field(grid, cfg.amcl_sigma_hit_m);
+    Amcl amcl(cfg, lf);
+    Rng  rng(cfg.amcl_seed);
+
+    std::vector<RangeBeam> beams_buf;
+    Pose2D last_pose{};
+    bool   live_first_iter = true;
+    Offset last_written{0.0, 0.0, 0.0};
+    Seqlock<Offset>   target_offset;
+    Seqlock<LastPose> last_pose_seq;
+    Seqlock<LastScan> last_scan_seq;
+    AmclRateAccumulator amcl_rate_accum;
+    Seqlock<godo::core::HotConfig> hot_cfg_seq;
+
+    // Publish a hint as the UDS handler would — bundle then flag.
+    reset_hint_state();
+    godo::rt::HintBundle bundle{};
+    bundle.x_m            = 0.5;
+    bundle.y_m            = 0.5;
+    bundle.yaw_deg        = 45.0;
+    bundle.sigma_xy_m     = 0.5;
+    bundle.sigma_yaw_deg  = 20.0;
+    godo::rt::g_calibrate_hint_data.store(bundle);
+    godo::rt::g_calibrate_hint_valid.store(true, std::memory_order_release);
+
+    const Frame frame = make_synthetic_frame(360);
+    (void)run_one_iteration(cfg, frame, grid, lf, amcl, rng,
+                            beams_buf, last_pose, live_first_iter,
+                            last_written, target_offset,
+                            last_pose_seq, last_scan_seq,
+                            amcl_rate_accum, hot_cfg_seq);
+
+    // Consume-once: kernel cleared the flag after publishing.
+    CHECK(godo::rt::g_calibrate_hint_valid.load(
+        std::memory_order_acquire) == false);
+}
+
+TEST_CASE("run_one_iteration — back-compat: no hint published, flag remains false") {
+    Config cfg = make_fast_oneshot_cfg();
+
+    OccupancyGrid grid = load_map(cfg.amcl_map_path);
+    LikelihoodField lf = build_likelihood_field(grid, cfg.amcl_sigma_hit_m);
+    Amcl amcl(cfg, lf);
+    Rng  rng(cfg.amcl_seed);
+
+    std::vector<RangeBeam> beams_buf;
+    Pose2D last_pose{};
+    bool   live_first_iter = true;
+    Offset last_written{0.0, 0.0, 0.0};
+    Seqlock<Offset>   target_offset;
+    Seqlock<LastPose> last_pose_seq;
+    Seqlock<LastScan> last_scan_seq;
+    AmclRateAccumulator amcl_rate_accum;
+    Seqlock<godo::core::HotConfig> hot_cfg_seq;
+
+    reset_hint_state();
+    const Frame frame = make_synthetic_frame(360);
+    const auto result = run_one_iteration(cfg, frame, grid, lf, amcl, rng,
+                                          beams_buf, last_pose, live_first_iter,
+                                          last_written, target_offset,
+                                          last_pose_seq, last_scan_seq,
+                                          amcl_rate_accum, hot_cfg_seq);
+
+    // No hint was set → kernel falls through to seed_global → result is
+    // valid + finite (the existing back-compat invariants).
+    CHECK(std::isfinite(result.offset.dx));
+    CHECK(std::isfinite(result.offset.dy));
+    CHECK(std::isfinite(result.offset.dyaw));
+    CHECK(godo::rt::g_calibrate_hint_valid.load(
+        std::memory_order_acquire) == false);
+}
+
+TEST_CASE("run_one_iteration — two consecutive hint OneShots both consume their hint") {
+    Config cfg = make_fast_oneshot_cfg();
+
+    OccupancyGrid grid = load_map(cfg.amcl_map_path);
+    LikelihoodField lf = build_likelihood_field(grid, cfg.amcl_sigma_hit_m);
+    Amcl amcl(cfg, lf);
+    Rng  rng(cfg.amcl_seed);
+
+    std::vector<RangeBeam> beams_buf;
+    Pose2D last_pose{};
+    bool   live_first_iter = true;
+    Offset last_written{0.0, 0.0, 0.0};
+    Seqlock<Offset>   target_offset;
+    Seqlock<LastPose> last_pose_seq;
+    Seqlock<LastScan> last_scan_seq;
+    AmclRateAccumulator amcl_rate_accum;
+    Seqlock<godo::core::HotConfig> hot_cfg_seq;
+    const Frame frame = make_synthetic_frame(360);
+
+    auto publish_and_run = [&](double x, double y, double yaw) {
+        godo::rt::HintBundle bundle{};
+        bundle.x_m            = x;
+        bundle.y_m            = y;
+        bundle.yaw_deg        = yaw;
+        bundle.sigma_xy_m     = 0.5;
+        bundle.sigma_yaw_deg  = 20.0;
+        godo::rt::g_calibrate_hint_data.store(bundle);
+        godo::rt::g_calibrate_hint_valid.store(
+            true, std::memory_order_release);
+        (void)run_one_iteration(cfg, frame, grid, lf, amcl, rng,
+                                beams_buf, last_pose, live_first_iter,
+                                last_written, target_offset,
+                                last_pose_seq, last_scan_seq,
+                                amcl_rate_accum, hot_cfg_seq);
+    };
+
+    reset_hint_state();
+    publish_and_run(0.3, 0.3, 30.0);
+    CHECK(godo::rt::g_calibrate_hint_valid.load(
+        std::memory_order_acquire) == false);
+    publish_and_run(-0.3, -0.3, 60.0);
+    CHECK(godo::rt::g_calibrate_hint_valid.load(
+        std::memory_order_acquire) == false);
+}
+
+// Mode-B B-M4: bias-block the consume-once invariant by exercising the
+// scenario named in the bias-blocking checklist verbatim — "place hint →
+// run two consecutive OneShots → second uses seed_global (hint cleared
+// after first)". Distinct from the test above (which re-publishes between
+// iterations); a regression that broke `g_calibrate_hint_valid.store(false)`
+// at the end of run_one_iteration would still pass the re-publishing
+// variant. This test catches it.
+TEST_CASE("run_one_iteration — second OneShot without re-publish takes seed_global path") {
+    Config cfg = make_fast_oneshot_cfg();
+
+    OccupancyGrid grid = load_map(cfg.amcl_map_path);
+    LikelihoodField lf = build_likelihood_field(grid, cfg.amcl_sigma_hit_m);
+    Amcl amcl(cfg, lf);
+    Rng  rng(cfg.amcl_seed);
+
+    std::vector<RangeBeam> beams_buf;
+    Pose2D last_pose{};
+    bool   live_first_iter = true;
+    Offset last_written{0.0, 0.0, 0.0};
+    Seqlock<Offset>   target_offset;
+    Seqlock<LastPose> last_pose_seq;
+    Seqlock<LastScan> last_scan_seq;
+    AmclRateAccumulator amcl_rate_accum;
+    Seqlock<godo::core::HotConfig> hot_cfg_seq;
+    const Frame frame = make_synthetic_frame(360);
+
+    // First OneShot: publish the hint then run.
+    reset_hint_state();
+    godo::rt::HintBundle bundle{};
+    bundle.x_m            = 0.5;
+    bundle.y_m            = -0.5;
+    bundle.yaw_deg        = 45.0;
+    bundle.sigma_xy_m     = 0.5;
+    bundle.sigma_yaw_deg  = 20.0;
+    godo::rt::g_calibrate_hint_data.store(bundle);
+    godo::rt::g_calibrate_hint_valid.store(true, std::memory_order_release);
+    (void)run_one_iteration(cfg, frame, grid, lf, amcl, rng,
+                            beams_buf, last_pose, live_first_iter,
+                            last_written, target_offset,
+                            last_pose_seq, last_scan_seq,
+                            amcl_rate_accum, hot_cfg_seq);
+    // Pre-condition for the second call: consume-once cleared the flag.
+    CHECK(godo::rt::g_calibrate_hint_valid.load(
+        std::memory_order_acquire) == false);
+
+    // Second OneShot: do NOT re-publish a hint. The kernel must observe
+    // the cleared flag and fall through to seed_global. Capture observable
+    // proof: the result is valid + finite (same invariant as the
+    // back-compat case) AND the flag remains false on exit (no spontaneous
+    // self-publish).
+    const auto r2 = run_one_iteration(cfg, frame, grid, lf, amcl, rng,
+                                      beams_buf, last_pose, live_first_iter,
+                                      last_written, target_offset,
+                                      last_pose_seq, last_scan_seq,
+                                      amcl_rate_accum, hot_cfg_seq);
+    CHECK(std::isfinite(r2.offset.dx));
+    CHECK(std::isfinite(r2.offset.dy));
+    CHECK(std::isfinite(r2.offset.dyaw));
+    CHECK(godo::rt::g_calibrate_hint_valid.load(
+        std::memory_order_acquire) == false);
 }

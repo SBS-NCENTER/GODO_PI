@@ -53,7 +53,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi import Path as FastApiPath
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from . import activity as activity_mod
 from . import auth as auth_mod
@@ -153,6 +153,50 @@ class LoginBody(BaseModel):
 
 class LiveBody(BaseModel):
     enable: bool
+
+
+class CalibrateBody(BaseModel):
+    """`POST /api/calibrate` body (issue#3 — initial pose hint UI).
+
+    All five fields are optional. When the operator places a hint via
+    the SPA, the seed triple `(seed_x_m, seed_y_m, seed_yaw_deg)` is
+    all-or-none — partial submissions are 422'd here BEFORE reaching
+    UDS. σ overrides are independent of each other but require the
+    seed triple to be present (operators cannot tune σ without
+    placing a hint).
+
+    Bounds match production/RPi5/src/uds/uds_server.cpp::hint_within_bounds
+    byte-exactly and the schema row constraints in
+    config_schema.hpp::CONFIG_SCHEMA. Drift is a CODEBASE invariant
+    violation.
+
+    Mode-A M4 — uses `model_validator(mode='after')` for the
+    cross-field shape check; per-field bounds use Pydantic v2 `Field`
+    constraints so a typo lands as 422 BEFORE the validator runs.
+    """
+
+    seed_x_m:      float | None = Field(default=None, ge=-100.0, le=100.0)
+    seed_y_m:      float | None = Field(default=None, ge=-100.0, le=100.0)
+    seed_yaw_deg:  float | None = Field(default=None, ge=0.0,    lt=360.0)
+    sigma_xy_m:    float | None = Field(default=None, ge=0.05,   le=5.0)
+    sigma_yaw_deg: float | None = Field(default=None, ge=1.0,    le=90.0)
+
+    @model_validator(mode="after")
+    def all_or_none_seed(self) -> CalibrateBody:
+        triple = (self.seed_x_m, self.seed_y_m, self.seed_yaw_deg)
+        n_present = sum(v is not None for v in triple)
+        if n_present not in (0, 3):
+            raise ValueError(
+                "seed_x_m, seed_y_m, seed_yaw_deg must all be present "
+                "or all absent",
+            )
+        if n_present == 0 and (
+            self.sigma_xy_m is not None or self.sigma_yaw_deg is not None
+        ):
+            raise ValueError(
+                "sigma overrides require seed_* to be present",
+            )
+        return self
 
 
 class ConfigPatchBody(BaseModel):
@@ -549,13 +593,36 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # ---- /api/calibrate -------------------------------------------------
     @app.post("/api/calibrate")
     async def calibrate(
+        body: CalibrateBody | None = None,
         claims: auth_mod.Claims = Depends(auth_mod.require_admin),
     ) -> JSONResponse:
+        # issue#3 — optional pose hint. Empty body / `body is None` /
+        # `body` with all fields None → byte-identical to pre-issue#3
+        # wire (back-compat anti-regression pinned in test_protocol +
+        # test_app_integration).
+        seed: tuple[float, float, float] | None = None
+        sigma_xy: float | None = None
+        sigma_yaw: float | None = None
+        if (
+            body is not None
+            and body.seed_x_m is not None
+            and body.seed_y_m is not None
+            and body.seed_yaw_deg is not None
+        ):
+            # Pydantic `all_or_none_seed` already enforced full triple
+            # — the explicit None-checks above narrow the types so mypy
+            # accepts the float-tuple constructor without a cast.
+            seed = (body.seed_x_m, body.seed_y_m, body.seed_yaw_deg)
+            sigma_xy = body.sigma_xy_m
+            sigma_yaw = body.sigma_yaw_deg
         try:
             await uds_mod.call_uds(
                 client.set_mode,
                 MODE_ONESHOT,
                 cfg.calibrate_uds_timeout_s,
+                seed=seed,
+                sigma_xy_m=sigma_xy,
+                sigma_yaw_deg=sigma_yaw,
             )
         except uds_mod.UdsError as e:
             return _map_uds_exc_to_response(e)

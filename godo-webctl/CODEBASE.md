@@ -2180,3 +2180,86 @@ the rule unblocks at runtime.
   `services.py::ALLOWED_SERVICES × ALLOWED_ACTIONS`. Adding a fourth
   GODO unit or fourth verb is a synchronized two-file edit
   (`services.py` + the polkit rule) per that invariant.
+
+## 2026-05-01 00:30 KST — issue#3: CalibrateBody (pose hint forward) + schema row count 40 → 42
+
+### Added
+
+- `CalibrateBody` Pydantic v2 model in `app.py` — five optional
+  fields (`seed_x_m`, `seed_y_m`, `seed_yaw_deg`, `sigma_xy_m`,
+  `sigma_yaw_deg`). Per-field bounds via `Field(ge=, le=, lt=)`;
+  cross-field shape via `model_validator(mode='after')`:
+    1. seed triple is all-or-none (Mode-A M4),
+    2. σ overrides require seed_* to be present.
+- `protocol.py::encode_set_mode(...)` — keyword-only kwargs
+  `seed`, `sigma_xy_m`, `sigma_yaw_deg`. When `seed=None` (default),
+  emits the pre-issue#3 wire byte-for-byte (back-compat).
+  Defence-in-depth: rejects non-finite floats + σ-without-seed at
+  the encoder seam. JSON NUMBER serialization via `repr(float)`
+  (shortest round-trip — accepted by the C++ `parse_number` subset).
+- `uds_client.py::UdsClient.set_mode(..., *, seed=None, ...)` +
+  `call_uds(fn, *args, **kwargs)` extension to forward kwargs.
+  Pre-issue#3 callers (positional only) are unaffected.
+- `app.py /api/calibrate` accepts an optional `CalibrateBody | None`.
+  Empty body / all-None body → no `seed` kwarg → encoder emits
+  pre-issue#3 wire (back-compat anti-regression).
+- `config_schema.py::EXPECTED_ROW_COUNT` 40 → 42 to track the C++
+  schema (issue#3 added `amcl.hint_sigma_xy_m_default` +
+  `amcl.hint_sigma_yaw_deg_default`).
+
+### Tests
+
+- `test_app_integration.py` — 7 new cases:
+    test_calibrate_with_full_hint_appends_seed_keys_to_wire,
+    test_calibrate_partial_hint_returns_422,
+    test_calibrate_sigma_only_returns_422,
+    test_calibrate_yaw_360_returns_422,
+    test_calibrate_yaw_negative_returns_422,
+    test_calibrate_seed_only_no_sigma_uses_cfg_default,
+    test_calibrate_empty_body_byte_identical_to_pre_issue3.
+- `test_protocol.py` — 5 new cases pinning the encoder shape:
+    test_encode_set_mode_no_hint_byte_identical_to_pre_issue3
+    (anti-regression vs the pre-issue#3 byte sequence),
+    test_encode_set_mode_with_full_hint, test_encode_set_mode_seed_only_no_sigma,
+    test_encode_set_mode_rejects_sigma_without_seed,
+    test_encode_set_mode_rejects_non_finite_hint.
+- Schema parity tests bumped to 42:
+    test_config_schema_parity, test_config_schema, test_config_view,
+    test_get_config_schema_returns_42_rows.
+- All 683 webctl tests pass (was 671 baseline + 12 new).
+- Ruff clean. Mypy clean on edited files.
+
+### Removed
+
+- (none)
+
+### Invariants
+
+- **(ac) calibrate-hint-forward-compat-discipline** — issue#3
+  CalibrateBody pipeline. Three layers must agree on the wire shape;
+  drift between any pair is a code-review block.
+
+  1. **Pydantic = first defence**: `CalibrateBody.all_or_none_seed`
+     enforces the seed-triple shape AND σ-without-seed rejection
+     BEFORE the handler runs. Operator-facing 422 with field
+     paths so the SPA can highlight the broken input.
+
+  2. **Encoder = second defence**: `protocol.py::encode_set_mode`
+     re-rejects σ-without-seed + non-finite floats. JSON NUMBER
+     emission via `repr(float)` is the shortest round-trip Python
+     produces; the C++ `parse_number` subset accepts it byte-exactly
+     (no leading +, no bare '.', no NaN/Infinity).
+
+  3. **Tracker = third defence**: `production/RPi5/src/uds/uds_server.cpp`
+     re-validates the hint at the wire seam (production CODEBASE
+     invariant (p)). A non-webctl client (raw `socat`) cannot
+     bypass any of the three layers because each one independently
+     rejects malformed payloads.
+
+  4. **Back-compat**: an empty body / `body=None` request emits
+     `{"cmd":"set_mode","mode":"OneShot"}\n` — byte-identical to
+     pre-issue#3. Pinned in two test files (one per layer):
+     `test_protocol::encode_set_mode_no_hint_byte_identical_to_pre_issue3`
+     + `test_app_integration::test_calibrate_empty_body_byte_identical_to_pre_issue3`.
+     A future writer who introduces an unconditional `seed_x_m`
+     emit fails BOTH cases.

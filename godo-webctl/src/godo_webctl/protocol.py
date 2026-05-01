@@ -456,11 +456,73 @@ def encode_get_mode() -> bytes:
     return b'{"cmd":"get_mode"}\n'
 
 
-def encode_set_mode(mode: str) -> bytes:
-    """Canonical wire encoding of ``set_mode`` for a validated mode name."""
+def encode_set_mode(
+    mode: str,
+    *,
+    seed: tuple[float, float, float] | None = None,
+    sigma_xy_m: float | None = None,
+    sigma_yaw_deg: float | None = None,
+) -> bytes:
+    """Canonical wire encoding of ``set_mode`` for a validated mode name.
+
+    issue#3 (pose hint) — when ``seed`` is supplied as
+    ``(x_m, y_m, yaw_deg)``, the encoder appends three JSON NUMBER keys
+    ``seed_x_m``, ``seed_y_m``, ``seed_yaw_deg`` (in that order). When
+    ``sigma_xy_m`` / ``sigma_yaw_deg`` are also supplied, they append
+    after the seed triple. The C++ tracker parser
+    (``json_mini.cpp::parse_request``) accepts these as JSON numbers
+    only — strings would be rejected.
+
+    Pre-issue#3 byte shape (no seed, no sigma) is preserved verbatim
+    for back-compat — anti-regression pinned by
+    ``test_protocol::encode_set_mode_no_hint_byte_identical``.
+
+    All numeric values are formatted via ``repr(float)`` which gives a
+    shortest round-trip representation acceptable to the tracker's
+    parse_number subset (no leading +, no leading dot, no NaN/Infinity
+    — webctl Pydantic validates finite + range BEFORE this encoder is
+    reached).
+    """
     if mode not in VALID_MODES:
         raise ValueError(f"invalid mode: {mode!r}")
-    return b'{"cmd":"set_mode","mode":"' + mode.encode("ascii") + b'"}\n'
+    if seed is None and (sigma_xy_m is not None or sigma_yaw_deg is not None):
+        # The tracker rejects σ-without-seed as bad_sigma_without_seed;
+        # webctl Pydantic catches the same shape upstream as 422. This
+        # raise is a defence-in-depth so a programming-error caller
+        # cannot bypass both checks.
+        raise ValueError("sigma overrides require seed to be present")
+    base = b'{"cmd":"set_mode","mode":"' + mode.encode("ascii") + b'"'
+    if seed is None:
+        return base + b"}\n"
+    sx, sy, syaw = seed
+    parts = [
+        base,
+        b',"seed_x_m":',     _encode_json_number(sx),
+        b',"seed_y_m":',     _encode_json_number(sy),
+        b',"seed_yaw_deg":', _encode_json_number(syaw),
+    ]
+    if sigma_xy_m is not None:
+        parts += [b',"sigma_xy_m":',    _encode_json_number(sigma_xy_m)]
+    if sigma_yaw_deg is not None:
+        parts += [b',"sigma_yaw_deg":', _encode_json_number(sigma_yaw_deg)]
+    parts.append(b"}\n")
+    return b"".join(parts)
+
+
+def _encode_json_number(v: float) -> bytes:
+    """Render a Python float into the C++ parse_number subset. Rejects
+    NaN / Infinity (Pydantic + the C++ parser already reject these; we
+    raise here as a defence-in-depth so a buggy upstream caller cannot
+    emit a malformed wire payload).
+
+    Python's `repr(float)` is the right choice over `str` (Python 3.x
+    they are identical) — gives shortest round-trip representation
+    that strtod restores byte-exactly.
+    """
+    import math as _math
+    if not _math.isfinite(v):
+        raise ValueError(f"non-finite float in set_mode hint: {v!r}")
+    return repr(float(v)).encode("ascii")
 
 
 def encode_get_last_pose() -> bytes:

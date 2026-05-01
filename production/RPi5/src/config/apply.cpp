@@ -161,6 +161,8 @@ EffectiveValue read_effective(const Config& c, const ConfigSchemaRow& row) {
     else if (k == "amcl.converge_xy_std_m")          v.as_double = c.amcl_converge_xy_std_m;
     else if (k == "amcl.converge_yaw_std_deg")       v.as_double = c.amcl_converge_yaw_std_deg;
     else if (k == "amcl.downsample_stride")          v.as_int    = c.amcl_downsample_stride;
+    else if (k == "amcl.hint_sigma_xy_m_default")    v.as_double = c.amcl_hint_sigma_xy_m_default;
+    else if (k == "amcl.hint_sigma_yaw_deg_default") v.as_double = c.amcl_hint_sigma_yaw_deg_default;
     else if (k == "amcl.map_path")                   v.as_string = c.amcl_map_path;
     else if (k == "amcl.max_iters")                  v.as_int    = c.amcl_max_iters;
     else if (k == "amcl.origin_x_m")                 v.as_double = c.amcl_origin_x_m;
@@ -211,6 +213,8 @@ bool apply_one(Config& c,
     else if (k == "amcl.converge_xy_std_m")          c.amcl_converge_xy_std_m          = vr.parsed_double;
     else if (k == "amcl.converge_yaw_std_deg")       c.amcl_converge_yaw_std_deg       = vr.parsed_double;
     else if (k == "amcl.downsample_stride")          c.amcl_downsample_stride          = static_cast<int>(vr.parsed_double);
+    else if (k == "amcl.hint_sigma_xy_m_default")    c.amcl_hint_sigma_xy_m_default    = vr.parsed_double;
+    else if (k == "amcl.hint_sigma_yaw_deg_default") c.amcl_hint_sigma_yaw_deg_default = vr.parsed_double;
     else if (k == "amcl.map_path")                   c.amcl_map_path                   = vr.parsed_string;
     else if (k == "amcl.max_iters")                  c.amcl_max_iters                  = static_cast<int>(vr.parsed_double);
     else if (k == "amcl.origin_x_m")                 c.amcl_origin_x_m                 = vr.parsed_double;

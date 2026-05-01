@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ApiError, apiFetch, apiGet, apiPost, configureAuth } from '../../src/lib/api';
+import {
+  ApiError,
+  apiFetch,
+  apiGet,
+  apiPost,
+  apiPostCalibrate,
+  configureAuth,
+} from '../../src/lib/api';
 
 let onUnauth: ReturnType<typeof vi.fn>;
 let token: string | null;
@@ -122,6 +129,44 @@ describe('apiFetch', () => {
     );
     const r = await apiPost('/api/calibrate');
     expect(r).toBeNull();
+  });
+
+  // --- issue#3 — apiPostCalibrate body / no-body distinction --------
+  it('apiPostCalibrate(undefined) emits no body and no Content-Type', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    await apiPostCalibrate();
+    const [url, init] = fetchSpy.mock.calls[0]!;
+    expect(url).toBe('/api/calibrate');
+    expect((init as RequestInit).method).toBe('POST');
+    // body undefined → no JSON body in the fetch call.
+    expect((init as RequestInit).body).toBeUndefined();
+    const headers = (init as RequestInit).headers as Headers;
+    expect(headers.get('Content-Type')).toBeNull();
+  });
+
+  it('apiPostCalibrate(body) sends JSON body with all-or-none seed fields', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    await apiPostCalibrate({
+      seed_x_m: 1.5,
+      seed_y_m: -2.25,
+      seed_yaw_deg: 90.0,
+    });
+    const [, init] = fetchSpy.mock.calls[0]!;
+    expect((init as RequestInit).body).toBe(
+      '{"seed_x_m":1.5,"seed_y_m":-2.25,"seed_yaw_deg":90}',
+    );
+    const headers = (init as RequestInit).headers as Headers;
+    expect(headers.get('Content-Type')).toBe('application/json');
   });
 
   it('explicit AbortSignal aborts the request', async () => {

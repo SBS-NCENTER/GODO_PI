@@ -97,4 +97,19 @@ inline constexpr int              AMCL_ANNEAL_ITERS_PER_PHASE    = 10;
 inline constexpr int              GPIO_CALIBRATE_PIN       = 16;
 inline constexpr int              GPIO_LIVE_TOGGLE_PIN     = 20;
 
+// issue#3 — calibrate pose-hint default σ (recalibrate class). When the
+// operator places a hint via webctl WITHOUT supplying explicit σ
+// overrides, the cold writer falls back to these.
+//
+// Defaults rationale (plan §R1, §R2): test4/test5 HIL showed one-shot
+// (x, y) error of ~0.5 m and yaw error of ~5–10°; live mode showed
+// (x, y) error of ~4 m and yaw ~90°. σ_xy = 0.50 m (~10 grid cells at
+// 0.05 m/cell) gives ±2σ = 1.0 m radius — comfortably covers the
+// observed 0.5 m one-shot bias and the operator's coarse click
+// precision. σ_yaw = 20° covers ±40°, well below the 90° false-basin
+// separation. Both Tier-2 keys; HIL-tunable down later if these prove
+// over-permissive in practice.
+inline constexpr double           AMCL_HINT_SIGMA_XY_M_DEFAULT     = 0.50;
+inline constexpr double           AMCL_HINT_SIGMA_YAW_DEG_DEFAULT  = 20.0;
+
 }  // namespace godo::config::defaults

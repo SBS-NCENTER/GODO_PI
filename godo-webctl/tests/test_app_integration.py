@@ -255,6 +255,160 @@ async def test_calibrate_unauth_returns_401(
     assert r.json()["err"] == "auth_required"
 
 
+# ---- /api/calibrate — issue#3 pose hint -----------------------------------
+async def test_calibrate_with_full_hint_appends_seed_keys_to_wire(
+    fake_uds_server,
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    """Full hint body — the seed triple + σ overrides reach the UDS wire
+    as JSON numbers. Pinned byte-exact for cross-stack drift catch."""
+    fake_uds_server.reply(b'{"ok":true}')
+    s = _settings_for(
+        uds_socket=fake_uds_server.path,
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    body = {
+        "seed_x_m":      1.5,
+        "seed_y_m":     -2.25,
+        "seed_yaw_deg": 90.0,
+        "sigma_xy_m":    0.5,
+        "sigma_yaw_deg": 20.0,
+    }
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post("/api/calibrate", headers=_auth(token), json=body)
+    assert r.status_code == HTTPStatus.OK
+    assert r.json() == {"ok": True}
+    assert fake_uds_server.captured == [
+        b'{"cmd":"set_mode","mode":"OneShot","seed_x_m":1.5,'
+        b'"seed_y_m":-2.25,"seed_yaw_deg":90.0,'
+        b'"sigma_xy_m":0.5,"sigma_yaw_deg":20.0}\n'
+    ]
+
+
+async def test_calibrate_partial_hint_returns_422(
+    fake_uds_server,
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    """Two-of-three seed_* present → 422; UDS not contacted."""
+    s = _settings_for(
+        uds_socket=fake_uds_server.path,
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    body = {"seed_x_m": 1.0, "seed_y_m": 2.0}  # missing seed_yaw_deg
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post("/api/calibrate", headers=_auth(token), json=body)
+    assert r.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+    assert fake_uds_server.captured == []
+
+
+async def test_calibrate_sigma_only_returns_422(
+    fake_uds_server,
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    """σ override without seed → 422 (Pydantic all_or_none_seed)."""
+    s = _settings_for(
+        uds_socket=fake_uds_server.path,
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    body = {"sigma_xy_m": 0.5}
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post("/api/calibrate", headers=_auth(token), json=body)
+    assert r.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+    assert fake_uds_server.captured == []
+
+
+async def test_calibrate_yaw_360_returns_422(
+    fake_uds_server,
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    """yaw_deg must be < 360 (lt=360.0). 360.0 → 422."""
+    s = _settings_for(
+        uds_socket=fake_uds_server.path,
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    body = {"seed_x_m": 0.0, "seed_y_m": 0.0, "seed_yaw_deg": 360.0}
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post("/api/calibrate", headers=_auth(token), json=body)
+    assert r.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+
+
+async def test_calibrate_yaw_negative_returns_422(
+    fake_uds_server,
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    """yaw_deg must be ≥ 0. -1.0 → 422."""
+    s = _settings_for(
+        uds_socket=fake_uds_server.path,
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    body = {"seed_x_m": 0.0, "seed_y_m": 0.0, "seed_yaw_deg": -1.0}
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post("/api/calibrate", headers=_auth(token), json=body)
+    assert r.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+
+
+async def test_calibrate_seed_only_no_sigma_uses_cfg_default(
+    fake_uds_server,
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    """Operator places only the seed triple — no σ overrides. The wire
+    must NOT carry sigma_* keys (cfg default applies on tracker side)."""
+    fake_uds_server.reply(b'{"ok":true}')
+    s = _settings_for(
+        uds_socket=fake_uds_server.path,
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    body = {"seed_x_m": 1.0, "seed_y_m": -1.0, "seed_yaw_deg": 45.0}
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post("/api/calibrate", headers=_auth(token), json=body)
+    assert r.status_code == HTTPStatus.OK
+    assert fake_uds_server.captured == [
+        b'{"cmd":"set_mode","mode":"OneShot",'
+        b'"seed_x_m":1.0,"seed_y_m":-1.0,"seed_yaw_deg":45.0}\n'
+    ]
+
+
+async def test_calibrate_empty_body_byte_identical_to_pre_issue3(
+    fake_uds_server,
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    """No body → wire is byte-identical to pre-issue#3 (back-compat
+    pin). Pinned in two places: this case AND
+    test_calibrate_happy_sends_oneshot_bytes (already in this file)."""
+    fake_uds_server.reply(b'{"ok":true}')
+    s = _settings_for(
+        uds_socket=fake_uds_server.path,
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        # No JSON body — FastAPI passes body=None → handler keeps
+        # `seed=None` → encoder emits the pre-issue#3 wire.
+        r = await cl.post("/api/calibrate", headers=_auth(token))
+    assert r.status_code == HTTPStatus.OK
+    assert fake_uds_server.captured == [b'{"cmd":"set_mode","mode":"OneShot"}\n']
+
+
 # ---- /api/map/backup ------------------------------------------------------
 async def test_backup_happy_returns_path(
     tmp_path: Path,
@@ -2224,12 +2378,13 @@ async def test_get_config_returns_projected_dict(
     assert body["network.ue_port"] == 6666
 
 
-async def test_get_config_schema_returns_37_rows(
+async def test_get_config_schema_returns_42_rows(
     tmp_path: Path,
     tmp_map_pair: Path,
 ) -> None:
     """The schema is mirrored from C++; the endpoint serves the local
-    parse cache, not a UDS round-trip."""
+    parse cache, not a UDS round-trip. issue#3 fold added 2 rows
+    (amcl.hint_sigma_*_default) — count 40 → 42."""
     s = _settings_for(
         uds_socket=tmp_path / "u.sock",
         map_path=tmp_map_pair,
@@ -2240,7 +2395,7 @@ async def test_get_config_schema_returns_37_rows(
     assert r.status_code == HTTPStatus.OK
     rows = r.json()
     assert isinstance(rows, list)
-    assert len(rows) == 40
+    assert len(rows) == 42
     # Each row has the documented keys.
     for row in rows:
         assert {

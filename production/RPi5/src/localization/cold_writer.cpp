@@ -60,6 +60,18 @@ AmclResult converge_anneal(const godo::core::Config&     cfg,
     int         bad_streak = 0;
     constexpr int kPatience = 2;  // 2 consecutive worse phases → stop
 
+    // issue#3 — pose hint check. UDS handler stored a finite, in-range
+    // bundle and lifted the flag with release ordering BEFORE
+    // g_amcl_mode = OneShot was stored (uds_server.cpp Mode-A M3 pin).
+    // Acquire-load here gives us happens-after on both the bundle bytes
+    // and the OneShot mode that brought us into this kernel.
+    const bool have_hint = godo::rt::g_calibrate_hint_valid.load(
+        std::memory_order_acquire);
+    godo::rt::HintBundle hint{};
+    if (have_hint) {
+        hint = godo::rt::g_calibrate_hint_data.load();
+    }
+
     for (std::size_t k = 0; k < schedule.size(); ++k) {
         const double sigma_k = schedule[k];
 
@@ -72,7 +84,28 @@ AmclResult converge_anneal(const godo::core::Config&     cfg,
         amcl.set_field(field_inout);
 
         // 2. Seed.
-        if (k == 0) {
+        if (k == 0 && have_hint) {
+            // issue#3 — operator-supplied hint narrows the phase-0 cloud
+            // to a Gaussian basin instead of seeding globally. σ override
+            // applies if the operator supplied one (>0); otherwise fall
+            // back to the Tier-2 default.
+            const double seed_xy_h = (hint.sigma_xy_m > 0.0)
+                ? hint.sigma_xy_m
+                : cfg.amcl_hint_sigma_xy_m_default;
+            const double seed_yaw_h = (hint.sigma_yaw_deg > 0.0)
+                ? hint.sigma_yaw_deg
+                : cfg.amcl_hint_sigma_yaw_deg_default;
+            Pose2D hint_pose{};
+            hint_pose.x       = hint.x_m;
+            hint_pose.y       = hint.y_m;
+            hint_pose.yaw_deg = hint.yaw_deg;
+            amcl.seed_around(hint_pose, seed_xy_h, seed_yaw_h, rng);
+            // pose_inout is the carry-pose for subsequent phases; start
+            // it at the hint position so the phase-1 seed_around centres
+            // on the operator's basin even if phase 0 ends with a slight
+            // drift from xy_std-tracking noise.
+            pose_inout = hint_pose;
+        } else if (k == 0) {
             amcl.seed_global(grid, rng);
         } else {
             // Per-phase seed_around σ_xy from the explicit schedule (Mode-A
@@ -331,6 +364,14 @@ AmclResult run_one_iteration(const godo::core::Config&         cfg,
     // schedule's narrow final-phase σ. Cost: one EDT rebuild on the cold
     // path; off the 10 Hz Live tick.
     rebuild_lf_for_live(cfg, grid, lf_inout, amcl);
+
+    // issue#3 — consume-once: cold writer is the SOLE clearer of the
+    // calibrate-hint flag (production CODEBASE invariant (p)). Clearing
+    // unconditionally is correct: if the flag was already false (no
+    // hint this OneShot), the store is a no-op; if it was true, we just
+    // consumed it and the next OneShot starts with a fresh global seed
+    // unless the operator places a new hint via webctl.
+    godo::rt::g_calibrate_hint_valid.store(false, std::memory_order_release);
 
     return result;
 }

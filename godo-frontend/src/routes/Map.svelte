@@ -4,6 +4,8 @@
   import MapListPanel from '$components/MapListPanel.svelte';
   import MapZoomControls from '$components/MapZoomControls.svelte';
   import PoseCanvas from '$components/PoseCanvas.svelte';
+  import PoseHintLayer, { type HintPose } from '$components/PoseHintLayer.svelte';
+  import PoseHintNumericFields from '$components/PoseHintNumericFields.svelte';
   import ScanToggle from '$components/ScanToggle.svelte';
   import TrackerControls from '$components/TrackerControls.svelte';
   import { MAP_SUBTAB_EDIT, MAP_SUBTAB_OVERVIEW } from '$lib/constants';
@@ -35,6 +37,17 @@
   // MapListPanel re-points to `/api/maps/<name>/image` for read-only
   // preview without altering the active state.
   let previewUrl = $state('/api/map/image');
+
+  // issue#3 — pose hint state. Mode-A M6: lives in Map.svelte parent
+  // so it survives sub-tab switching (PoseHintLayer is unmounted on
+  // Edit, but the placed hint persists; common-header
+  // <TrackerControls> can still issue "Calibrate from hint" from
+  // either sub-tab).
+  let poseHintEnabled = $state(false);
+  let hint = $state<HintPose | null>(null);
+  function onHintChange(next: HintPose | null): void {
+    hint = next;
+  }
 
   // Sub-tab is URL-backed: `/map` -> Overview, `/map-edit` -> Edit. The
   // Edit sub-tab hosts the brush-erase mask editor (formerly the
@@ -83,8 +96,11 @@
        2026-04-30 KST late evening: TrackerControls + LastPoseCard
        must show on BOTH Overview and Edit. Promoted out of per-sub-tab
        blocks so they share a single mount lifecycle and a single
-       lastPose / mode subscription pair. -->
-  <TrackerControls />
+       lastPose / mode subscription pair.
+       issue#3 — `hint` + `onClearHint` props supplied so the
+       common-header "Calibrate from hint" button works on either
+       sub-tab. -->
+  <TrackerControls {hint} onClearHint={() => onHintChange(null)} />
   <LastPoseCard />
 
   <div class="subtabs-row">
@@ -108,8 +124,20 @@
     </div>
     <!-- ScanToggle pinned to the right end of the sub-tabs row. Single
          mount; shows on both sub-tabs (the toggle's effect — LiDAR
-         overlay on/off — applies to whichever map view is active). -->
-    <ScanToggle {scan} />
+         overlay on/off — applies to whichever map view is active).
+         issue#3: pose-hint toggle sits next to ScanToggle (both are
+         operator switches that bound canvas pointer behaviour). The
+         toggle is gated on the Overview sub-tab — on Edit it is
+         hidden because the brush layer needs the canvas events. -->
+    <div class="hstack">
+      {#if activeSubtab === MAP_SUBTAB_OVERVIEW}
+        <label class="pose-hint-toggle" data-testid="pose-hint-toggle">
+          <input type="checkbox" bind:checked={poseHintEnabled} />
+          <span>위치 힌트</span>
+        </label>
+      {/if}
+      <ScanToggle {scan} />
+    </div>
   </div>
 
   {#if activeSubtab === MAP_SUBTAB_OVERVIEW}
@@ -120,8 +148,19 @@
     {/if}
     <div class="canvas-stack">
       <PoseCanvas {viewport} {pose} mapImageUrl={previewUrl} {scan} scanOverlayOn={scanOn} />
+      {#if poseHintEnabled}
+        <PoseHintLayer
+          {viewport}
+          enabled={poseHintEnabled}
+          {hint}
+          onhintchange={onHintChange}
+        />
+      {/if}
       <MapZoomControls {viewport} />
     </div>
+    {#if poseHintEnabled}
+      <PoseHintNumericFields {hint} onhintchange={onHintChange} />
+    {/if}
     <!-- Operator HIL 2026-04-30 KST: "map 미리보기 블럭이 위로, 맵
          목록 블럭이 아래로" — MapListPanel moved BELOW the canvas. -->
     <MapListPanel {onPreviewSelect} />
@@ -175,5 +214,20 @@
   .subtab.active {
     color: var(--color-text);
     border-bottom-color: var(--color-accent);
+  }
+  /* issue#3 — pose-hint toggle. Sits beside ScanToggle in the sub-tab
+     row; visible only on Overview. */
+  .pose-hint-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 13px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .hstack {
+    display: flex;
+    gap: 12px;
+    align-items: center;
   }
 </style>

@@ -27,11 +27,36 @@ namespace godo::uds {
 // returns format_err("parse_error") to the client. `mode_arg` is only
 // populated when `cmd == "set_mode"`. `key_arg` + `value_arg` are only
 // populated when `cmd == "set_config"` (Track B-CONFIG / PR-CONFIG-α).
+//
+// issue#3 (pose hint) — `set_mode` may carry an optional pose-hint
+// triple `(seed_x_m, seed_y_m, seed_yaw_deg)` plus optional sigma
+// overrides `(sigma_xy_m, sigma_yaw_deg)`. Each is parsed as a JSON
+// NUMBER (not a string) per uds_protocol.md §C.1.1. The `has_*` flags
+// distinguish "not present" from "present with value 0.0". Webctl
+// pre-validates the all-or-none shape across the seed triple; the
+// tracker's UDS layer enforces finite + range bounds before publishing
+// to `g_calibrate_hint_data`. See production/RPi5/CODEBASE.md
+// invariant (p) for the full ownership chain.
 struct Request {
     std::string cmd;
     std::string mode_arg;
     std::string key_arg;
     std::string value_arg;
+
+    // issue#3 — optional pose hint number fields. Defaults are inert
+    // (has_*=false; value=0.0) so existing callers see no behaviour
+    // change. The seed triple is forwarded as a unit (all-or-none); σ
+    // overrides are independent (cfg defaults apply when absent).
+    bool   has_seed_x_m       = false;
+    double seed_x_m           = 0.0;
+    bool   has_seed_y_m       = false;
+    double seed_y_m           = 0.0;
+    bool   has_seed_yaw_deg   = false;
+    double seed_yaw_deg       = 0.0;
+    bool   has_sigma_xy_m     = false;
+    double sigma_xy_m         = 0.0;
+    bool   has_sigma_yaw_deg  = false;
+    double sigma_yaw_deg      = 0.0;
 };
 
 // Parse one request line. Tolerates trailing whitespace / newline.

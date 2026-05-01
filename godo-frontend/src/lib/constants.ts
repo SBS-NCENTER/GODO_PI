@@ -37,6 +37,12 @@ export const MAP_TRAIL_TTL_MS = 1000;
 export const LAST_POSE_POLL_FALLBACK_MS = 1000;
 // /api/health polling cadence on DASH (1 Hz is plenty for a status chip).
 export const HEALTH_POLL_MS = 1000;
+// /api/system/restart_pending polling backstop. Action-driven refreshes
+// (post service-restart, post cfg-PATCH) fire too early to see the
+// tracker's own clear_pending_flag(); without polling the banner sticks
+// at pending=true until a hard reload. 1 Hz matches HEALTH_POLL_MS so
+// banner clearance feels paired with the tracker-status chip.
+export const RESTART_PENDING_POLL_MS = 1000;
 
 // --- Activity log -------------------------------------------------------
 // Mirrors backend ACTIVITY_TAIL_DEFAULT_N.

@@ -603,6 +603,48 @@ preview proxy needed.
 
 ## Change log
 
+### 2026-05-01 13:29 KST — issue#8 — restart-pending banner polling backstop
+
+#### Changed
+
+- `src/stores/restartPending.ts` — added subscriber-counted polling
+  via new `subscribeRestartPending(fn)` API mirroring the
+  `subscribeMode` pattern in `stores/mode.ts`. The first subscriber
+  starts a 1 Hz `setInterval` calling the existing `refresh()`; the
+  last unsubscribe stops the timer. Fixes the operator-observed bug
+  where the banner ("godo-tracker 재시작 필요") stuck at
+  `pending=true` after a service-restart action until a hard reload.
+- `src/components/RestartPendingBanner.svelte` — switched from
+  direct `restartPending.subscribe` + `onMount refresh()` to
+  `subscribeRestartPending`, so mounting the banner also starts the
+  polling backstop.
+- `src/lib/constants.ts` — added `RESTART_PENDING_POLL_MS = 1000`
+  with a comment naming the issue#8 scenario.
+- `tests/unit/restartPending.test.ts` — four new tests covering
+  subscriber-counted polling: immediate-fetch on first subscribe,
+  re-fetch at the configured cadence, timer-stop on last detach,
+  and one-timer-shared across multiple subscribers.
+
+#### Why polling and not a smarter post-action retry
+
+Action-driven `refresh()` calls remain in place (ServiceCard,
+Config, MapEdit, ServiceStatusCard) for immediate feedback after an
+operator action. They fire BEFORE the tracker boot completes its
+`clear_pending_flag()`, so they see stale `pending=true`. Polling
+is the smallest backstop that catches the deferred clearance
+without introducing per-action delay logic or an SSE channel.
+1 Hz is the same cadence as `/api/health` in `mode.ts` so the two
+status indicators (banner, tracker chip) feel paired.
+
+#### Out of scope
+
+- An SSE-based push channel for `restart_pending`. Operator can
+  upgrade later if 1 Hz polling proves wasteful at scale; for now
+  the endpoint is anon-readable + cheap (single sentinel-file
+  stat).
+- Audit of every cfg key that touches the sentinel — covered by
+  invariant `apply.cpp` semantics; not the bug being fixed here.
+
 ### 2026-04-30 21:00 KST — issue#2.2 — panClamp single-case fix + pinch zoom (PR #46 HIL hotfix)
 
 #### Changed

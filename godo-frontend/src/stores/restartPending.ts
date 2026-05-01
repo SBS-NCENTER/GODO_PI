@@ -1,10 +1,18 @@
 /**
- * RestartPending store — Track B-CONFIG (PR-CONFIG-β).
+ * RestartPending store — Track B-CONFIG (PR-CONFIG-β) + issue#8.
  *
- * Refresh-on-action; explicit `refresh()` is called on mount + on
- * every successful PATCH /api/config response (the tracker may have
- * touched the flag during the round-trip). The banner component also
- * subscribes directly so the UI updates without prop-drilling.
+ * Two refresh paths:
+ *   - Action-driven `refresh()` — called from PATCH /api/config success,
+ *     ServiceCard restart action, MapEdit map mutations, etc. Gives
+ *     immediate UI feedback after operator actions.
+ *   - Subscriber-counted polling (`subscribeRestartPending`) at
+ *     `RESTART_PENDING_POLL_MS`. Backstop for issue#8: a service-restart
+ *     POST returns success the moment systemctl queues the restart, but
+ *     the tracker's own `clear_pending_flag()` runs later during boot;
+ *     the action-driven refresh fires too early to see the cleared
+ *     sentinel, so without polling the banner sticks at pending=true
+ *     until a hard reload. Polling re-fetches at 1 Hz to catch the
+ *     deferred clearance.
  *
  * Mode-A S5 fold: distinguishes "tracker ok + flag set" (red banner
  * "godo-tracker 재시작 필요") from "tracker unreachable + flag set"
@@ -14,6 +22,7 @@
 
 import { writable, type Writable } from 'svelte/store';
 import { apiGet, ApiError } from '$lib/api';
+import { RESTART_PENDING_POLL_MS } from '$lib/constants';
 import type { Health, RestartPendingResponse } from '$lib/protocol';
 
 export interface RestartPendingState {
@@ -53,7 +62,41 @@ export async function refresh(): Promise<void> {
   restartPending.set({ pending, trackerOk });
 }
 
+let pollTimer: ReturnType<typeof setInterval> | null = null;
+let subscriberCount = 0;
+
+function startPolling(): void {
+  if (pollTimer !== null) return;
+  void refresh();
+  pollTimer = setInterval(() => void refresh(), RESTART_PENDING_POLL_MS);
+}
+
+function stopPolling(): void {
+  if (pollTimer !== null) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+}
+
+/**
+ * Subscribe with subscriber-counted always-on polling. Mirrors the
+ * `subscribeMode` pattern in stores/mode.ts. The first subscriber starts
+ * the polling timer; the last one to unsubscribe stops it.
+ */
+export function subscribeRestartPending(fn: (s: RestartPendingState) => void): () => void {
+  subscriberCount++;
+  if (subscriberCount === 1) startPolling();
+  const unsub = restartPending.subscribe(fn);
+  return () => {
+    unsub();
+    subscriberCount--;
+    if (subscriberCount === 0) stopPolling();
+  };
+}
+
 /** Test helper. */
 export function reset(): void {
   restartPending.set({ pending: false, trackerOk: true });
+  stopPolling();
+  subscriberCount = 0;
 }

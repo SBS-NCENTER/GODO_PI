@@ -20,6 +20,9 @@ export const routes: Record<string, Component> = {
   '/login': Login,
   '/map': Map,
   '/map-edit': Map,
+  // issue#14 — Mapping sub-tab URL. Routes to Map.svelte which
+  // auto-selects the Mapping sub-tab when route.path === '/map-mapping'.
+  '/map-mapping': Map,
   '/local': Local,
   '/diag': Diagnostics,
   '/config': Config,

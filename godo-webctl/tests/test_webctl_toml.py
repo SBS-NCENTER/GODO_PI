@@ -245,3 +245,57 @@ def test_public_constants_pinned() -> None:
     assert wt.WEBCTL_SCAN_STREAM_HZ_DEFAULT == 30
     assert wt.WEBCTL_STREAM_HZ_MIN == 1
     assert wt.WEBCTL_STREAM_HZ_MAX == 60
+
+
+# ---- issue#14 — tracker-owned [serial] section reader -----------------
+
+
+def test_tracker_serial_default_when_missing_file(tmp_path: Path) -> None:
+    out = wt.read_tracker_serial_section(tmp_path / "no_such.toml")
+    assert out.lidar_port == wt.TRACKER_SERIAL_LIDAR_PORT_DEFAULT
+    assert wt.TRACKER_SERIAL_LIDAR_PORT_DEFAULT == "/dev/ttyUSB0"
+
+
+def test_tracker_serial_default_when_section_missing(tmp_path: Path) -> None:
+    p = tmp_path / "tracker.toml"
+    p.write_text("[network]\nue_host = \"127.0.0.1\"\n")
+    out = wt.read_tracker_serial_section(p)
+    assert out.lidar_port == "/dev/ttyUSB0"
+
+
+def test_tracker_serial_reads_value_verbatim(tmp_path: Path) -> None:
+    p = tmp_path / "tracker.toml"
+    p.write_text('[serial]\nlidar_port = "/dev/ttyUSB1"\n')
+    out = wt.read_tracker_serial_section(p)
+    assert out.lidar_port == "/dev/ttyUSB1"
+
+
+def test_tracker_serial_default_when_empty_string(tmp_path: Path) -> None:
+    """Empty string from TOML falls back to default (defence-in-depth)."""
+    p = tmp_path / "tracker.toml"
+    p.write_text('[serial]\nlidar_port = ""\n')
+    out = wt.read_tracker_serial_section(p)
+    assert out.lidar_port == "/dev/ttyUSB0"
+
+
+def test_tracker_serial_rejects_non_string(tmp_path: Path) -> None:
+    p = tmp_path / "tracker.toml"
+    p.write_text("[serial]\nlidar_port = 1234\n")
+    with pytest.raises(wt.WebctlTomlError):
+        wt.read_tracker_serial_section(p)
+
+
+def test_tracker_serial_rejects_table_section(tmp_path: Path) -> None:
+    """If [serial] is given as an array of tables (operator typo), reject
+    cleanly rather than silently use defaults."""
+    p = tmp_path / "tracker.toml"
+    p.write_text('[[serial]]\nlidar_port = "/dev/ttyUSB1"\n')
+    with pytest.raises(wt.WebctlTomlError):
+        wt.read_tracker_serial_section(p)
+
+
+def test_tracker_serial_propagates_malformed_toml(tmp_path: Path) -> None:
+    p = tmp_path / "tracker.toml"
+    p.write_text("[serial\nlidar_port = bogus\n")
+    with pytest.raises(wt.WebctlTomlError):
+        wt.read_tracker_serial_section(p)

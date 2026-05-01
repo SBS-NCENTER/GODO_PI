@@ -22,8 +22,19 @@ if [[ -z "${MAP_NAME:-}" ]]; then
 fi
 
 # Output paths inside the container. The host bind-mounts ./maps -> /maps.
-MAP_OUT_DIR="/maps"
+# MAP_OUT_DIR is overrideable so the hardware-free trap test can point it
+# at a tmp location.
+MAP_OUT_DIR="${MAP_OUT_DIR:-/maps}"
 MAP_OUT_BASE="${MAP_OUT_DIR}/${MAP_NAME}"
+
+# issue#14 — ensure the preview output directory exists. The bind-mount
+# /var/lib/godo/maps -> /maps gives us write access; the .preview
+# subdirectory is created lazily here (idempotent). The host install.sh
+# also seeds it post-install, so this is belt-and-suspenders. In
+# TEST_MODE we run as a non-root user without /maps; tolerate the mkdir
+# failure rather than abort, since the trap test does not care about
+# the preview path.
+mkdir -p "${MAP_OUT_DIR}/.preview" 2>/dev/null || true
 
 # Plan F9 — map saver indirection. Default writes /maps/${MAP_NAME}.{pgm,yaml}
 # (the bind-mounted host path). tests/test_entrypoint_trap.sh overrides this

@@ -41,7 +41,7 @@ if [[ ! -x "$BIN_SRC" ]]; then
     exit 1
 fi
 
-echo "[1/8] Installing /opt/godo-tracker/"
+echo "[1/11] Installing /opt/godo-tracker/"
 install -d -m 0755 -o root -g root /opt/godo-tracker
 install -d -m 0755 -o root -g root /opt/godo-tracker/share
 install -m 0755 -o root -g root "$BIN_SRC"                          /opt/godo-tracker/godo_tracker_rt
@@ -55,16 +55,19 @@ install -m 0755 -o root -g root "$SCRIPT_DIR/godo-irq-pin.sh"       /opt/godo-tr
 install -m 0644 -o root -g root "$RPI5_DIR/src/core/config_schema.hpp" \
                                 /opt/godo-tracker/share/config_schema.hpp
 
-echo "[2/8] Installing systemd units to /etc/systemd/system/"
+echo "[2/11] Installing systemd units to /etc/systemd/system/"
 install -m 0644 "$SCRIPT_DIR/godo-irq-pin.service"  /etc/systemd/system/godo-irq-pin.service
 install -m 0644 "$SCRIPT_DIR/godo-tracker.service"  /etc/systemd/system/godo-tracker.service
+# issue#14 — mapping pipeline template unit. Operator never enables
+# this; webctl drives `systemctl start godo-mapping@active.service`.
+install -m 0644 "$SCRIPT_DIR/godo-mapping@.service" /etc/systemd/system/godo-mapping@.service
 
-echo "[3/8] Installing watchdog drop-in"
+echo "[3/11] Installing watchdog drop-in"
 install -d -m 0755 /etc/systemd/system.conf.d
 install -m 0644 "$SCRIPT_DIR/system.conf.d/godo-watchdog.conf" \
                 /etc/systemd/system.conf.d/godo-watchdog.conf
 
-echo "[4/8] Installing polkit rule for ncenter-group systemctl + login1 access"
+echo "[4/11] Installing polkit rule for ncenter-group systemctl + login1 access"
 install -d -m 0755 /etc/polkit-1/rules.d
 install -m 0644 "$SCRIPT_DIR/49-godo-systemctl.rules" \
                 /etc/polkit-1/rules.d/49-godo-systemctl.rules
@@ -76,7 +79,7 @@ if ! systemctl is-active --quiet polkit; then
     echo "install: warning — polkit unit is not active; rule will load when polkit starts" >&2
 fi
 
-echo "[5/8] Seeding /etc/godo/tracker.env (preserves existing real .env)"
+echo "[5/11] Seeding /etc/godo/tracker.env (preserves existing real .env)"
 install -d -m 0755 -o root -g root /etc/godo
 if [[ ! -e /etc/godo/tracker.env ]]; then
     install -m 0644 -o root -g root "$SCRIPT_DIR/godo-tracker.env.example" /etc/godo/tracker.env
@@ -87,7 +90,7 @@ else
     echo "    Compare with $SCRIPT_DIR/godo-tracker.env.example for new keys."
 fi
 
-echo "[6/8] Seeding /var/lib/godo/tracker.toml (empty, ncenter-owned)"
+echo "[6/11] Seeding /var/lib/godo/tracker.toml (empty, ncenter-owned)"
 # /var/lib/godo itself is created by the unit's StateDirectory=godo, but
 # the install path is also valid before the unit ever runs (the directory
 # tree is harmless if /var/lib/godo/maps/ etc. arrive later).
@@ -116,14 +119,57 @@ if [[ -e /etc/godo/tracker.toml ]]; then
     fi
 fi
 
-echo "[7/8] systemctl daemon-reload"
+echo "[7/11] Installing godo-mapping@.env.example reference (issue#14)"
+# Documentation only — webctl writes the real envfile at runtime to
+# /run/godo/mapping/active.env. This reference copy lives in /etc/godo
+# so an operator inspecting the system can see the expected shape.
+install -m 0644 -o root -g root "$SCRIPT_DIR/godo-mapping@.env.example" \
+                                 /etc/godo/godo-mapping@.env.example
+
+echo "[8/11] Ensuring /var/lib/godo/maps/.preview/ exists (issue#14 mapping previews)"
+# Bind-mount target inside the container at /maps/.preview. webctl reads
+# the PGM via realpath-contained `mapping.preview_path`. Belt-and-
+# suspenders: the entrypoint also `mkdir -p /maps/.preview` at
+# container-start.
+install -d -m 0750 -o ncenter -g ncenter /var/lib/godo/maps/.preview
+
+echo "[9/11] Ensuring docker group membership for ncenter (issue#14)"
+# webctl shells out to `docker inspect` / `docker stats` etc. without
+# sudo; ncenter must be in the docker group. First-time-after-install
+# requires log out + back in (or reboot) for the group membership to
+# take effect on existing sessions. Idempotent: re-runs print a no-op.
+if id -nG ncenter | grep -qw docker; then
+    echo "  → ncenter already in docker group."
+else
+    if getent group docker >/dev/null 2>&1; then
+        usermod -aG docker ncenter
+        echo "  → ncenter added to docker group."
+        echo "  → IMPORTANT: operator must log out + log back in (or reboot)"
+        echo "    for this membership to take effect on existing sessions."
+        echo "  → Verify with: groups ncenter | grep -w docker && docker ps"
+    else
+        echo "  → docker group not present — install Docker first, then re-run install.sh." >&2
+    fi
+fi
+
+# (M2 fix — no /run/godo/mapping/ install-time seed. /run is tmpfs and
+# any install-time mkdir is wiped on reboot. webctl's
+# `_write_run_envfile` performs `Path(...).mkdir(parents=True,
+# exist_ok=True, mode=0o750)` at runtime before its atomic write — this
+# is the only correct creator. /run/godo itself comes from
+# godo-tracker.service's RuntimeDirectory=godo + RuntimeDirectoryPreserve=yes,
+# and webctl already has ReadWritePaths=/run/godo so the runtime mkdir
+# of the `mapping` subdir succeeds without elevation.)
+
+echo "[10/11] systemctl daemon-reload"
 systemctl daemon-reload
 
 echo
-echo "Install complete. Auto-start policy (operator decision):"
-echo "  - godo-irq-pin.service    AUTO    (IRQ pinning, oneshot, no runtime risk)"
-echo "  - godo-webctl.service     AUTO    (operator UI; must reach at boot)"
-echo "  - godo-tracker.service    MANUAL  (start via SPA System tab Start button)"
+echo "[11/11] Install complete. Auto-start policy (operator decision):"
+echo "  - godo-irq-pin.service                AUTO    (IRQ pinning, oneshot, no runtime risk)"
+echo "  - godo-webctl.service                 AUTO    (operator UI; must reach at boot)"
+echo "  - godo-tracker.service                MANUAL  (start via SPA System tab Start button)"
+echo "  - godo-mapping@active.service         MANUAL  (issue#14 — driven by webctl /api/mapping/start)"
 echo
 echo "Enable the auto-start units:"
 echo "  sudo systemctl enable --now godo-irq-pin.service"

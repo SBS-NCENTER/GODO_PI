@@ -18,6 +18,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
+from .constants import (
+    MAPPING_IMAGE_TAG_DEFAULT,
+    MAPPING_RUNTIME_DIR_DEFAULT,
+)
+
 
 class ConfigError(ValueError):
     """Raised when an env value cannot be parsed into its target type."""
@@ -74,6 +79,16 @@ class Settings:
     # GODO_WEBCTL_TRACKER_TOML_PATH so they point at a tmp_path fixture
     # instead of ``/var/lib/godo/tracker.toml``.
     tracker_toml_path: Path
+    # issue#14: mapping pipeline runtime directory. webctl writes
+    # ``<dir>/active.env`` + ``<dir>/state.json`` here. /run is tmpfs;
+    # webctl creates the dir at runtime (M2 fix — no install-time seed).
+    mapping_runtime_dir: Path
+    # issue#14: Docker image tag passed via the systemd envfile. Default
+    # ``godo-mapping:dev`` matches what `docker build` emits.
+    mapping_image_tag: str
+    # issue#14: docker binary location. /usr/bin/docker on Debian/Trixie.
+    # Tests override via GODO_WEBCTL_DOCKER_BIN to point at a fake path.
+    docker_bin: Path
 
 
 # Documented defaults — single source for code + README + systemd env-file.
@@ -94,6 +109,9 @@ _DEFAULTS: Final[dict[str, str]] = {
     "GODO_WEBCTL_RESTART_PENDING_PATH": "/var/lib/godo/restart_pending",
     "GODO_WEBCTL_PIDFILE": "/run/godo/godo-webctl.pid",
     "GODO_WEBCTL_TRACKER_TOML_PATH": "/var/lib/godo/tracker.toml",
+    "GODO_WEBCTL_MAPPING_RUNTIME_DIR": MAPPING_RUNTIME_DIR_DEFAULT,
+    "GODO_WEBCTL_MAPPING_IMAGE_TAG": MAPPING_IMAGE_TAG_DEFAULT,
+    "GODO_WEBCTL_DOCKER_BIN": "/usr/bin/docker",
 }
 
 # Per-field parser. Same keys (in same order) as _DEFAULTS.
@@ -114,6 +132,9 @@ _PARSERS: Final[dict[str, Callable[[str], Any]]] = {
     "GODO_WEBCTL_RESTART_PENDING_PATH": Path,
     "GODO_WEBCTL_PIDFILE": Path,
     "GODO_WEBCTL_TRACKER_TOML_PATH": Path,
+    "GODO_WEBCTL_MAPPING_RUNTIME_DIR": Path,
+    "GODO_WEBCTL_MAPPING_IMAGE_TAG": str,
+    "GODO_WEBCTL_DOCKER_BIN": Path,
 }
 
 # env-var name → Settings field name. Drift between this and the dataclass
@@ -135,6 +156,9 @@ _ENV_TO_FIELD: Final[dict[str, str]] = {
     "GODO_WEBCTL_RESTART_PENDING_PATH": "restart_pending_path",
     "GODO_WEBCTL_PIDFILE": "pidfile_path",
     "GODO_WEBCTL_TRACKER_TOML_PATH": "tracker_toml_path",
+    "GODO_WEBCTL_MAPPING_RUNTIME_DIR": "mapping_runtime_dir",
+    "GODO_WEBCTL_MAPPING_IMAGE_TAG": "mapping_image_tag",
+    "GODO_WEBCTL_DOCKER_BIN": "docker_bin",
 }
 
 

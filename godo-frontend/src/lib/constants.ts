@@ -271,12 +271,14 @@ export const SYSTEM_SUBTAB_PROCESSES = 'processes';
 export const SYSTEM_SUBTAB_EXTENDED = 'extended';
 
 // Sub-tab keys for `routes/Map.svelte`. URL-backed (unlike System): the
-// Overview sub-tab lives at `/map` and the Edit sub-tab lives at
-// `/map-edit`, so refresh + browser back-button preserve the active
-// view, and sidebar Map link + e2e direct-navigate to `/map-edit`
-// continue to work without the legacy top-level Map Edit menu entry.
+// Overview sub-tab lives at `/map`, the Edit sub-tab lives at
+// `/map-edit`, and the Mapping sub-tab lives at `/map-mapping` (issue#14).
+// Refresh + browser back-button preserve the active view; sidebar Map
+// link + e2e direct-navigate to `/map-edit` and `/map-mapping` continue
+// to work without the legacy top-level Map Edit menu entry.
 export const MAP_SUBTAB_OVERVIEW = 'overview';
 export const MAP_SUBTAB_EDIT = 'edit';
+export const MAP_SUBTAB_MAPPING = 'mapping';
 
 // Per-core CPU bar height. 12 px is dense enough to show 4–8 cores in
 // the same panel without scrolling on a 720p preview.
@@ -356,3 +358,28 @@ export const POSE_HINT_DECIMAL_DISPLAY_MM = 3;
 //   seed_yaw_deg ∈ [0, 360)
 export const POSE_HINT_X_Y_ABS_MAX_M = 100.0;
 export const POSE_HINT_YAW_DEG_LT = 360.0;
+
+// --- issue#14 — mapping pipeline -------------------------------------
+// 1 Hz polling of /api/mapping/status. Mirrors backend
+// MAPPING_MONITOR_TICK_S * 1000 = 1000 ms. Same cadence as
+// HEALTH_POLL_MS so the operator perceives banner + status flips at
+// the same rate.
+export const MAPPING_STATUS_POLL_MS = 1000;
+// 1 Hz cache-bust refresh for the preview <img> blob URL.
+export const MAPPING_PREVIEW_REFRESH_MS = 1000;
+// Mirror of webctl `MAPPING_NAME_REGEX.pattern`. Pinned by parity test
+// vs. `protocol.ts::MAPPING_NAME_REGEX_PATTERN_STR`. C5 fix: leading
+// dot REJECTED — the SPA short-circuits before the upload starts.
+// Operator-locked 2026-05-01.
+export const MAPPING_NAME_REGEX_SOURCE = '^[A-Za-z0-9_()-][A-Za-z0-9._()\\-,]{0,63}$';
+export const MAPPING_NAME_MAX_LEN = 64;
+// Reserved names — rejected at validate-name layer regardless of regex.
+export const MAPPING_RESERVED_NAMES: ReadonlySet<string> = new Set<string>([
+  '.',
+  '..',
+  'active',
+]);
+// (S2 amendment — no SSE polling fallback. When the monitor stream
+// closes, the SPA freezes the last Docker frame and shows a "중단됨"
+// badge; never re-issues HTTP. The only way to refresh Docker stats
+// post-close is to start a new mapping run.)

@@ -65,6 +65,8 @@ from . import map_backup as map_backup_mod
 from . import map_edit as map_edit_mod
 from . import map_image as map_image_mod
 from . import map_origin as map_origin_mod
+from . import mapping as mapping_mod
+from . import mapping_sse as mapping_sse_mod
 from . import maps as maps_mod
 from . import processes as processes_mod
 from . import resources as resources_mod
@@ -88,6 +90,9 @@ from .constants import (
     LOGS_TAIL_DEFAULT_N,
     LOGS_TAIL_MAX_N,
     MAP_EDIT_MASK_PNG_MAX_BYTES,
+    MAPPING_JOURNAL_TAIL_DEFAULT_N,
+    MAPPING_JOURNAL_TAIL_MAX_N,
+    MAPPING_NAME_MAX_LEN,
     MAPS_ACTIVE_BASENAME,
     ORIGIN_BODY_MAX_BYTES,
     ORIGIN_X_Y_ABS_MAX_M,
@@ -99,24 +104,38 @@ from .protocol import (
     ERR_ACTIVE_MAP_MISSING,
     ERR_ACTIVE_YAML_MISSING,
     ERR_BACKUP_NOT_FOUND,
+    ERR_BAD_N,
+    ERR_CONTAINER_START_TIMEOUT,
+    ERR_CONTAINER_STOP_TIMEOUT,
+    ERR_DOCKER_UNAVAILABLE,
     ERR_EDIT_FAILED,
+    ERR_IMAGE_MISSING,
     ERR_INVALID_MAP_NAME,
+    ERR_INVALID_MAPPING_NAME,
     ERR_MAP_IS_ACTIVE,
     ERR_MAP_NOT_FOUND,
+    ERR_MAPPING_ACTIVE,
+    ERR_MAPPING_ALREADY_ACTIVE,
     ERR_MAPS_DIR_MISSING,
     ERR_MASK_DECODE_FAILED,
     ERR_MASK_SHAPE_MISMATCH,
     ERR_MASK_TOO_LARGE,
+    ERR_NAME_EXISTS,
+    ERR_NO_ACTIVE_MAPPING,
     ERR_ORIGIN_BAD_VALUE,
     ERR_ORIGIN_EDIT_FAILED,
     ERR_ORIGIN_YAML_PARSE_FAILED,
+    ERR_PREVIEW_NOT_YET_PUBLISHED,
     ERR_RESTORE_NAME_CONFLICT,
     ERR_SERVICE_STARTING,
     ERR_SERVICE_STOPPING,
+    ERR_STATE_FILE_CORRUPT,
+    ERR_TRACKER_STOP_FAILED,
     EXTENDED_RESOURCES_FIELDS,
     JITTER_FIELDS,
     LAST_POSE_FIELDS,
     LAST_SCAN_HEADER_FIELDS,
+    MAPPING_STATUS_FIELDS,
     MODE_IDLE,
     MODE_LIVE,
     MODE_ONESHOT,
@@ -228,6 +247,12 @@ class OriginPatchBody(BaseModel):
     x_m: float = Field(...)
     y_m: float = Field(...)
     mode: Literal["absolute", "delta"] = Field(...)
+
+
+class MappingStartBody(BaseModel):
+    """`POST /api/mapping/start` body (issue#14)."""
+
+    name: str = Field(min_length=1, max_length=MAPPING_NAME_MAX_LEN)
 
 
 # --- helpers -----------------------------------------------------------
@@ -367,6 +392,93 @@ def _map_edit_exc_to_response(exc: Exception) -> JSONResponse:
     return JSONResponse(
         {"ok": False, "err": "internal_error"},
         status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+    )
+
+
+def _map_mapping_exc_to_response(exc: Exception) -> JSONResponse:
+    """issue#14 — Local error mapper for `mapping.*` exceptions. Status
+    mapping per the API surface table in plan §5."""
+    if isinstance(exc, mapping_mod.InvalidName):
+        body: dict[str, object] = {"ok": False, "err": ERR_INVALID_MAPPING_NAME}
+        if exc.args:
+            body["detail"] = str(exc.args[0])
+        return JSONResponse(body, status_code=HTTPStatus.BAD_REQUEST)
+    if isinstance(exc, mapping_mod.NameAlreadyExists):
+        return JSONResponse(
+            {"ok": False, "err": ERR_NAME_EXISTS, "detail": str(exc)},
+            status_code=HTTPStatus.CONFLICT,
+        )
+    if isinstance(exc, mapping_mod.MappingAlreadyActive):
+        return JSONResponse(
+            {"ok": False, "err": ERR_MAPPING_ALREADY_ACTIVE, "detail": str(exc)},
+            status_code=HTTPStatus.CONFLICT,
+        )
+    if isinstance(exc, mapping_mod.ImageMissing):
+        return JSONResponse(
+            {
+                "ok": False,
+                "err": ERR_IMAGE_MISSING,
+                "detail": (
+                    "Build image: cd godo-mapping && docker build -t godo-mapping:dev ."
+                ),
+            },
+            status_code=HTTPStatus.PRECONDITION_FAILED,
+        )
+    if isinstance(exc, mapping_mod.TrackerStopFailed):
+        return JSONResponse(
+            {"ok": False, "err": ERR_TRACKER_STOP_FAILED, "detail": str(exc)},
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+        )
+    if isinstance(exc, mapping_mod.DockerUnavailable):
+        return JSONResponse(
+            {"ok": False, "err": ERR_DOCKER_UNAVAILABLE, "detail": str(exc)},
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+        )
+    if isinstance(exc, mapping_mod.ContainerStartTimeout):
+        return JSONResponse(
+            {"ok": False, "err": ERR_CONTAINER_START_TIMEOUT, "detail": str(exc)},
+            status_code=HTTPStatus.GATEWAY_TIMEOUT,
+        )
+    if isinstance(exc, mapping_mod.ContainerStopTimeout):
+        return JSONResponse(
+            {"ok": False, "err": ERR_CONTAINER_STOP_TIMEOUT, "detail": str(exc)},
+            status_code=HTTPStatus.GATEWAY_TIMEOUT,
+        )
+    if isinstance(exc, mapping_mod.NoActiveMapping):
+        return JSONResponse(
+            {"ok": False, "err": ERR_NO_ACTIVE_MAPPING},
+            status_code=HTTPStatus.NOT_FOUND,
+        )
+    if isinstance(exc, mapping_mod.StateFileCorrupt):
+        return JSONResponse(
+            {"ok": False, "err": ERR_STATE_FILE_CORRUPT, "detail": str(exc)},
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+        )
+    return JSONResponse(
+        {"ok": False, "err": "internal_error"},
+        status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+    )
+
+
+def _mapping_lockout_response() -> JSONResponse:
+    """L14 — return 409 mapping_active when state ∈ {Starting, Running, Stopping}.
+    Used by /api/calibrate, /api/live, /api/map/edit, /api/map/origin."""
+    return JSONResponse(
+        {"ok": False, "err": ERR_MAPPING_ACTIVE, "detail": "Mapping mode active"},
+        status_code=HTTPStatus.CONFLICT,
+    )
+
+
+def _is_mapping_active(cfg: Settings) -> bool:
+    """L14 — True when mapping mode coordinator says ∈ {Starting, Running, Stopping}."""
+    try:
+        s = mapping_mod.status(cfg)
+    except mapping_mod.MappingError:
+        return False
+    return s.state in (
+        mapping_mod.MappingState.STARTING,
+        mapping_mod.MappingState.RUNNING,
+        mapping_mod.MappingState.STOPPING,
     )
 
 
@@ -596,6 +708,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         body: CalibrateBody | None = None,
         claims: auth_mod.Claims = Depends(auth_mod.require_admin),
     ) -> JSONResponse:
+        # issue#14 L14 lock-out: refuse calibrate when mapping is active.
+        if _is_mapping_active(cfg):
+            return _mapping_lockout_response()
         # issue#3 — optional pose hint. Empty body / `body is None` /
         # `body` with all fields None → byte-identical to pre-issue#3
         # wire (back-compat anti-regression pinned in test_protocol +
@@ -635,6 +750,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         body: LiveBody,
         claims: auth_mod.Claims = Depends(auth_mod.require_admin),
     ) -> JSONResponse:
+        # issue#14 L14 lock-out.
+        if _is_mapping_active(cfg):
+            return _mapping_lockout_response()
         target = MODE_LIVE if body.enable else MODE_IDLE
         try:
             await uds_mod.call_uds(client.set_mode, target, cfg.calibrate_uds_timeout_s)
@@ -763,6 +881,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request: Request,
         claims: auth_mod.Claims = Depends(auth_mod.require_admin),
     ) -> JSONResponse:
+        # issue#14 L14 lock-out: refuse edits during mapping.
+        if _is_mapping_active(cfg):
+            return _mapping_lockout_response()
         # T2 fold: content-length check BEFORE any decode. Distinct
         # error from MaskShapeMismatch (which runs after decode).
         cl_header = request.headers.get("content-length")
@@ -926,6 +1047,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request: Request,
         claims: auth_mod.Claims = Depends(auth_mod.require_admin),
     ) -> JSONResponse:
+        # issue#14 L14 lock-out.
+        if _is_mapping_active(cfg):
+            return _mapping_lockout_response()
         # Body-size pre-check BEFORE Pydantic parse (M3: mirror of
         # PATCH /api/config — `bad_payload + detail=body_too_large`).
         raw = await request.body()
@@ -1719,6 +1843,110 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         activity_log.append("shutdown", claims.username)
         return JSONResponse({"ok": True}, status_code=HTTPStatus.OK)
+
+    # ---- /api/mapping/* (issue#14) -------------------------------------
+    # Mapping pipeline endpoints. Status / preview / monitor / journal
+    # are anonymous (read-only observation). Start / stop require admin.
+
+    def _mapping_status_view(s: mapping_mod.MappingStatus) -> dict[str, object]:
+        """Project MappingStatus through MAPPING_STATUS_FIELDS for the wire."""
+        d = s.to_dict()
+        return {field: d.get(field) for field in MAPPING_STATUS_FIELDS}
+
+    @app.post("/api/mapping/start")
+    async def mapping_start_endpoint(
+        body: MappingStartBody,
+        claims: auth_mod.Claims = Depends(auth_mod.require_admin),
+    ) -> JSONResponse:
+        try:
+            out = await asyncio.to_thread(mapping_mod.start, body.name, cfg)
+        except mapping_mod.MappingError as e:
+            return _map_mapping_exc_to_response(e)
+        activity_log.append("mapping_start", f"{body.name} by {claims.username}")
+        return JSONResponse(_mapping_status_view(out), status_code=HTTPStatus.OK)
+
+    @app.post("/api/mapping/stop")
+    async def mapping_stop_endpoint(
+        claims: auth_mod.Claims = Depends(auth_mod.require_admin),
+    ) -> JSONResponse:
+        try:
+            out = await asyncio.to_thread(mapping_mod.stop, cfg)
+        except mapping_mod.MappingError as e:
+            return _map_mapping_exc_to_response(e)
+        activity_log.append("mapping_stop", claims.username)
+        return JSONResponse(_mapping_status_view(out), status_code=HTTPStatus.OK)
+
+    @app.get("/api/mapping/status")
+    async def mapping_status_endpoint() -> JSONResponse:
+        try:
+            out = await asyncio.to_thread(mapping_mod.status, cfg)
+        except mapping_mod.MappingError as e:
+            return _map_mapping_exc_to_response(e)
+        return JSONResponse(_mapping_status_view(out), status_code=HTTPStatus.OK)
+
+    @app.get("/api/mapping/preview")
+    async def mapping_preview_endpoint() -> Response:
+        """Returns image/png re-encoded server-side from `.preview/<name>.pgm`.
+        D5 amendment — re-encode via map_image so the SPA doesn't depend
+        on browser PGM support.
+        """
+        try:
+            current = await asyncio.to_thread(mapping_mod.status, cfg)
+        except mapping_mod.MappingError as e:
+            return _map_mapping_exc_to_response(e)
+        if current.map_name is None:
+            return JSONResponse(
+                {"ok": False, "err": ERR_NO_ACTIVE_MAPPING},
+                status_code=HTTPStatus.NOT_FOUND,
+            )
+        try:
+            pgm_path = mapping_mod.preview_path(cfg, current.map_name)
+        except mapping_mod.InvalidName as e:
+            return _map_mapping_exc_to_response(e)
+        if not pgm_path.is_file():
+            return JSONResponse(
+                {"ok": False, "err": ERR_PREVIEW_NOT_YET_PUBLISHED},
+                status_code=HTTPStatus.NOT_FOUND,
+            )
+        try:
+            png = await asyncio.to_thread(map_image_mod.render_pgm_to_png, pgm_path)
+        except map_image_mod.MapImageNotFound:
+            return JSONResponse(
+                {"ok": False, "err": ERR_PREVIEW_NOT_YET_PUBLISHED},
+                status_code=HTTPStatus.NOT_FOUND,
+            )
+        except map_image_mod.MapImageInvalid:
+            return JSONResponse(
+                {"ok": False, "err": "preview_invalid"},
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+        return Response(content=png, media_type=_PNG_MEDIA_TYPE)
+
+    @app.get("/api/mapping/monitor/stream")
+    async def mapping_monitor_stream_endpoint() -> StreamingResponse:
+        return StreamingResponse(
+            mapping_sse_mod.mapping_monitor_stream(cfg),
+            media_type=_SSE_MEDIA_TYPE,
+            headers=sse_mod.SSE_RESPONSE_HEADERS,
+        )
+
+    @app.get("/api/mapping/journal")
+    async def mapping_journal_endpoint(
+        n: Annotated[
+            int,
+            Query(ge=1, le=MAPPING_JOURNAL_TAIL_MAX_N),
+        ] = MAPPING_JOURNAL_TAIL_DEFAULT_N,
+    ) -> JSONResponse:
+        try:
+            lines = await asyncio.to_thread(mapping_mod.journal_tail, cfg, n)
+        except ValueError:
+            return JSONResponse(
+                {"ok": False, "err": ERR_BAD_N},
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+        except mapping_mod.MappingError as e:
+            return _map_mapping_exc_to_response(e)
+        return JSONResponse({"lines": lines}, status_code=HTTPStatus.OK)
 
     # Keep FastAPI happy: it will reject 404s on unknown /api/* — but make
     # the dependency-side HTTPException flow uniform for SSE token paths.

@@ -726,6 +726,66 @@ has been synced (`uv sync`).
 
 ---
 
+## 2026-05-01 23:21 KST — issue#14: SPA Mapping pipeline (systemd + polkit only — tracker unchanged)
+
+### Why
+
+The new SPA Map > Mapping sub-tab drives a SLAM mapping container
+(`godo-mapping`) via webctl + systemd. Tracker behaviour is unchanged
+(it is stopped during mapping per L2). RPi5-side deliverables are
+therefore narrow: a new systemd template unit, a polkit rule
+extension, and an install.sh extension. No C++ code or schema row
+changes.
+
+### Added
+
+- `systemd/godo-mapping@.service` — template unit (instance `active`).
+  `EnvironmentFile=/run/godo/mapping/%i.env` reads MAP_NAME / LIDAR_DEV
+  / IMAGE_TAG written atomically by webctl. `ExecStart=` is
+  `/usr/bin/docker run --rm --name godo-mapping --network=host
+  --device=${LIDAR_DEV} -v /var/lib/godo/maps:/maps -e MAP_NAME=…
+  ${IMAGE_TAG}`. `Restart=no` (failures surface as Failed, never
+  silently retried). `TimeoutStopSec=20s` is the load-bearing M5 fix
+  satisfying the ordering invariant
+  `docker grace 10s < TimeoutStopSec 20s < webctl 25s`.
+- `systemd/godo-mapping@.env.example` — operator-readable reference
+  showing the three env-vars webctl writes at runtime.
+
+### Changed
+
+- `systemd/49-godo-systemctl.rules` — appended rule `(c)` granting
+  ncenter group `start`/`stop`/`restart` on the fixed instance
+  `godo-mapping@active.service`. Scoped narrowly so `systemctl start
+  godo-mapping@whatever.service` is denied (D4 — only `active` is a
+  valid instance).
+- `systemd/install.sh` — extended from `[1/8]..[7/8]` to
+  `[1/11]..[11/11]` adding (a) godo-mapping@.service install,
+  (b) godo-mapping@.env.example reference install,
+  (c) `/var/lib/godo/maps/.preview/` mkdir, (d) `usermod -aG docker
+  ncenter` with logout-and-back-in warning. NO install-time `mkdir
+  /run/godo/mapping/` (M2 fix — /run is tmpfs; webctl creates the
+  dir at runtime).
+
+### Tests
+
+- Manual: `systemd-analyze verify systemd/godo-mapping@.service`
+  produces zero warnings (clean parse).
+- HIL (operator on news-pi01) per Scenario A..H in the plan.
+
+### Notes
+
+- godo-mapping@.service is NOT enabled — operator service-management
+  policy (mirrors godo-tracker pattern). Webctl's
+  `POST /api/mapping/start` is the SOLE caller of `systemctl start
+  godo-mapping@active.service`.
+- Tracker `Config` schema unchanged (no new rows). issue#14's only
+  cross-stack dependency is webctl reading the existing
+  `serial.lidar_port` row from `tracker.toml` — and that read is via
+  the new `webctl_toml.read_tracker_serial_section()` helper, not via
+  UDS. Tracker has zero awareness of mapping mode.
+
+---
+
 ## 2026-05-01 18:07 KST — issue#5 default-flip + issue#12 latency defaults (combined PR)
 
 ### Why

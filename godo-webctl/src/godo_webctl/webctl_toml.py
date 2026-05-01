@@ -148,6 +148,66 @@ def _resolve_one(
     return default
 
 
+# --- issue#14: tracker-owned serial section reader ----------------------
+# Mirror of the `[serial]` table the tracker writes to tracker.toml. webctl
+# READS this table for the mapping pipeline (LiDAR USB device path) but
+# does NOT own the keys — the SSOT is
+# `production/RPi5/src/core/config_schema.hpp:120` (`serial.lidar_port`).
+# DO NOT add `serial_lidar_port` to `WebctlSection` (PR #63 lock-in).
+TRACKER_SERIAL_LIDAR_PORT_DEFAULT: Final[str] = "/dev/ttyUSB0"
+
+
+class TrackerSerialSection(NamedTuple):
+    """Tracker-owned `[serial]` table values consumed by webctl.
+
+    Fields:
+        lidar_port: TOML `[serial] lidar_port` (canonical dotted name
+            `serial.lidar_port`). Default ``/dev/ttyUSB0`` matches the
+            tracker schema row default at
+            `production/RPi5/src/core/config_schema.hpp:120`.
+    """
+
+    lidar_port: str
+
+
+def read_tracker_serial_section(toml_path: Path) -> TrackerSerialSection:
+    """Read the tracker-owned `[serial]` table.
+
+    Returns the lidar_port string (verbatim from TOML) or the schema
+    default. Missing file / missing table / missing key all silently
+    fall back to the default — matches the discipline of
+    ``read_webctl_section``. Malformed TOML raises ``WebctlTomlError``.
+
+    Note: this helper does NOT validate the value (the path may not
+    exist on this host; the operator might have udev-renamed it). The
+    tracker's apply_set already validated it before writing the TOML.
+    """
+    if not toml_path.exists():
+        return TrackerSerialSection(lidar_port=TRACKER_SERIAL_LIDAR_PORT_DEFAULT)
+    try:
+        with toml_path.open("rb") as f:
+            data = tomllib.load(f)
+    except (tomllib.TOMLDecodeError, OSError) as e:
+        raise WebctlTomlError(
+            f"failed to parse {toml_path}: {e}",
+        ) from e
+    section = data.get("serial", {})
+    if not isinstance(section, dict):
+        raise WebctlTomlError(
+            f"{toml_path}: [serial] is not a table (got {type(section).__name__})",
+        )
+    raw = section.get("lidar_port")
+    if raw is None:
+        return TrackerSerialSection(lidar_port=TRACKER_SERIAL_LIDAR_PORT_DEFAULT)
+    if not isinstance(raw, str):
+        raise WebctlTomlError(
+            f"serial.lidar_port: must be a string (got {type(raw).__name__})",
+        )
+    if not raw:
+        return TrackerSerialSection(lidar_port=TRACKER_SERIAL_LIDAR_PORT_DEFAULT)
+    return TrackerSerialSection(lidar_port=raw)
+
+
 def read_webctl_section(
     toml_path: Path,
     env: Mapping[str, str] | None = None,

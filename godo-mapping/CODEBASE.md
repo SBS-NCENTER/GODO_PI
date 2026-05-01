@@ -191,6 +191,62 @@ A reviewer or maintainer who removes the rf2o (or B/C equivalent) from the launc
 
 **Verification**: `grep -n "static_transform_publisher" godo-mapping/launch/map.launch.py` must return zero hits as of the post-fix commit.
 
+### (i) Preview node single-writer + atomic PGM rename (issue#14)
+
+`preview_node/preview_dumper.py` is the SOLE writer to
+`/maps/.preview/<MAP_NAME>.pgm`. The node:
+
+- Subscribes `/map` (`nav_msgs/msg/OccupancyGrid`) at QoS depth 1.
+- Throttles to `PREVIEW_DUMP_HZ = 1.0` (1 Hz; min interval 1e9 ns).
+- Encodes via the pure-stdlib `pgm_encoder.encode_pgm_p5` +
+  `occupancy_to_pixels` — Y-flipped to top-down PGM, pixel mapping
+  `unknown=205, free=254, occupied (≥50%)=0`.
+- Atomic write: open `.pgm.tmp` → `fsync` → `os.replace(tmp, target)`.
+  webctl's `/api/mapping/preview` therefore never observes a half-
+  written file.
+
+The pure encoder lives in `pgm_encoder.py` (no rclpy import) so
+`tests/test_preview_dumper_pgm_encoder.py` runs hardware-free under
+`verify-no-hw.sh --quick`.
+
+**Single-instance enforcement** is inherited from four parent layers
+(`docker run` → `entrypoint.sh` → `ros2 launch` → the rclpy node) so
+this node does NOT add a fifth pidfile per CLAUDE.md §6 single-
+instance discipline interpretation: pidfiles are mandatory only for
+top-level long-running processes, not for transient children whose
+lifetime is bounded by their parent.
+
+### (j) LIDAR_DEV env-var SSOT chain (issue#14)
+
+The chain from operator to running rplidar driver is:
+
+```text
+operator's tracker.toml [serial] lidar_port  (SSOT — tracker schema row,
+   ↓                                          config_schema.hpp:120)
+webctl mapping._resolve_lidar_port()         (read via
+   ↓                                          webctl_toml.read_tracker_serial_section)
+/run/godo/mapping/active.env (LIDAR_DEV=…)   (atomic write)
+   ↓
+systemd EnvironmentFile= directive
+   ↓
+docker run --device=${LIDAR_DEV}
+   ↓
+container env LIDAR_DEV
+   ↓
+launch/map.launch.py rplidar Node serial_port=os.environ.get('LIDAR_DEV', '/dev/ttyUSB0')
+```
+
+A change at the SSOT (operator edits `tracker.toml`) propagates through
+the chain on the next mapping start without any container rebuild.
+The fallback default `/dev/ttyUSB0` matches the tracker schema row
+default, so a missing-file or missing-section path resolves to the
+same value the tracker would use.
+
+**Operator-locked SSOT discipline**: webctl reads tracker-owned keys
+but does NOT add them to `WebctlSection` (PR #63 lock-in). When two
+stacks own different facets of the same concept, the SSOT lives where
+the value originates.
+
 ## Phase 4.5 follow-up candidates
 
 - Pin `Dockerfile` `FROM ros:jazzy-ros-base` by image digest after the first
@@ -244,6 +300,45 @@ A reviewer or maintainer who removes the rf2o (or B/C equivalent) from the launc
   operator's intentional Ctrl+C.
 
 ## Change log
+
+### 2026-05-01 23:21 KST — issue#14: preview node + LIDAR_DEV env chain
+
+#### Added
+
+- `preview_node/__init__.py` — empty package marker.
+- `preview_node/pgm_encoder.py` — pure stdlib + numpy encoder.
+  `occupancy_to_pixels(width, height, data)` Y-flips and threshold-maps
+  the OccupancyGrid `data` array; `encode_pgm_p5(width, height, pixels)`
+  prepends the netpbm `P5\n<W> <H>\n255\n` header. Hardware-free; no
+  rclpy import.
+- `preview_node/preview_dumper.py` — thin rclpy node that subscribes
+  `/map`, throttles to 1 Hz via `PREVIEW_DUMP_MIN_INTERVAL_NS`, and
+  atomic-writes `/maps/.preview/${MAP_NAME}.pgm` (tmp + fsync +
+  os.replace).
+- `tests/test_preview_dumper_pgm_encoder.py` — 8 hardware-free cases:
+  P5 header byte-exact, pixel mapping (-1→205, 0→254, ≥50→0), Y-flip
+  pin, shape-mismatch rejection, end-to-end byte-exact, constant pins.
+
+#### Changed
+
+- `Dockerfile` — added `python3-numpy` to the apt layer (issue#14
+  preview-node dep). `COPY preview_node/ /godo-mapping/preview_node/`
+  + chmod for the rclpy entrypoint script.
+- `launch/map.launch.py` — added `preview_dumper` Node to the launch
+  graph (invoked as `python3 -m preview_node.preview_dumper` with
+  `cwd=/godo-mapping`). Modified the rplidar Node's `serial_port` to
+  honour `os.environ.get('LIDAR_DEV', '/dev/ttyUSB0')` so webctl's
+  resolved tracker `[serial] lidar_port` value flows to the driver.
+- `entrypoint.sh` — added `mkdir -p /maps/.preview` (idempotent;
+  tolerant of failure under TEST_MODE without /maps mounted) and made
+  `MAP_OUT_DIR` overrideable via env-var.
+- `scripts/verify-no-hw.sh` — `--quick` now also collects the new
+  `tests/` directory (1 hardware-free pytest module, 8 cases).
+
+#### Tests
+
+- 8 new hardware-free pytest cases under `tests/test_preview_dumper_pgm_encoder.py`.
+- `verify-no-hw.sh --quick` execution (entire chain) green.
 
 ### 2026-05-01 18:36 KST — issue#13-candidate (partial): SLAM default resolution 0.05 → 0.025 m/cell
 

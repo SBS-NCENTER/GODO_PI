@@ -30,6 +30,8 @@
 # motion-derived `odom -> laser` TF. SSOT for rf2o parameters lives in
 # config/rf2o.yaml. See CODEBASE.md invariant (h).
 
+import os
+
 from launch import LaunchDescription
 from launch.actions import EmitEvent, RegisterEventHandler
 from launch.events import matches_action
@@ -78,6 +80,11 @@ def generate_launch_description() -> LaunchDescription:
     # a colcon overlay so the modern `rplidar_node` binary is available.
     # The Jazzy Debian package only ships `rplidar_composition` (legacy
     # SDK path), which fails on C1 with 0x80008002.
+    # issue#14 — `serial_port` honours LIDAR_DEV env-var so webctl can
+    # inject the operator's TOML-resolved tracker `[serial] lidar_port`
+    # value at container-start time. Falls back to the C1 default
+    # `/dev/ttyUSB0` for the legacy run-mapping.sh path that does not set
+    # LIDAR_DEV explicitly.
     rplidar = Node(
         package='rplidar_ros',
         executable='rplidar_node',
@@ -85,7 +92,7 @@ def generate_launch_description() -> LaunchDescription:
         output='screen',
         parameters=[{
             'channel_type': 'serial',
-            'serial_port': '/dev/ttyUSB0',
+            'serial_port': os.environ.get('LIDAR_DEV', '/dev/ttyUSB0'),
             'serial_baudrate': 460800,        # C1
             'frame_id': 'laser',              # Plan F1: base_frame == laser
             'inverted': False,
@@ -134,10 +141,27 @@ def generate_launch_description() -> LaunchDescription:
         ),
     )
 
+    # issue#14 — preview PGM dumper node. Subscribes /map (slam_toolbox)
+    # @ 1 Hz and atomic-writes /maps/.preview/${MAP_NAME}.pgm. webctl
+    # serves this via /api/mapping/preview re-encoded to PNG. MAP_NAME is
+    # propagated via the OS environment from `docker run -e`, the
+    # entrypoint.sh re-export, and ros2 launch which forwards env to
+    # child processes by default — no explicit `additional_env=` needed.
+    preview_dumper = Node(
+        executable='python3',
+        arguments=['-m', 'preview_node.preview_dumper'],
+        name='godo_mapping_preview_dumper',
+        output='screen',
+        # Run from /godo-mapping so `python3 -m preview_node.preview_dumper`
+        # finds the package directory.
+        cwd='/godo-mapping',
+    )
+
     return LaunchDescription([
         rf2o,
         rplidar,
         slam,
         slam_configure,
         slam_activate,
+        preview_dumper,
     ])

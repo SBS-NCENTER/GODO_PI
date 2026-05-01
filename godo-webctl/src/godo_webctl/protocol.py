@@ -440,6 +440,73 @@ EXTENDED_RESOURCES_FIELDS: Final[tuple[str, ...]] = (
 # `godo-frontend/src/lib/protocol.ts::MAPS_NAME_REGEX_PATTERN_STR`.
 MAPS_NAME_REGEX_PATTERN_STR: Final[str] = MAPS_NAME_REGEX.pattern
 
+# --- issue#14 — mapping pipeline state-machine + wire shapes -------------
+# The 5 states `mapping.MappingState` can carry. Mirrored on the SPA via
+# `godo-frontend/src/lib/protocol.ts::MAPPING_STATE_*`. Drift detected by
+# inspection per godo-frontend/CODEBASE.md invariant (the new mapping
+# block).
+MAPPING_STATE_IDLE: Final[str] = "idle"
+MAPPING_STATE_STARTING: Final[str] = "starting"
+MAPPING_STATE_RUNNING: Final[str] = "running"
+MAPPING_STATE_STOPPING: Final[str] = "stopping"
+MAPPING_STATE_FAILED: Final[str] = "failed"
+
+VALID_MAPPING_STATES: Final[frozenset[str]] = frozenset(
+    {
+        MAPPING_STATE_IDLE,
+        MAPPING_STATE_STARTING,
+        MAPPING_STATE_RUNNING,
+        MAPPING_STATE_STOPPING,
+        MAPPING_STATE_FAILED,
+    },
+)
+
+# `GET /api/mapping/status` response field order. SOLE Python mirror of
+# the JSON keys emitted by `app.py::map_status_endpoint` (which iterates
+# this tuple). Frontend mirror at `lib/protocol.ts::MAPPING_STATUS_FIELDS`.
+MAPPING_STATUS_FIELDS: Final[tuple[str, ...]] = (
+    "state",
+    "map_name",
+    "container_id_short",
+    "started_at",
+    "error_detail",
+    "journal_tail_available",
+)
+
+# `GET /api/mapping/monitor/stream` per-frame field order. Docker-only
+# (S1 amendment); RPi5 host stats live in the existing
+# `/api/system/resources/extended/stream`. SPA's two-region monitor strip
+# subscribes to BOTH streams in parallel.
+MAPPING_MONITOR_FIELDS: Final[tuple[str, ...]] = (
+    "valid",
+    "container_id_short",
+    "container_state",
+    "container_cpu_pct",
+    "container_mem_bytes",
+    "container_net_rx_bytes",
+    "container_net_tx_bytes",
+    "var_lib_godo_disk_avail_bytes",
+    "var_lib_godo_disk_total_bytes",
+    "in_progress_map_size_bytes",
+    "published_mono_ns",
+)
+
+# Mapping-pipeline error codes (webctl-internal; no C++ wire counterpart).
+# Mirror in `lib/protocol.ts`.
+ERR_INVALID_MAPPING_NAME: Final[str] = "invalid_mapping_name"
+ERR_NAME_EXISTS: Final[str] = "name_exists"
+ERR_MAPPING_ALREADY_ACTIVE: Final[str] = "mapping_already_active"
+ERR_MAPPING_ACTIVE: Final[str] = "mapping_active"
+ERR_IMAGE_MISSING: Final[str] = "image_missing"
+ERR_DOCKER_UNAVAILABLE: Final[str] = "docker_unavailable"
+ERR_TRACKER_STOP_FAILED: Final[str] = "tracker_stop_failed"
+ERR_CONTAINER_START_TIMEOUT: Final[str] = "container_start_timeout"
+ERR_CONTAINER_STOP_TIMEOUT: Final[str] = "container_stop_timeout"
+ERR_NO_ACTIVE_MAPPING: Final[str] = "no_active_mapping"
+ERR_PREVIEW_NOT_YET_PUBLISHED: Final[str] = "preview_not_yet_published"
+ERR_STATE_FILE_CORRUPT: Final[str] = "state_file_corrupt"
+ERR_BAD_N: Final[str] = "bad_n"
+
 
 # --- Canonical request encoders -------------------------------------------
 # The server tolerates whitespace + arbitrary key order, but the client MUST

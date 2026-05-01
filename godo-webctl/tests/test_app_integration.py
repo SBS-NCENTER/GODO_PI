@@ -52,6 +52,7 @@ def _settings_for(
     restart_pending_path: Path | None = None,
     pidfile_path: Path | None = None,
     tracker_toml_path: Path | None = None,
+    mapping_runtime_dir: Path | None = None,
 ) -> Settings:
     base = backup_dir.parent
     return Settings(
@@ -80,6 +81,11 @@ def _settings_for(
         # this — defaults to a non-existent path so webctl_toml falls
         # through to schema defaults silently.
         tracker_toml_path=tracker_toml_path or (base / "tracker.toml"),
+        # issue#14: mapping pipeline state lives under a tmp_path-anchored
+        # directory so tests don't touch /run/godo/mapping.
+        mapping_runtime_dir=mapping_runtime_dir or (base / "mapping_rt"),
+        mapping_image_tag="godo-mapping:dev",
+        docker_bin=Path("/usr/bin/docker"),
     )
 
 
@@ -219,6 +225,9 @@ async def test_calibrate_timeout_returns_504(
         restart_pending_path=s.restart_pending_path,
         pidfile_path=s.pidfile_path,
         tracker_toml_path=s.tracker_toml_path,
+        mapping_runtime_dir=s.mapping_runtime_dir,
+        mapping_image_tag=s.mapping_image_tag,
+        docker_bin=s.docker_bin,
     )
     async with _client(s) as cl:
         token = await _login_admin(cl)
@@ -1999,6 +2008,9 @@ def test_lifespan_legacy_migration_creates_active_symlink(
         restart_pending_path=tmp_path / "rp",
         pidfile_path=tmp_path / "godo-webctl.pid",
         tracker_toml_path=tmp_path / "tracker.toml",
+        mapping_runtime_dir=tmp_path / "mapping_rt",
+        mapping_image_tag="godo-mapping:dev",
+        docker_bin=Path("/usr/bin/docker"),
     )
 
     # Manually invoke the migration helper that the lifespan uses.
@@ -2061,6 +2073,9 @@ def test_lifespan_warns_every_boot_when_map_path_set(
         restart_pending_path=tmp_path / "rp",
         pidfile_path=tmp_path / "godo-webctl.pid",
         tracker_toml_path=tmp_path / "tracker.toml",
+        mapping_runtime_dir=tmp_path / "mapping_rt",
+        mapping_image_tag="godo-mapping:dev",
+        docker_bin=Path("/usr/bin/docker"),
     )
 
     def _boot_and_count_warns() -> int:
@@ -2203,6 +2218,9 @@ async def test_system_amcl_rate_tracker_timeout_returns_504(
         restart_pending_path=s.restart_pending_path,
         pidfile_path=s.pidfile_path,
         tracker_toml_path=s.tracker_toml_path,
+        mapping_runtime_dir=s.mapping_runtime_dir,
+        mapping_image_tag=s.mapping_image_tag,
+        docker_bin=s.docker_bin,
     )
     async with _client(s) as cl:
         r = await cl.get("/api/system/amcl_rate")
@@ -4235,3 +4253,294 @@ async def test_post_map_origin_locale_comma_string_returns_400(
         r = await cl.post("/api/map/origin", json=body, headers=_auth(token))
     assert r.status_code == HTTPStatus.BAD_REQUEST
     assert r.json()["err"] == "bad_payload"
+
+
+# ---- /api/mapping/* (issue#14) -------------------------------------------
+
+
+def _settings_for_mapping(tmp_path: Path, fake_uds_server) -> Settings:
+    """Helper for mapping-pipeline integration tests. Sets up a maps_dir
+    under tmp_path so the start path's `<name>.pgm`-exists check works
+    against a known-empty directory."""
+    s = _settings_for(
+        uds_socket=fake_uds_server.path,
+        map_path=tmp_path / "fake.pgm",
+        backup_dir=tmp_path / "bk",
+        maps_dir=tmp_path / "maps",
+    )
+    s.maps_dir.mkdir(mode=0o750, exist_ok=True)
+    (s.maps_dir / ".preview").mkdir(mode=0o750, exist_ok=True)
+    return s
+
+
+async def test_get_mapping_status_anonymous_returns_idle(
+    fake_uds_server,
+    tmp_path: Path,
+) -> None:
+    """status is anonymous-readable + Idle when no state file exists."""
+    s = _settings_for_mapping(tmp_path, fake_uds_server)
+    async with _client(s) as cl:
+        r = await cl.get("/api/mapping/status")
+    assert r.status_code == HTTPStatus.OK
+    body = r.json()
+    assert body["state"] == "idle"
+    assert body["map_name"] is None
+
+
+async def test_post_mapping_start_invalid_name_returns_400(
+    fake_uds_server,
+    tmp_path: Path,
+) -> None:
+    s = _settings_for_mapping(tmp_path, fake_uds_server)
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post(
+            "/api/mapping/start",
+            json={"name": ".hidden"},
+            headers=_auth(token),
+        )
+    assert r.status_code == HTTPStatus.BAD_REQUEST
+    assert r.json()["err"] == "invalid_mapping_name"
+
+
+async def test_post_mapping_start_anon_returns_401(
+    fake_uds_server,
+    tmp_path: Path,
+) -> None:
+    s = _settings_for_mapping(tmp_path, fake_uds_server)
+    async with _client(s) as cl:
+        r = await cl.post("/api/mapping/start", json={"name": "studio_v1"})
+    assert r.status_code == HTTPStatus.UNAUTHORIZED
+
+
+async def test_post_mapping_start_duplicate_name_returns_409(
+    fake_uds_server,
+    tmp_path: Path,
+) -> None:
+    s = _settings_for_mapping(tmp_path, fake_uds_server)
+    (s.maps_dir / "studio_v1.pgm").write_bytes(b"P5\n1 1\n255\n\x00")
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post(
+            "/api/mapping/start",
+            json={"name": "studio_v1"},
+            headers=_auth(token),
+        )
+    assert r.status_code == HTTPStatus.CONFLICT
+    assert r.json()["err"] == "name_exists"
+
+
+async def test_post_mapping_start_image_missing_returns_412(
+    fake_uds_server,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    s = _settings_for_mapping(tmp_path, fake_uds_server)
+    from godo_webctl import mapping as mapping_mod
+
+    def fake_subprocess(argv, **kw):
+        # Always returns "no such image".
+        import subprocess as sp
+
+        return sp.CompletedProcess(
+            argv,
+            returncode=1,
+            stdout="",
+            stderr="Error: No such image: godo-mapping:dev\n",
+        )
+
+    monkeypatch.setattr(mapping_mod.subprocess, "run", fake_subprocess)
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post(
+            "/api/mapping/start",
+            json={"name": "studio_v1"},
+            headers=_auth(token),
+        )
+    assert r.status_code == HTTPStatus.PRECONDITION_FAILED
+    assert r.json()["err"] == "image_missing"
+
+
+async def test_post_mapping_stop_idle_returns_404(
+    fake_uds_server,
+    tmp_path: Path,
+) -> None:
+    s = _settings_for_mapping(tmp_path, fake_uds_server)
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post("/api/mapping/stop", headers=_auth(token))
+    assert r.status_code == HTTPStatus.NOT_FOUND
+    assert r.json()["err"] == "no_active_mapping"
+
+
+async def test_get_mapping_preview_returns_404_when_idle(
+    fake_uds_server,
+    tmp_path: Path,
+) -> None:
+    s = _settings_for_mapping(tmp_path, fake_uds_server)
+    async with _client(s) as cl:
+        r = await cl.get("/api/mapping/preview")
+    assert r.status_code == HTTPStatus.NOT_FOUND
+    assert r.json()["err"] == "no_active_mapping"
+
+
+async def test_get_mapping_journal_anonymous_returns_empty_when_idle(
+    fake_uds_server,
+    tmp_path: Path,
+) -> None:
+    s = _settings_for_mapping(tmp_path, fake_uds_server)
+    async with _client(s) as cl:
+        r = await cl.get("/api/mapping/journal")
+    assert r.status_code == HTTPStatus.OK
+    assert r.json() == {"lines": []}
+
+
+async def test_get_mapping_journal_bad_n_returns_422(
+    fake_uds_server,
+    tmp_path: Path,
+) -> None:
+    s = _settings_for_mapping(tmp_path, fake_uds_server)
+    async with _client(s) as cl:
+        r = await cl.get("/api/mapping/journal?n=0")
+    # FastAPI Query(ge=1) returns 422.
+    assert r.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+
+
+# ---- L14 lock-out --------------------------------------------------------
+
+
+def _seed_running_state(s: Settings) -> None:
+    """Persist a Running mapping state.json so L14 lock-out fires."""
+    from godo_webctl import mapping as mapping_mod
+
+    s.mapping_runtime_dir.mkdir(parents=True, exist_ok=True, mode=0o750)
+    mapping_mod._save_state(
+        s,
+        mapping_mod.MappingStatus(
+            state=mapping_mod.MappingState.RUNNING,
+            map_name="studio_v1",
+            container_id_short="abc",
+            started_at="2026-05-01T15:00:00Z",
+            error_detail=None,
+            journal_tail_available=False,
+        ),
+    )
+
+
+async def test_post_calibrate_during_mapping_returns_409_mapping_active(
+    fake_uds_server,
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    monkeypatch,
+) -> None:
+    s = _settings_for(
+        uds_socket=fake_uds_server.path,
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    _seed_running_state(s)
+    # Stub docker inspect so status() reconcile sees "running".
+    from godo_webctl import mapping as mapping_mod
+
+    def fake_subprocess(argv, **kw):
+        import subprocess as sp
+
+        return sp.CompletedProcess(argv, 0, stdout="running\n", stderr="")
+
+    monkeypatch.setattr(mapping_mod.subprocess, "run", fake_subprocess)
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post("/api/calibrate", headers=_auth(token))
+    assert r.status_code == HTTPStatus.CONFLICT
+    assert r.json()["err"] == "mapping_active"
+
+
+async def test_post_live_during_mapping_returns_409_mapping_active(
+    fake_uds_server,
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    monkeypatch,
+) -> None:
+    s = _settings_for(
+        uds_socket=fake_uds_server.path,
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    _seed_running_state(s)
+    from godo_webctl import mapping as mapping_mod
+
+    def fake_subprocess(argv, **kw):
+        import subprocess as sp
+
+        return sp.CompletedProcess(argv, 0, stdout="running\n", stderr="")
+
+    monkeypatch.setattr(mapping_mod.subprocess, "run", fake_subprocess)
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post(
+            "/api/live", json={"enable": True}, headers=_auth(token),
+        )
+    assert r.status_code == HTTPStatus.CONFLICT
+    assert r.json()["err"] == "mapping_active"
+
+
+async def test_post_map_edit_during_mapping_returns_409_mapping_active(
+    fake_uds_server,
+    tmp_path: Path,
+    tmp_active_map_pair: tuple[Path, Path],
+    monkeypatch,
+) -> None:
+    maps_dir, _ = tmp_active_map_pair
+    s = _settings_for(
+        uds_socket=fake_uds_server.path,
+        map_path=tmp_path / "fake.pgm",
+        backup_dir=tmp_path / "bk",
+        maps_dir=maps_dir,
+    )
+    _seed_running_state(s)
+    from godo_webctl import mapping as mapping_mod
+
+    def fake_subprocess(argv, **kw):
+        import subprocess as sp
+
+        return sp.CompletedProcess(argv, 0, stdout="running\n", stderr="")
+
+    monkeypatch.setattr(mapping_mod.subprocess, "run", fake_subprocess)
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post("/api/map/edit", headers=_auth(token))
+    assert r.status_code == HTTPStatus.CONFLICT
+    assert r.json()["err"] == "mapping_active"
+
+
+async def test_post_map_origin_during_mapping_returns_409_mapping_active(
+    fake_uds_server,
+    tmp_path: Path,
+    tmp_active_map_pair: tuple[Path, Path],
+    monkeypatch,
+) -> None:
+    maps_dir, _ = tmp_active_map_pair
+    s = _settings_for(
+        uds_socket=fake_uds_server.path,
+        map_path=tmp_path / "fake.pgm",
+        backup_dir=tmp_path / "bk",
+        maps_dir=maps_dir,
+    )
+    _seed_running_state(s)
+    from godo_webctl import mapping as mapping_mod
+
+    def fake_subprocess(argv, **kw):
+        import subprocess as sp
+
+        return sp.CompletedProcess(argv, 0, stdout="running\n", stderr="")
+
+    monkeypatch.setattr(mapping_mod.subprocess, "run", fake_subprocess)
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post(
+            "/api/map/origin",
+            json={"x_m": 1.0, "y_m": 2.0, "mode": "absolute"},
+            headers=_auth(token),
+        )
+    assert r.status_code == HTTPStatus.CONFLICT
+    assert r.json()["err"] == "mapping_active"

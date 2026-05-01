@@ -23,6 +23,22 @@ vi.mock('$stores/mode', () => ({
   setModeOptimistic: () => {},
 }));
 
+// issue#14 — mappingStatus store is also subscribed in onMount; stub it
+// to a synchronous Idle frame so the gating logic sees a defined shape.
+vi.mock('$stores/mappingStatus', () => ({
+  subscribeMappingStatus: (cb: (s: unknown) => void) => {
+    cb({
+      state: 'idle',
+      map_name: null,
+      container_id_short: null,
+      started_at: null,
+      error_detail: null,
+      journal_tail_available: false,
+    });
+    return () => {};
+  },
+}));
+
 // Avoid timer-driven health refresh during tests: stub apiGet to a
 // resolved no-op so the onMount path doesn't throw.
 vi.mock('$lib/api', async (importOriginal) => {

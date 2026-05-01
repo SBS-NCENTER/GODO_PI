@@ -264,3 +264,128 @@ def test_service_transition_messages_ko_covers_allowed_services() -> None:
     for svc in ALLOWED_SERVICES:
         assert (svc, "starting") in keys, f"missing starting message for {svc}"
         assert (svc, "stopping") in keys, f"missing stopping message for {svc}"
+
+
+# --- issue#14 — mapping pipeline constants -------------------------------
+
+
+def test_mapping_runtime_dir_default_pinned() -> None:
+    # M2 fix: /run is tmpfs; webctl creates the dir at runtime.
+    assert C.MAPPING_RUNTIME_DIR_DEFAULT == "/run/godo/mapping"
+
+
+def test_mapping_preview_subdir_pinned() -> None:
+    # Hidden (dot-prefix) so MAPS_NAME_REGEX leading-dot rejection
+    # filters it out of `maps.list_pairs`.
+    assert C.MAPPING_PREVIEW_SUBDIR == ".preview"
+    assert C.MAPPING_PREVIEW_SUBDIR.startswith(".")
+
+
+def test_mapping_container_name_pinned() -> None:
+    assert C.MAPPING_CONTAINER_NAME == "godo-mapping"
+
+
+def test_mapping_unit_name_pinned() -> None:
+    # D4: instance fixed to `active`.
+    assert C.MAPPING_UNIT_NAME == "godo-mapping@active.service"
+
+
+def test_mapping_image_tag_default_pinned() -> None:
+    assert C.MAPPING_IMAGE_TAG_DEFAULT == "godo-mapping:dev"
+
+
+def test_mapping_monitor_tick_s_pinned() -> None:
+    # 1 Hz cadence; mirrors frontend MAPPING_STATUS_POLL_MS = 1000.
+    assert C.MAPPING_MONITOR_TICK_S == 1.0
+
+
+def test_mapping_monitor_idle_grace_s_pinned() -> None:
+    assert C.MAPPING_MONITOR_IDLE_GRACE_S == 5.0
+
+
+def test_mapping_tracker_stop_timeout_s_pinned() -> None:
+    assert C.MAPPING_TRACKER_STOP_TIMEOUT_S == 5.0
+
+
+def test_mapping_container_start_timeout_s_pinned() -> None:
+    assert C.MAPPING_CONTAINER_START_TIMEOUT_S == 8.0
+
+
+def test_mapping_container_stop_timeout_ordering_invariant() -> None:
+    """M5 fix — the timeout ordering invariant is the load-bearing pin:
+
+        docker stop --time grace (10s) < TimeoutStopSec (20s) < webctl_timeout (25s)
+
+    The systemd unit's `TimeoutStopSec=20s` and the docker `--time=10`
+    grace inside `ExecStop=` must satisfy this ordering. Webctl's 25 s
+    is the outermost ceiling — the systemd unit kills before webctl's
+    poll loop loses patience."""
+    assert C.MAPPING_CONTAINER_STOP_TIMEOUT_S == 25.0
+    # Sanity: must be strictly greater than the systemd TimeoutStopSec
+    # value pinned in the unit file (20).
+    assert C.MAPPING_CONTAINER_STOP_TIMEOUT_S > 20.0
+    # And greater than the docker stop --time grace (10).
+    assert C.MAPPING_CONTAINER_STOP_TIMEOUT_S > 10.0
+
+
+def test_mapping_docker_inspect_poll_s_pinned() -> None:
+    assert C.MAPPING_DOCKER_INSPECT_POLL_S == 0.25
+
+
+def test_mapping_journal_tail_default_n_pinned() -> None:
+    assert C.MAPPING_JOURNAL_TAIL_DEFAULT_N == 50
+
+
+def test_mapping_journal_tail_max_n_pinned() -> None:
+    assert C.MAPPING_JOURNAL_TAIL_MAX_N == 500
+
+
+def test_mapping_name_regex_accepts_typical_stems() -> None:
+    assert C.MAPPING_NAME_REGEX.match("studio_v1")
+    assert C.MAPPING_NAME_REGEX.match("control_room_2026")
+    assert C.MAPPING_NAME_REGEX.match("studio.2026.05.01")
+    assert C.MAPPING_NAME_REGEX.match("(prefix)tail")
+    assert C.MAPPING_NAME_REGEX.match("Date,Loc")
+    assert C.MAPPING_NAME_REGEX.match("a")
+    assert C.MAPPING_NAME_REGEX.match("a" * 64)
+
+
+def test_mapping_name_regex_rejects_leading_dot() -> None:
+    """C5 fix — leading-dot REJECTED. Operator-locked 2026-05-01."""
+    assert not C.MAPPING_NAME_REGEX.match(".foo")
+    assert not C.MAPPING_NAME_REGEX.match("..bar")
+    assert not C.MAPPING_NAME_REGEX.match(".hidden")
+    assert not C.MAPPING_NAME_REGEX.match(".")
+
+
+def test_mapping_name_regex_rejects_whitespace() -> None:
+    assert not C.MAPPING_NAME_REGEX.match("foo bar")
+    assert not C.MAPPING_NAME_REGEX.match("foo\tbar")
+
+
+def test_mapping_name_regex_rejects_too_long() -> None:
+    assert not C.MAPPING_NAME_REGEX.match("a" * 65)
+
+
+def test_mapping_name_regex_rejects_empty() -> None:
+    assert not C.MAPPING_NAME_REGEX.match("")
+
+
+def test_mapping_name_max_len_pinned() -> None:
+    assert C.MAPPING_NAME_MAX_LEN == 64
+
+
+def test_mapping_reserved_names_pinned() -> None:
+    assert frozenset({".", "..", "active"}) == C.MAPPING_RESERVED_NAMES
+
+
+def test_mapping_docker_stats_timeout_s_pinned() -> None:
+    assert C.MAPPING_DOCKER_STATS_TIMEOUT_S == 3.0
+
+
+def test_mapping_docker_inspect_timeout_s_pinned() -> None:
+    assert C.MAPPING_DOCKER_INSPECT_TIMEOUT_S == 2.0
+
+
+def test_mapping_du_timeout_s_pinned() -> None:
+    assert C.MAPPING_DU_TIMEOUT_S == 2.0

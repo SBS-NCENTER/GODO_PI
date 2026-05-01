@@ -603,6 +603,75 @@ preview proxy needed.
 
 ## Change log
 
+### 2026-05-01 23:21 KST — issue#14: SPA Mapping pipeline + monitor
+
+#### Added
+
+- `src/routes/MapMapping.svelte` — Map > Mapping sub-tab body. Hosts
+  name input + validation, Start/Stop buttons, live preview canvas,
+  Docker monitor strip, journal-tail panel on Failed.
+- `src/components/MappingBanner.svelte` — top-of-page banner shown when
+  `mappingStatus.state ∈ {starting, running, stopping}`. Mounted in
+  `App.svelte` between `<TopBar/>` and `<RestartPendingBanner/>`.
+- `src/components/MappingPreviewCanvas.svelte` — cache-busting `<img>`
+  refresh of `/api/mapping/preview` at 1 Hz. Re-encoded server-side to
+  PNG (D5) so no client-side PGM decoder is required.
+- `src/components/MappingMonitorStrip.svelte` — Docker-only monitor
+  strip (S1 amendment). Subscribes the new
+  `/api/mapping/monitor/stream` SSE endpoint; freezes the last frame
+  with a "중단됨" badge on stream close (S2 — no fallback polling).
+- `src/stores/mappingStatus.ts` — 1 Hz `/api/mapping/status` polling
+  store. Subscribe-counted lifecycle (mirrors `subscribeMode` /
+  `subscribeRestartPending`).
+- `src/lib/protocol.ts` — `MAPPING_STATE_*`, `MAPPING_STATUS_FIELDS`,
+  `MAPPING_MONITOR_FIELDS`, mapping error codes, regex pattern mirror.
+- `src/lib/constants.ts` — `MAP_SUBTAB_MAPPING`,
+  `MAPPING_STATUS_POLL_MS`, `MAPPING_PREVIEW_REFRESH_MS`,
+  `MAPPING_NAME_REGEX_SOURCE`, `MAPPING_NAME_MAX_LEN`,
+  `MAPPING_RESERVED_NAMES`.
+
+#### Changed
+
+- `src/routes/Map.svelte` — added Mapping sub-tab tab button + URL
+  `/map-mapping`. Edit sub-tab tab button is `disabled` while
+  `mappingActive` (L14). Subscribes to `mappingStatus`.
+- `src/routes.ts` — added `'/map-mapping': Map`.
+- `src/components/TrackerControls.svelte` — Calibrate / Live / Backup
+  buttons disabled while `mappingActive`; tooltip "매핑 중에는
+  사용할 수 없습니다". Subscribes to `mappingStatus`.
+- `src/App.svelte` — mounts `<MappingBanner/>` above
+  `<RestartPendingBanner/>`.
+
+#### Tests
+
+- `tests/unit/mappingNameValidation.test.ts` — 26 cases (regex parity
+  vs. webctl mirror, accept matrix, reject matrix, leading-dot C5
+  pin, reserved-name set).
+- `tests/unit/mappingProtocol.test.ts` — 5 cases pinning state strings,
+  field tuples, error codes.
+- `tests/unit/mappingStatusStore.test.ts` — 3 cases: subscribe starts
+  polling, fetch updates store, last unsubscribe stops polling.
+- `tests/unit/trackerControls.test.ts` — added `vi.mock('$stores/mappingStatus')`
+  shim so the existing 5 cases pass with the new dependency.
+
+#### New invariants
+
+`(ac)` Mapping sub-tab URL convention — `/map-mapping` URL routes to
+`Map.svelte` which auto-selects the Mapping sub-tab. Direct
+navigation, refresh, and browser back-button all preserve the
+sub-tab. Sister convention to `/map-edit` per Map sub-tab family.
+
+`(ad)` Mode-aware UI gating via `mappingStatus` store — when
+`mappingStatus.state ∈ {starting, running, stopping}`,
+`<TrackerControls/>` Calibrate / Live / Backup buttons + the
+Edit sub-tab tab button are disabled with a Korean tooltip.
+Backend-side L14 lock-out (`/api/calibrate`, `/api/live`,
+`/api/map/edit`, `/api/map/origin` return 409 `mapping_active`)
+is the load-bearing defence; SPA gating is UX. Drift between
+the two surfaces would mean the operator sees a
+clickable-but-failing button — pinned by lock-out tests in
+`godo-webctl/tests/test_app_integration.py`.
+
 ### 2026-05-01 18:36 KST — Map + Backup list timestamps: include date (YYYY-MM-DD HH:MM)
 
 #### Changed

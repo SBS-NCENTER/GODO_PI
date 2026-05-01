@@ -174,6 +174,57 @@ All host-side bring-up steps complete. See per-step session log entry below. The
 
 ## Session log
 
+### 2026-05-01 (early morning → late morning — 00:00 KST → 12:18 KST, thirteenth-session — issue#3 pose hint UI + install fix + AMCL frame y-flip fix; production-critical latent bug surfaced & fixed)
+
+Thirteenth-session shipped issue#3 pose hint UI (PR #54) as a full-pipeline PR — Planner → Reviewer Mode-A (1 Critical + 6 Must + 8 Should + 5 Nit) → Writer (6 commits) → Reviewer Mode-B (1 Critical + 4 Must + 10 Should + 5 Nit). Operator-locked UX directives during the run reshaped the plan twice: (1) **blended (A click+drag) + (B two-click) + C numeric companion** gesture (operator: "A, B 둘 다 같이 녹이는 것은 어때? C도 x,y numeric 옆에 yaw numeric 입력창 함께"), (2) **Live mode pose-hint deferred** to issue#5 (operator: "issue#6도 회전 중심 대신 지금처럼 두 점으로 해도 될 것 같은데... 이건 그때 가서 생각해보자"). HIL surfaced two **production-critical latent bugs** that had been masking each other for the entire project history.
+
+**Production-critical revelation #1 — install ReadOnlyPaths**: SPA Config-tab PATCH always returned `write_failed`. Diagnosis: systemd unit's `ReadOnlyPaths=/etc/godo` + `ProtectSystem=strict` made the directory read-only from the tracker process's namespace view; `mkstemp + rename` for atomic TOML write failed with EROFS. Latent because nobody had used the SPA Config write path before issue#3 needed Tier-2 σ tuning. PR #55 moved tracker.toml default to `/var/lib/godo` (already in `ReadWritePaths` via `StateDirectory=godo`); install.sh new step `[6/8]` seeds an empty TOML + migrates existing `/etc/godo/tracker.toml` from a pre-fix install. Test isolation (PR #55 + #56) hardened `test_rt_replay` and `test_config` to mkstemp a per-process TOML and export `GODO_CONFIG_PATH`, preventing the developer-host runtime TOML from leaking into in-tree tests.
+
+**Production-critical revelation #2 — AMCL y-flip frame bug**: Operator HIL after PR #54 deploy saw AMCL pose **point-reflected about canvas center** — (x, y, yaw) all mirrored. PGM walls and live LiDAR overlay had the same shape but offset by 180° canvas-center inversion. tracker restarts and σ adjustments did not perturb the pattern. Diagnosis (operator-driven, then code-traced): PGM raster is row-major top-row-first; ROS YAML `origin` is bottom-left; AMCL kernels (`Amcl::seed_global`, `evaluate_scan`) treated `cells[cy=0]` as bottom anchored at `(origin_x, origin_y)`. Pre-fix loader stored PGM bytes as-is, so `cells[cy=0]` was actually the TOP row — internal frame inverted. AMCL was self-consistent (likelihood + seed both used the inverted frame so convergence still worked) but its output poses lived in a frame mirrored against the YAML semantics. PR #56 row-flips the PGM payload at load time (option X over option Y because `build_likelihood_field`'s EDT pass would otherwise compute distances in the inverted frame, defeating any single lookup-side flip). Single-point fix; downstream EDT, likelihood, seed sampling, free-cell enumeration all read coherent bottom-first frame.
+
+**Operator's debugging contribution was essential**: operator hypothesized "약간 yaw와 위치가 x축 대칭되어있는 듯한 느낌? 지금 보니 AMCL은 정상이고, 반환 좌표 방향이나 부호가 달라서 map pgm과 오버레이가 일치하지 않는 듯 한 느낌이라면?" before any code-trace had identified the y-flip. The hypothesis pointed directly at the convention mismatch we then confirmed in code.
+
+**Operator-locked decisions this session**:
+
+1. **Hint = strong command**, not weak prior. After PR #56 frame fix, σ sweep on a correct frame showed σ_xy ∈ {0.3, 0.4, 0.5} all kept hint dominant when hint was wrong. Operator's framing: "가까운 곳 두면 실제위치 우세. 이상한 곳 두면 먼 곳 우세. 일단 난 지금의 힌트도 좋은 것 같아. hint 안에 있을 때에는 정밀도가 저하되면 안 된다는 것이 내 생각" — locked σ defaults at 0.5 m / 20°. See `project_hint_strong_command_semantics.md`.
+2. **Live mode = pipelined one-shot driven by previous-pose-as-hint**. Re-frames issue#5 from "make Live's per-scan step() deeper" to "Live ≡ pipelined one-shot, never bare step()". Live carry-over σ is tight (matches inter-tick crane-base drift, NOT padded). See `project_calibration_alternatives.md`.
+3. **Far-range automated rough-hint** as production-friendly hint elimination path. Two-stage: stage 1 = rough (x, y, yaw) from far-range LiDAR features (range > ~3 m, where points are stable studio walls/corners); stage 2 = AMCL precise localization seeded by stage 1. Subsumes earlier approaches A (image match) / B (GPU features) / C (pre-marked landmarks) by adding the far-range pre-filter. Maps to AF analogy: stage 1 = phase detection, stage 2 = contrast detection, operator-click = manual focus override.
+
+**Process violations + lessons**:
+
+- **Production tracker.toml ↔ branch Config struct compatibility**: PR #56 deploy failed initially because `/var/lib/godo/tracker.toml` carried `amcl.hint_sigma_*_default` keys (PATCHed during PR #54 σ probing), but PR #56's main-based binary did not yet recognize those keys → `unknown TOML key` → exit 2 → systemd auto-restart loop. Pre-deploy hygiene rule in `feedback_toml_branch_compat.md`: when deploying any branch whose Config struct lacks a key already present in the runtime TOML, strip the key from TOML or stage the deploy.
+- **Restart-pending banner stale recurrence**: PR #45 fixed the banner clearing after a service-restart action, but the banner re-locks on every fresh tab/page load until manually reloaded. Self-healing hypothesis from earlier dismissed; real fix needs polling/SSE guard flag on initial mount + after every server-side restart_pending mutation. Tracked in `project_restart_pending_banner_stale.md`. Small frontend follow-up PR.
+- **PR merge-order mistake**: operator merged PR #54 (issue#3) before PR #56 (frame fix). Recoverable — rebased PR #56 on the new main, conflicts zero, force-pushed. Worth noting because the safer order would have been "frame fix first, then issue#3 σ work means anything." Lesson is in the operator's already-locked rule, not new memory.
+- **Origin pick accumulation**: `04.29_v3.yaml` origin shifted from SLAM-original `[-10.855, -7.336, 0]` through 4 cumulative ADD picks to `[14.995, 26.164, 0]` over the prior twelfth-session. The frame fix works regardless of origin sign, but the cosmetic cleanup (resetting to a meaningful origin) is a deferred yaml edit.
+
+**3 PRs landed this session**:
+
+| PR | issue | Title | State |
+|---|---|---|---|
+| #54 | issue#3 | initial pose hint UI for AMCL multi-basin fix | merged |
+| #55 | — | install fix — tracker.toml moved to /var/lib/godo for RW under sandbox | merged |
+| #56 | — | AMCL row-flip PGM at load to match bottom-first cell convention | merged |
+
+**Test count delta** (cumulative across the 3 PRs):
+
+- C++ ctest hardware-free: 31 → 45 (+14, plus refactored existing). Highlights: 5000-round atomic-ordering torture test in `test_uds_server` for the issue#3 hint M3 release/acquire chain; consume-once + back-compat + second-OneShot-no-republish in `test_cold_writer_offset_invariant` for the seqlock + atomic-flag split.
+- webctl pytest (excluding `-m hardware_tracker`): 671 → 683 (+12 — issue#3 CalibrateBody all-or-none + integration round-trips + byte-identical encoder pin).
+- Frontend vitest: 299 → 311 (+12 — issue#3 PoseHintLayer state machine + numeric panel + TrackerControls "Calibrate from hint" gating + originMath yawFromDrag + apiPostCalibrate body anti-regression).
+
+**HIL acceptance achieved**:
+- frame fix (PR #56): 50% calibrate runs land in perfect alignment (test9-pattern), 45% close-to-perfect with mild yaw bias, ~5% complete miss (test11-pattern, gone when operator uses hint). Pre-fix: 100% mirror inversion.
+- issue#3 hint UI (PR #54): operator-locked semantic — hint near true pose locks to true pose; hint far locks to hint. σ sweep 0.3 / 0.4 / 0.5 all sweet, default 0.5 m / 20° sticks. The remaining test11-class miss-rate is now operator-controlled (driven by hint placement quality, not AMCL randomness).
+
+**Open queue for next session** (operator-locked priority):
+
+1. **issue#5 — Live mode pipelined hint** (NEW shape per operator lock-in). Live = pipelined one-shot driven by previous-pose-as-hint. Replaces the simpler step()-with-prior design from prior memories. See `project_calibration_alternatives.md` "Live mode hint pipeline" section.
+2. **Far-range automated rough-hint** (NEW direction per operator lock-in). Two-stage: far-range feature → rough hint → AMCL precise. Lower-cost than full image / GPU / landmark approaches because it pre-filters to high-information distant points.
+3. **issue#4 — AMCL silent-converge diagnostic** (still useful — measures both issue#5 and the far-range automation). Now has thirteenth-session HIL data as baseline.
+4. **restart-pending banner real fix** (small frontend PR). polling/SSE guard flag on initial mount + after server-side mutations.
+5. **B-MAPEDIT-2 origin reset** (cosmetic). Reset `04.29_v3.yaml` origin to SLAM-original `[-10.855, -7.336, 0]` or operator-meaningful value.
+6. **issue#6 — B-MAPEDIT-3 yaw rotation** (deferred — revisit per operator's earlier "그때 가서 생각해보자" framing now that hint UX is validated).
+7. **issue#7 — boom-arm angle masking** (still optional, contingent on issue#4 measurements).
+
 ### 2026-04-30 (afternoon → late evening — 14:00 KST → 22:00 KST, twelfth-session — B-MAPEDIT-2 origin pick + B-MAPEDIT-2 minor cleanup + banner-refresh fix + PR β shared map viewport + β.5 Map Edit controls parity + branch-check feedback + issue#2.2 panClamp/pinch + issue#2.2 sensitivity hotfix + issue#2.3 Map Edit overlay/pan/pinch fix; AMCL multi-basin observation surfaced)
 
 Twelfth-session shipped Phase 4.5 P2 / B-MAPEDIT-2 origin pick as a single full-pipeline PR (#43), then operator-driven follow-ups (#44 Minor cleanup, #45 banner-refresh fix, #46 shared map viewport with zoom UX uniform + Map Edit LiDAR overlay, #47 controls parity, #48 panClamp+pinch hotfix, #49 branch-check feedback memory, #50 Map Edit overlay/pan/pinch fix). 8 PRs across the session. Notable: PR β bundle was uncovered via HIL to have THREE different bugs not caught by Mode-A or Mode-B (panClamp formula inversion at high zoom, pinch zoom missing entirely, MapMaskCanvas duplicate map-layer hiding shared underlay) — operator's iterative deploy → use → fix cycle is the canonical bug-finder for layout-heavy refactors.

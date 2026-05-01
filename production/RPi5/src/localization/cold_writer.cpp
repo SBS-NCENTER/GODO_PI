@@ -572,6 +572,137 @@ AmclResult run_live_iteration(const godo::core::Config&         cfg,
     return result;
 }
 
+// issue#5 — Per-Live-iteration pipelined-hint kernel. Runs sequential K-step
+// `converge_anneal_with_hint` driven by the previous-tick pose with tight σ
+// and a short schedule. Sole caller of converge_anneal_with_hint from the
+// Live cold-path branch (production CODEBASE invariant (q)).
+//
+// Hint source contract (`last_pose_inout`):
+//   - tick t=0 after Live entry: `last_pose_inout` carries the most recent
+//     OneShot pose OR the previous Live session's last pose (preserved
+//     across Idle re-entry). The cold-start guard in run_cold_writer's
+//     Live-case body ensures `last_pose_set` is true before this function
+//     is reachable; we trust the caller and do NOT re-check here.
+//   - tick t≥1: `last_pose_inout` is the previous tick's converged pose.
+//
+// σ pair: cfg.amcl_live_carry_sigma_xy_m / _yaw_deg. Tight, matched to
+// inter-tick crane-base drift, NOT padded for AMCL search comfort
+// (`project_hint_strong_command_semantics.md`). Operators widen via
+// tracker.toml if HIL shows wider drift.
+//
+// Schedule: cfg.amcl_live_carry_schedule_m. Short by design — basin lock
+// is automatic at σ=0.05 m carry-σ, so the wide-σ phases of OneShot
+// (1.0, 0.5) waste depth. See config_defaults.hpp comment block.
+//
+// Side effects mirror run_live_iteration: deadband-filtered Offset
+// publish, unconditional LastPose + LastScan publish, AMCL rate record.
+// `result.forced = false` always; deadband applies. `live_first_iter_inout`
+// is intentionally unused here (the latch belongs to the rollback path).
+AmclResult run_live_iteration_pipelined(
+    const godo::core::Config&                     cfg,
+    const godo::lidar::Frame&                     frame,
+    const OccupancyGrid&                          grid,
+    LikelihoodField&                              lf_inout,
+    Amcl&                                         amcl,
+    Rng&                                          rng,
+    std::vector<RangeBeam>&                       beams_buf,
+    Pose2D&                                       last_pose_inout,
+    godo::rt::Offset&                             last_written_inout,
+    godo::rt::Seqlock<godo::rt::Offset>&          target_offset,
+    godo::rt::Seqlock<godo::rt::LastPose>&        last_pose_seq,
+    godo::rt::Seqlock<godo::rt::LastScan>&        last_scan_seq,
+    godo::rt::AmclRateAccumulator&                amcl_rate_accum,
+    godo::rt::Seqlock<godo::core::HotConfig>&     hot_cfg_seq) {
+    // 0. PR-DIAG (Mode-A M2): record this AMCL iteration into the rate
+    //    accumulator. Mirrors run_one_iteration / run_live_iteration.
+    amcl_rate_accum.record(
+        static_cast<std::uint64_t>(godo::rt::monotonic_ns()));
+
+    // 0b. Track B-CONFIG (PR-CONFIG-β): hot-class Tier-2 keys, see
+    //     run_one_iteration for the contract pin.
+    const godo::core::HotConfig hot = hot_cfg_seq.load();
+    const double deadband_mm  = hot.valid ? hot.deadband_mm  : cfg.deadband_mm;
+    const double deadband_deg = hot.valid ? hot.deadband_deg : cfg.deadband_deg;
+    const double yaw_tripwire = hot.valid ? hot.amcl_yaw_tripwire_deg
+                                          : cfg.amcl_yaw_tripwire_deg;
+
+    // 1. Decimate the scan into AMCL beams.
+    downsample(frame,
+               cfg.amcl_downsample_stride,
+               cfg.amcl_range_min_m,
+               cfg.amcl_range_max_m,
+               beams_buf);
+
+    // 2. Run the pipelined-hint kernel. Hint = previous-tick pose.
+    //    Schedule + σ from the Live carry-keys (distinct from OneShot).
+    Pose2D anneal_pose{};
+    AmclResult result = converge_anneal_with_hint(
+        cfg, beams_buf, grid, lf_inout, amcl,
+        last_pose_inout,
+        cfg.amcl_live_carry_sigma_xy_m,
+        cfg.amcl_live_carry_sigma_yaw_deg,
+        cfg.amcl_live_carry_schedule_m,
+        anneal_pose, rng);
+
+    // 3. Tripwire — informational only (mirror of OneShot / Live legacy).
+    if (apply_yaw_tripwire(result.pose,
+                           cfg.amcl_origin_yaw_deg,
+                           yaw_tripwire)) {
+        std::fprintf(stderr,
+            "cold_writer: yaw tripwire fired (Live pipelined) — pose.yaw=%.3f deg "
+            "vs origin.yaw=%.3f deg (tripwire=%.3f deg). Studio base "
+            "may have rotated; re-run calibration when convenient.\n",
+            result.pose.yaw_deg, cfg.amcl_origin_yaw_deg,
+            yaw_tripwire);
+    }
+
+    // 4. Compute Offset against calibration origin.
+    Pose2D origin{};
+    origin.x       = cfg.amcl_origin_x_m;
+    origin.y       = cfg.amcl_origin_y_m;
+    origin.yaw_deg = cfg.amcl_origin_yaw_deg;
+    result.offset = compute_offset(result.pose, origin);
+    result.forced = false;            // Live publishes through the deadband
+
+    // 5. Publish — deadband filter at the seqlock seam (§6.4.1).
+    (void)apply_deadband_publish(result.offset,
+                                 result.forced,
+                                 deadband_mm / 1000.0,
+                                 deadband_deg,
+                                 last_written_inout,
+                                 target_offset);
+
+    // 6. Track B — publish LastPose snapshot UNCONDITIONALLY.
+    godo::rt::LastPose snap{};
+    snap.x_m               = result.pose.x;
+    snap.y_m               = result.pose.y;
+    snap.yaw_deg           = result.pose.yaw_deg;
+    snap.xy_std_m          = result.xy_std_m;
+    snap.yaw_std_deg       = result.yaw_std_deg;
+    snap.published_mono_ns = static_cast<std::uint64_t>(godo::rt::monotonic_ns());
+    snap.iterations        = result.iterations;
+    snap.valid             = 1;
+    snap.converged         = result.converged ? std::uint8_t{1} : std::uint8_t{0};
+    snap.forced            = std::uint8_t{0};       // Live publishes forced=0
+    snap._pad0             = 0;
+    last_pose_seq.store(snap);
+
+    // 7. Track D — publish LastScan snapshot UNCONDITIONALLY.
+    godo::rt::LastScan scan_snap{};
+    fill_last_scan(scan_snap, cfg, frame, result);
+    scan_snap.forced     = std::uint8_t{0};         // Live publishes forced=0
+    scan_snap.pose_valid = result.converged ? std::uint8_t{1} : std::uint8_t{0};
+    last_scan_seq.store(scan_snap);
+
+    // 8. Update Live state. `last_pose_inout` is updated unconditionally;
+    //    on the next tick this becomes the hint. Note: NEVER touch
+    //    g_calibrate_hint_*; consume-once is OneShot-only. The legacy
+    //    `live_first_iter` latch is intentionally not consulted on the
+    //    pipelined path.
+    last_pose_inout = result.pose;
+    return result;
+}
+
 namespace {
 
 // Helper: convert a poll interval in milliseconds to a timespec for nanosleep.
@@ -620,6 +751,16 @@ void run_cold_writer(const godo::core::Config&              cfg,
     Rng  rng(cfg.amcl_seed);
     Pose2D last_pose{};
     bool live_first_iter = true;
+
+    // issue#5 — Cold-start guard for the pipelined Live path. Set to true
+    // ONLY after a successful OneShot completion (run_one_iteration end)
+    // OR after the first successful pipelined Live tick (when seeding from
+    // a prior OneShot pose has already produced a converged pose). Reading
+    // this flag is preferred over comparing `last_pose` to (0,0,0): a
+    // legitimate OneShot result of pose=(0.0, 0.0, 0.0°) is operator-allowed
+    // (calibration origin defaults are 0), so a value-comparison guard
+    // would falsely reject Live re-entry after such a OneShot.
+    bool last_pose_set = false;
 
     // Thread-C-local reference for the deadband filter (§6.4.1).
     // Initialised to {0, 0, 0} to match the seqlock's default-constructed
@@ -712,6 +853,10 @@ void run_cold_writer(const godo::core::Config&              cfg,
                                             last_written, target_offset,
                                             last_pose_seq, last_scan_seq,
                                             amcl_rate_accum, hot_cfg_seq);
+                    // issue#5 — A successful OneShot anchors the cold-start
+                    // for the pipelined Live path. Flag flips here, NEVER
+                    // on a thrown converge.
+                    last_pose_set = true;
                 } catch (const std::exception& e) {
                     std::fprintf(stderr,
                         "cold_writer: run_one_iteration threw: %s — "
@@ -745,6 +890,25 @@ void run_cold_writer(const godo::core::Config&              cfg,
                     std::fprintf(stderr,
                         "cold_writer: Live requested but no LiDAR source "
                         "available; returning to Idle.\n");
+                    godo::rt::g_amcl_mode.store(godo::rt::AmclMode::Idle,
+                                                std::memory_order_release);
+                    on_leave_live(live_first_iter);
+                    break;
+                }
+                // issue#5 — Cold-start guard for the pipelined path.
+                // Reject Live entry when (a) the operator selected the
+                // pipelined kernel via cfg.live_carry_pose_as_hint AND
+                // (b) no prior OneShot has run in this session (so
+                // `last_pose` is the default-zero seed and is NOT a
+                // converged pose). The rollback path is unaffected — its
+                // first iteration runs seed_global so it can recover from
+                // arbitrary state.
+                if (cfg.live_carry_pose_as_hint && !last_pose_set) {
+                    std::fprintf(stderr,
+                        "cold_writer: Live (pipelined-hint kernel) requires "
+                        "a prior OneShot or pose-hint-driven OneShot in this "
+                        "session — `last_pose` is unset. Bouncing to Idle. "
+                        "Run Calibrate first, then re-toggle Live.\n");
                     godo::rt::g_amcl_mode.store(godo::rt::AmclMode::Idle,
                                                 std::memory_order_release);
                     on_leave_live(live_first_iter);
@@ -790,15 +954,33 @@ void run_cold_writer(const godo::core::Config&              cfg,
                     break;
                 }
                 try {
-                    (void)run_live_iteration(cfg, captured, grid, amcl, rng,
-                                             beams_buf, last_pose,
-                                             live_first_iter,
-                                             last_written, target_offset,
-                                             last_pose_seq, last_scan_seq,
-                                             amcl_rate_accum, hot_cfg_seq);
+                    if (cfg.live_carry_pose_as_hint) {
+                        // issue#5 — pipelined-hint Live kernel. last_pose
+                        // is the carry source; flag enforced above ensures
+                        // it's a converged pose (not default zero).
+                        (void)run_live_iteration_pipelined(
+                            cfg, captured, grid, lf, amcl, rng,
+                            beams_buf, last_pose,
+                            last_written, target_offset,
+                            last_pose_seq, last_scan_seq,
+                            amcl_rate_accum, hot_cfg_seq);
+                        // After the first successful pipelined tick
+                        // last_pose carries a fresh converged pose;
+                        // a subsequent OneShot exit followed by another
+                        // pipelined Live re-entry can rely on the flag
+                        // even if the user did not run another Calibrate.
+                        last_pose_set = true;
+                    } else {
+                        (void)run_live_iteration(cfg, captured, grid, amcl, rng,
+                                                 beams_buf, last_pose,
+                                                 live_first_iter,
+                                                 last_written, target_offset,
+                                                 last_pose_seq, last_scan_seq,
+                                                 amcl_rate_accum, hot_cfg_seq);
+                    }
                 } catch (const std::exception& e) {
                     std::fprintf(stderr,
-                        "cold_writer: run_live_iteration threw: %s — "
+                        "cold_writer: Live iteration threw: %s — "
                         "returning to Idle.\n", e.what());
                     godo::rt::g_amcl_mode.store(godo::rt::AmclMode::Idle,
                                                 std::memory_order_release);

@@ -113,8 +113,28 @@ Operator's framing: issue#3 is "automated hint" by analogy = the phase-detection
 
 This analogy is portable — useful when explaining the system to engineers / operators / new collaborators. "It's like mirrorless AF" conveys the architecture in one sentence.
 
+## Live mode previous-pose-as-hint (operator 2026-05-01 08:38 KST)
+
+Operator-proposed during issue#3 HIL (PR #54): once Live mode starts, treat the **previous-tick pose as the next-tick hint**. Rationale: in production the crane base moves continuously — adjacent ticks' poses differ by ~tens of cm at most. Carrying the previous pose as a tight Gaussian prior means each new scan starts already inside the correct basin, eliminating the basin-jump failure mode entirely.
+
+Concrete shape:
+- **Cold start** = issue#3 operator hint (or first-seed algorithm — A/B/C).
+- **Live tick t** = step() with prior centred on `pose[t-1]`, σ matching the maximum plausible inter-tick drift (e.g. base moves ≤ 30 cm/s × 16 ms tick = 5 mm; 10× safety = 50 mm σ_xy, σ_yaw small).
+
+This is a **velocity-free motion model**. AMCL upstream supports motion models (odometry-driven), but GODO has no odometry feed. Proxy via:
+- Operator-bounded drift: cfg key `live_max_inter_tick_drift_m` defaults to a generous physical limit; σ_xy = drift_limit × safety_factor.
+- Optionally: tiny inertia term using `pose[t-1] - pose[t-2]` (constant-velocity assumption) for σ_xy positioning, which catches steady-state crane moves better than pure stationary prior.
+
+How this composes with the broader plan:
+- Subsumes the first-seed pattern's Live arm (cold start gets the heavy seed once; Live carries forward).
+- Orthogonal to issue#5 (Pipelined K-step) — pipelining adds depth per scan, carry-over guarantees the right basin to deepen INTO.
+- Fits the AF analogy: after phase-detection lock, contrast-detection only needs to refine locally — never re-search the full basin space.
+
+When implementing: Live mode opt-in flag (cfg `live_carry_pose_as_hint`) so operators can A/B test against today's seed-global-per-tick behaviour. issue#5 PR is the natural home.
+
 ## Status
 
 - File created 2026-04-30 23:30 KST.
 - Extended 2026-04-30 23:50 KST with first-seed pattern + distance-weighted AMCL + AF analogy.
+- Extended 2026-05-01 08:38 KST with Live previous-pose-as-hint (operator-proposed during issue#3 HIL).
 - MEMORY.md index entry deferred at operator's request — re-indexing happens at session-close (chronicler skill) or upon explicit request.

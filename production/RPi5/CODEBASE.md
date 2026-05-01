@@ -632,6 +632,104 @@ also ignores path; it pins the write *function*.
 
 ---
 
+## 2026-05-01 10:26 KST — fix(amcl): occupancy_grid row-flip at load (frame-convention bridge)
+
+### Why
+
+Operator HIL on news-pi01 during the issue#3 σ sweep observed a
+persistent geometric pattern: AMCL's reported pose dot was the
+**point reflection** of the true position about the canvas center —
+(x, y, yaw) all mirrored. PGM walls and live LiDAR-overlay scan
+shapes were **the same shape** but offset by that 180° canvas-center
+inversion. tracker restarts and σ adjustments did not perturb the
+pattern. ([test4/5/6 screenshots, operator measurement at last_pose
+≈ (25.79, 34.84, 161.3°), ground-truth ≈ (mirrored anchor)] —
+captured in `.claude/memory/project_amcl_multi_basin_observation.md`
+extension during the session.)
+
+Root cause: a frame-convention mismatch between the PGM file format
+and the GODO AMCL kernel.
+
+- **PGM (P5) raster**: row-major **top-row-first**. byte 0 is the
+  top-left pixel; byte (height-1)·width is the bottom-left.
+- **YAML semantics (ROS map_server)**: `origin: [ox, oy, 0]` is the
+  world coord of the **bottom-left** pixel.
+- **GODO AMCL kernels** (`Amcl::seed_global` at `amcl.cpp:92-97`,
+  `evaluate_scan` at `scan_ops.cpp:84-85`): index `cells[cy * W + cx]`
+  and treat `(cx, cy=0)` as the cell anchored at world
+  `(origin_x, origin_y)`.
+
+For the kernel's expectation to hold, `cells[0..W-1]` must contain
+the **bottom** row of the PGM image. The previous loader stored the
+PGM bytes as-is (top row first), so cells[cy=0] actually held the
+TOP row — a vertically inverted internal frame. The AMCL kernel was
+self-consistent (likelihood lookup and seed sampling used the same
+inverted convention, so convergence still worked), but its output
+poses were in a frame mirrored against the YAML semantics. The SPA's
+`worldToCanvas` correctly applies the YAML semantics and a
+height-1-row flip, so PGM bitmaps and AMCL pose dots ended up in
+opposite frames — producing the 180° inversion the operator saw.
+
+### What changed
+
+- `production/RPi5/src/localization/occupancy_grid.cpp::load_map` —
+  row-flip the PGM byte payload at load time. cells[0..W-1] now
+  holds the bottom row, matching the kernel's `(cx, cy=0)` =
+  bottom-left expectation. Single-point fix; downstream EDT build,
+  likelihood lookup, seed sampling, and free-cell enumeration all
+  read a coherent frame without further patching.
+- `production/RPi5/tests/test_config.cpp::Env` — the helper now
+  synthesises an empty per-test-case TOML when the test does not
+  pass `GODO_CONFIG_PATH` explicitly. Without this, the loader's
+  fallback search hits `/var/lib/godo/tracker.toml`, which on a
+  developer host that has exercised forward-branch features (issue#3
+  hint-σ keys) carries entries the in-tree `Config` struct doesn't
+  yet recognise — every test_config case throws on load. (Mirror of
+  the same isolation pattern already applied to `test_rt_replay` in
+  PR #55.)
+
+### Why row-flip at load (option X) over per-lookup flip (option Y)
+
+`build_likelihood_field` runs the EDT pass over `grid.cells` in
+array order; the EDT measures distance-from-obstacle in cell space.
+Without flipping at load, the EDT distances would themselves be
+computed in the inverted frame, and a single lookup-side flip in
+`scan_ops.cpp` would not undo it. Row-flipping at load makes the
+ENTIRE downstream kernel (EDT, likelihood, seed, free-cell scan)
+read a single coherent frame, with one comment-bearing change site.
+
+### Tests
+
+- Existing 45 hardware-free tests pass after the fix (they exercise
+  fixtures generated programmatically with consistent frame, so the
+  flip simply re-aligns them).
+- `test_config` newly green via the isolated-Env addition.
+- No new test cases added — the fix is a frame-correctness change
+  visible at the integration level (LiDAR overlay alignment on a
+  real map). HIL on news-pi01 is the load-bearing acceptance gate.
+
+### HIL acceptance
+
+After deploy on news-pi01:
+- Calibrate (one-shot, no hint) → pose dot lands on the operator's
+  ground-truth crane base location, NOT its 180° mirror image.
+- LiDAR scan overlay aligns to PGM walls without sign-flip.
+- Operator's mental coordinate system (e.g. ground-truth ~26, 34)
+  matches the AMCL pose readout.
+
+### Out of scope
+
+- issue#3 hint σ sweep — paused while this fix is verified;
+  resume after HIL confirms the frame is correct, since all prior
+  σ-cliff data was collected under the broken frame.
+- B-MAPEDIT-2 origin-pick accumulation (operator's `04.29_v3.yaml`
+  origin is `[14.995, 26.164, 0]` after 4 cumulative ADD picks
+  from the SLAM-original `[-10.855, -7.336, 0]`). The frame fix
+  works regardless of yaml origin sign; if the operator wants to
+  reset to the SLAM-original, that is a separate yaml edit.
+
+---
+
 ## 2026-04-23 — Initial scaffold (Plan B v2, P3-1…P3-10)
 
 ### Added

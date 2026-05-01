@@ -241,6 +241,31 @@ WORKDIR /work
 - `studio_v1.pgm`: 8-bit grayscale occupancy grid (0 = occupied, 255 = free, 205 = unknown).
 - `studio_v1.yaml`: metadata (resolution, origin, thresholds). The C++ runtime parses this via `map_loader.cpp`.
 
+#### Frame convention (PGM ↔ AMCL ↔ SPA)
+
+The PGM file format stores raster data row-major **top-row-first** —
+byte 0 is the top-left pixel, byte (height-1)·width is the bottom-left.
+The YAML `origin: [ox, oy, 0]` value is the world coord of the
+**bottom-left** pixel (ROS map_server semantics). For the AMCL kernel
+to satisfy both — `cells[cy * W + cx]` looking up a cell at world
+`(origin_x + cx*res, origin_y + cy*res)` and matching the YAML's
+bottom-left anchor — the loader (`occupancy_grid.cpp::load_map`)
+**row-flips the PGM payload at load time** so `cells[0..W-1]` holds
+the bottom row.
+
+The SPA's `mapViewport.svelte.ts::worldToCanvas` applies a separate
+height-1 flip when projecting world coords onto canvas pixels,
+because the canvas is drawn with row 0 at top (matching the original
+PGM raster, not the AMCL internal frame). The two flips are
+deliberately asymmetric — AMCL works in a bottom-row-first frame
+internally, the SPA renders in a top-row-first frame visually, and
+both convert to/from the same world frame so pose dots and scan
+overlays land where YAML origin says they should.
+
+This convention is the bridge for a frame-orientation bug found
+2026-05-01 KST during issue#3 HIL — see `production/RPi5/CODEBASE.md`
+2026-05-01 entry for the diagnosis.
+
 ### When to rebuild the map
 
 - Rebuild when the studio set or layout has changed **significantly** (furniture added/removed, structural change).

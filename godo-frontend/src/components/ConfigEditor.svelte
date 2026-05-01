@@ -215,6 +215,20 @@
     width: 10em;
     color: var(--color-text-muted);
   }
+  /* Edit column is sized to roughly match Current (operator UX request
+     2026-05-02 KST — long values like /var/lib/godo/maps/active.pgm were
+     getting truncated in the input box because the browser was giving
+     all the slack to .col-desc). col-edit input itself is width:100% of
+     this cell, so the cell width drives the input width. */
+  .col-edit {
+    width: 11em;
+  }
+  /* Description fills the remaining horizontal space; the slight cap
+     here prevents long descriptions from squeezing the Edit cell on
+     narrow viewports. */
+  .col-desc {
+    max-width: 28em;
+  }
   .current-value {
     color: var(--color-text);
   }

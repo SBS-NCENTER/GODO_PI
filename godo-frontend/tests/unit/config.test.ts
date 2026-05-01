@@ -717,6 +717,57 @@ describe('Config.svelte — input clearing UX (Bug C 2026-05-01 hotfix)', () => 
     expect(input.value).not.toBe('');
   });
 
+  it('Apply with pending value EQUAL to current → no PATCH fires, ✓ marker still shows', async () => {
+    // Operator UX 2026-05-02 KST: typing the same value back should NOT
+    // generate network traffic. Pre-fix, the apply loop fired a PATCH
+    // for every entry in `pending` regardless of whether it matched the
+    // active value, polluting activity logs and racing restart_pending.
+    let patchCalls = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+      const u = String(url);
+      const m = (init as RequestInit | undefined)?.method ?? 'GET';
+      if (u === '/api/config/schema') return jsonResp(FAKE_SCHEMA);
+      if (u === '/api/config' && m === 'GET') return jsonResp(FAKE_CURRENT);
+      if (m === 'PATCH') {
+        patchCalls += 1;
+        return jsonResp({ ok: true, reload_class: 'hot' });
+      }
+      if (u === '/api/system/restart_pending') return jsonResp({ pending: false });
+      if (u === '/api/health') return jsonResp({ webctl: 'ok', tracker: 'ok', mode: 'Idle' });
+      if (u === '/api/system/services') return jsonResp({ services: [] });
+      return jsonResp({});
+    });
+
+    setSession('admin');
+    const target = mountConfig();
+    const editBtn = await waitFor<HTMLButtonElement>(
+      () => target.querySelector<HTMLButtonElement>('[data-testid="config-edit"]'),
+      'config-edit button',
+    );
+    editBtn.click();
+    flushSync();
+
+    // FAKE_CURRENT["network.ue_port"] is 6666 — type the same value back.
+    const input = await waitFor<HTMLInputElement>(
+      () => target.querySelector<HTMLInputElement>('[data-testid="input-network.ue_port"]'),
+      'network.ue_port input',
+    );
+    input.value = '6666';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+
+    target.querySelector<HTMLButtonElement>('[data-testid="config-apply"]')!.click();
+    await new Promise((r) => setTimeout(r, 30));
+    flushSync();
+
+    // Zero PATCH traffic — the no-op was suppressed at the apply layer.
+    expect(patchCalls).toBe(0);
+    // ✓ marker still shows so the operator sees their intent landed.
+    expect(target.querySelector('[data-testid="marker-network.ue_port"]')!.textContent).toContain(
+      '✓',
+    );
+  });
+
   it('Apply with an empty pending value surfaces a per-row error (not silent commit)', async () => {
     let patchCalls = 0;
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {

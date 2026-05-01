@@ -156,15 +156,32 @@
 
     const typed: Record<string, ConfigValue> = {};
     const upfrontFailures: Record<string, { ok: boolean; error?: string }> = {};
+    // Operator UX 2026-05-02 KST — when the operator deletes and re-types
+    // the same value (or just types the existing value back), Apply must
+    // NOT fire a PATCH. Pre-fix the no-op PATCH still travelled to the
+    // tracker, looking like a real change in activity logs and racing
+    // any restart_pending state. We suppress no-ops at this layer (after
+    // type coercion, before the apply loop) so the down-stream pipeline
+    // sees only genuine deltas.
+    const noopKeys: string[] = [];
     for (const [key, raw] of Object.entries(pending)) {
       const row = schemaByName[key];
       if (!row) continue;
       const coerced = coerce(row, raw);
       if (coerced === null) {
         upfrontFailures[key] = { ok: false, error: `bad ${row.type} literal` };
-      } else {
-        typed[key] = coerced;
+        continue;
       }
+      // Compare coerced pending to the active value for this key.
+      // strict equality works for int / double / bool / string per the
+      // ConfigValue union — for double, the coerce() pipeline has already
+      // applied parseFloat, so e.g. typing "0.05" against current 0.05
+      // collapses to numeric equality.
+      if (current[key] !== undefined && current[key] === coerced) {
+        noopKeys.push(key);
+        continue;
+      }
+      typed[key] = coerced;
     }
 
     isApplying = true;
@@ -174,10 +191,15 @@
       results = await applyBatch(typed);
     }
 
-    // Merge upfront-failures with PATCH results.
+    // Merge upfront-failures with PATCH results. No-op keys count as ok
+    // (operator semantically intended that value, the system has it,
+    // done) — they get the same ✓ marker as if a PATCH had fired.
     const merged: Record<string, { ok: boolean; error?: string }> = { ...upfrontFailures };
     for (const r of results) {
       merged[r.key] = r.ok ? { ok: true } : { ok: false, error: r.error };
+    }
+    for (const key of noopKeys) {
+      merged[key] = { ok: true };
     }
 
     applyResults = merged;

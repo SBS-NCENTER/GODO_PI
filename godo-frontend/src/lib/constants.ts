@@ -324,6 +324,13 @@ export const ORIGIN_PICK_REDIRECT_DELAY_MS = 3000;
 // arm's length, not glancing at a top-bar toast.
 export const CONFIG_APPLY_RESULT_MARKER_TTL_MS = 2000;
 
+// --- Backup flash banner (operator UX 2026-05-02 KST) -------------------
+// /api/map/backup is a fire-and-result action — operators need a visible
+// success/failure flash that auto-dismisses. 3 s gives enough time to
+// read "백업 완료 (path)" without the banner persisting into unrelated
+// navigation.
+export const BACKUP_FLASH_DISMISS_MS = 3000;
+
 // --- issue#3 — pose hint UI (Map Overview sub-tab) --------------------
 // Pixel distance threshold separating gesture path A (single drag) from
 // path B (click-then-click). pointerdown→pointerup with movement <

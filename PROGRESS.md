@@ -174,6 +174,53 @@ All host-side bring-up steps complete. See per-step session log entry below. The
 
 ## Session log
 
+### 2026-05-01 (afternoon — 12:30 KST → 14:30 KST, fourteenth-session — issue#8 banner polling backstop + issue#9 mode action-hook + CLAUDE.md §8 Deployment + PR workflow + governance/operations bundle)
+
+Fourteenth-session was a tight afternoon follow-up to thirteenth's cold-start handoff. The plan locked at session-start: small banner PR first (TL;DR #4 from cold-start cache), then issue#5 full pipeline. Operator course-corrected mid-session to also fold in **issue#9** as a natural extension of issue#8's polling territory, deferring issue#5 to next-session cold-start instead. Three PRs merged.
+
+**Notable structural revelation — emergent vs explicit behaviour**: issue#9 originated as an operator HIL observation after PR #59 deploy: "godo-tracker가 응답하지 않습니다" tracker-down banner cleared almost instantly on Start/Restart click, consistent across multiple tries. Code-trace analysis disproved the obvious hypothesis (PR #59 directly speeds up tracker-down banner): PR #59's polling backstop touched the **separate** `restartPending` store; `mode.trackerOk` (the actual driver of the App.svelte tracker-down banner) was untouched. The observed speedup was an **emergent property** of mount-time polling-phase alignment after the hard-reload deploy. PR #60 made the same behaviour explicit and deterministic by mirroring PR #45 / PR #59's action-driven refresh pattern for `mode.ts` — `refreshMode()` exported, called alongside `refreshRestartPending()` in service-action handlers. Stop click now responds within HTTP RTT; Restart catches the transient unreachable window during the bounce; Start is still bounded by tracker boot time (a polling-cadence fix can't accelerate process startup). Lesson: operator-perceived "consistent fast behaviour" may be polling-phase coincidence, not designed determinism — when a behaviour is worth keeping, lock it explicitly.
+
+**Operator-locked governance changes**:
+
+1. **`issue#N / issue#N.M` labelling convention promoted from cache to SSOT** — the integer-and-decimal naming scheme had lived only in `NEXT_SESSION.md`'s "Naming convention reminder" section (cache). Operator: "이건 우리 claude.md에 지침 작성하자. 메모리가 너무 많으면 너가 참조하는 컨텍스트가 너무 많을 것 같아." Promoted into CLAUDE.md §6 as a §6-subsection. The shadow memory entry I had created (`feedback_issue_naming_scheme.md`) was deleted in favour of the CLAUDE.md home — fewer files to load on cold start.
+2. **CLAUDE.md §8 Deployment + PR workflow** — operator wanted the deploy/HIL/merge pipeline procedure that's been ad-hoc across recent PRs (#54, #55, #56, #58, #59, #60) promoted into CLAUDE.md as a SSOT. Operator: "claude.md에 지침사항으로 정리해도 좋겠어. 내가 직접 확인하면서 해보려구." New §8 contains: (a) standard pipeline diagram (PR opened → fetch → build → deploy → HIL → merge → main sync), (b) **stack-deploy matrix** (frontend / webctl / RPi5 tracker / multi-stack each with build + deploy + service-restart commands), (c) **critical rsync trailing-slash trap** documenting both correct and broken forms, (d) HIL verification checklist, (e) merge etiquette, (f) pre-deploy traps cross-linked to existing memory.
+
+**Live operator HIL surfaced two operational gotchas**:
+
+- **rsync trailing-slash trap**: operator ran `sudo rsync -a --delete /home/ncenter/projects/GODO/godo-frontend/dist /opt/godo-frontend` (correct), then immediately followed with `sudo rsync -a --delete /home/ncenter/projects/GODO/godo-frontend/dist/ /opt/godo-frontend` (with trailing slash on source). The second form's `--delete` wiped the `dist/` subdirectory the first form had created, leaving SPA assets at `/opt/godo-frontend/{index.html,assets,...}` directly while webctl env-var pointed at `/opt/godo-frontend/dist/`. SPA broken, webctl returned 404 on `/`. Recovery: same correct command (no trailing slash) re-run; `--delete` cleaned up the misplaced top-level files and recreated `/opt/godo-frontend/dist/`. Documented in CLAUDE.md §8 with both forms shown side-by-side.
+- **GitHub web UI default merge style**: operator merged PR #60 via the web UI instead of `gh pr merge --squash --delete-branch`. The web UI's default landed a merge commit (`315c631`) on top of the feature commit (`7dfcbd8`) — main got 2 commits where PR #58 / #59 got 1 squash commit each. Operator noted but no action taken; if a future session prefers single-commit-per-PR consistency, repo Settings → "Merge button" defaults can be adjusted, or the team can adopt `gh pr merge --squash` discipline.
+
+**3 PRs landed this session**:
+
+| PR | issue | Title | State |
+|---|---|---|---|
+| #58 | governance | docs: thirteenth-session memory bundle + cold-start refresh + CLAUDE.md §8 + issue#N labelling | merged (squash) |
+| #59 | issue#8 | restart-pending banner polling backstop | merged (squash) |
+| #60 | issue#9 | action-driven mode refresh hook | merged (web UI merge commit) |
+
+PR #58 was a hybrid — its first commit (88b640b "memory bundle + cold-start refresh") was authored at end of thirteenth-session by operator; the next two (aa8ee99 issue#N labelling + 6295db8 §8 Deployment) were authored this session. All three squashed at merge into `cfef33c`.
+
+**Test count delta** (cumulative across PR #59 + PR #60):
+
+- Frontend vitest: 311 → 321 (+10 — issue#8 polling backstop tests in `restartPending.test.ts` + issue#9 mode store tests in new `mode.test.ts`).
+- C++ ctest, webctl pytest: unchanged (frontend-only PRs).
+- Bundle delta: ~+0.10 kB gzip (135.40 → 135.50 kB — store + import delta only).
+
+**HIL acceptance achieved**:
+
+- issue#8 (PR #59): operator confirmed banner clears within ~1–2 s on tracker action, no hard reload required across cfg-edit / action / idle paths. Deployed to news-pi01 via the §8 stack-deploy matrix (rsync trap recovered as noted).
+- issue#9 (PR #60): operator confirmed tracker-down banner clears with consistent timing on Start/Restart. Quote: "지금 일관되게 ... 메시지 사라지는 속도가 start나 restart 버튼 누르자마자 일관된 타이밍으로 사라짐."
+
+**Open queue for next session** (operator-locked priority — explicitly deferred to a clean cold-start condition):
+
+1. **issue#5 — Live mode pipelined hint** (P0, full pipeline). Live ≡ pipelined one-shot driven by previous-pose-as-hint. Architectural impact comparable to issue#3 (PR #54). Operator-locked direction: `project_calibration_alternatives.md` "Live mode hint pipeline" section.
+2. **Far-range automated rough-hint** (P0, after issue#5). Two-stage stage-1-rough → stage-2-AMCL-precise. Operator-locked direction: same memory file's "Automated rough-hint" section.
+3. **issue#4 — AMCL silent-converge diagnostic**.
+4. **restart-pending banner real fix** — superseded by PR #59 for the action-driven path; non-action paths (initial mount, idle polling) still need the polling/SSE guard flag.
+5. **B-MAPEDIT-2 origin reset** (cosmetic).
+6. **issue#6 — B-MAPEDIT-3 yaw rotation** (revisit two-point UX pattern).
+7. **issue#7 — boom-arm angle masking** (optional, contingent on issue#4).
+
 ### 2026-05-01 (early morning → late morning — 00:00 KST → 12:18 KST, thirteenth-session — issue#3 pose hint UI + install fix + AMCL frame y-flip fix; production-critical latent bug surfaced & fixed)
 
 Thirteenth-session shipped issue#3 pose hint UI (PR #54) as a full-pipeline PR — Planner → Reviewer Mode-A (1 Critical + 6 Must + 8 Should + 5 Nit) → Writer (6 commits) → Reviewer Mode-B (1 Critical + 4 Must + 10 Should + 5 Nit). Operator-locked UX directives during the run reshaped the plan twice: (1) **blended (A click+drag) + (B two-click) + C numeric companion** gesture (operator: "A, B 둘 다 같이 녹이는 것은 어때? C도 x,y numeric 옆에 yaw numeric 입력창 함께"), (2) **Live mode pose-hint deferred** to issue#5 (operator: "issue#6도 회전 중심 대신 지금처럼 두 점으로 해도 될 것 같은데... 이건 그때 가서 생각해보자"). HIL surfaced two **production-critical latent bugs** that had been masking each other for the entire project history.

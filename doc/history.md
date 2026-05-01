@@ -10,6 +10,63 @@
 
 ---
 
+## 2026-05-01 (오후 — 12:30 KST → 14:30 KST, 열네 번째 세션 — issue#8 banner polling backstop + issue#9 mode action-hook + CLAUDE.md §8 Deployment + PR workflow 거버넌스 정리)
+
+### 한 줄 요약
+
+작은 frontend PR 두 건(issue#8, issue#9)과 거버넌스 PR 한 건(#58)으로 banner UX 일관성 정리. issue#5는 깨끗한 cold-start condition으로 다음 세션 이월. 운영자 HIL 중 **emergent vs explicit** 패턴이 드러나 issue#8 + issue#9 사이의 연결고리를 명시적 코드로 잠금.
+
+### 3 PR
+
+| PR | issue | 제목 | 결과 |
+|---|---|---|---|
+| #58 | governance | docs: thirteenth-session memory bundle + cold-start refresh + CLAUDE.md §8 + issue#N labelling | merged (squash) |
+| #59 | issue#8 | restart-pending banner polling backstop | merged (squash) |
+| #60 | issue#9 | action-driven mode refresh hook | merged (web UI merge commit) |
+
+### 핵심 발견 — emergent vs explicit behaviour
+
+issue#9는 운영자 HIL 관찰에서 시작됨. PR #59 배포 후 "godo-tracker가 응답하지 않습니다" tracker-down banner가 Start/Restart 누르자마자 일관된 타이밍으로 사라짐. 운영자 인용: "지금 일관되게 ... 메시지 사라지는 속도가 start나 restart 버튼 누르자마자 일관된 타이밍으로 사라짐."
+
+코드 추적 결과 — PR #59이 직접 빠르게 만든 게 아니었음. PR #59의 폴링 backstop은 **별도 store** (`restartPending`)을 갱신하고, App.svelte tracker-down banner가 읽는 `mode.trackerOk`는 `mode.ts`의 1Hz 폴링이 단독으로 갱신함. 운영자가 본 빠름은 hard-reload 직후 mount-time polling phase가 정렬되어 클릭 직후 다음 tick이 잘 잡힌 **emergent property**였음. 깨지기 쉽고 문서화도 안 된 동작.
+
+PR #60은 PR #45 / PR #59의 action-driven refresh 패턴을 `mode.ts`에도 미러해서 emergent 동작을 explicit + deterministic하게 잠금:
+
+- `refreshMode()` export — 즉시 `/api/health` fetch + polling interval phase reset
+- `ServiceCard.svelte` + `ServiceStatusCard.svelte`: action() 끝에 `void refreshMode()` 호출 (`refreshRestartPending` 옆에)
+
+결과:
+- **Stop 클릭**: banner HTTP RTT 안에 등장 (수십 ms)
+- **Restart 클릭**: bounce 동안 transient unreachable 캐치 (운영자한테 "액션 먹었음" 즉각 피드백)
+- **Start 클릭**: 여전히 tracker boot time bound. 즉시 fetch는 보통 still unreachable. 이건 polling-cadence로 못 빠르게 함.
+
+**교훈**: 운영자가 "consistent fast" 라고 인지한 동작이 polling-phase 우연일 수 있음. 보존할 가치가 있는 동작이면 명시적으로 잠그자.
+
+### 운영자 잠금 — 거버넌스
+
+1. **`issue#N / issue#N.M` 라벨링 규칙을 cache → SSOT 승격**: 정수+소수점 네이밍이 `NEXT_SESSION.md` "Naming convention reminder"에만 살아있었는데, 운영자 인용: "이건 우리 claude.md에 지침 작성하자. 메모리가 너무 많으면 너가 참조하는 컨텍스트가 너무 많을 것 같아." → CLAUDE.md §6 sub-section으로 이동. (내가 잠깐 만들었던 메모리 entry `feedback_issue_naming_scheme.md`는 삭제 — cold-start 부담 줄이는 운영자 의도에 맞춤.)
+2. **CLAUDE.md §8 Deployment + PR workflow 신설**: 최근 PR들 (#54, #55, #56, #58, #59, #60)에 ad-hoc로 흩어져있던 deploy/HIL/merge 절차를 SSOT로 박음. 운영자 인용: "claude.md에 지침사항으로 정리해도 좋겠어. 내가 직접 확인하면서 해보려구." 포함된 것:
+   - **stack-deploy 매트릭스** (frontend / webctl / RPi5 tracker / multi-stack)
+   - **rsync trailing-slash 함정** — 본 세션에서 직접 운영자가 빠진 그 함정. 정답 / 망가진 형태 둘 다 명시 + 복구 명령
+   - 표준 파이프라인 다이어그램, HIL 검증 체크리스트, merge etiquette, pre-deploy 함정
+
+### 운영자 HIL에서 드러난 운영 함정 두 건
+
+- **rsync trailing-slash 함정**: 운영자가 첫 명령어 (정답)를 실행한 직후 trailing slash 붙은 두 번째 명령어를 실행. `--delete`가 첫 명령어가 만든 `dist/` 서브디렉터리를 wipe → SPA 자산이 `/opt/godo-frontend/{index.html,assets,...}`에 직접 놓이고 webctl env-var는 `/opt/godo-frontend/dist/`을 보고 있어서 SPA 깨짐. 복구는 같은 정답 명령 재실행 — `--delete`가 잘못 놓인 top-level 파일들 청소 + `dist/` 재생성. CLAUDE.md §8에 두 형태 나란히 박음.
+- **GitHub web UI 기본 머지 스타일**: 운영자가 PR #60을 web UI에서 머지 → 기본값 "Create a merge commit" 적용 → main에 merge commit + feature commit 두 개. PR #58/#59은 `gh pr merge --squash`로 squash됨 → 한 commit. 기능 동일, 히스토리 스타일만 차이. 일단 기록만 하고 액션 없음.
+
+### 다음 세션 큐 (운영자 잠금 — 깨끗한 cold-start로 시작)
+
+1. **issue#5 — Live mode pipelined hint** (P0, 풀 파이프라인). Live ≡ pipelined one-shot driven by previous-pose-as-hint. issue#3 (PR #54)급 아키텍처 영향. 디자인 잠금: `project_calibration_alternatives.md` "Live mode hint pipeline" 섹션.
+2. **Far-range automated rough-hint** (P0, issue#5 후속).
+3. **issue#4 — AMCL silent-converge diagnostic**.
+4. **restart-pending banner non-action 경로 fix** — PR #59이 action 경로는 잡았지만 initial mount + idle polling 경로는 polling/SSE guard flag 필요.
+5. **B-MAPEDIT-2 origin reset** (cosmetic).
+6. **issue#6 — B-MAPEDIT-3 yaw rotation**.
+7. **issue#7 — boom-arm angle masking** (optional).
+
+---
+
 ## 2026-05-01 (새벽 ~ 늦은 오전 — 00:00 KST → 12:18 KST, 열세 번째 세션 — issue#3 pose hint UI + install fix + AMCL frame y-flip 잠재 버그 fix)
 
 ### 한 줄 요약

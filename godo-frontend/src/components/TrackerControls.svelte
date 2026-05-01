@@ -27,7 +27,7 @@
   import { onDestroy, onMount } from 'svelte';
   import ModeChip from '$components/ModeChip.svelte';
   import { ApiError, apiGet, apiPost, apiPostCalibrate } from '$lib/api';
-  import { DASHBOARD_REFRESH_MS } from '$lib/constants';
+  import { BACKUP_FLASH_DISMISS_MS, DASHBOARD_REFRESH_MS } from '$lib/constants';
   import {
     MODE_LIVE,
     type CalibrateBody,
@@ -56,10 +56,24 @@
   let mode = $state<Mode | null>(null);
   let health = $state<Health | null>(null);
   let actionError = $state<string | null>(null);
+  // Backup flash banner — auto-dismisses after BACKUP_FLASH_DISMISS_MS so
+  // operators get a visible "백업 완료" / "백업 실패" signal without the
+  // banner persisting into unrelated navigation. Operator UX 2026-05-02 KST.
+  let backupFlash = $state<{ kind: 'ok' | 'error'; text: string } | null>(null);
+  let backupFlashTimer: ReturnType<typeof setTimeout> | null = null;
   let busy = $state(false);
 
   let unsubMode: (() => void) | null = null;
   let healthTimer: ReturnType<typeof setInterval> | null = null;
+
+  function showBackupFlash(kind: 'ok' | 'error', text: string): void {
+    if (backupFlashTimer !== null) clearTimeout(backupFlashTimer);
+    backupFlash = { kind, text };
+    backupFlashTimer = setTimeout(() => {
+      backupFlash = null;
+      backupFlashTimer = null;
+    }, BACKUP_FLASH_DISMISS_MS);
+  }
 
   async function refreshHealth(): Promise<void> {
     try {
@@ -124,9 +138,12 @@
     busy = true;
     actionError = null;
     try {
-      await apiPost('/api/map/backup');
+      const resp = await apiPost<{ ok: true; path: string }>('/api/map/backup');
+      showBackupFlash('ok', `백업 완료: ${resp.path}`);
     } catch (e) {
-      actionError = (e as ApiError).body?.err ?? (e as Error).message;
+      const msg = (e as ApiError).body?.err ?? (e as Error).message;
+      actionError = msg;
+      showBackupFlash('error', `백업 실패: ${msg}`);
     } finally {
       busy = false;
     }
@@ -144,6 +161,7 @@
   onDestroy(() => {
     unsubMode?.();
     if (healthTimer !== null) clearInterval(healthTimer);
+    if (backupFlashTimer !== null) clearTimeout(backupFlashTimer);
   });
 </script>
 
@@ -187,4 +205,35 @@
       {actionError}
     </div>
   {/if}
+  {#if backupFlash}
+    <div
+      class="backup-flash"
+      class:ok={backupFlash.kind === 'ok'}
+      class:err={backupFlash.kind === 'error'}
+      data-testid="backup-flash"
+      data-kind={backupFlash.kind}
+    >
+      {backupFlash.text}
+    </div>
+  {/if}
 </div>
+
+<style>
+  .backup-flash {
+    margin-top: var(--space-2);
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm, 4px);
+    font-size: 0.92em;
+    word-break: break-all;
+  }
+  .backup-flash.ok {
+    background: var(--color-status-ok-bg, rgba(46, 125, 50, 0.12));
+    color: var(--color-status-ok, #2e7d32);
+    border: 1px solid var(--color-status-ok, #2e7d32);
+  }
+  .backup-flash.err {
+    background: var(--color-status-err-bg, rgba(198, 40, 40, 0.12));
+    color: var(--color-status-err, #c62828);
+    border: 1px solid var(--color-status-err, #c62828);
+  }
+</style>

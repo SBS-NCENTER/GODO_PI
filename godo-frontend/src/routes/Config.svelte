@@ -86,14 +86,30 @@
   }
 
   function setPending(key: string, raw: string): void {
-    if (raw === '') {
-      // Empty input → drop the key (matches Escape-to-clear UX).
-      const { [key]: _drop, ...rest } = pending;
-      void _drop;
-      pending = rest;
-      return;
-    }
+    // Bug C fix (2026-05-01 KST): preserve the empty string instead of
+    // dropping the key. Pre-fix, clearing the input mid-edit caused the
+    // reactive `inputValue = pending[row.name] ?? fmtCurrent(current)`
+    // chain to fall through to the current value, so the operator could
+    // not delete-and-retype a numeric field — the moment they cleared
+    // it, the box was repopulated with the active value and the keystroke
+    // race was unwinnable. We now retain `''` in `pending` so the input
+    // stays blank while the operator types the new value.
+    //
+    // Apply-time semantics (`parseValue`) reject empty/whitespace-only
+    // strings as `null` for int/double types, which the existing apply
+    // loop surfaces as a per-row error — operators see "유효하지 않은
+    // 값" rather than a silent commit of the prior value.
+    //
+    // Explicit-drop UX (Escape key) lives in `clearPending` below; that
+    // path keeps the historic key-removal semantics so Escape still
+    // restores the current-value display in one keystroke.
     pending = { ...pending, [key]: raw };
+  }
+
+  function clearPending(key: string): void {
+    const { [key]: _drop, ...rest } = pending;
+    void _drop;
+    pending = rest;
   }
 
   function pendingCount(): number {
@@ -140,15 +156,32 @@
 
     const typed: Record<string, ConfigValue> = {};
     const upfrontFailures: Record<string, { ok: boolean; error?: string }> = {};
+    // Operator UX 2026-05-02 KST — when the operator deletes and re-types
+    // the same value (or just types the existing value back), Apply must
+    // NOT fire a PATCH. Pre-fix the no-op PATCH still travelled to the
+    // tracker, looking like a real change in activity logs and racing
+    // any restart_pending state. We suppress no-ops at this layer (after
+    // type coercion, before the apply loop) so the down-stream pipeline
+    // sees only genuine deltas.
+    const noopKeys: string[] = [];
     for (const [key, raw] of Object.entries(pending)) {
       const row = schemaByName[key];
       if (!row) continue;
       const coerced = coerce(row, raw);
       if (coerced === null) {
         upfrontFailures[key] = { ok: false, error: `bad ${row.type} literal` };
-      } else {
-        typed[key] = coerced;
+        continue;
       }
+      // Compare coerced pending to the active value for this key.
+      // strict equality works for int / double / bool / string per the
+      // ConfigValue union — for double, the coerce() pipeline has already
+      // applied parseFloat, so e.g. typing "0.05" against current 0.05
+      // collapses to numeric equality.
+      if (current[key] !== undefined && current[key] === coerced) {
+        noopKeys.push(key);
+        continue;
+      }
+      typed[key] = coerced;
     }
 
     isApplying = true;
@@ -158,10 +191,15 @@
       results = await applyBatch(typed);
     }
 
-    // Merge upfront-failures with PATCH results.
+    // Merge upfront-failures with PATCH results. No-op keys count as ok
+    // (operator semantically intended that value, the system has it,
+    // done) — they get the same ✓ marker as if a PATCH had fired.
     const merged: Record<string, { ok: boolean; error?: string }> = { ...upfrontFailures };
     for (const r of results) {
       merged[r.key] = r.ok ? { ok: true } : { ok: false, error: r.error };
+    }
+    for (const key of noopKeys) {
+      merged[key] = { ok: true };
     }
 
     applyResults = merged;
@@ -169,10 +207,18 @@
     // Drop succeeded keys from pending; keep failures so the operator
     // can fix them inline. Memory: "Cancel semantics: don't undo
     // already-applied keys."
+    //
+    // Operator UX 2026-05-02 KST follow-up: no-op keys (pending value
+    // matched current) keep their ✓ marker for input acknowledgement
+    // but are EXCLUDED from `okCount` — the "N개 키가 적용되었습니다"
+    // summary should only count keys that actually moved through PATCH.
+    // A pure-noop Apply produces no summary banner at all (ok=0, fail=0).
+    const noopSet = new Set(noopKeys);
     const nextPending: Record<string, string> = {};
     let okCount = 0;
     let failCount = 0;
     for (const [key, raw] of Object.entries(pending)) {
+      if (noopSet.has(key)) continue;
       const r = merged[key];
       if (r?.ok) {
         okCount += 1;
@@ -322,6 +368,7 @@
     {pending}
     {applyResults}
     {setPending}
+    {clearPending}
   />
 
   <ConfirmDialog

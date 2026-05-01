@@ -416,14 +416,27 @@ async def test_calibrate_empty_body_byte_identical_to_pre_issue3(
 
 
 # ---- /api/map/backup ------------------------------------------------------
+# Bug A regression context (2026-05-01 KST hotfix): pre-fix, the endpoint
+# passed `cfg.map_path` (deprecated Track-E pre-symlink hook) directly to
+# backup_map, which on a host that never set GODO_WEBCTL_MAP_PATH points
+# at the non-existent default `/etc/godo/maps/studio_v1.pgm` and unconditionally
+# raised `map_path_not_found`. The fix routes through `maps.read_active_name`
+# + `maps.pgm_for` (mirrors /api/map/edit + /api/map/origin) so the active
+# symlink is resolved at request time. These tests use `tmp_active_map_pair`
+# rather than `tmp_map_pair` so the maps_dir/active.pgm symlink is what
+# actually drives the path resolution.
 async def test_backup_happy_returns_path(
     tmp_path: Path,
-    tmp_map_pair: Path,
+    tmp_active_map_pair: tuple[Path, Path],
 ) -> None:
+    maps_dir, _active_pgm = tmp_active_map_pair
     s = _settings_for(
         uds_socket=tmp_path / "unused.sock",
-        map_path=tmp_map_pair,
+        # `map_path` deliberately set to a non-existent path — Bug A fix
+        # ensures we no longer read this field for the backup source.
+        map_path=tmp_path / "ghost.pgm",
         backup_dir=tmp_path / "bk",
+        maps_dir=maps_dir,
     )
     async with _client(s) as cl:
         token = await _login_admin(cl)
@@ -432,28 +445,71 @@ async def test_backup_happy_returns_path(
     body = r.json()
     assert body["ok"] is True
     assert Path(body["path"]).is_dir()
+    # The active symlink target is `studio_v1.pgm`; backup_map copies it
+    # under that basename (NOT `active.pgm`).
     assert (Path(body["path"]) / "studio_v1.pgm").is_file()
 
 
-async def test_backup_missing_map_returns_404(
+async def test_backup_missing_active_symlink_returns_503(
     tmp_path: Path,
 ) -> None:
-    # Need a map pair so login works without OS errors elsewhere.
+    # No `active.pgm` symlink under maps_dir → 503 active_map_missing.
+    # Bug A fix superseded the pre-fix 404 map_path_not_found semantics.
+    maps_dir = tmp_path / "maps"
+    maps_dir.mkdir(mode=0o750)
     s = _settings_for(
         uds_socket=tmp_path / "unused.sock",
         map_path=tmp_path / "ghost.pgm",
         backup_dir=tmp_path / "bk",
+        maps_dir=maps_dir,
     )
     async with _client(s) as cl:
         token = await _login_admin(cl)
         r = await cl.post("/api/map/backup", headers=_auth(token))
-    assert r.status_code == HTTPStatus.NOT_FOUND
-    assert r.json() == {"ok": False, "err": "map_path_not_found"}
+    assert r.status_code == HTTPStatus.SERVICE_UNAVAILABLE
+    assert r.json() == {"ok": False, "err": "active_map_missing"}
+
+
+async def test_backup_uses_active_symlink_not_cfg_map_path_regression(
+    tmp_path: Path,
+    tmp_active_map_pair: tuple[Path, Path],
+) -> None:
+    """Bug A direct regression pin: even with `cfg.map_path` set to a
+    real file under a different name, the backup must come from the
+    active symlink target. Previously the endpoint would silently
+    backup whatever `cfg.map_path` named (or 404 if it didn't exist),
+    bypassing the operator's actual active map.
+    """
+    maps_dir, _active_pgm = tmp_active_map_pair
+    # Plant a separate, real .pgm/.yaml pair under a different basename
+    # and point cfg.map_path at it. The fix must NOT pick this up — it
+    # must back up `studio_v1.pgm` (the active symlink target) instead.
+    decoy_pgm = tmp_path / "decoy.pgm"
+    decoy_yaml = tmp_path / "decoy.yaml"
+    decoy_pgm.write_bytes(b"P5\n1 1\n255\n\xff")
+    decoy_yaml.write_text(
+        "image: decoy.pgm\nresolution: 0.05\norigin: [0,0,0]\n"
+        "occupied_thresh: 0.65\nfree_thresh: 0.196\nnegate: 0\n",
+    )
+    s = _settings_for(
+        uds_socket=tmp_path / "unused.sock",
+        map_path=decoy_pgm,
+        backup_dir=tmp_path / "bk",
+        maps_dir=maps_dir,
+    )
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post("/api/map/backup", headers=_auth(token))
+    assert r.status_code == HTTPStatus.OK
+    body = r.json()
+    backup_dir_path = Path(body["path"])
+    assert (backup_dir_path / "studio_v1.pgm").is_file()
+    assert not (backup_dir_path / "decoy.pgm").exists()
 
 
 async def test_backup_conflict_returns_409(
     tmp_path: Path,
-    tmp_map_pair: Path,
+    tmp_active_map_pair: tuple[Path, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Mode-A M3 fold: when backup_map raises
@@ -466,10 +522,12 @@ async def test_backup_conflict_returns_409(
         raise backup_mod.BackupError("concurrent_backup_in_progress")
 
     monkeypatch.setattr(backup_mod, "backup_map", _raise_conflict)
+    maps_dir, _active_pgm = tmp_active_map_pair
     s = _settings_for(
         uds_socket=tmp_path / "unused.sock",
-        map_path=tmp_map_pair,
+        map_path=tmp_path / "ghost.pgm",
         backup_dir=tmp_path / "bk",
+        maps_dir=maps_dir,
     )
     async with _client(s) as cl:
         token = await _login_admin(cl)

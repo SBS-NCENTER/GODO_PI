@@ -634,6 +634,323 @@ describe('Config.svelte — state machine (PR-C)', () => {
   });
 });
 
+describe('Config.svelte — input clearing UX (Bug C 2026-05-01 hotfix)', () => {
+  // Pre-fix: `setPending(key, '')` deleted the row from `pending`,
+  // which made the reactive `inputValue = pending[row.name] ?? fmtCurrent(...)`
+  // chain fall through to the current applied value the moment the
+  // operator cleared the input. The input box auto-repopulated with
+  // the current value, so delete-and-retype was unwinnable on int/double
+  // fields whose schema `min` is > 0.
+  //
+  // Post-fix: bare `oninput=""` preserves an empty string in `pending`
+  // so the input box stays empty mid-edit. Explicit Escape uses
+  // `clearPending` (the historic key-removal semantics) so Escape
+  // still restores the current-value display.
+
+  it('clearing the input mid-edit keeps the box empty (NOT reset to current)', async () => {
+    stubInitialRefreshOnly();
+    setSession('admin');
+
+    const target = mountConfig();
+    const editBtn = await waitFor<HTMLButtonElement>(
+      () => target.querySelector<HTMLButtonElement>('[data-testid="config-edit"]'),
+      'config-edit button',
+    );
+    editBtn.click();
+    flushSync();
+
+    const input = await waitFor<HTMLInputElement>(
+      () => target.querySelector<HTMLInputElement>('[data-testid="input-network.ue_port"]'),
+      'network.ue_port input',
+    );
+
+    // Step 1: type a partial value → pending populated, input shows it.
+    input.value = '70';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(input.value).toBe('70');
+
+    // Step 2: clear the input → input MUST stay empty (regression pin).
+    // Pre-fix this re-rendered as the current value (e.g. '6666') and
+    // the operator could not delete-and-retype.
+    input.value = '';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(input.value).toBe('');
+
+    // Step 3: type the desired value → input updates correctly.
+    input.value = '7000';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(input.value).toBe('7000');
+  });
+
+  it('Escape after clearing reverts the box to the current applied value', async () => {
+    stubInitialRefreshOnly();
+    setSession('admin');
+
+    const target = mountConfig();
+    const editBtn = await waitFor<HTMLButtonElement>(
+      () => target.querySelector<HTMLButtonElement>('[data-testid="config-edit"]'),
+      'config-edit button',
+    );
+    editBtn.click();
+    flushSync();
+
+    const input = await waitFor<HTMLInputElement>(
+      () => target.querySelector<HTMLInputElement>('[data-testid="input-network.ue_port"]'),
+      'network.ue_port input',
+    );
+
+    // Type and then Escape → input shows current value again.
+    input.value = '7000';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(input.value).toBe('7000');
+
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    flushSync();
+    // Current value is whatever FAKE_CURRENT carries for network.ue_port —
+    // we don't pin the exact number, only that it's not the user's stale
+    // pending text and not empty.
+    expect(input.value).not.toBe('7000');
+    expect(input.value).not.toBe('');
+  });
+
+  it('Apply with pending value EQUAL to current → no PATCH fires, ✓ marker still shows', async () => {
+    // Operator UX 2026-05-02 KST: typing the same value back should NOT
+    // generate network traffic. Pre-fix, the apply loop fired a PATCH
+    // for every entry in `pending` regardless of whether it matched the
+    // active value, polluting activity logs and racing restart_pending.
+    let patchCalls = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+      const u = String(url);
+      const m = (init as RequestInit | undefined)?.method ?? 'GET';
+      if (u === '/api/config/schema') return jsonResp(FAKE_SCHEMA);
+      if (u === '/api/config' && m === 'GET') return jsonResp(FAKE_CURRENT);
+      if (m === 'PATCH') {
+        patchCalls += 1;
+        return jsonResp({ ok: true, reload_class: 'hot' });
+      }
+      if (u === '/api/system/restart_pending') return jsonResp({ pending: false });
+      if (u === '/api/health') return jsonResp({ webctl: 'ok', tracker: 'ok', mode: 'Idle' });
+      if (u === '/api/system/services') return jsonResp({ services: [] });
+      return jsonResp({});
+    });
+
+    setSession('admin');
+    const target = mountConfig();
+    const editBtn = await waitFor<HTMLButtonElement>(
+      () => target.querySelector<HTMLButtonElement>('[data-testid="config-edit"]'),
+      'config-edit button',
+    );
+    editBtn.click();
+    flushSync();
+
+    // FAKE_CURRENT["network.ue_port"] is 6666 — type the same value back.
+    const input = await waitFor<HTMLInputElement>(
+      () => target.querySelector<HTMLInputElement>('[data-testid="input-network.ue_port"]'),
+      'network.ue_port input',
+    );
+    input.value = '6666';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+
+    target.querySelector<HTMLButtonElement>('[data-testid="config-apply"]')!.click();
+    await new Promise((r) => setTimeout(r, 30));
+    flushSync();
+
+    // Zero PATCH traffic — the no-op was suppressed at the apply layer.
+    expect(patchCalls).toBe(0);
+    // ✓ marker still shows so the operator sees their intent landed.
+    expect(target.querySelector('[data-testid="marker-network.ue_port"]')!.textContent).toContain(
+      '✓',
+    );
+    // Operator UX 2026-05-02 KST follow-up: pure no-op Apply produces
+    // NO "n개 키가 적용되었습니다" summary banner (ok=0, fail=0 →
+    // banner suppressed by the {#if applySummary && fail===0 && ok>0}
+    // guard in Config.svelte).
+    expect(target.querySelector('[data-testid="config-apply-summary"]')).toBeNull();
+  });
+
+  it('modified-dot appears next to keys whose current value differs from default; absent when at default', async () => {
+    // Operator UX 2026-05-02 KST: small amber dot before the key name
+    // when the live value diverges from the schema default. Allows
+    // operators to scan the table and immediately see which keys have
+    // been overridden from factory.
+    //
+    // FAKE_SCHEMA defaults: deadband_mm = '10.0', ue_port = '6666'.
+    // Test 1: FAKE_CURRENT carries both at default → no dots.
+    // Test 2: override one key → exactly one dot.
+
+    // Test 1 — both at default → no dots anywhere.
+    stubInitialRefreshOnly();
+    setSession('viewer');
+    let target = mountConfig();
+    await waitFor(
+      () => target.querySelector('[data-testid="row-smoother.deadband_mm"]'),
+      'deadband_mm row',
+    );
+    expect(
+      target.querySelector('[data-testid="modified-dot-smoother.deadband_mm"]'),
+    ).toBeNull();
+    expect(target.querySelector('[data-testid="modified-dot-network.ue_port"]')).toBeNull();
+
+    // Test 2 — override deadband_mm → dot appears on that row only.
+    vi.restoreAllMocks();
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
+      const u = String(url);
+      if (u === '/api/config/schema') return jsonResp(FAKE_SCHEMA);
+      if (u === '/api/config') return jsonResp({ ...FAKE_CURRENT, 'smoother.deadband_mm': 25.0 });
+      if (u === '/api/system/restart_pending') return jsonResp({ pending: false });
+      if (u === '/api/health') return jsonResp({ webctl: 'ok', tracker: 'ok', mode: 'Idle' });
+      if (u === '/api/system/services') return jsonResp({ services: [] });
+      return jsonResp({});
+    });
+    setSession('viewer');
+    target = mountConfig();
+    await waitFor(
+      () => target.querySelector('[data-testid="row-smoother.deadband_mm"]'),
+      'deadband_mm row',
+    );
+    const dot = target.querySelector<HTMLSpanElement>(
+      '[data-testid="modified-dot-smoother.deadband_mm"]',
+    );
+    expect(dot).not.toBeNull();
+    expect(dot!.title).toBe('기본값과 다름');
+    // Other row stays at default → no dot.
+    expect(target.querySelector('[data-testid="modified-dot-network.ue_port"]')).toBeNull();
+  });
+
+  it('Apply with 1 real change + 2 no-ops → "1개 키가 적용되었습니다" (no-ops not counted)', async () => {
+    // Operator request 2026-05-02 KST: when the operator types one new
+    // value plus types two existing values back, the summary banner
+    // should report "1" — only the genuinely-applied keys count.
+    let patchCalls = 0;
+    let lastPatchKey: string | null = null;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+      const u = String(url);
+      const m = (init as RequestInit | undefined)?.method ?? 'GET';
+      if (u === '/api/config/schema') return jsonResp(FAKE_SCHEMA);
+      if (u === '/api/config' && m === 'GET') return jsonResp(FAKE_CURRENT);
+      if (m === 'PATCH') {
+        patchCalls += 1;
+        // Capture which key actually got PATCHed — should NOT include
+        // the no-op key.
+        const body = init?.body;
+        if (typeof body === 'string') {
+          const parsed = JSON.parse(body) as { key?: string };
+          if (parsed.key) lastPatchKey = parsed.key;
+        }
+        return jsonResp({ ok: true, reload_class: 'restart' });
+      }
+      if (u === '/api/system/restart_pending') return jsonResp({ pending: true });
+      if (u === '/api/health') return jsonResp({ webctl: 'ok', tracker: 'ok', mode: 'Idle' });
+      if (u === '/api/system/services') return jsonResp({ services: [] });
+      return jsonResp({});
+    });
+
+    setSession('admin');
+    const target = mountConfig();
+    const editBtn = await waitFor<HTMLButtonElement>(
+      () => target.querySelector<HTMLButtonElement>('[data-testid="config-edit"]'),
+      'config-edit button',
+    );
+    editBtn.click();
+    flushSync();
+
+    // FAKE_CURRENT["smoother.deadband_mm"] = 10.0 → type same value back
+    // (no-op).
+    const dbInput = await waitFor<HTMLInputElement>(
+      () => target.querySelector<HTMLInputElement>('[data-testid="input-smoother.deadband_mm"]'),
+      'smoother.deadband_mm input',
+    );
+    dbInput.value = '10';
+    dbInput.dispatchEvent(new Event('input', { bubbles: true }));
+
+    // FAKE_CURRENT["network.ue_port"] = 6666 → type a NEW value (real
+    // change, restart-class).
+    const portInput = target.querySelector<HTMLInputElement>(
+      '[data-testid="input-network.ue_port"]',
+    )!;
+    portInput.value = '7000';
+    portInput.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+
+    target.querySelector<HTMLButtonElement>('[data-testid="config-apply"]')!.click();
+    await new Promise((r) => setTimeout(r, 30));
+    flushSync();
+
+    // Exactly one PATCH — for the real change, NOT for the no-op.
+    expect(patchCalls).toBe(1);
+    expect(lastPatchKey).toBe('network.ue_port');
+
+    // Summary banner reports "1" — the no-op was not counted.
+    const summary = target.querySelector<HTMLDivElement>('[data-testid="config-apply-summary"]');
+    expect(summary).not.toBeNull();
+    expect(summary!.textContent).toContain('1개 키가 적용되었습니다');
+    expect(summary!.textContent).not.toContain('2개');
+    expect(summary!.textContent).not.toContain('3개');
+
+    // Both rows still show ✓ markers (input acknowledged for both).
+    expect(target.querySelector('[data-testid="marker-network.ue_port"]')!.textContent).toContain(
+      '✓',
+    );
+    expect(
+      target.querySelector('[data-testid="marker-smoother.deadband_mm"]')!.textContent,
+    ).toContain('✓');
+  });
+
+  it('Apply with an empty pending value surfaces a per-row error (not silent commit)', async () => {
+    let patchCalls = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+      const u = String(url);
+      const m = (init as RequestInit | undefined)?.method ?? 'GET';
+      if (u === '/api/config/schema') return jsonResp(FAKE_SCHEMA);
+      if (u === '/api/config' && m === 'GET') return jsonResp(FAKE_CURRENT);
+      if (m === 'PATCH') {
+        patchCalls += 1;
+        return jsonResp({ ok: true, reload_class: 'hot' });
+      }
+      if (u === '/api/system/restart_pending') return jsonResp({ pending: false });
+      if (u === '/api/health') return jsonResp({ webctl: 'ok', tracker: 'ok', mode: 'Idle' });
+      if (u === '/api/system/services') return jsonResp({ services: [] });
+      return jsonResp({});
+    });
+
+    setSession('admin');
+    const target = mountConfig();
+    const editBtn = await waitFor<HTMLButtonElement>(
+      () => target.querySelector<HTMLButtonElement>('[data-testid="config-edit"]'),
+      'config-edit button',
+    );
+    editBtn.click();
+    flushSync();
+
+    const input = await waitFor<HTMLInputElement>(
+      () => target.querySelector<HTMLInputElement>('[data-testid="input-network.ue_port"]'),
+      'network.ue_port input',
+    );
+
+    // Type, clear, Apply with empty pending → reject up-front, no PATCH.
+    input.value = '7000';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    input.value = '';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+
+    target.querySelector<HTMLButtonElement>('[data-testid="config-apply"]')!.click();
+    await new Promise((r) => setTimeout(r, 30));
+    flushSync();
+
+    expect(patchCalls).toBe(0);
+    expect(target.querySelector('[data-testid="marker-network.ue_port"]')!.textContent).toContain(
+      '✗',
+    );
+  });
+});
+
 describe('Config.svelte — tracker-inactive banner (PR-C)', () => {
   it('tracker active → no banner', async () => {
     stubInitialRefreshOnly();

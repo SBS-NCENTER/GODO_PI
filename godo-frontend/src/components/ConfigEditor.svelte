@@ -50,10 +50,20 @@
     pending: Record<string, string>;
     applyResults: Record<string, ApplyResult>;
     setPending: (key: string, raw: string) => void;
+    clearPending: (key: string) => void;
   }
 
-  let { admin, mode, isApplying, schema, current, pending, applyResults, setPending }: Props =
-    $props();
+  let {
+    admin,
+    mode,
+    isApplying,
+    schema,
+    current,
+    pending,
+    applyResults,
+    setPending,
+    clearPending,
+  }: Props = $props();
 
   function fmtCurrent(value: ConfigValue | undefined): string {
     if (value === undefined || value === null) return '—';
@@ -86,14 +96,34 @@
   function onKeydown(e: KeyboardEvent, row: ConfigSchemaRow): void {
     if (e.key === 'Escape') {
       e.preventDefault();
-      // Drop this row's pending edit back to the current value display.
-      setPending(row.name, '');
+      // Bug C fix: explicit Escape uses `clearPending` (drops the key,
+      // box reverts to current-value display). Bare empty input via
+      // `oninput` no longer drops the key — it preserves the empty
+      // string so the operator can delete-and-retype mid-edit. The two
+      // gestures map to two different functions.
+      clearPending(row.name);
     }
   }
 
   function onInput(e: Event, name: string): void {
     const target = e.target as HTMLInputElement;
     setPending(name, target.value);
+  }
+
+  // Operator UX 2026-05-02 KST: small amber dot before the key name when
+  // the live value differs from the schema default — operators can scan
+  // the column and immediately see which keys have been overridden from
+  // factory. `current` is the typed live value; `row.default` is the
+  // schema string. Coerce per row.type, then strict-equality compare.
+  function isAtDefault(row: ConfigSchemaRow, value: ConfigValue | undefined): boolean {
+    // Unknown current → suppress the dot (we can't tell, no point flashing
+    // it on every row while /api/config is loading or the tracker is down).
+    if (value === undefined || value === null) return true;
+    const def = row.default;
+    if (row.type === 'int') return parseInt(def, 10) === value;
+    if (row.type === 'double') return Number(def) === value;
+    if (row.type === 'bool') return (def === 'true') === value;
+    return def === value;
   }
 </script>
 
@@ -116,7 +146,17 @@
         <td class="col-glyph">
           <span class="glyph {glyph.cls}" title={glyph.tooltip}>{glyph.text}</span>
         </td>
-        <td class="col-key"><code>{row.name}</code></td>
+        <td class="col-key">
+          {#if !isAtDefault(row, current[row.name])}
+            <span
+              class="modified-dot"
+              title="기본값과 다름"
+              aria-label="modified from default"
+              data-testid="modified-dot-{row.name}">●</span
+            >
+          {/if}
+          <code>{row.name}</code>
+        </td>
         <td class="col-desc">{row.description}</td>
         <td class="col-current">
           <div class="current-value">{fmtCurrent(current[row.name])}</div>
@@ -201,6 +241,20 @@
     width: 10em;
     color: var(--color-text-muted);
   }
+  /* Edit column is sized to roughly match Current (operator UX request
+     2026-05-02 KST — long values like /var/lib/godo/maps/active.pgm were
+     getting truncated in the input box because the browser was giving
+     all the slack to .col-desc). col-edit input itself is width:100% of
+     this cell, so the cell width drives the input width. */
+  .col-edit {
+    width: 11em;
+  }
+  /* Description fills the remaining horizontal space; the slight cap
+     here prevents long descriptions from squeezing the Edit cell on
+     narrow viewports. */
+  .col-desc {
+    max-width: 28em;
+  }
   .current-value {
     color: var(--color-text);
   }
@@ -224,6 +278,12 @@
     color: var(--color-text-muted);
     background: var(--color-bg-elev);
     cursor: not-allowed;
+  }
+  .modified-dot {
+    color: var(--color-warn, #f57c00);
+    font-size: 0.85em;
+    margin-right: 4px;
+    cursor: help;
   }
   .glyph {
     display: inline-flex;

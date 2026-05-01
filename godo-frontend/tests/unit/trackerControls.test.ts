@@ -159,6 +159,46 @@ describe('TrackerControls "Calibrate from hint" (issue#3 B-M2)', () => {
     expect(onClearHint).toHaveBeenCalledTimes(1);
   });
 
+  it('Backup map success → backup-flash banner (kind=ok) appears with path text', async () => {
+    const postSpy = vi
+      .spyOn(api, 'apiPost')
+      .mockResolvedValue({ ok: true, path: '/var/lib/godo/map-backups/20260502T010101Z' });
+    const { target } = mountTracker({ hint: null, role: 'admin' });
+    flushSync();
+    const btn = target.querySelector<HTMLButtonElement>('[data-testid="backup-btn"]');
+    expect(btn!.disabled).toBe(false);
+    btn!.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    flushSync();
+
+    expect(postSpy).toHaveBeenCalledWith('/api/map/backup');
+    const flash = target.querySelector<HTMLDivElement>('[data-testid="backup-flash"]');
+    expect(flash).not.toBeNull();
+    expect(flash!.dataset.kind).toBe('ok');
+    expect(flash!.textContent).toContain('백업 완료');
+    expect(flash!.textContent).toContain('/var/lib/godo/map-backups/20260502T010101Z');
+  });
+
+  it('Backup map failure → backup-flash banner (kind=error) with err code', async () => {
+    vi.spyOn(api, 'apiPost').mockRejectedValue(
+      new api.ApiError(503, { err: 'active_map_missing' }, 'svc unavailable'),
+    );
+    const { target } = mountTracker({ hint: null, role: 'admin' });
+    flushSync();
+    const btn = target.querySelector<HTMLButtonElement>('[data-testid="backup-btn"]');
+    btn!.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    flushSync();
+
+    const flash = target.querySelector<HTMLDivElement>('[data-testid="backup-flash"]');
+    expect(flash).not.toBeNull();
+    expect(flash!.dataset.kind).toBe('error');
+    expect(flash!.textContent).toContain('백업 실패');
+    expect(flash!.textContent).toContain('active_map_missing');
+  });
+
   it('apiPostCalibrate failure → onClearHint NOT called, error rendered', async () => {
     vi.spyOn(api, 'apiPostCalibrate').mockRejectedValue(
       new api.ApiError(500, { err: 'boom' }, 'boom'),

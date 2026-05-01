@@ -806,6 +806,106 @@ Pinned by:
 - `tests/test_protocol.py::test_origin_edit_response_fields_pinned`,
 - `tests/test_protocol.py::test_origin_modes_pinned`.
 
+### (ac) issue#12 — webctl-owned schema rows + tracker.toml SSOT
+
+> Letter rationale: (a)..(ab) all in use as of 2026-04-30; next free
+> letter is (ac).
+
+issue#12 introduces a new ownership pattern at the tracker schema
+boundary: rows whose **runtime consumer is godo-webctl rather than the
+tracker itself**. Two current entries: `webctl.pose_stream_hz` /
+`webctl.scan_stream_hz` (Int [1, 60], default 30 Hz, ReloadClass
+Restart). Tracker stores them as first-class `Config` fields, the SPA
+edits them via the same schema-driven Config tab as every other Tier-2
+key, but no tracker logic path reads the value. webctl is the sole
+consumer.
+
+Cross-link: tracker side covers the Config-storage half via
+`production/RPi5/CODEBASE.md` invariant `(r)`.
+
+**Storage path (webctl-side)**:
+
+1. webctl's settings dataclass gains `tracker_toml_path: Path`
+   (default `/var/lib/godo/tracker.toml`, override via
+   `GODO_WEBCTL_TRACKER_TOML_PATH` for tests).
+2. `godo_webctl/webctl_toml.py` — leaf module (stdlib only) exporting
+   one public function: `read_webctl_section(toml_path, env=None) ->
+   WebctlSection`. Returns a typed NamedTuple of `(pose_stream_hz,
+   scan_stream_hz)` after applying the precedence ladder env > TOML >
+   default. Raises `WebctlTomlError` on malformed TOML / non-int /
+   out-of-range; missing TOML file is NOT an error (returns defaults).
+3. `godo_webctl/sse.py` — `last_pose_stream` and `last_scan_stream`
+   resolve their per-tick sleep duration at stream open via
+   `_resolve_pose_tick_s` / `_resolve_scan_tick_s` helpers that wrap
+   `webctl_toml.read_webctl_section` in a try/except (falls back to
+   schema defaults on `WebctlTomlError`). All other SSE producers
+   (`services_stream`, `processes_stream`, `resources_extended_stream`,
+   `diag_stream`) are UNCHANGED — operator-locked "지도 부분에만 적용".
+4. `godo_webctl/__main__.py::main` — eager startup read (wrapped in
+   try/except per Mode-A M6 / Parent A6) logs the resolved rates at
+   INFO; on failure, logs WARNING and falls back to defaults so the
+   service boots regardless.
+
+**Constants live in `webctl_toml.py`, not `constants.py`** (Mode-A N5 /
+Parent A8): the leaf-module dependency edge stays
+`sse.py → webctl_toml.py → stdlib` with no back-edges.
+`WEBCTL_POSE_STREAM_HZ_DEFAULT = 30`, `WEBCTL_SCAN_STREAM_HZ_DEFAULT =
+30`, `WEBCTL_STREAM_HZ_MIN = 1`, `WEBCTL_STREAM_HZ_MAX = 60` are pinned
+there and in `tests/test_webctl_toml.py::test_public_constants_pinned`.
+
+**Atomic-rename safety**: the tracker writes `tracker.toml` via
+`atomic_toml_writer.cpp` (`mkstemp + fsync + rename`). webctl's
+`read_webctl_section` either sees the OLD or the NEW content — never a
+partial file. R1 race window framing in the issue#12 plan is therefore
+moot.
+
+**Reload-class semantics**: `webctl.*` rows are Restart class. After
+the operator edits via SPA Config tab, `restart_pending` fires (the
+generic banner), and `systemctl restart godo-webctl` is the propagation
+path (NOT godo-tracker — the tracker does not consume the value).
+Per-key restart-target hints in the SPA banner are an out-of-scope
+enhancement.
+
+**Forward-compat**: `read_webctl_section` tolerates unknown keys inside
+`[webctl]`. The tracker still rejects unknown keys at parse time via
+`allowed_keys()`, so a typo never reaches webctl — but a future webctl
+running against a NEW tracker.toml that adds `webctl.future_key` boots
+without crash (only the keys this version knows are validated).
+
+**Range validation responsibility**: the tracker validates `[1, 60]`
+inside `apply_set` (Tier-2 schema row); webctl re-validates at the
+reader to defence-in-depth a manually-edited tracker.toml that bypassed
+the SPA. Defaults match byte-exactly between the two layers.
+
+Pinned by:
+- `tests/test_webctl_toml.py` — 28 cases covering precedence, range,
+  type, missing-file, malformed-TOML, and forward-compat.
+- `tests/test_sse.py::test_last_pose_stream_honours_toml_pose_stream_hz`
+  + `test_last_scan_stream_honours_toml_scan_stream_hz` — TOML
+  fixture-driven cadence injection (10 Hz → sleep ≈ 0.1 s; 20 Hz →
+  sleep ≈ 0.05 s).
+- `tests/test_sse.py::test_last_pose_stream_env_var_overrides_toml`
+  — env > TOML precedence pin.
+- `tests/test_sse.py::test_last_pose_stream_falls_back_on_toml_error`
+  — Mode-A M6 / Parent A6 pin (out-of-range value does NOT crash the
+  stream; default 30 Hz applies).
+- `tests/test_sse.py::test_diag_stream_emits_one_frame_per_tick` —
+  regression pin that `diag_stream` continues to use `SSE_TICK_S`,
+  NOT the new webctl.* config-driven cadence.
+- `tests/test_config.py::test_empty_env_uses_defaults` +
+  `test_each_env_var_overrides_default` — `tracker_toml_path` parity
+  in the `_DEFAULTS` / `_PARSERS` / `_ENV_TO_FIELD` triple-table.
+- `tests/test_config_schema.py::test_load_schema_real_source_returns_48_rows`
+  — webctl Python mirror reflects the new row count.
+- `tests/test_config_schema_parity.py::test_webctl_rows_present` —
+  C++ schema rows present, type Int, range [1, 60], default 30,
+  Restart class.
+- `tests/test_config_view.py::test_project_schema_view_real_source` —
+  config view projection includes webctl.* rows.
+- `tests/test_app_integration.py::test_get_config_schema_returns_48_rows`
+  — `/api/config/schema` round-trip serves 48 rows including the two
+  webctl.* entries.
+
 ## Phase 4.5 follow-up candidates
 
 - Deadline-based UDS timeout (single shared `monotonic()` budget per
@@ -817,6 +917,56 @@ Pinned by:
   different uid.
 
 ## Change log
+
+### 2026-05-01 18:07 KST — issue#5 default-flip + issue#12 latency defaults (combined PR)
+
+Two operator-locked HIL follow-ups bundled into one PR; webctl owns the
+runtime consumer side of issue#12 B2 (SSE pose+scan rate config-driven).
+
+**What changed (webctl side)**:
+
+- New leaf module `godo_webctl/webctl_toml.py` (~190 LOC + tests)
+  exporting `read_webctl_section(toml_path, env=None) ->
+  WebctlSection`. Precedence env > TOML > default; range validation
+  [1, 60]; defaults 30 Hz / 30 Hz; raises `WebctlTomlError` on bad
+  input. Constants pinned in this module per Mode-A N5 / Parent A8
+  (NOT in `constants.py`) so the dep edge stays
+  `sse.py → webctl_toml.py → stdlib`.
+- `Settings` gains `tracker_toml_path: Path` (default
+  `/var/lib/godo/tracker.toml`, override via
+  `GODO_WEBCTL_TRACKER_TOML_PATH`). Wired through
+  `_DEFAULTS` / `_PARSERS` / `_ENV_TO_FIELD`.
+- `sse.py::last_pose_stream` and `last_scan_stream` resolve their
+  per-tick sleep at stream open via two new private helpers
+  (`_resolve_pose_tick_s`, `_resolve_scan_tick_s`) that wrap
+  `webctl_toml.read_webctl_section` in a try/except (default fallback
+  on `WebctlTomlError`).
+- `sse.py::diag_stream`, `services_stream`, `processes_stream`,
+  `resources_extended_stream` are UNCHANGED — operator-locked
+  "지도 부분에만 적용".
+- `__main__.py::main` calls a new `_log_resolved_sse_rates` helper that
+  reads the section + logs INFO on success or WARNING on failure
+  (Mode-A M6 / Parent A6: service must boot regardless of malformed
+  tracker.toml).
+- `config_schema.py::EXPECTED_ROW_COUNT` 46 → 48.
+
+**Tests**:
+
+- `tests/test_webctl_toml.py` — NEW, 28 cases.
+- `tests/test_sse.py` — pose+scan default 30 Hz cadence pin (was
+  5 Hz / `SSE_TICK_S` 0.2 s before issue#12); 4 new TOML/env injection
+  cases; `diag_stream` regression pin that it still uses `SSE_TICK_S`.
+- `tests/test_config.py` — `tracker_toml_path` parity check, default
+  value pin.
+- `tests/test_config_schema.py`, `test_config_schema_parity.py`,
+  `test_config_view.py`, `test_app_integration.py` — row count 46 → 48
+  + presence checks for the two `webctl.*` rows.
+
+**Tracker side (cross-link)**: see `production/RPi5/CODEBASE.md`
+invariant `(r)` and the dated change-log entry under the same date.
+
+**New invariant**: `(ac)` "issue#12 — webctl-owned schema rows +
+tracker.toml SSOT" — see body above.
 
 ### 2026-05-01 15:17 KST — issue#5: schema row count 42 → 46 (Live-carry mirror bump)
 

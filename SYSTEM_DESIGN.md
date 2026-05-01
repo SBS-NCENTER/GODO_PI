@@ -772,9 +772,19 @@ mode publishes new `Offset`s at ~10 Hz from the cold writer; the smoother
 interpolates between those updates so UE renders at a steady 59.94 fps
 without visible "tick-tick" jumps. **1-shot calibrate (mode 3) inherits
 the smoother as a side-benefit** — the operator-triggered re-localization
-becomes a smooth ~500 ms ramp instead of a step change. If only mode 3
-existed, the smoother would be optional. The full architecture exists
-because mode 4 needs it, so mode 3 gets it for free.
+becomes a smooth ramp instead of a step change. If only mode 3 existed,
+the smoother would be optional. The full architecture exists because
+mode 4 needs it, so mode 3 gets it for free.
+
+**Default ramp duration (issue#12, 2026-05-01 18:07 KST)**: `T_RAMP_NS`
+defaults to **100 ms** (lowered from the original 500 ms after operator
+HIL approval). At 10 Hz LiDAR cadence the inter-tick period is ~100 ms,
+so a 1-tick ramp suffices to hide per-tick step changes without
+visible lag. The earlier 500 ms value was tuned for the OneShot UX
+which inherits the smoother as a side-benefit; OneShot is
+operator-triggered and rare, so its comfort no longer dominates the
+trade-off. Operators may restore 500 ms via `smoother.t_ramp_ms = 500`
+in tracker.toml (Restart class).
 
 #### 6.4.1 Deadband filter — at the cold path, before seqlock write
 
@@ -1445,6 +1455,59 @@ Numeric literals in `src/` require one of:
 
 Anything else is a code-review block. This is added to CLAUDE.md §6
 Golden Rules at the same commit that introduces `core/constants.hpp`.
+
+### 11.5 Webctl-owned schema rows (issue#12, 2026-05-01 18:07 KST)
+
+Some Tier-2 keys describe behaviour of **godo-webctl**, not the
+tracker. They live in the same `CONFIG_SCHEMA[]` table because the
+SPA's Config tab is schema-driven (one render path for every operator-
+tunable knob), but no tracker logic path consumes their value. The
+tracker stores them through the existing `apply_one` /
+`read_effective` / `render_toml` round-trip purely to keep the schema
+contract uniform; webctl is the sole consumer and reads the rendered
+`/var/lib/godo/tracker.toml` directly.
+
+Currently two such keys:
+
+| Key | Type | Range | Default | Reload class | Consumer |
+| --- | --- | --- | --- | --- | --- |
+| `webctl.pose_stream_hz` | Int | [1, 60] | 30 Hz | Restart | `last_pose_stream` SSE producer |
+| `webctl.scan_stream_hz` | Int | [1, 60] | 30 Hz | Restart | `last_scan_stream` SSE producer |
+
+**Why not a parallel `WEBCTL_CONFIG_SCHEMA[]`?** Mode-A C1/C2/C3
+established that the "schema-row-only, NOT Config-mapped" route is
+architecturally infeasible — `apply_one` rejects unmapped keys with
+`internal_error`, `read_effective` returns default-zero sentinels, and
+`apply_set` never reaches the `restart_pending` flag. Adding 80 LOC for
+a parallel mirror was not earned by the cleanliness benefit; the
+12-LOC plumbing path (Route 2) keeps every existing test pattern alive
+plus a new invariant `(r)` in `production/RPi5/CODEBASE.md`
+documenting the "tracker never reads" contract.
+
+**Reload-class semantics**: webctl-owned rows are Restart class. After
+the operator edits via SPA, the tracker writes `restart_pending` (the
+generic banner fires); the operator runs `systemctl restart
+godo-webctl` (NOT godo-tracker — the tracker has no live-reload work
+to do). webctl re-reads the value at startup via
+`godo_webctl/webctl_toml.read_webctl_section`. Per-key restart-target
+hints in the SPA banner are out of scope.
+
+**Cadence-tier discipline**: only the **map-related** SSE streams
+(`last_pose_stream`, `last_scan_stream`) are config-driven via these
+keys. Other SSE producers stay on their compile-time defaults
+(`SSE_TICK_S = 0.2 s` for `diag_stream`,
+`SSE_SERVICES_TICK_S = 1 s` for `services_stream`,
+`SSE_PROCESSES_TICK_S = 1 s` for `processes_stream`,
+`SSE_RESOURCES_EXTENDED_TICK_S = 1 s` for `resources_extended_stream`).
+The split is operator-locked "지도 부분에만 적용" — the rationale is
+that the Map tab's pose marker + scan overlay benefit the most from
+high-cadence updates, while the diag / system tabs are debug-loop
+cadence by design.
+
+Cross-link for code: `production/RPi5/CODEBASE.md` invariant `(r)`
+covers the storage half (Config-mapped, tracker-unconsumed); the
+consumer half lives in `godo-webctl/CODEBASE.md` invariant `(ac)`
+(`webctl_toml.py` reader + `sse.py` per-stream cadence resolution).
 
 ---
 

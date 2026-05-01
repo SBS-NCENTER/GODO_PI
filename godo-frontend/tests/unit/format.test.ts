@@ -8,9 +8,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   formatBytesBinaryShort,
+  formatDateTime,
   formatDegrees,
   formatMeters,
   formatRemaining,
+  formatTimeOfDay,
   formatUptimeKo,
 } from '../../src/lib/format';
 
@@ -29,6 +31,51 @@ describe('formatMeters / formatDegrees (existing)', () => {
   });
   it('formats degrees with 1 decimal', () => {
     expect(formatDegrees(45)).toBe('45.0°');
+  });
+});
+
+describe('formatTimeOfDay (existing)', () => {
+  // Sanity pin: the helper is still used by the dashboard activity feed
+  // after the 2026-05-01 list-view migration to formatDateTime.
+  it('renders host-local HH:MM:SS with zero-padding', () => {
+    const unixSec = 1735776645; // arbitrary; reproducible across hosts.
+    const d = new Date(unixSec * 1000);
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const expected = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    expect(formatTimeOfDay(unixSec)).toBe(expected);
+  });
+});
+
+describe('formatDateTime (issue#13-list-view-timestamp)', () => {
+  // We pin against host-local Date getters rather than a literal so the test
+  // passes on KST CI as well as on a developer's UTC laptop. The contract
+  // under test is the *shape* "YYYY-MM-DD HH:MM" + zero-padding, not a
+  // particular wall-clock interpretation.
+  it('renders "YYYY-MM-DD HH:MM" matching the host-local Date components', () => {
+    const unixSec = 1735776645; // 2025-01-02T01:30:45Z (varies per TZ).
+    const d = new Date(unixSec * 1000);
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const expected =
+      `${String(d.getFullYear()).padStart(4, '0')}-` +
+      `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
+      `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    expect(formatDateTime(unixSec)).toBe(expected);
+  });
+  it('zero-pads single-digit month / day / hour / minute', () => {
+    // Pick a unix-second whose KST wall-clock components are all single-digit.
+    // 2026-01-02T01:01:00Z = 2026-01-02 10:01 KST. We assert the *shape*
+    // matches the regex regardless of host TZ.
+    const unixSec = 1767315660;
+    const out = formatDateTime(unixSec);
+    expect(out).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
+  });
+  it('matches no timezone marker (length is exactly 16 chars)', () => {
+    // "YYYY-MM-DD HH:MM" is 16 characters; rule out an accidental " KST"
+    // suffix or "Z" tail.
+    expect(formatDateTime(1735776645)).toHaveLength(16);
+  });
+  it('handles unix epoch (0) without crashing', () => {
+    expect(formatDateTime(0)).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
   });
 });
 

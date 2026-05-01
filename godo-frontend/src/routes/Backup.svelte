@@ -19,7 +19,7 @@
   import ConfirmDialog from '$components/ConfirmDialog.svelte';
   import { ApiError, apiGet, apiPost } from '$lib/api';
   import { BACKUP_RESTORE_OVERWRITE_WARNING, BACKUP_RESTORE_SUCCESS_TOAST } from '$lib/constants';
-  import { formatTimeOfDay } from '$lib/format';
+  import { formatDateTime } from '$lib/format';
   import type { BackupEntry, BackupListResponse, RestoreResponse } from '$lib/protocol';
   import { auth } from '$stores/auth';
 
@@ -36,10 +36,12 @@
     bannerKind = kind;
   }
 
-  // `<ts>` arrives as `20260101T010101Z`. Operators read time-of-day
-  // more readily than UTC stamps, so we pull the basename from the
-  // existing `format.ts` helper rather than rolling another formatter.
-  // The raw stamp also stays visible alongside (for debugging + audit).
+  // `<ts>` arrives as `20260101T010101Z`. Operators read a localised
+  // "YYYY-MM-DD HH:MM" string more readily than the canonical UTC
+  // stamp, so we hand the unix-seconds form to `format.ts::formatDateTime`
+  // (added 2026-05-01 for cross-day disambiguation in list views) rather
+  // than rolling another formatter. The raw stamp stays visible alongside
+  // (for debugging + audit).
   function tsToUnix(ts: string): number {
     // Build an ISO-8601 string from the canonical stamp:
     // 20260101T010101Z → 2026-01-01T01:01:01Z
@@ -119,7 +121,7 @@
           {#each entries as entry (entry.ts)}
             <tr data-testid={`backup-row-${entry.ts}`}>
               <td><code>{entry.ts}</code></td>
-              <td>{formatTimeOfDay(tsToUnix(entry.ts))}</td>
+              <td>{formatDateTime(tsToUnix(entry.ts))}</td>
               <td>{entry.files.length}</td>
               <td>{entry.size_bytes}</td>
               <td>

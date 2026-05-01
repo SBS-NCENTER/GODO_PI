@@ -118,6 +118,17 @@ struct Config {
     double              amcl_live_carry_sigma_yaw_deg{};
     std::vector<double> amcl_live_carry_schedule_m;
 
+    // issue#12 — webctl SSE stream cadence (Hz). Tracker stores these
+    // verbatim through the apply / render_toml round-trip so the SPA's
+    // Config tab can edit them via /api/config. No tracker logic path
+    // reads the stored value — godo-webctl is the sole consumer, reading
+    // /var/lib/godo/tracker.toml directly via webctl_toml.py. See
+    // production/RPi5/CODEBASE.md invariant (r). Reload class is Restart
+    // because webctl restarts to pick up the new value (the tracker has
+    // no live-reload responsibility for these fields).
+    int                 webctl_pose_stream_hz{};
+    int                 webctl_scan_stream_hz{};
+
     // Build a Config with defaults applied from core/config_defaults.hpp.
     static Config make_default();
 

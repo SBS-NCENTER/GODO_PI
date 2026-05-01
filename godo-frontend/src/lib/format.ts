@@ -33,6 +33,28 @@ export function formatTimeOfDay(unixSec: number): string {
 }
 
 /**
+ * Render unix-seconds as a "YYYY-MM-DD HH:MM" local-time string.
+ *
+ * Used by list views (Map list, Backup list) where multi-day-old entries
+ * must be distinguishable at a glance. We format via Date getters rather
+ * than `Intl.DateTimeFormat`/`toLocaleString` so the output is identical
+ * across Mac / Windows / Linux hosts and across browser locales — the
+ * SPA's host-local clock is the ground truth, no implicit re-localisation.
+ *
+ * No timezone marker is appended; the studio host runs KST and the SPA is
+ * served from that same host, so the local-time interpretation is implicit.
+ */
+export function formatDateTime(unixSec: number): string {
+  const d = new Date(unixSec * 1000);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const yyyy = String(d.getFullYear()).padStart(4, '0');
+  return (
+    `${yyyy}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
+    `${pad(d.getHours())}:${pad(d.getMinutes())}`
+  );
+}
+
+/**
  * Format a meter value as "X.XX m" (2 decimal places).
  */
 export function formatMeters(m: number): string {

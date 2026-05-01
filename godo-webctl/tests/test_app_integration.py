@@ -51,6 +51,7 @@ def _settings_for(
     disk_check_path: Path | None = None,
     restart_pending_path: Path | None = None,
     pidfile_path: Path | None = None,
+    tracker_toml_path: Path | None = None,
 ) -> Settings:
     base = backup_dir.parent
     return Settings(
@@ -75,6 +76,10 @@ def _settings_for(
         # exists only because Settings is the SSOT for both code and the
         # __main__ entrypoint. Tests use a unique tmp filename.
         pidfile_path=pidfile_path or (base / "godo-webctl.pid"),
+        # issue#12: integration tests don't open SSE streams that need
+        # this — defaults to a non-existent path so webctl_toml falls
+        # through to schema defaults silently.
+        tracker_toml_path=tracker_toml_path or (base / "tracker.toml"),
     )
 
 
@@ -213,6 +218,7 @@ async def test_calibrate_timeout_returns_504(
         disk_check_path=s.disk_check_path,
         restart_pending_path=s.restart_pending_path,
         pidfile_path=s.pidfile_path,
+        tracker_toml_path=s.tracker_toml_path,
     )
     async with _client(s) as cl:
         token = await _login_admin(cl)
@@ -1934,6 +1940,7 @@ def test_lifespan_legacy_migration_creates_active_symlink(
         disk_check_path=Path("/"),
         restart_pending_path=tmp_path / "rp",
         pidfile_path=tmp_path / "godo-webctl.pid",
+        tracker_toml_path=tmp_path / "tracker.toml",
     )
 
     # Manually invoke the migration helper that the lifespan uses.
@@ -1995,6 +2002,7 @@ def test_lifespan_warns_every_boot_when_map_path_set(
         disk_check_path=Path("/"),
         restart_pending_path=tmp_path / "rp",
         pidfile_path=tmp_path / "godo-webctl.pid",
+        tracker_toml_path=tmp_path / "tracker.toml",
     )
 
     def _boot_and_count_warns() -> int:
@@ -2136,6 +2144,7 @@ async def test_system_amcl_rate_tracker_timeout_returns_504(
         disk_check_path=s.disk_check_path,
         restart_pending_path=s.restart_pending_path,
         pidfile_path=s.pidfile_path,
+        tracker_toml_path=s.tracker_toml_path,
     )
     async with _client(s) as cl:
         r = await cl.get("/api/system/amcl_rate")
@@ -2378,13 +2387,13 @@ async def test_get_config_returns_projected_dict(
     assert body["network.ue_port"] == 6666
 
 
-async def test_get_config_schema_returns_42_rows(
+async def test_get_config_schema_returns_48_rows(
     tmp_path: Path,
     tmp_map_pair: Path,
 ) -> None:
     """The schema is mirrored from C++; the endpoint serves the local
-    parse cache, not a UDS round-trip. issue#3 fold added 2 rows
-    (amcl.hint_sigma_*_default) — count 40 → 42."""
+    parse cache, not a UDS round-trip. issue#12 fold added 2 rows
+    (webctl.pose_stream_hz, webctl.scan_stream_hz) — count 46 → 48."""
     s = _settings_for(
         uds_socket=tmp_path / "u.sock",
         map_path=tmp_map_pair,
@@ -2395,7 +2404,7 @@ async def test_get_config_schema_returns_42_rows(
     assert r.status_code == HTTPStatus.OK
     rows = r.json()
     assert isinstance(rows, list)
-    assert len(rows) == 46
+    assert len(rows) == 48
     # Each row has the documented keys.
     for row in rows:
         assert {
@@ -2407,6 +2416,10 @@ async def test_get_config_schema_returns_42_rows(
             "reload_class",
             "description",
         } == set(row.keys())
+    # issue#12 — webctl.* rows surface through the round-trip endpoint.
+    names = [r["name"] for r in rows]
+    assert "webctl.pose_stream_hz" in names
+    assert "webctl.scan_stream_hz" in names
 
 
 async def test_patch_config_admin_happy(

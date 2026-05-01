@@ -85,6 +85,14 @@ const std::set<std::string>& allowed_keys() {
         "amcl.live_carry_sigma_yaw_deg",
         "gpio.calibrate_pin",
         "gpio.live_toggle_pin",
+        // issue#12 — webctl-owned schema rows. Tracker validates these
+        // here so toml++ does not throw on unknown-key, then stores
+        // them via apply_one + emits via read_effective + render_toml,
+        // but no tracker logic path consumes the value. webctl reads
+        // /var/lib/godo/tracker.toml directly via webctl_toml.py. See
+        // production/RPi5/CODEBASE.md invariant (r).
+        "webctl.pose_stream_hz",
+        "webctl.scan_stream_hz",
     };
     return k;
 }
@@ -217,6 +225,11 @@ void apply_toml_file(Config& c, const std::filesystem::path& path) {
 
     if (auto v = tbl["gpio"]["calibrate_pin"].value<int64_t>();    v) c.gpio_calibrate_pin   = static_cast<int>(*v);
     if (auto v = tbl["gpio"]["live_toggle_pin"].value<int64_t>();  v) c.gpio_live_toggle_pin = static_cast<int>(*v);
+
+    // issue#12 — webctl-owned schema rows. Tracker stores the value
+    // verbatim; no tracker logic path consumes it (CODEBASE.md (r)).
+    if (auto v = tbl["webctl"]["pose_stream_hz"].value<int64_t>(); v) c.webctl_pose_stream_hz = static_cast<int>(*v);
+    if (auto v = tbl["webctl"]["scan_stream_hz"].value<int64_t>(); v) c.webctl_scan_stream_hz = static_cast<int>(*v);
 }
 
 // Linear search over the envp array.
@@ -496,6 +509,10 @@ void apply_env(Config& c, char** envp) {
 
     if (auto v = env_get(envp, "GODO_GPIO_CALIBRATE_PIN"))             c.gpio_calibrate_pin             = parse_int_or_throw(*v, "GODO_GPIO_CALIBRATE_PIN");
     if (auto v = env_get(envp, "GODO_GPIO_LIVE_TOGGLE_PIN"))           c.gpio_live_toggle_pin           = parse_int_or_throw(*v, "GODO_GPIO_LIVE_TOGGLE_PIN");
+
+    // issue#12 — webctl-owned schema rows.
+    if (auto v = env_get(envp, "GODO_WEBCTL_POSE_STREAM_HZ")) c.webctl_pose_stream_hz = parse_int_or_throw(*v, "GODO_WEBCTL_POSE_STREAM_HZ");
+    if (auto v = env_get(envp, "GODO_WEBCTL_SCAN_STREAM_HZ")) c.webctl_scan_stream_hz = parse_int_or_throw(*v, "GODO_WEBCTL_SCAN_STREAM_HZ");
 }
 
 // CLI parser — tiny, explicit. `--key=value` or `--key value`.
@@ -600,6 +617,9 @@ void apply_cli(Config& c, int argc, char** argv) {
         {"amcl-live-carry-schedule-m",     [](Config& cc, const std::string& v){ cc.amcl_live_carry_schedule_m     = parse_csv_doubles_or_throw(v, "--amcl-live-carry-schedule-m"); }},
         {"gpio-calibrate-pin",             [](Config& cc, const std::string& v){ cc.gpio_calibrate_pin             = parse_int_or_throw(v, "--gpio-calibrate-pin"); }},
         {"gpio-live-toggle-pin",           [](Config& cc, const std::string& v){ cc.gpio_live_toggle_pin           = parse_int_or_throw(v, "--gpio-live-toggle-pin"); }},
+        // issue#12 — webctl-owned schema rows.
+        {"webctl-pose-stream-hz",          [](Config& cc, const std::string& v){ cc.webctl_pose_stream_hz          = parse_int_or_throw(v, "--webctl-pose-stream-hz"); }},
+        {"webctl-scan-stream-hz",          [](Config& cc, const std::string& v){ cc.webctl_scan_stream_hz          = parse_int_or_throw(v, "--webctl-scan-stream-hz"); }},
     };
     for (const auto& kv : parse_cli(argc, argv)) {
         auto it = handlers.find(kv.key);
@@ -876,6 +896,10 @@ Config Config::make_default() {
     c.amcl_live_carry_schedule_m     =
         parse_csv_doubles_or_throw(cfg_defaults::AMCL_LIVE_CARRY_SCHEDULE_M,
                                    "AMCL_LIVE_CARRY_SCHEDULE_M");
+
+    // issue#12 — webctl-owned defaults (CODEBASE.md (r)).
+    c.webctl_pose_stream_hz          = cfg_defaults::WEBCTL_POSE_STREAM_HZ_DEFAULT;
+    c.webctl_scan_stream_hz          = cfg_defaults::WEBCTL_SCAN_STREAM_HZ_DEFAULT;
 
     return c;
 }

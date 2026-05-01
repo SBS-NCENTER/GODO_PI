@@ -617,6 +617,77 @@ first; pipelined-parallel deferred),
 `.claude/memory/project_calibration_alternatives.md` "Live mode hint
 pipeline" anchor.
 
+### (r) webctl-owned schema rows — Config carries them verbatim, tracker logic never reads them
+
+issue#12 introduces a new ownership pattern for the
+`CONFIG_SCHEMA[]` table: rows whose **runtime consumer is godo-webctl
+rather than the tracker itself**. The two current entries are
+`webctl.pose_stream_hz` and `webctl.scan_stream_hz` (SSE pose/scan
+stream cadence, default 30 Hz, range [1, 60], `ReloadClass::Restart`).
+
+**Storage contract (Parent decision A1, post-Mode-A 2026-05-01 KST)**:
+the keys are first-class `Config` fields (`int webctl_pose_stream_hz`,
+`int webctl_scan_stream_hz`) wired through every existing config
+machinery touchpoint:
+
+1. `core/config_defaults.hpp` — Tier-1 constants
+   `WEBCTL_POSE_STREAM_HZ_DEFAULT = 30`,
+   `WEBCTL_SCAN_STREAM_HZ_DEFAULT = 30`.
+2. `core/config_schema.hpp` — schema rows declare type, range, default,
+   reload class. The row count moved 46 → 48 in lockstep with the C++
+   `static_assert` and webctl's `EXPECTED_ROW_COUNT`.
+3. `core/config.cpp` — `allowed_keys()` set, `apply_toml_file`,
+   `apply_env`, `apply_cli`, `Config::make_default`. CLI / env / TOML
+   precedence matches every other Tier-2 Int row.
+4. `config/apply.cpp` — `apply_one` writes to the staging Config field;
+   `read_effective` reads it back. `render_toml` emits a `[webctl]`
+   section with the stored values; `apply_get_all` (`/api/config`)
+   returns the actual stored value (NOT a default-zero sentinel).
+5. webctl reads `/var/lib/godo/tracker.toml` directly via
+   `godo_webctl/webctl_toml.read_webctl_section` to consume the value.
+
+**The tracker never reads these fields in any logic path.** No cold
+writer branch, no smoother tick, no AMCL kernel consults
+`webctl_pose_stream_hz` or `webctl_scan_stream_hz`. They round-trip
+through Config purely so the SPA's schema-driven Config tab works
+uniformly across all 48 rows and so `render_toml` produces a
+deterministic file the tracker can load + persist on the next edit.
+
+**Why not a parallel `WEBCTL_CONFIG_SCHEMA[]` table?** Mode-A C1/C2/C3
+showed the "schema-row-only, NOT Config-mapped" route (Plan §3 D1
+Route 1) is architecturally infeasible — `apply_one` rejects unmapped
+keys with `internal_error`, `read_effective` returns default-zero
+sentinels for unmapped keys (so `render_toml` writes `0` and
+`apply_get_all` reports `0`), and `apply_set` aborts before the
+`restart_pending` flag can fire. A parallel schema table would have
+required new SPA endpoints + a second mirror parser in webctl (~80 LOC
+for cleanliness benefit not yet earned). Route 2 (Config-mapped) costs
+~12 LOC of plumbing + a documented "no logic-path reader" invariant
+and reuses every existing test pattern.
+
+**Adding a new webctl-owned row** requires the same lockstep updates as
+any other Tier-2 row PLUS a docstring note clarifying that no tracker
+logic path reads the field. The `int` field on `Config` is a *storage
+slot*, not a behavioural input.
+
+Pinned by:
+
+- `tests/test_config.cpp` — issue#12 cases for default wiring, TOML
+  round-trip, env override, CLI override, unknown-key rejection.
+- `tests/test_config_schema.cpp::TEST_CASE("issue#12: webctl.pose_stream_hz
+  + webctl.scan_stream_hz rows present (count went 46 → 48)")` —
+  schema row presence + types + default_repr.
+- `tests/test_config_apply.cpp::TEST_CASE("apply_set webctl.pose_stream_hz:
+  round-trips through render_toml")` — Mode-A C1+C2+C3 RESOLVED
+  pin: `apply_set` succeeds, `render_toml` carries the value,
+  `apply_get_all` reflects it.
+- `tests/test_config_apply.cpp::TEST_CASE("apply_get_all returns 48 keys,
+  alphabetical, valid JSON-ish")` — JSON round-trip emits non-zero
+  stored values for both webctl rows.
+
+Cross-link: webctl side covers the consumer half via
+`godo-webctl/CODEBASE.md` invariant `(ac)`.
+
 ### Known scaffolding
 
 - (Removed 2026-04-26 with Wave 2.) `thread_stub_cold_writer` and the
@@ -652,6 +723,101 @@ scripts/build.sh
 Expect `ctest -L hardware-free` to report every listed test green. If
 `test_csv_parity` is skipped, install `uv` and ensure `prototype/Python/`
 has been synced (`uv sync`).
+
+---
+
+## 2026-05-01 18:07 KST — issue#5 default-flip + issue#12 latency defaults (combined PR)
+
+### Why
+
+Two operator-locked HIL follow-ups bundled because both are
+**schema-row default changes** with overlapping test surfaces (CONFIG_SCHEMA
+row count and `default_repr` literals).
+
+- **issue#5 default-flip.** PR #62 (`fc9afc6`) shipped the Live
+  pipelined-hint kernel default-OFF; HIL was overwhelmingly successful
+  (Live drift ~4 m → ±5 cm stationary / ±10 cm in motion; yaw ~90° →
+  ±1°). R1 wall-clock budget validated (iters mode=16, max=21,
+  mean=15.7 of 30-iter ceiling). σ stays at default 0.05 (this
+  session's sweep showed σ_xy 0.02 destabilises yaw + induces 2/600
+  convergence failures). Operators retain the legacy `Amcl::step`
+  rollback by setting `amcl.live_carry_pose_as_hint = 0` in
+  tracker.toml.
+- **issue#12 — smoother default ramp.** `T_RAMP_NS` 500 ms → 100 ms.
+  The architecture is Live-primary (SYSTEM_DESIGN.md §6.4 design
+  intent); at 10 Hz LiDAR cadence, a 1-tick ramp (~100 ms) hides
+  per-tick step changes without visible lag. 500 ms was tuned for the
+  OneShot UX which inherits the smoother as a side-benefit; OneShot
+  is operator-triggered and rare, so its comfort no longer dominates
+  the trade-off.
+- **issue#12 — webctl SSE pose+scan rate config-driven.** Two new
+  schema rows `webctl.pose_stream_hz` and `webctl.scan_stream_hz`
+  (Int [1, 60], default 30 Hz, Restart class). Other SSE streams
+  (services 1 Hz, processes 1 Hz, resources_extended 1 Hz, diag 5 Hz)
+  keep current rates per operator-locked "지도 부분에만 적용".
+
+### What changed
+
+- `core/config_defaults.hpp` — `LIVE_CARRY_POSE_AS_HINT = false → true`
+  with rationale comment citing PR-#62 HIL outcomes; `T_RAMP_NS
+  500'000'000 → 100'000'000` with Live-primary rationale; new
+  constants `WEBCTL_POSE_STREAM_HZ_DEFAULT = 30` and
+  `WEBCTL_SCAN_STREAM_HZ_DEFAULT = 30`.
+- `core/config.hpp` — added `int webctl_pose_stream_hz` /
+  `int webctl_scan_stream_hz` fields with a docstring locking the
+  "Config carries verbatim, tracker logic never reads" semantic
+  (invariant (r)).
+- `core/config_schema.hpp` — row count assert + `std::array` size
+  46 → 48; `amcl.live_carry_pose_as_hint` `default_repr "0" → "1"`;
+  `smoother.t_ramp_ms` `default_repr "500" → "100"`; new rows
+  `webctl.pose_stream_hz` and `webctl.scan_stream_hz` at end of array
+  (alphabetical: webctl > smoother).
+- `core/config.cpp` — `allowed_keys()` extended; `apply_toml_file`,
+  `apply_env`, `apply_cli`, `Config::make_default` propagate the two
+  new keys via existing precedent (`amcl_anneal_iters_per_phase` Int
+  row pattern).
+- `config/apply.cpp` — `apply_one` writes the two new fields;
+  `read_effective` emits them as Int. Mode-A C1/C2/C3 RESOLVED:
+  `apply_set` succeeds, `render_toml` carries the value,
+  `apply_get_all` reflects it.
+
+### Tests
+
+- `tests/test_config_schema.cpp` — row-count assertion 46 → 48; pinned
+  `default_repr "1"` for `amcl.live_carry_pose_as_hint`; pinned
+  `default_repr "100"` for `smoother.t_ramp_ms`; new presence test
+  for the two `webctl.*` rows (type=Int, range [1, 60], default 30,
+  reload_class=Restart).
+- `tests/test_config.cpp` — issue#5 follow-up case (default true);
+  issue#12 cases: T_RAMP_NS 100 ms default, webctl pose/scan defaults
+  30, TOML round-trip, env override, CLI override, unknown
+  `[webctl]` leaf rejection.
+- `tests/test_config_apply.cpp` — JSON row count + comma counts
+  46/45 → 48/47; presence checks for `webctl.pose_stream_hz` /
+  `webctl.scan_stream_hz` in `apply_get_all` and `apply_get_schema`
+  output; `apply_set` round-trip pin (Mode-A C1/C2/C3 fix); range
+  rejection pin for `webctl.scan_stream_hz = 100` (above schema max).
+- Existing tests (`test_cold_writer_live_pipelined`,
+  `test_amcl_scenarios`) unaffected — defaults of `Config::make_default`
+  cascade but no algorithmic test pinned the previous default value
+  beyond the ones updated above.
+
+### Removed
+
+- (none)
+
+### Invariants
+
+- New invariant **(r)** "webctl-owned schema rows — Config carries
+  them verbatim, tracker logic never reads them" — see body above.
+- Existing invariant (q) Live pipelined-hint kernel ownership
+  unchanged in shape; only the compile-time default flipped.
+
+### Test counts
+
+- 46/46 hardware-free ctest cases green post-change. The
+  hardware-conditional `test_rt_replay` (Phase 1 dump replay) is
+  marked `python-required` and continues to pass on hosts with `uv`.
 
 ---
 

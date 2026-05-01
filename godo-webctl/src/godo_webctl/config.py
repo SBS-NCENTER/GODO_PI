@@ -67,6 +67,13 @@ class Settings:
     # live on a local FS — tmpfs /run/godo is the project default; NFS
     # is unsupported (flock semantics differ).
     pidfile_path: Path
+    # issue#12: source TOML for the webctl-owned ``[webctl]`` section
+    # (``pose_stream_hz`` / ``scan_stream_hz``). Tracker writes this
+    # file via atomic-rename; webctl reads it via
+    # ``webctl_toml.read_webctl_section``. Tests override via
+    # GODO_WEBCTL_TRACKER_TOML_PATH so they point at a tmp_path fixture
+    # instead of ``/var/lib/godo/tracker.toml``.
+    tracker_toml_path: Path
 
 
 # Documented defaults — single source for code + README + systemd env-file.
@@ -86,6 +93,7 @@ _DEFAULTS: Final[dict[str, str]] = {
     "GODO_WEBCTL_DISK_CHECK_PATH": "/",
     "GODO_WEBCTL_RESTART_PENDING_PATH": "/var/lib/godo/restart_pending",
     "GODO_WEBCTL_PIDFILE": "/run/godo/godo-webctl.pid",
+    "GODO_WEBCTL_TRACKER_TOML_PATH": "/var/lib/godo/tracker.toml",
 }
 
 # Per-field parser. Same keys (in same order) as _DEFAULTS.
@@ -105,6 +113,7 @@ _PARSERS: Final[dict[str, Callable[[str], Any]]] = {
     "GODO_WEBCTL_DISK_CHECK_PATH": Path,
     "GODO_WEBCTL_RESTART_PENDING_PATH": Path,
     "GODO_WEBCTL_PIDFILE": Path,
+    "GODO_WEBCTL_TRACKER_TOML_PATH": Path,
 }
 
 # env-var name → Settings field name. Drift between this and the dataclass
@@ -125,6 +134,7 @@ _ENV_TO_FIELD: Final[dict[str, str]] = {
     "GODO_WEBCTL_DISK_CHECK_PATH": "disk_check_path",
     "GODO_WEBCTL_RESTART_PENDING_PATH": "restart_pending_path",
     "GODO_WEBCTL_PIDFILE": "pidfile_path",
+    "GODO_WEBCTL_TRACKER_TOML_PATH": "tracker_toml_path",
 }
 
 

@@ -205,6 +205,11 @@ EffectiveValue read_effective(const Config& c, const ConfigSchemaRow& row) {
     else if (k == "smoother.divergence_deg")         v.as_double = c.divergence_deg;
     else if (k == "smoother.divergence_mm")          v.as_double = c.divergence_mm;
     else if (k == "smoother.t_ramp_ms")              v.as_int    = c.t_ramp_ns / 1'000'000LL;
+    // issue#12 — webctl-owned schema rows. Tracker stores the value
+    // verbatim and emits it back through render_toml; no tracker logic
+    // path consumes it. See production/RPi5/CODEBASE.md invariant (r).
+    else if (k == "webctl.pose_stream_hz")           v.as_int    = c.webctl_pose_stream_hz;
+    else if (k == "webctl.scan_stream_hz")           v.as_int    = c.webctl_scan_stream_hz;
     return v;
 }
 
@@ -262,6 +267,9 @@ bool apply_one(Config& c,
     else if (k == "smoother.divergence_deg")         c.divergence_deg                  = vr.parsed_double;
     else if (k == "smoother.divergence_mm")          c.divergence_mm                   = vr.parsed_double;
     else if (k == "smoother.t_ramp_ms")              c.t_ramp_ns                       = static_cast<long long>(vr.parsed_double) * 1'000'000LL;
+    // issue#12 — webctl-owned schema rows.
+    else if (k == "webctl.pose_stream_hz")           c.webctl_pose_stream_hz           = static_cast<int>(vr.parsed_double);
+    else if (k == "webctl.scan_stream_hz")           c.webctl_scan_stream_hz           = static_cast<int>(vr.parsed_double);
     else                                             return false;
     return true;
 }

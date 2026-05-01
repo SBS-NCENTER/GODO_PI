@@ -25,7 +25,7 @@
   import ConfirmDialog from '$components/ConfirmDialog.svelte';
   import { apiPost } from '$lib/api';
   import { LOCAL_HOSTNAMES } from '$lib/constants';
-  import { formatTimeOfDay } from '$lib/format';
+  import { formatDateTime } from '$lib/format';
   import type { MapEntry } from '$lib/protocol';
   import { auth } from '$stores/auth';
   import { activate, maps, refresh, remove } from '$stores/maps';
@@ -207,7 +207,7 @@
               </button>
             </td>
             <td>{entry.size_bytes}</td>
-            <td>{formatTimeOfDay(entry.mtime_unix)}</td>
+            <td>{formatDateTime(entry.mtime_unix)}</td>
             <td>
               {#if entry.is_active}
                 <span class="badge active-badge" data-testid={`map-active-${entry.name}`}>활성</span

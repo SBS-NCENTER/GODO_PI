@@ -20,8 +20,8 @@ using godo::core::config_schema::reload_class_to_string;
 using godo::core::config_schema::ValueType;
 using godo::core::config_schema::value_type_to_string;
 
-TEST_CASE("CONFIG_SCHEMA has exactly 46 rows (issue#5 fold added 4 Live-carry rows)") {
-    CHECK(CONFIG_SCHEMA.size() == 46);
+TEST_CASE("CONFIG_SCHEMA has exactly 48 rows (issue#12 fold added 2 webctl.* rows)") {
+    CHECK(CONFIG_SCHEMA.size() == 48);
 }
 
 TEST_CASE("CONFIG_SCHEMA rows are alphabetically ordered by name") {
@@ -76,6 +76,29 @@ TEST_CASE("Mode-A M2: t_ramp_ms reload class is restart") {
     const auto* row = find("smoother.t_ramp_ms");
     REQUIRE(row != nullptr);
     CHECK(row->reload_class == ReloadClass::Restart);
+}
+
+TEST_CASE("issue#12: smoother.t_ramp_ms default_repr lowered 500 → 100") {
+    const auto* row = find("smoother.t_ramp_ms");
+    REQUIRE(row != nullptr);
+    CHECK(row->default_repr == "100");
+}
+
+TEST_CASE("issue#12: webctl.pose_stream_hz + webctl.scan_stream_hz rows present (count went 46 → 48)") {
+    const auto* pose = find("webctl.pose_stream_hz");
+    const auto* scan = find("webctl.scan_stream_hz");
+    REQUIRE(pose != nullptr);
+    REQUIRE(scan != nullptr);
+    CHECK(pose->type == ValueType::Int);
+    CHECK(scan->type == ValueType::Int);
+    CHECK(pose->min_d == 1.0);
+    CHECK(pose->max_d == 60.0);
+    CHECK(scan->min_d == 1.0);
+    CHECK(scan->max_d == 60.0);
+    CHECK(pose->default_repr == "30");
+    CHECK(scan->default_repr == "30");
+    CHECK(pose->reload_class == ReloadClass::Restart);
+    CHECK(scan->reload_class == ReloadClass::Restart);
 }
 
 TEST_CASE("Mode-A M2: live-σ rows have updated descriptions") {
@@ -134,7 +157,7 @@ TEST_CASE("issue#5: Live-carry rows present (count went 42 → 46)") {
     CHECK(flag->type      == ValueType::Int);     // Bool-as-Int convention
     CHECK(flag->min_d     == 0.0);
     CHECK(flag->max_d     == 1.0);
-    CHECK(flag->default_repr == "0");             // ships OFF
+    CHECK(flag->default_repr == "1");             // issue#5 follow-up: ships ON post-PR-#62 HIL
     CHECK(sched->type     == ValueType::String);
     CHECK(sigma_xy->type  == ValueType::Double);
     CHECK(sigma_yaw->type == ValueType::Double);

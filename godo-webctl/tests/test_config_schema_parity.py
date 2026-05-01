@@ -4,7 +4,7 @@ Track B-CONFIG (PR-CONFIG-β, TB1 fold) — cross-language schema parity.
 Loads `production/RPi5/src/core/config_schema.hpp` BY REAL PATH (mirrors
 `tests/test_protocol.py`'s LAST_POSE_FIELDS pattern) and asserts:
 
-  - row count == 42 (issue#3 fold pin: 40 + 2 hint-σ rows),
+  - row count == 46 (issue#5 fold pin: 42 + 4 Live-carry rows),
   - every row's `reload_class` is one of the 3 known strings,
   - every row's `type` is one of the 3 known strings,
   - the default_repr is non-empty.
@@ -33,16 +33,16 @@ def test_real_source_exists() -> None:
     assert _CPP_SCHEMA_HPP.exists(), f"C++ schema source missing: {_CPP_SCHEMA_HPP}"
 
 
-def test_row_count_pinned_at_42() -> None:
-    """issue#3 fold pin: schema row count is 42 (40 + 2 hint-σ defaults)."""
+def test_row_count_pinned_at_46() -> None:
+    """issue#5 fold pin: schema row count is 46 (42 + 4 Live-carry rows)."""
     rows = schema_mod.load_schema()
-    assert len(rows) == 42
+    assert len(rows) == 46
 
 
-def test_static_assert_in_cpp_says_42_too() -> None:
+def test_static_assert_in_cpp_says_46_too() -> None:
     """Cross-pin: the C++ static_assert text contains the count."""
     text = _CPP_SCHEMA_HPP.read_text(encoding="utf-8")
-    assert "CONFIG_SCHEMA.size() == 42" in text
+    assert "CONFIG_SCHEMA.size() == 46" in text
 
 
 def test_every_reload_class_in_known_set() -> None:

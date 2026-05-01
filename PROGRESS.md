@@ -174,6 +174,60 @@ All host-side bring-up steps complete. See per-step session log entry below. The
 
 ## Session log
 
+### 2026-05-01 (afternoon → evening — 14:30 KST → 20:30 KST, fifteenth-session — issue#5 Live pipelined-hint kernel ships + HIL spectacular + issue#12 latency defaults + issue#13-cand mapping resolution + frontend timestamps + issue#14 SPA mapping pipeline plan authored)
+
+Fifteenth-session was a marathon afternoon-evening following directly from fourteenth's cold-start handoff (TL;DR #1: `issue#5 Live mode pipelined hint`). Operator drove two full-pipeline PRs to merge plus a 1393-line Plan for the next major feature (issue#14 SPA mapping pipeline). Two Mode-A REWORK cycles were triggered (planner overestimated architectural simplicity each time); both were resolved by Parent decisions during the same session without re-Planner spawn. HIL outcomes on PR #62 were the most spectacular this project has seen — Live drift collapsed from ~4 m to ±5 cm stationary / ±10 cm in motion; yaw drift from ~90° to ±1°. A σ tighten experiment (σ_xy 0.05 → 0.02) was empirically rejected mid-session, locking σ semantics in both directions (do not widen for AMCL search comfort, do not tighten beyond physical drift bounds).
+
+**Notable structural revelation #1 — pipelined-hint kernel as one-shot-with-carry**: PR #62 reframed Live mode from "improve `Amcl::step` per-scan convergence depth" into "Live ≡ pipelined one-shot driven by `pose[t-1]` as hint, never bare `Amcl::step()`." The kernel now uses `converge_anneal_with_hint(hint=pose[t-1], σ=tight)` per Live tick, with σ matching physical inter-tick crane-base drift bound (operator-locked 0.05 m / 5°, NOT padded). Patience-2 early-break in the existing converge_anneal mechanism keeps the per-tick budget under 100 ms — empirically validated this session: 600 samples × 60 s showed iters mode 16/30, max 21, mean 15.7 (R1 budget SAFE). The architectural change touched 22 files across RPi5 + webctl + tests + docs (~1835 LOC); shipped default-OFF in PR #62 for HIL safety, then default-ON in PR #63's combined follow-up after operator HIL approval.
+
+**Notable structural revelation #2 — map-cell quantization as the standstill jitter floor**: HIL after PR #62 deploy showed the Live carry-hint locked basin perfectly but published pose still oscillated ±2-3 cm at standstill. Operator probed σ tighten (σ_xy 0.05 → 0.02) hoping to crush the jitter; result was unambiguously worse — y range marginally narrowed (36 → 34 mm) but **yaw range expanded 2.5×** (0.338° → 0.844°), max yaw_std exploded 8.6× (0.224° → 1.925°), and 2/600 frames failed to converge. Particle-budget redistribution explanation: tightening σ_xy compresses the 5000-particle cloud's xy footprint, redistributing entropy into the yaw axis — particles wander into poor-yaw basins. The true floor is `04.29_v3.pgm` map resolution (0.050 m/cell × y range 36 mm = 0.73 cells); sub-cell jitter is irreducible given the current cell width. Operator immediately locked: σ stays at 0.05 / 5°. Floor breakers belong to issue#13-cand (map resolution 0.05 → 0.025; partial: PR #63's commit `3225149` halved the SLAM default for *future* maps) and a future distance-weighted likelihood experiment. Memory entry `project_hint_strong_command_semantics.md` extended with the σ-tighten experiment finding so future sessions reflexively reject the same tighten attempt.
+
+**Operator-locked decisions this session (queue + memory)**:
+
+1. **issue#5 default-flip in follow-up PR** — PR #62 shipped default-OFF (rollback safety); after HIL approval, PR #63 flipped `LIVE_CARRY_POSE_AS_HINT = false → true` and the schema row's `default_repr "0" → "1"`. Operator can revert via tracker.toml `amcl.live_carry_pose_as_hint = 0`.
+2. **issue#12 latency defaults — smoother `t_ramp_ms` 500 → 100 ms**. Operator framing: "논리적으로 이게 맞으니까 이걸로 고정하는 것이 좋겠어. (SPA config에서 수정 가능하게끔)" Architecture is Live-primary (SYSTEM_DESIGN.md §6.4 design intent already documented this); 500 ms was a OneShot-comfort value over-spec'd for the dominant Live use case.
+3. **issue#12 SSE pose+scan stream config-driven, default 30 Hz**. Operator: "지도 부분에만 적용." Two new `webctl.*` schema rows (`pose_stream_hz`, `scan_stream_hz`); other SSE streams (services, processes, resources_extended, diag) keep existing rates. Initial Mode-A finding: schema-row-only Route 1 was architecturally infeasible (`apply_set` rejects unmapped keys, `render_toml` writes 0, `apply_get_all` returns 0). Pivoted to Route α (Config-struct-mapped) — tracker stores in `Config` but never reads; webctl reads via `webctl_toml.read_webctl_section` of `/var/lib/godo/tracker.toml`. RPi5 invariant `(r)`, webctl invariant `(ac)`.
+4. **issue#13-candidate (partial) — SLAM default resolution 0.05 → 0.025 m/cell**. PR #63 commit `3225149`. Existing maps untouched; future SLAM runs pick up the new default. AMCL adapts automatically (likelihood field is cell-based; ~4× memory on Pi 5 8 GB is fine).
+5. **Frontend timestamp UX** — Map list + Backup list show `YYYY-MM-DD HH:MM` (was `HH:MM`). New `formatDateTime(unixSec)` helper alongside existing `formatTimeOfDay`; Dashboard alarm feed intentionally unchanged (alarms are recent, time-of-day suffices).
+6. **issue#14 SPA mapping pipeline + monitoring (Plan-only)** — full feature spec for bringing SLAM mapping inside the SPA. 14 operator-locked decisions (L1-L14): system-level Mapping mode, tracker auto-stop on entry, LiDAR USB port shared via tracker's `serial.lidar_port`, Map sub-tabs (Overview/Edit/Mapping), regex `^[A-Za-z0-9._\-(),]+$` 1-64 chars, bind-mount `/var/lib/godo/maps/`, manual activation post-mapping, `godo-mapping@<name>.service` systemd template, dedicated Python ROS2 preview node @ 1 Hz, Docker socket via `usermod -aG docker ncenter`, polkit rule mirroring tracker's. Plan body (1393 lines) + Parent post-Plan amendment (S1-S6) for **SSE separation**: Mapping monitor SSE is Docker-only, RPi5 system stats keep their existing independent stream, no one-shot polling fallback, SPA Mapping strip splits into RPi5 (always live) + Docker (live ↔ "중단됨" frozen on close) regions. Mode-A deferred to sixteenth-session per operator's "Plan까지만 진행하자."
+
+**Process notes — two Mode-A REWORK cycles, both Parent-resolved**:
+
+- **PR #62 Mode-A**: ACCEPT-WITH-NITS (5 majors absorbed at intake). M1 dropped `share/config_schema.hpp` mirror task (file is install-time-generated, not tracked — same finding the chronicler recorded for PR #62 will catch in fifteenth too). M2 introduced `bool last_pose_set` cold-start guard (instead of comparing pose to (0,0,0), which could legitimately be a OneShot result). M3 documented Bool-as-Int convention. M4 added a fourth cfg key `amcl.live_carry_schedule_m` for separate Live schedule control. M5 added a round-trip rollback test case.
+- **PR #63 Mode-A**: REWORK (3 critical architecture defects in Route 1 schema-row-only). Critical 1: `apply_one` rejects unmapped keys with `internal_error` → SPA edit path broken. Critical 2: `render_toml` writes 0 for unmapped keys → tracker.toml corrupted on every commit. Critical 3: `apply_get_all` returns 0 → SPA "current value" column wrong. Parent resolved with Route α (Config-struct-mapped) — same plan body, different ownership decision. No re-Planner spawn; Writer absorbed Parent decision A1-A10 directly.
+
+**LiDAR USB swap incident (operational lesson)**: mid-session, the LiDAR USB-C cable disconnected and re-attached as `/dev/ttyUSB1` instead of `/dev/ttyUSB0` (the slot tracker config pointed at). dmesg confirmed at 16:15:45. Resolution: operator updated tracker.toml `serial.lidar_port = "/dev/ttyUSB1"` + restart. Long-term fix queued as **issue#10 — udev rule for stable LiDAR symlink (`/dev/rplidar` based on USB serial number `2eca2bbb4d6eef1182aae9c2c169b110`)**. Confirmed pre-existing for ~1 hour before the swap (multiple `set request 0x12 status: -110` errors in dmesg history); the swap event made it acute.
+
+**2 PRs landed + 1 Plan authored this session**:
+
+| PR / Plan | issue | Title | State |
+|---|---|---|---|
+| #62 | issue#5 | feat(rpi5): issue#5 — Live mode pipelined-hint kernel | merged (squash) |
+| #63 | issue#5 follow-up + #12 + #13-cand | feat: issue#5 default-flip + issue#12 latency defaults + issue#13-cand mapping resolution + frontend timestamps | merged (squash) |
+| Plan #14 | issue#14 | SPA Mapping pipeline + monitoring (1393 LOC + S1-S6 SSE-separation amendment) | authored to `.claude/tmp/plan_issue_14_mapping_pipeline_spa.md`; Mode-A deferred to sixteenth-session |
+
+**Test count delta** (cumulative across PR #62 + PR #63):
+
+- RPi5 ctest: 42 → 46 (+4 from `test_cold_writer_live_pipelined.cpp` 8 cases + Scenario E in `test_amcl_scenarios.cpp`); then unchanged through PR #63 (CONFIG_SCHEMA row count assertion bumped from 42 → 46 → 48 across the two PRs).
+- webctl pytest: 681 → 683 → 716 (+33 via PR #63's `test_webctl_toml.py` 28 cases + new `test_sse.py` cadence-injection cases).
+- Frontend vitest: 321 → 326 (+5 via `formatDateTime` cases in `format.test.ts`).
+- Bundle delta: ~+0.5 kB gzip cumulative (formatDateTime + new Backup/MapListPanel imports).
+
+**HIL acceptance achieved**:
+
+- **PR #62 (issue#5)** spectacular: stationary ±5 cm xy / ±1° yaw, in motion ±10 cm xy. Multi-basin failure rate 0% across the HIL window. Operator quote: "완전 잘 맞아. 오히려 이전 상태가 힌트가 되서 그런지 튀는 증상 없이 계속 자기 위치를 찾아."
+- **PR #63 (default-flip + smoother + SSE 30 Hz + frontend timestamps + mapping resolution)** verified end-to-end. Operator deployed via the §8 stack-deploy matrix with no rsync trailing-slash incident. webctl SSE 30 Hz visibly smoother on Map tab pose marker. Smoother 100 ms ramp ready for HIL but operator's tracker.toml still had explicit `t_ramp_ms = 500` override from prior sessions — flagged in PR #63 body for operator's tracker.toml cleanup.
+
+**Open queue for sixteenth-session** (operator-locked priority order):
+
+1. **issue#14 — SPA Mapping pipeline + monitoring** (P0, full pipeline). Plan authored this session (1393 lines + Parent SSE-separation amendment). Sixteenth-session begins with Mode-A → Writer (~2000 LOC across 4 stacks) → Mode-B → PR → multi-stack deploy → HIL Scenarios A-F.
+2. **issue#10 — udev rule for stable LiDAR symlink** (acute after this session's USB swap). `/etc/udev/rules.d/99-rplidar.rules` matching `idVendor=10c4 idProduct=ea60 serial=2eca2bbb4d6eef1182aae9c2c169b110` → `SYMLINK+="rplidar"`; tracker.toml `serial.lidar_port = "/dev/rplidar"`. Small PR but eliminates a recurring class of operational bugs.
+3. **issue#11 — Live pipelined-parallel multi-thread** (operator insight from PR #62 HIL: "OneShot처럼 정밀하게 + CPU pipeline like 계산"). With carry-hint locked basin, deeper schedule per tick is feasible if K-step distributed across cores 0/1/2 (CPU 3 RT-isolated). Reference: `project_pipelined_compute_pattern.md` "Why sequential ships first" — pipelined-parallel was the always-deferred follow-up.
+4. **issue#13 (continued) — distance-weighted AMCL likelihood** (`r_cutoff` near-LiDAR down-weight). Memory: `project_calibration_alternatives.md` "Distance-weighted AMCL likelihood." Standalone single-knob algorithmic experiment; could ship before A/B/C alternatives.
+5. **issue#4 — AMCL silent-converge diagnostic** (carryover; now has fifteenth's HIL data as comprehensive baseline).
+6. **issue#6 — B-MAPEDIT-3 yaw rotation** (carryover; revisit two-point UX).
+7. **issue#7 — boom-arm angle masking** (carryover; contingent on issue#4).
+
 ### 2026-05-01 (afternoon — 12:30 KST → 14:30 KST, fourteenth-session — issue#8 banner polling backstop + issue#9 mode action-hook + CLAUDE.md §8 Deployment + PR workflow + governance/operations bundle)
 
 Fourteenth-session was a tight afternoon follow-up to thirteenth's cold-start handoff. The plan locked at session-start: small banner PR first (TL;DR #4 from cold-start cache), then issue#5 full pipeline. Operator course-corrected mid-session to also fold in **issue#9** as a natural extension of issue#8's polling territory, deferring issue#5 to next-session cold-start instead. Three PRs merged.

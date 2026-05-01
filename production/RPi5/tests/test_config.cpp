@@ -52,11 +52,44 @@ struct Argv {
 struct Env {
     std::vector<std::string> storage;
     std::vector<char*>       env;
+    std::filesystem::path    auto_toml;  // empty if test supplied its own
 
     explicit Env(std::initializer_list<std::string> items) {
-        for (auto&& s : items) storage.push_back(s);
+        bool has_config_path = false;
+        for (auto&& s : items) {
+            if (s.rfind("GODO_CONFIG_PATH=", 0) == 0) has_config_path = true;
+            storage.push_back(s);
+        }
+        if (!has_config_path) {
+            // Self-isolation: when the test does not supply
+            // GODO_CONFIG_PATH explicitly, synthesise an empty
+            // per-test-case TOML and point at it. Without this the
+            // Config::load fallback would hit the developer host's
+            // /var/lib/godo/tracker.toml — which on a host that has
+            // exercised features like issue#3's hint-σ keys carries
+            // entries the in-tree Config struct may not yet recognise,
+            // causing every test_config case to throw with
+            // "unknown TOML key 'amcl.hint_sigma_xy_m_default'" or
+            // similar. Production paths reach this fallback only when
+            // the tracker is intentionally configured against a host
+            // with matched binary + TOML; tests must NOT.
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "godo_test_env_%d_%p.toml",
+                          static_cast<int>(::getpid()),
+                          static_cast<void*>(this));
+            auto_toml = std::filesystem::temp_directory_path() / buf;
+            std::ofstream(auto_toml).close();  // create empty file
+            storage.push_back("GODO_CONFIG_PATH=" + auto_toml.string());
+        }
         for (auto& s : storage) env.push_back(const_cast<char*>(s.c_str()));
         env.push_back(nullptr);
+    }
+
+    ~Env() {
+        if (!auto_toml.empty()) {
+            std::error_code ec;
+            std::filesystem::remove(auto_toml, ec);
+        }
     }
 
     char** ptr() { return env.data(); }

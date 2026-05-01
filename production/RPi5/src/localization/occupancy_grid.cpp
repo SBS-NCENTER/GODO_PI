@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <set>
 #include <sstream>
@@ -315,14 +316,49 @@ OccupancyGrid load_map(const std::string& pgm_path) {
     // is part of the spec; if a sentinel char remains it's still safe to just
     // read width*height bytes from here per the GIMP / map_server emitter).
     const std::size_t cells_n = static_cast<std::size_t>(cells64);
-    std::vector<std::uint8_t> cells(cells_n, 0);
-    f.read(reinterpret_cast<char*>(cells.data()),
+    std::vector<std::uint8_t> raw(cells_n, 0);
+    f.read(reinterpret_cast<char*>(raw.data()),
            static_cast<std::streamsize>(cells_n));
     const auto got = f.gcount();
     if (got != static_cast<std::streamsize>(cells_n)) {
         throw_with_path(pgm_path,
             "PGM payload truncated: expected " + std::to_string(cells_n) +
             " bytes, got " + std::to_string(static_cast<long long>(got)));
+    }
+
+    // Frame-convention bridge — PGM file convention vs GODO AMCL convention.
+    //
+    // PGM (P5) raster order is row-major top-row-first: byte 0 is the
+    // top-left pixel, byte (height-1)*width is the bottom-left pixel.
+    //
+    // ROS map_server YAML semantics: `origin: [ox, oy, 0]` is the world
+    // coordinate of the BOTTOM-left pixel (the lowest row of the image).
+    //
+    // GODO AMCL kernels (Amcl::seed_global at amcl.cpp:92-97; scan_ops
+    // evaluate_scan at scan_ops.cpp:84-85; symmetric uses elsewhere) all
+    // index `cells[cy * width + cx]` and treat `(cx, cy=0)` as the cell
+    // anchored at world (origin_x, origin_y). For that to be consistent
+    // with the YAML semantics, `cells[0..width-1]` must be the BOTTOM
+    // row of the image, not the top row.
+    //
+    // We bridge here at load time: flip the row order once so the
+    // entire downstream kernel (EDT build, likelihood lookup, seed
+    // sampling, free-cell enumeration) reads a single coherent frame.
+    // The alternative — leaving the raster intact and inserting
+    // `(height - 1 - cy)` flips at every lookup — was rejected because
+    // `build_likelihood_field` runs the EDT pass over `cells` in array
+    // order; without the flip the EDT distances would be measured in a
+    // mirrored frame and a single lookup-side flip would not undo it.
+    std::vector<std::uint8_t> cells(cells_n, 0);
+    for (int row = 0; row < height; ++row) {
+        const std::size_t src_off =
+            static_cast<std::size_t>(row) * static_cast<std::size_t>(width);
+        const std::size_t dst_off =
+            static_cast<std::size_t>(height - 1 - row) *
+            static_cast<std::size_t>(width);
+        std::memcpy(cells.data() + dst_off,
+                    raw.data() + src_off,
+                    static_cast<std::size_t>(width));
     }
 
     OccupancyGrid g{};

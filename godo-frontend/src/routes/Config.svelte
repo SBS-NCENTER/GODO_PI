@@ -207,10 +207,18 @@
     // Drop succeeded keys from pending; keep failures so the operator
     // can fix them inline. Memory: "Cancel semantics: don't undo
     // already-applied keys."
+    //
+    // Operator UX 2026-05-02 KST follow-up: no-op keys (pending value
+    // matched current) keep their ✓ marker for input acknowledgement
+    // but are EXCLUDED from `okCount` — the "N개 키가 적용되었습니다"
+    // summary should only count keys that actually moved through PATCH.
+    // A pure-noop Apply produces no summary banner at all (ok=0, fail=0).
+    const noopSet = new Set(noopKeys);
     const nextPending: Record<string, string> = {};
     let okCount = 0;
     let failCount = 0;
     for (const [key, raw] of Object.entries(pending)) {
+      if (noopSet.has(key)) continue;
       const r = merged[key];
       if (r?.ok) {
         okCount += 1;

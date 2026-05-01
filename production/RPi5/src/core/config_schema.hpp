@@ -49,25 +49,36 @@ struct ConfigSchemaRow {
     std::string_view description;
 };
 
-// 42 rows — issue#3 fold (2026-04-30). Adding 2 hint-σ default rows
-// brought the count from 40 to 42 (`amcl.hint_sigma_xy_m_default`,
-// `amcl.hint_sigma_yaw_deg_default`). Track D-5 fold added 3 annealing
-// rows (37 → 40); see git history for the earlier fold.
+// 46 rows — issue#5 fold (2026-05-01). Adding 4 Live-carry rows brought
+// the count from 42 to 46 (`amcl.live_carry_pose_as_hint` Int-as-Bool
+// selector, `amcl.live_carry_schedule_m` schedule string,
+// `amcl.live_carry_sigma_xy_m`, `amcl.live_carry_sigma_yaw_deg`).
+// issue#3 fold (40 → 42) added 2 hint-σ default rows. Track D-5 fold
+// (37 → 40) added 3 annealing rows; see git history for the earlier folds.
 //
 // Ordering: alphabetical by `name`. Section grouping (network, serial,
 // smoother, rt, ipc, amcl, gpio) emerges naturally from the alphabet.
 //
 // NOTE: `t_ramp_ms` reload_class is `restart` (Mode-A M2 fold) — mid-
 // run ramp duration changes would race the smoother's state machine.
+//
+// NOTE (issue#5): `amcl.live_carry_pose_as_hint` is the project's first
+// Bool-as-Int row — encoded as `Int` with `min=0, max=1, default_repr="0"`
+// until a future PR adds first-class `ValueType::Bool`. Precedent-setting
+// key for the convention. See production/RPi5/CODEBASE.md invariant (q).
 
 // clang-format off
-inline constexpr std::array<ConfigSchemaRow, 42> CONFIG_SCHEMA = {{
+inline constexpr std::array<ConfigSchemaRow, 46> CONFIG_SCHEMA = {{
     {"amcl.anneal_iters_per_phase",     ValueType::Int,    1.0,      200.0,    "10",                             ReloadClass::Recalibrate, "Track D-5: per-phase upper-bound iteration count for sigma annealing."},
     {"amcl.converge_xy_std_m",          ValueType::Double, 0.001,    1.0,      "0.015",                          ReloadClass::Recalibrate, "AMCL converge() xy_std exit threshold (m)."},
     {"amcl.converge_yaw_std_deg",       ValueType::Double, 0.01,     30.0,     "0.3",                            ReloadClass::Recalibrate, "AMCL converge() yaw_std exit threshold (deg)."},
     {"amcl.downsample_stride",          ValueType::Int,    1.0,      16.0,     "2",                              ReloadClass::Recalibrate, "LiDAR beam decimation stride."},
     {"amcl.hint_sigma_xy_m_default",    ValueType::Double, 0.05,     5.0,      "0.50",                           ReloadClass::Recalibrate, "issue#3: default σ_xy (m) for the calibrate pose hint when the operator omits an override."},
     {"amcl.hint_sigma_yaw_deg_default", ValueType::Double, 1.0,      90.0,     "20.0",                           ReloadClass::Recalibrate, "issue#3: default σ_yaw (deg) for the calibrate pose hint when the operator omits an override."},
+    {"amcl.live_carry_pose_as_hint",    ValueType::Int,    0.0,      1.0,      "0",                              ReloadClass::Recalibrate, "issue#5: Live mode kernel selector (Bool-as-Int). 0 = legacy `Amcl::step` per-scan path (rollback). 1 = pipelined `converge_anneal_with_hint` driven by previous-tick pose. Default OFF; flip via tracker.toml + restart after HIL approval."},
+    {"amcl.live_carry_schedule_m",      ValueType::String, 0.0,      0.0,      "0.2,0.1,0.05",                   ReloadClass::Recalibrate, "issue#5: CSV sigma_hit schedule for Live pipelined-hint kernel (per-tick anneal). Distinct from amcl.sigma_hit_schedule_m (OneShot). Short by design — tight carry-hint already locks the basin."},
+    {"amcl.live_carry_sigma_xy_m",      ValueType::Double, 0.001,    0.5,      "0.050",                          ReloadClass::Recalibrate, "issue#5: Live (pipelined-hint kernel) per-tick carry σ_xy (m). Tight value matches inter-tick crane-base drift; do NOT widen for AMCL search comfort."},
+    {"amcl.live_carry_sigma_yaw_deg",   ValueType::Double, 0.05,     30.0,     "5.0",                            ReloadClass::Recalibrate, "issue#5: Live (pipelined-hint kernel) per-tick carry σ_yaw (deg). Pair with amcl.live_carry_sigma_xy_m."},
     {"amcl.map_path",                   ValueType::String, 0.0,      0.0,      "/etc/godo/maps/studio_v1.pgm",   ReloadClass::Recalibrate, "PGM map path; load_map runs at OneShot start."},
     {"amcl.max_iters",                  ValueType::Int,    1.0,      200.0,    "25",                             ReloadClass::Recalibrate, "AMCL converge() upper-bound iteration count."},
     {"amcl.origin_x_m",                 ValueType::Double, -1000.0,  1000.0,   "0.0",                            ReloadClass::Recalibrate, "Calibration origin X (m); affects offset arithmetic."},
@@ -107,7 +118,7 @@ inline constexpr std::array<ConfigSchemaRow, 42> CONFIG_SCHEMA = {{
 }};
 // clang-format on
 
-static_assert(CONFIG_SCHEMA.size() == 42,
+static_assert(CONFIG_SCHEMA.size() == 46,
               "CONFIG_SCHEMA row count drifted; update tests + schema mirror");
 
 // O(N) lookup. N=40 keeps this trivially fine; O(log N) binary search is

@@ -101,6 +101,10 @@ Config make_test_config(std::uint64_t seed) {
     cfg.amcl_particles_global_n         = 200;
     cfg.amcl_map_path =
         std::string(GODO_FIXTURES_MAPS_DIR) + "/synthetic_4x4.pgm";
+    // issue#5 — pin the rollback-path contract. This test file asserts
+    // the legacy `Amcl::step` Live behaviour; the pipelined kernel has
+    // its own test file (test_cold_writer_live_pipelined.cpp).
+    cfg.live_carry_pose_as_hint         = false;
     return cfg;
 }
 

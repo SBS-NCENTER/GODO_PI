@@ -112,4 +112,30 @@ inline constexpr int              GPIO_LIVE_TOGGLE_PIN     = 20;
 inline constexpr double           AMCL_HINT_SIGMA_XY_M_DEFAULT     = 0.50;
 inline constexpr double           AMCL_HINT_SIGMA_YAW_DEG_DEFAULT  = 20.0;
 
+// issue#5 — Live mode pipelined-hint kernel (default OFF in this PR for
+// rollback safety; flip on via tracker.toml + restart per
+// production/RPi5/CODEBASE.md invariant (q)).
+//
+// σ derivation: operator memory cites "50 ms × 1 m/s = 50 mm"; actual
+// LiDAR tick is ~100 ms (10 Hz). At realistic 30 cm/s crane peak,
+// 100 ms tick × 30 cm/s = 30 mm displacement, well within 50 mm σ.
+// Default is conservative-but-comfortable; operators can widen to
+// 0.10 m via tracker.toml if HIL shows wider drift. σ_yaw 5° is
+// conservative for a non-rotating SHOTOKU dolly base (see CLAUDE.md §1).
+//
+// Schedule rationale: with a tight carry-hint the OneShot anneal's wide-σ
+// phases (1.0, 0.5) waste depth — basin lock is automatic at σ=0.05 m.
+// Three phases × ~10 ms ≈ 30 ms confines per-tick wall-clock to ~1/3 of
+// the 100 ms LiDAR period, leaving headroom for queue depth. Operators
+// can lengthen via tracker.toml if HIL shows undersettling.
+//
+// Bool-as-Int convention: `live_carry_pose_as_hint` is encoded as
+// CONFIG_SCHEMA `Int` with `min=0, max=1, default_repr="0"` until a
+// future PR adds `ValueType::Bool`. Precedent-setting key.
+inline constexpr bool             LIVE_CARRY_POSE_AS_HINT          = false;
+inline constexpr double           AMCL_LIVE_CARRY_SIGMA_XY_M       = 0.050;
+inline constexpr double           AMCL_LIVE_CARRY_SIGMA_YAW_DEG    = 5.0;
+inline constexpr std::string_view AMCL_LIVE_CARRY_SCHEDULE_M       =
+    "0.2,0.1,0.05";
+
 }  // namespace godo::config::defaults

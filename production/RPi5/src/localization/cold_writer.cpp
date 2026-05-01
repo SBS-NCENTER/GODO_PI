@@ -7,6 +7,7 @@
 #include <cstring>
 #include <exception>
 #include <limits>
+#include <variant>
 
 #include "core/constants.hpp"
 #include "core/rt_flags.hpp"
@@ -37,88 +38,101 @@ namespace godo::localization {
 // best phases before declaring "we've passed the minimum, stop"
 // (patience absorbs single-phase noise spikes; second consecutive bump
 // signals real over-tightening). See .claude/memory/project_amcl_sigma_sweep_2026-04-29.md.
-AmclResult converge_anneal(const godo::core::Config&     cfg,
-                           const std::vector<RangeBeam>& beams,
-                           const OccupancyGrid&          grid,
-                           LikelihoodField&              field_inout,
-                           Amcl&                         amcl,
-                           Pose2D&                       pose_inout,
-                           Rng&                          rng) {
+namespace {
+
+// Phase-0 seed strategy. Determines what `phase_seed_for_index_0` does
+// at the top of the anneal loop.
+struct Phase0SeedHint {
+    Pose2D pose;
+    double sigma_xy_m;
+    double sigma_yaw_deg;
+};
+struct Phase0SeedGlobal {};
+using Phase0Seed = std::variant<Phase0SeedGlobal, Phase0SeedHint>;
+
+// Per-phase seed_xy source. OneShot uses the length-matched
+// `cfg.amcl_sigma_seed_xy_schedule_m` (entries 1..N-1 are doubles, entry
+// 0 is NaN sentinel). Live carry derives seed_xy from a base σ_xy times
+// σ_k / σ_0 — no separate length-matched schedule needed.
+struct PerPhaseSeedFromSchedule {
+    const std::vector<double>* schedule;  // length-matched to schedule_m
+};
+struct PerPhaseSeedFromBase {
+    double base_xy_m;
+};
+using PerPhaseSeed = std::variant<PerPhaseSeedFromSchedule,
+                                  PerPhaseSeedFromBase>;
+
+// Shared anneal kernel. Single loop covers both OneShot (with possible
+// hint) and Live carry. Phase 0 seeds per `phase0_seed`; phases k>0
+// seed_around the carry pose with σ_xy from `per_phase_seed` and σ_yaw
+// scaled linearly by σ_k / σ_0. Auto-minima tracking with patience-2
+// early break is unchanged from the pre-issue#5 OneShot path.
+AmclResult run_anneal_kernel(const godo::core::Config&     cfg,
+                             const std::vector<RangeBeam>& beams,
+                             const OccupancyGrid&          grid,
+                             LikelihoodField&              field_inout,
+                             Amcl&                         amcl,
+                             const std::vector<double>&    schedule,
+                             const Phase0Seed&             phase0_seed,
+                             const PerPhaseSeed&           per_phase_seed,
+                             Pose2D&                       pose_inout,
+                             Rng&                          rng) {
+    if (schedule.empty()) {
+        AmclResult r{};
+        r.iterations = 0;
+        r.xy_std_m   = std::numeric_limits<double>::infinity();
+        return r;
+    }
+
     int total_iters = 0;
+    const double sigma_0 = schedule.front();
 
-    const auto& schedule = cfg.amcl_sigma_hit_schedule_m;
-    const auto& seed_xy_schedule = cfg.amcl_sigma_seed_xy_schedule_m;
-    const double sigma_0 = (schedule.empty() ? 1.0 : schedule.front());
-
-    // Auto-minima tracking. best_result starts forced-false / xy_std=+inf
-    // so the first phase ALWAYS becomes the new best, even if AMCL reported
-    // a degenerate xy_std on phase 0.
     AmclResult  best_result{};
     best_result.forced    = false;
     best_result.xy_std_m  = std::numeric_limits<double>::infinity();
     Pose2D      best_pose{};
     int         bad_streak = 0;
-    constexpr int kPatience = 2;  // 2 consecutive worse phases → stop
-
-    // issue#3 — pose hint check. UDS handler stored a finite, in-range
-    // bundle and lifted the flag with release ordering BEFORE
-    // g_amcl_mode = OneShot was stored (uds_server.cpp Mode-A M3 pin).
-    // Acquire-load here gives us happens-after on both the bundle bytes
-    // and the OneShot mode that brought us into this kernel.
-    const bool have_hint = godo::rt::g_calibrate_hint_valid.load(
-        std::memory_order_acquire);
-    godo::rt::HintBundle hint{};
-    if (have_hint) {
-        hint = godo::rt::g_calibrate_hint_data.load();
-    }
+    constexpr int kPatience = 2;
 
     for (std::size_t k = 0; k < schedule.size(); ++k) {
         const double sigma_k = schedule[k];
 
-        // 1. Rebuild EDT at σ_k. `lf` is reassignable via the static_assert
-        //    pinned in amcl.hpp (Mode-A S4); a throw here would unwind into
-        //    the caller's catch with the field in an unspecified state, but
-        //    since LikelihoodField is nothrow-move-assignable, the basic
-        //    exception guarantee holds.
+        // Rebuild EDT at σ_k. LikelihoodField is nothrow-move-assignable
+        // (amcl.hpp static_assert), so a throw inside leaves the basic
+        // exception guarantee intact.
         field_inout = build_likelihood_field(grid, sigma_k);
         amcl.set_field(field_inout);
 
-        // 2. Seed.
-        if (k == 0 && have_hint) {
-            // issue#3 — operator-supplied hint narrows the phase-0 cloud
-            // to a Gaussian basin instead of seeding globally. σ override
-            // applies if the operator supplied one (>0); otherwise fall
-            // back to the Tier-2 default.
-            const double seed_xy_h = (hint.sigma_xy_m > 0.0)
-                ? hint.sigma_xy_m
-                : cfg.amcl_hint_sigma_xy_m_default;
-            const double seed_yaw_h = (hint.sigma_yaw_deg > 0.0)
-                ? hint.sigma_yaw_deg
-                : cfg.amcl_hint_sigma_yaw_deg_default;
-            Pose2D hint_pose{};
-            hint_pose.x       = hint.x_m;
-            hint_pose.y       = hint.y_m;
-            hint_pose.yaw_deg = hint.yaw_deg;
-            amcl.seed_around(hint_pose, seed_xy_h, seed_yaw_h, rng);
-            // pose_inout is the carry-pose for subsequent phases; start
-            // it at the hint position so the phase-1 seed_around centres
-            // on the operator's basin even if phase 0 ends with a slight
-            // drift from xy_std-tracking noise.
-            pose_inout = hint_pose;
-        } else if (k == 0) {
-            amcl.seed_global(grid, rng);
+        // Seed.
+        if (k == 0) {
+            if (std::holds_alternative<Phase0SeedHint>(phase0_seed)) {
+                const auto& h = std::get<Phase0SeedHint>(phase0_seed);
+                amcl.seed_around(h.pose, h.sigma_xy_m, h.sigma_yaw_deg, rng);
+                // Carry the hint pose so the phase-1 seed_around centres
+                // on the operator's basin even if phase 0 ends with a
+                // small drift from xy_std-tracking noise.
+                pose_inout = h.pose;
+            } else {
+                amcl.seed_global(grid, rng);
+            }
         } else {
-            // Per-phase seed_around σ_xy from the explicit schedule (Mode-A
-            // M4 option b). Seed σ_yaw shrinks linearly with σ_k / σ_0 so
-            // the yaw cloud refines in lockstep with the likelihood field's
-            // tightening.
-            const double seed_xy_k  = seed_xy_schedule[k];
+            double seed_xy_k = 0.0;
+            if (std::holds_alternative<PerPhaseSeedFromSchedule>(
+                    per_phase_seed)) {
+                const auto& s = std::get<PerPhaseSeedFromSchedule>(
+                    per_phase_seed);
+                seed_xy_k = (*s.schedule)[k];
+            } else {
+                const auto& b = std::get<PerPhaseSeedFromBase>(per_phase_seed);
+                seed_xy_k = b.base_xy_m * (sigma_k / sigma_0);
+            }
             const double seed_yaw_k = cfg.amcl_sigma_seed_yaw_deg *
                                       (sigma_k / sigma_0);
             amcl.seed_around(pose_inout, seed_xy_k, seed_yaw_k, rng);
         }
 
-        // 3. Inner loop — same early-exit rule as Amcl::converge.
+        // Inner loop — same early-exit rule as Amcl::converge.
         AmclResult phase_result{};
         const int max_iters = cfg.amcl_anneal_iters_per_phase;
         int iter = 0;
@@ -130,10 +144,6 @@ AmclResult converge_anneal(const godo::core::Config&     cfg,
             }
         }
 
-        // 4. Track minimum + patience-aware early break. Always carry
-        //    pose_inout = current-phase pose to next seed_around (gives
-        //    next σ a chance to recover even if THIS phase was worse).
-        //    Final return is best_result, not last.
         total_iters += iter;
         if (phase_result.xy_std_m < best_result.xy_std_m) {
             best_result = phase_result;
@@ -142,9 +152,6 @@ AmclResult converge_anneal(const godo::core::Config&     cfg,
         } else {
             ++bad_streak;
             if (bad_streak >= kPatience) {
-                // Two consecutive phases worse than best — likely past the
-                // minimum (over-tightening into sub-cell discretization or
-                // particle-cloud collapse). Stop here; return best.
                 pose_inout = phase_result.pose;
                 break;
             }
@@ -152,11 +159,83 @@ AmclResult converge_anneal(const godo::core::Config&     cfg,
         pose_inout = phase_result.pose;
     }
 
-    // pose_inout out-param mirrors best_result.pose for caller convenience
-    // (some call sites use the in/out pose, others use the returned struct).
     pose_inout = best_pose;
     best_result.iterations = total_iters;
     return best_result;
+}
+
+}  // namespace
+
+// issue#5 — Pure-kernel hint-driven anneal. Caller supplies the hint
+// pose, the per-tick σ pair, and the schedule. NEVER touches
+// g_calibrate_hint_*; consume-once is OneShot-only (run_one_iteration).
+//
+// Phase 0 always seed_arounds the hint with (sigma_xy_m, sigma_yaw_deg).
+// Phases k>0 derive seed_xy from sigma_xy_m × σ_k / σ_0 (tight carry-σ
+// shrinks in lockstep with the likelihood field). This keeps the kernel
+// independent of OneShot's `amcl_sigma_seed_xy_schedule_m`, which is
+// length-matched to the wide OneShot schedule and would over-spread the
+// Live carry cloud.
+AmclResult converge_anneal_with_hint(const godo::core::Config&     cfg,
+                                     const std::vector<RangeBeam>& beams,
+                                     const OccupancyGrid&          grid,
+                                     LikelihoodField&              lf_inout,
+                                     Amcl&                         amcl,
+                                     const Pose2D&                 hint_pose,
+                                     double                        sigma_xy_m,
+                                     double                        sigma_yaw_deg,
+                                     const std::vector<double>&    schedule_m,
+                                     Pose2D&                       pose_inout,
+                                     Rng&                          rng) {
+    Phase0Seed   p0  = Phase0SeedHint{hint_pose, sigma_xy_m, sigma_yaw_deg};
+    PerPhaseSeed pps = PerPhaseSeedFromBase{sigma_xy_m};
+    return run_anneal_kernel(cfg, beams, grid, lf_inout, amcl,
+                             schedule_m, p0, pps, pose_inout, rng);
+}
+
+AmclResult converge_anneal(const godo::core::Config&     cfg,
+                           const std::vector<RangeBeam>& beams,
+                           const OccupancyGrid&          grid,
+                           LikelihoodField&              field_inout,
+                           Amcl&                         amcl,
+                           Pose2D&                       pose_inout,
+                           Rng&                          rng) {
+    // issue#3 — pose hint check. UDS handler stored a finite, in-range
+    // bundle and lifted the flag with release ordering BEFORE
+    // g_amcl_mode = OneShot was stored (uds_server.cpp Mode-A M3 pin).
+    // Acquire-load here gives us happens-after on both the bundle bytes
+    // and the OneShot mode that brought us into this kernel. Consume-once
+    // clearing belongs to OneShot (run_one_iteration); this wrapper does
+    // not touch the flag.
+    const bool have_hint = godo::rt::g_calibrate_hint_valid.load(
+        std::memory_order_acquire);
+
+    if (have_hint) {
+        const godo::rt::HintBundle hint =
+            godo::rt::g_calibrate_hint_data.load();
+        const double seed_xy_h = (hint.sigma_xy_m > 0.0)
+            ? hint.sigma_xy_m
+            : cfg.amcl_hint_sigma_xy_m_default;
+        const double seed_yaw_h = (hint.sigma_yaw_deg > 0.0)
+            ? hint.sigma_yaw_deg
+            : cfg.amcl_hint_sigma_yaw_deg_default;
+        Pose2D hint_pose{};
+        hint_pose.x       = hint.x_m;
+        hint_pose.y       = hint.y_m;
+        hint_pose.yaw_deg = hint.yaw_deg;
+        return converge_anneal_with_hint(cfg, beams, grid, field_inout, amcl,
+                                         hint_pose, seed_xy_h, seed_yaw_h,
+                                         cfg.amcl_sigma_hit_schedule_m,
+                                         pose_inout, rng);
+    }
+
+    // No hint — phase 0 seeds globally (legacy OneShot path).
+    Phase0Seed   p0  = Phase0SeedGlobal{};
+    PerPhaseSeed pps = PerPhaseSeedFromSchedule{
+        &cfg.amcl_sigma_seed_xy_schedule_m};
+    return run_anneal_kernel(cfg, beams, grid, field_inout, amcl,
+                             cfg.amcl_sigma_hit_schedule_m, p0, pps,
+                             pose_inout, rng);
 }
 
 // Track D-5 (Q2 / S4) — At OneShot completion, rebuild `lf` back to
@@ -493,6 +572,137 @@ AmclResult run_live_iteration(const godo::core::Config&         cfg,
     return result;
 }
 
+// issue#5 — Per-Live-iteration pipelined-hint kernel. Runs sequential K-step
+// `converge_anneal_with_hint` driven by the previous-tick pose with tight σ
+// and a short schedule. Sole caller of converge_anneal_with_hint from the
+// Live cold-path branch (production CODEBASE invariant (q)).
+//
+// Hint source contract (`last_pose_inout`):
+//   - tick t=0 after Live entry: `last_pose_inout` carries the most recent
+//     OneShot pose OR the previous Live session's last pose (preserved
+//     across Idle re-entry). The cold-start guard in run_cold_writer's
+//     Live-case body ensures `last_pose_set` is true before this function
+//     is reachable; we trust the caller and do NOT re-check here.
+//   - tick t≥1: `last_pose_inout` is the previous tick's converged pose.
+//
+// σ pair: cfg.amcl_live_carry_sigma_xy_m / _yaw_deg. Tight, matched to
+// inter-tick crane-base drift, NOT padded for AMCL search comfort
+// (`project_hint_strong_command_semantics.md`). Operators widen via
+// tracker.toml if HIL shows wider drift.
+//
+// Schedule: cfg.amcl_live_carry_schedule_m. Short by design — basin lock
+// is automatic at σ=0.05 m carry-σ, so the wide-σ phases of OneShot
+// (1.0, 0.5) waste depth. See config_defaults.hpp comment block.
+//
+// Side effects mirror run_live_iteration: deadband-filtered Offset
+// publish, unconditional LastPose + LastScan publish, AMCL rate record.
+// `result.forced = false` always; deadband applies. `live_first_iter_inout`
+// is intentionally unused here (the latch belongs to the rollback path).
+AmclResult run_live_iteration_pipelined(
+    const godo::core::Config&                     cfg,
+    const godo::lidar::Frame&                     frame,
+    const OccupancyGrid&                          grid,
+    LikelihoodField&                              lf_inout,
+    Amcl&                                         amcl,
+    Rng&                                          rng,
+    std::vector<RangeBeam>&                       beams_buf,
+    Pose2D&                                       last_pose_inout,
+    godo::rt::Offset&                             last_written_inout,
+    godo::rt::Seqlock<godo::rt::Offset>&          target_offset,
+    godo::rt::Seqlock<godo::rt::LastPose>&        last_pose_seq,
+    godo::rt::Seqlock<godo::rt::LastScan>&        last_scan_seq,
+    godo::rt::AmclRateAccumulator&                amcl_rate_accum,
+    godo::rt::Seqlock<godo::core::HotConfig>&     hot_cfg_seq) {
+    // 0. PR-DIAG (Mode-A M2): record this AMCL iteration into the rate
+    //    accumulator. Mirrors run_one_iteration / run_live_iteration.
+    amcl_rate_accum.record(
+        static_cast<std::uint64_t>(godo::rt::monotonic_ns()));
+
+    // 0b. Track B-CONFIG (PR-CONFIG-β): hot-class Tier-2 keys, see
+    //     run_one_iteration for the contract pin.
+    const godo::core::HotConfig hot = hot_cfg_seq.load();
+    const double deadband_mm  = hot.valid ? hot.deadband_mm  : cfg.deadband_mm;
+    const double deadband_deg = hot.valid ? hot.deadband_deg : cfg.deadband_deg;
+    const double yaw_tripwire = hot.valid ? hot.amcl_yaw_tripwire_deg
+                                          : cfg.amcl_yaw_tripwire_deg;
+
+    // 1. Decimate the scan into AMCL beams.
+    downsample(frame,
+               cfg.amcl_downsample_stride,
+               cfg.amcl_range_min_m,
+               cfg.amcl_range_max_m,
+               beams_buf);
+
+    // 2. Run the pipelined-hint kernel. Hint = previous-tick pose.
+    //    Schedule + σ from the Live carry-keys (distinct from OneShot).
+    Pose2D anneal_pose{};
+    AmclResult result = converge_anneal_with_hint(
+        cfg, beams_buf, grid, lf_inout, amcl,
+        last_pose_inout,
+        cfg.amcl_live_carry_sigma_xy_m,
+        cfg.amcl_live_carry_sigma_yaw_deg,
+        cfg.amcl_live_carry_schedule_m,
+        anneal_pose, rng);
+
+    // 3. Tripwire — informational only (mirror of OneShot / Live legacy).
+    if (apply_yaw_tripwire(result.pose,
+                           cfg.amcl_origin_yaw_deg,
+                           yaw_tripwire)) {
+        std::fprintf(stderr,
+            "cold_writer: yaw tripwire fired (Live pipelined) — pose.yaw=%.3f deg "
+            "vs origin.yaw=%.3f deg (tripwire=%.3f deg). Studio base "
+            "may have rotated; re-run calibration when convenient.\n",
+            result.pose.yaw_deg, cfg.amcl_origin_yaw_deg,
+            yaw_tripwire);
+    }
+
+    // 4. Compute Offset against calibration origin.
+    Pose2D origin{};
+    origin.x       = cfg.amcl_origin_x_m;
+    origin.y       = cfg.amcl_origin_y_m;
+    origin.yaw_deg = cfg.amcl_origin_yaw_deg;
+    result.offset = compute_offset(result.pose, origin);
+    result.forced = false;            // Live publishes through the deadband
+
+    // 5. Publish — deadband filter at the seqlock seam (§6.4.1).
+    (void)apply_deadband_publish(result.offset,
+                                 result.forced,
+                                 deadband_mm / 1000.0,
+                                 deadband_deg,
+                                 last_written_inout,
+                                 target_offset);
+
+    // 6. Track B — publish LastPose snapshot UNCONDITIONALLY.
+    godo::rt::LastPose snap{};
+    snap.x_m               = result.pose.x;
+    snap.y_m               = result.pose.y;
+    snap.yaw_deg           = result.pose.yaw_deg;
+    snap.xy_std_m          = result.xy_std_m;
+    snap.yaw_std_deg       = result.yaw_std_deg;
+    snap.published_mono_ns = static_cast<std::uint64_t>(godo::rt::monotonic_ns());
+    snap.iterations        = result.iterations;
+    snap.valid             = 1;
+    snap.converged         = result.converged ? std::uint8_t{1} : std::uint8_t{0};
+    snap.forced            = std::uint8_t{0};       // Live publishes forced=0
+    snap._pad0             = 0;
+    last_pose_seq.store(snap);
+
+    // 7. Track D — publish LastScan snapshot UNCONDITIONALLY.
+    godo::rt::LastScan scan_snap{};
+    fill_last_scan(scan_snap, cfg, frame, result);
+    scan_snap.forced     = std::uint8_t{0};         // Live publishes forced=0
+    scan_snap.pose_valid = result.converged ? std::uint8_t{1} : std::uint8_t{0};
+    last_scan_seq.store(scan_snap);
+
+    // 8. Update Live state. `last_pose_inout` is updated unconditionally;
+    //    on the next tick this becomes the hint. Note: NEVER touch
+    //    g_calibrate_hint_*; consume-once is OneShot-only. The legacy
+    //    `live_first_iter` latch is intentionally not consulted on the
+    //    pipelined path.
+    last_pose_inout = result.pose;
+    return result;
+}
+
 namespace {
 
 // Helper: convert a poll interval in milliseconds to a timespec for nanosleep.
@@ -541,6 +751,16 @@ void run_cold_writer(const godo::core::Config&              cfg,
     Rng  rng(cfg.amcl_seed);
     Pose2D last_pose{};
     bool live_first_iter = true;
+
+    // issue#5 — Cold-start guard for the pipelined Live path. Set to true
+    // ONLY after a successful OneShot completion (run_one_iteration end)
+    // OR after the first successful pipelined Live tick (when seeding from
+    // a prior OneShot pose has already produced a converged pose). Reading
+    // this flag is preferred over comparing `last_pose` to (0,0,0): a
+    // legitimate OneShot result of pose=(0.0, 0.0, 0.0°) is operator-allowed
+    // (calibration origin defaults are 0), so a value-comparison guard
+    // would falsely reject Live re-entry after such a OneShot.
+    bool last_pose_set = false;
 
     // Thread-C-local reference for the deadband filter (§6.4.1).
     // Initialised to {0, 0, 0} to match the seqlock's default-constructed
@@ -633,6 +853,10 @@ void run_cold_writer(const godo::core::Config&              cfg,
                                             last_written, target_offset,
                                             last_pose_seq, last_scan_seq,
                                             amcl_rate_accum, hot_cfg_seq);
+                    // issue#5 — A successful OneShot anchors the cold-start
+                    // for the pipelined Live path. Flag flips here, NEVER
+                    // on a thrown converge.
+                    last_pose_set = true;
                 } catch (const std::exception& e) {
                     std::fprintf(stderr,
                         "cold_writer: run_one_iteration threw: %s — "
@@ -666,6 +890,25 @@ void run_cold_writer(const godo::core::Config&              cfg,
                     std::fprintf(stderr,
                         "cold_writer: Live requested but no LiDAR source "
                         "available; returning to Idle.\n");
+                    godo::rt::g_amcl_mode.store(godo::rt::AmclMode::Idle,
+                                                std::memory_order_release);
+                    on_leave_live(live_first_iter);
+                    break;
+                }
+                // issue#5 — Cold-start guard for the pipelined path.
+                // Reject Live entry when (a) the operator selected the
+                // pipelined kernel via cfg.live_carry_pose_as_hint AND
+                // (b) no prior OneShot has run in this session (so
+                // `last_pose` is the default-zero seed and is NOT a
+                // converged pose). The rollback path is unaffected — its
+                // first iteration runs seed_global so it can recover from
+                // arbitrary state.
+                if (cfg.live_carry_pose_as_hint && !last_pose_set) {
+                    std::fprintf(stderr,
+                        "cold_writer: Live (pipelined-hint kernel) requires "
+                        "a prior OneShot or pose-hint-driven OneShot in this "
+                        "session — `last_pose` is unset. Bouncing to Idle. "
+                        "Run Calibrate first, then re-toggle Live.\n");
                     godo::rt::g_amcl_mode.store(godo::rt::AmclMode::Idle,
                                                 std::memory_order_release);
                     on_leave_live(live_first_iter);
@@ -711,15 +954,33 @@ void run_cold_writer(const godo::core::Config&              cfg,
                     break;
                 }
                 try {
-                    (void)run_live_iteration(cfg, captured, grid, amcl, rng,
-                                             beams_buf, last_pose,
-                                             live_first_iter,
-                                             last_written, target_offset,
-                                             last_pose_seq, last_scan_seq,
-                                             amcl_rate_accum, hot_cfg_seq);
+                    if (cfg.live_carry_pose_as_hint) {
+                        // issue#5 — pipelined-hint Live kernel. last_pose
+                        // is the carry source; flag enforced above ensures
+                        // it's a converged pose (not default zero).
+                        (void)run_live_iteration_pipelined(
+                            cfg, captured, grid, lf, amcl, rng,
+                            beams_buf, last_pose,
+                            last_written, target_offset,
+                            last_pose_seq, last_scan_seq,
+                            amcl_rate_accum, hot_cfg_seq);
+                        // After the first successful pipelined tick
+                        // last_pose carries a fresh converged pose;
+                        // a subsequent OneShot exit followed by another
+                        // pipelined Live re-entry can rely on the flag
+                        // even if the user did not run another Calibrate.
+                        last_pose_set = true;
+                    } else {
+                        (void)run_live_iteration(cfg, captured, grid, amcl, rng,
+                                                 beams_buf, last_pose,
+                                                 live_first_iter,
+                                                 last_written, target_offset,
+                                                 last_pose_seq, last_scan_seq,
+                                                 amcl_rate_accum, hot_cfg_seq);
+                    }
                 } catch (const std::exception& e) {
                     std::fprintf(stderr,
-                        "cold_writer: run_live_iteration threw: %s — "
+                        "cold_writer: Live iteration threw: %s — "
                         "returning to Idle.\n", e.what());
                     godo::rt::g_amcl_mode.store(godo::rt::AmclMode::Idle,
                                                 std::memory_order_release);

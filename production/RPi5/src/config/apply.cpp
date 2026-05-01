@@ -163,6 +163,12 @@ EffectiveValue read_effective(const Config& c, const ConfigSchemaRow& row) {
     else if (k == "amcl.downsample_stride")          v.as_int    = c.amcl_downsample_stride;
     else if (k == "amcl.hint_sigma_xy_m_default")    v.as_double = c.amcl_hint_sigma_xy_m_default;
     else if (k == "amcl.hint_sigma_yaw_deg_default") v.as_double = c.amcl_hint_sigma_yaw_deg_default;
+    // issue#5 — Live pipelined-hint kernel keys. Bool-as-Int wire shape
+    // for live_carry_pose_as_hint: true → 1, false → 0.
+    else if (k == "amcl.live_carry_pose_as_hint")    v.as_int    = c.live_carry_pose_as_hint ? 1 : 0;
+    else if (k == "amcl.live_carry_schedule_m")      v.as_string = format_schedule_csv(c.amcl_live_carry_schedule_m);
+    else if (k == "amcl.live_carry_sigma_xy_m")      v.as_double = c.amcl_live_carry_sigma_xy_m;
+    else if (k == "amcl.live_carry_sigma_yaw_deg")   v.as_double = c.amcl_live_carry_sigma_yaw_deg;
     else if (k == "amcl.map_path")                   v.as_string = c.amcl_map_path;
     else if (k == "amcl.max_iters")                  v.as_int    = c.amcl_max_iters;
     else if (k == "amcl.origin_x_m")                 v.as_double = c.amcl_origin_x_m;
@@ -215,6 +221,11 @@ bool apply_one(Config& c,
     else if (k == "amcl.downsample_stride")          c.amcl_downsample_stride          = static_cast<int>(vr.parsed_double);
     else if (k == "amcl.hint_sigma_xy_m_default")    c.amcl_hint_sigma_xy_m_default    = vr.parsed_double;
     else if (k == "amcl.hint_sigma_yaw_deg_default") c.amcl_hint_sigma_yaw_deg_default = vr.parsed_double;
+    // issue#5 — Live pipelined-hint kernel keys.
+    else if (k == "amcl.live_carry_pose_as_hint")    c.live_carry_pose_as_hint         = (static_cast<int>(vr.parsed_double) != 0);
+    else if (k == "amcl.live_carry_schedule_m")      c.amcl_live_carry_schedule_m      = apply_parse_csv_doubles(vr.parsed_string);
+    else if (k == "amcl.live_carry_sigma_xy_m")      c.amcl_live_carry_sigma_xy_m      = vr.parsed_double;
+    else if (k == "amcl.live_carry_sigma_yaw_deg")   c.amcl_live_carry_sigma_yaw_deg   = vr.parsed_double;
     else if (k == "amcl.map_path")                   c.amcl_map_path                   = vr.parsed_string;
     else if (k == "amcl.max_iters")                  c.amcl_max_iters                  = static_cast<int>(vr.parsed_double);
     else if (k == "amcl.origin_x_m")                 c.amcl_origin_x_m                 = vr.parsed_double;
@@ -405,6 +416,38 @@ ApplyResult apply_set(std::string_view                              key,
                 ar.err_detail = "amcl.sigma_hit_schedule_m: each entry must "
                                 "be in [0.005, 5.0]";
                 return ar;
+            }
+        }
+    }
+
+    // issue#5: cross-field check for the Live carry schedule. Same
+    // monotonic-decreasing + per-entry range rules as the OneShot
+    // sigma_hit_schedule_m, applied at apply time so an inconsistent
+    // edit is rejected without waiting for the next Config::load.
+    if (vr.row->name == "amcl.live_carry_schedule_m") {
+        if (staging.amcl_live_carry_schedule_m.empty()) {
+            ar.err        = "bad_value";
+            ar.err_detail = "amcl.live_carry_schedule_m: must be non-empty";
+            return ar;
+        }
+        for (std::size_t i = 0;
+             i < staging.amcl_live_carry_schedule_m.size();
+             ++i) {
+            const double curr = staging.amcl_live_carry_schedule_m[i];
+            if (!(curr >= 0.005) || !(curr <= 5.0)) {
+                ar.err        = "bad_value";
+                ar.err_detail = "amcl.live_carry_schedule_m: each entry must "
+                                "be in [0.005, 5.0]";
+                return ar;
+            }
+            if (i > 0) {
+                const double prev = staging.amcl_live_carry_schedule_m[i - 1];
+                if (!(curr < prev)) {
+                    ar.err        = "bad_value";
+                    ar.err_detail = "amcl.live_carry_schedule_m: must be "
+                                    "strictly monotonically decreasing";
+                    return ar;
+                }
             }
         }
     }

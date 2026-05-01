@@ -9,14 +9,26 @@
 //             can pass operator-driven calibrates through unconditionally.
 //             Phase 4-2 D: ALWAYS seeds globally (no warm-seed shortcut),
 //             so a calibrate after a base move converges reliably.
-//   Live    — Phase 4-2 D body. Per-scan single Amcl::step() with the wider
-//             Live σ pair (cfg.amcl_sigma_xy_jitter_live_m /
-//             _yaw_jitter_live_deg), publishing through the deadband
-//             (forced=false). Stays in Live until g_amcl_mode is toggled
-//             elsewhere (GPIO/UDS in Wave B). On Live entry the
-//             `live_first_iter_inout` latch forces a `seed_global` for the
-//             first iteration so Live can always pick up after a base
-//             move; subsequent iterations re-seed around `last_pose`.
+//   Live    — branches on `cfg.live_carry_pose_as_hint` (issue#5):
+//             - false (rollback path) → run_live_iteration: per-scan
+//               single Amcl::step() with the wider Live σ pair
+//               (cfg.amcl_sigma_xy_jitter_live_m / _yaw_jitter_live_deg),
+//               seed_global on the first iteration after Live entry,
+//               seed_around(last_pose, …) thereafter. Forced=false through
+//               the deadband. This is the legacy kernel kept as the
+//               rollback path until HIL approves the carry-hint default.
+//             - true (pipelined-hint path) → run_live_iteration_pipelined:
+//               per-scan converge_anneal_with_hint driven by the previous
+//               tick's pose with tight σ
+//               (cfg.amcl_live_carry_sigma_xy_m / _yaw_deg) and a short
+//               schedule (cfg.amcl_live_carry_schedule_m). On Live entry
+//               t=0 the hint sources from the freshly-converged OneShot
+//               pose (last_pose carried across, gated by `last_pose_set`).
+//               Live's pipelined path NEVER reads or clears
+//               g_calibrate_hint_valid (consume-once is OneShot-only).
+//             Both Live paths stay in Live until g_amcl_mode is toggled
+//             elsewhere. The legacy `live_first_iter_inout` latch is used
+//             only by the rollback path; the pipelined path bypasses it.
 //
 // Wait-free contract (M1): no std::mutex / std::shared_mutex /
 // std::condition_variable inside this module. The seqlock store is the
@@ -139,6 +151,37 @@ AmclResult converge_anneal(const godo::core::Config&     cfg,
                            Pose2D&                       pose_inout,
                            Rng&                          rng);
 
+// issue#5 — Pure-kernel hint-driven anneal. Caller supplies the hint pose,
+// the per-tick σ pair, and the schedule (so OneShot can pass the wide
+// `cfg.amcl_sigma_hit_schedule_m` while Live carry path passes the short
+// `cfg.amcl_sigma_hit_schedule_m` ↔ `cfg.amcl_live_carry_schedule_m`).
+//
+// Distinct from `converge_anneal` in two ways:
+//  (1) Phase 0 ALWAYS calls seed_around(hint_pose, sigma_xy, sigma_yaw),
+//      never seed_global; the wrapper `converge_anneal` is the surface
+//      that decides hint vs global based on `g_calibrate_hint_valid`.
+//  (2) Does NOT touch g_calibrate_hint_*. Consume-once clearing belongs
+//      to OneShot (run_one_iteration), NEVER to Live carry.
+//
+// Subsequent phases reuse the OneShot anneal body unchanged (seed_around
+// the per-phase pose with the per-phase σ_xy from the schedule's seed-σ
+// table OR a derived σ_xy when no seed-σ schedule is provided — see
+// implementation). Yaw σ shrinks with σ_k / σ_0 just like converge_anneal.
+//
+// Returns the final-phase AmclResult with iterations = total across phases.
+// Same auto-minima + patience-2 early-break logic as converge_anneal.
+AmclResult converge_anneal_with_hint(const godo::core::Config&     cfg,
+                                     const std::vector<RangeBeam>& beams,
+                                     const OccupancyGrid&          grid,
+                                     LikelihoodField&              lf_inout,
+                                     Amcl&                         amcl,
+                                     const Pose2D&                 hint_pose,
+                                     double                        sigma_xy_m,
+                                     double                        sigma_yaw_deg,
+                                     const std::vector<double>&    schedule_m,
+                                     Pose2D&                       pose_inout,
+                                     Rng&                          rng);
+
 // Track D-5: `lf_inout` is the persistent likelihood field owned by
 // `run_cold_writer`. The annealing helper (converge_anneal) rebuilds it
 // in place at each phase's σ_hit. Before returning, the kernel restores
@@ -179,6 +222,12 @@ AmclResult run_one_iteration(const godo::core::Config&         cfg,
 // Other side effects mirror `run_one_iteration`. Returns the AmclResult
 // produced by `Amcl::step` (with `result.offset` and `result.forced`
 // filled in by this function before publishing).
+//
+// Legacy Live kernel; preserved as the rollback path for the issue#5
+// carry-hint pipeline. Reachable only when
+// `cfg.live_carry_pose_as_hint == false`. To be retired in a future PR
+// once the carry-hint default-ON kernel is HIL-stable across multiple
+// sessions.
 AmclResult run_live_iteration(const godo::core::Config&         cfg,
                               const godo::lidar::Frame&         frame,
                               const OccupancyGrid&              grid,
@@ -193,6 +242,46 @@ AmclResult run_live_iteration(const godo::core::Config&         cfg,
                               godo::rt::Seqlock<godo::rt::LastScan>& last_scan_seq,
                               godo::rt::AmclRateAccumulator&    amcl_rate_accum,
                               godo::rt::Seqlock<godo::core::HotConfig>& hot_cfg_seq);
+
+// issue#5 — Per-Live-iteration pipelined-hint kernel. Visible for tests
+// so they can drive a deterministic synthetic Frame through the kernel
+// without spawning the cold writer thread. The production loop
+// (`run_cold_writer`) calls this on every scan while
+// `g_amcl_mode == Live` AND `cfg.live_carry_pose_as_hint == true`.
+//
+// Differences from `run_live_iteration`:
+//   - hint source: `last_pose_inout` (carried forward from the prior
+//     tick OR from the most recent OneShot completion);
+//   - sequential-K-step `converge_anneal_with_hint` instead of a single
+//     `Amcl::step` — sequential ships first per
+//     `project_pipelined_compute_pattern.md`. Pipelined-parallel deferred;
+//   - σ pair from cfg.amcl_live_carry_sigma_*  (tight, NOT padded for
+//     AMCL search comfort, per `project_hint_strong_command_semantics.md`);
+//   - schedule from cfg.amcl_live_carry_schedule_m (short by design);
+//   - NEVER touches g_calibrate_hint_*. Consume-once is OneShot-only;
+//     mid-Live re-anchor via hint placement is out of scope (operator
+//     must toggle Live OFF, place hint, Calibrate, toggle Live ON);
+//   - `live_first_iter_inout` is intentionally unused on the pipelined
+//     path — the latch belongs to the rollback path's seed_global gate.
+//
+// Side effects mirror `run_live_iteration` (deadband publish, LastPose,
+// LastScan, AmclRate accumulator). `result.forced = false` always; Live
+// publishes through the deadband. Returns the AmclResult.
+AmclResult run_live_iteration_pipelined(
+    const godo::core::Config&                     cfg,
+    const godo::lidar::Frame&                     frame,
+    const OccupancyGrid&                          grid,
+    LikelihoodField&                              lf_inout,
+    Amcl&                                         amcl,
+    Rng&                                          rng,
+    std::vector<RangeBeam>&                       beams_buf,
+    Pose2D&                                       last_pose_inout,
+    godo::rt::Offset&                             last_written_inout,
+    godo::rt::Seqlock<godo::rt::Offset>&          target_offset,
+    godo::rt::Seqlock<godo::rt::LastPose>&        last_pose_seq,
+    godo::rt::Seqlock<godo::rt::LastScan>&        last_scan_seq,
+    godo::rt::AmclRateAccumulator&                amcl_rate_accum,
+    godo::rt::Seqlock<godo::core::HotConfig>&     hot_cfg_seq);
 
 // Run the cold writer until godo::rt::g_running is false. Idempotent on
 // repeated trigger; safe to call once per process lifetime.

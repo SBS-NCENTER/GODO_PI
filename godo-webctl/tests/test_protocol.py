@@ -716,15 +716,27 @@ def test_godo_process_names_match_cmake_executables() -> None:
 
 def test_managed_process_names_cardinality() -> None:
     """Mode-A M2 fold: `MANAGED_PROCESS_NAMES` is the process-name view
-    of `services.ALLOWED_SERVICES`; binary-vs-unit asymmetry means the
-    set membership differs by exactly the substitution
-    `godo-tracker → godo_tracker_rt`."""
+    of `services.ALLOWED_SERVICES` MINUS the units that don't appear in
+    the host process list (godo-mapping@active runs inside Docker — its
+    container processes show up as `slam_toolbox_node` etc., not as
+    `godo-mapping`). Binary-vs-unit asymmetry means the set membership
+    differs by exactly the substitution `godo-tracker → godo_tracker_rt`
+    AND the omission of `godo-mapping@active`.
+
+    issue#14 Patch C2 (2026-05-02): godo-mapping@active joined
+    ALLOWED_SERVICES so the System tab can render its status; it is
+    NOT added to MANAGED_PROCESS_NAMES because the docker container's
+    processes don't carry that argv-derived name."""
     from godo_webctl import services
 
     assert len(P.MANAGED_PROCESS_NAMES) == 3
-    assert len(services.ALLOWED_SERVICES) == 3
+    assert len(services.ALLOWED_SERVICES) == 4
     diff = P.MANAGED_PROCESS_NAMES.symmetric_difference(services.ALLOWED_SERVICES)
-    assert diff == {"godo-tracker", "godo_tracker_rt"}, f"Asymmetric-diff mismatch: {diff}"
+    assert diff == {
+        "godo-tracker",
+        "godo_tracker_rt",
+        "godo-mapping@active",
+    }, f"Asymmetric-diff mismatch: {diff}"
 
 
 # --- issue#14 — mapping pipeline state + monitor field pins -------------

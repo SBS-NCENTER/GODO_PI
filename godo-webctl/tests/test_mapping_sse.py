@@ -46,6 +46,7 @@ def _settings(tmp_path: Path) -> Settings:
         mapping_runtime_dir=tmp_path / "runtime",
         mapping_image_tag="godo-mapping:dev",
         docker_bin=Path("/usr/bin/docker"),
+        mapping_webctl_stop_timeout_s=35.0,
     )
 
 

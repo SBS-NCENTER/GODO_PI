@@ -60,7 +60,80 @@ install -m 0644 "$SCRIPT_DIR/godo-irq-pin.service"  /etc/systemd/system/godo-irq
 install -m 0644 "$SCRIPT_DIR/godo-tracker.service"  /etc/systemd/system/godo-tracker.service
 # issue#14 — mapping pipeline template unit. Operator never enables
 # this; webctl drives `systemctl start godo-mapping@active.service`.
-install -m 0644 "$SCRIPT_DIR/godo-mapping@.service" /etc/systemd/system/godo-mapping@.service
+#
+# issue#14 Maj-1 — sed-substitute the operator-tunable timing values
+# from /var/lib/godo/tracker.toml's [webctl] section:
+#   - webctl.mapping_docker_stop_grace_s   → ExecStop docker --time=<X>
+#   - webctl.mapping_systemd_stop_timeout_s → TimeoutStopSec=<Y>s
+# Defaults (20 / 30) match the as-checked-in unit file. If the operator
+# bumps either key in the Config tab, re-running install.sh updates the
+# .service file accordingly. The webctl-side ceiling
+# (webctl.mapping_webctl_stop_timeout_s, default 35) is read at webctl
+# startup directly from the TOML — no install-time substitution needed
+# for that one.
+GODO_MAPPING_DOCKER_GRACE_S=20
+GODO_MAPPING_SYSTEMD_TIMEOUT_S=30
+TRACKER_TOML=/var/lib/godo/tracker.toml
+# issue#14 Mode-B Mn1 fix (2026-05-02 KST) — use Python's stdlib tomllib
+# instead of an awk parser. The previous awk path silently fell back to
+# defaults on whitespace-noisy values (`= 25  ` with trailing spaces) or
+# leading-space lines, which would silently drift the runtime away from
+# the operator-set value. tomllib (Python 3.11+) is whitespace-resilient
+# and ships with python3 on Trixie. The fallback semantics (missing key
+# / missing file / parse error → keep default) are preserved by trapping
+# every exception and printing diagnostic lines.
+if [[ -e "$TRACKER_TOML" ]]; then
+    parsed=$(python3 - <<PYEOF "$TRACKER_TOML" 2>&1 || true
+import sys
+import tomllib
+
+def main(path: str) -> None:
+    try:
+        with open(path, "rb") as f:
+            doc = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        print(f"WARN: install.sh: tracker.toml parse failed ({e}); using defaults", file=sys.stderr)
+        return
+    section = doc.get("webctl", {})
+    docker = section.get("mapping_docker_stop_grace_s")
+    systemd = section.get("mapping_systemd_stop_timeout_s")
+    if isinstance(docker, int) and 1 <= docker <= 600:
+        print(f"DOCKER={docker}")
+    elif docker is not None:
+        print(
+            f"WARN: install.sh: mapping_docker_stop_grace_s value {docker!r} not int in range; using default",
+            file=sys.stderr,
+        )
+    if isinstance(systemd, int) and 1 <= systemd <= 600:
+        print(f"SYSTEMD={systemd}")
+    elif systemd is not None:
+        print(
+            f"WARN: install.sh: mapping_systemd_stop_timeout_s value {systemd!r} not int in range; using default",
+            file=sys.stderr,
+        )
+
+main(sys.argv[1])
+PYEOF
+)
+    while IFS='=' read -r key val; do
+        case "$key" in
+            DOCKER)  GODO_MAPPING_DOCKER_GRACE_S="$val"      ;;
+            SYSTEMD) GODO_MAPPING_SYSTEMD_TIMEOUT_S="$val"   ;;
+            WARN*|*) [[ -n "$key" ]] && echo "  $key${val:+=$val}" >&2 ;;
+        esac
+    done <<< "$parsed"
+fi
+# Render the substituted unit to a temp file then `install` it. The sed
+# uses `#` as the delimiter so it does not collide with the path slashes
+# in the ExecStop line.
+MAPPING_UNIT_TMP=$(mktemp /tmp/godo-mapping@.service.XXXXXX)
+trap 'rm -f "$MAPPING_UNIT_TMP"' EXIT
+sed \
+    -e "s#docker stop --time=[0-9]\+ godo-mapping#docker stop --time=${GODO_MAPPING_DOCKER_GRACE_S} godo-mapping#g" \
+    -e "s#^TimeoutStopSec=[0-9]\+s#TimeoutStopSec=${GODO_MAPPING_SYSTEMD_TIMEOUT_S}s#g" \
+    "$SCRIPT_DIR/godo-mapping@.service" > "$MAPPING_UNIT_TMP"
+install -m 0644 "$MAPPING_UNIT_TMP" /etc/systemd/system/godo-mapping@.service
+echo "  godo-mapping unit timing: docker_stop_grace=${GODO_MAPPING_DOCKER_GRACE_S}s, TimeoutStopSec=${GODO_MAPPING_SYSTEMD_TIMEOUT_S}s (operator-tunable via Config tab → webctl.mapping_*)"
 
 echo "[3/11] Installing watchdog drop-in"
 install -d -m 0755 /etc/systemd/system.conf.d

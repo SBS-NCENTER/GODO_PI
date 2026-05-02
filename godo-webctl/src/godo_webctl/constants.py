@@ -134,6 +134,14 @@ MAPS_ACTIVATE_LOCK_BASENAME: Final[str] = ".activate.lock"
 # PGM files (e.g. a 1 GB sparse file — we never stream pixel data).
 PGM_HEADER_MAX_BYTES: Final[int] = 64
 
+# Maximum bytes to read from a slam_toolbox / map_saver YAML companion
+# when the only fact we want is `resolution:`. Any practical YAML header
+# fits in well under 256 bytes (image, mode, resolution, origin,
+# negate, occupied_thresh, free_thresh = 7 short lines ~150 bytes).
+# Bounded so `read_yaml_resolution` is safe against a 1 MB pathological
+# file — we never need the full body.
+YAML_HEADER_MAX_BYTES: Final[int] = 512
+
 # --- PR-DIAG (Track B-DIAG) — diagnostics page constants -----------------
 # Resources sub-payload cache TTL — `/sys/class/thermal/...` and
 # `/proc/meminfo` reads cost ~10 µs each. With 5 Hz × 4 reads/tick =
@@ -279,6 +287,10 @@ SERVICE_TRANSITION_MESSAGES_KO: Final[dict[tuple[str, str], str]] = {
     ("godo-webctl", "stopping"): "godo-webctl이 종료 중입니다. 잠시 후 다시 시도해주세요.",
     ("godo-irq-pin", "starting"): "godo-irq-pin이 시동 중입니다. 잠시 후 다시 시도해주세요.",
     ("godo-irq-pin", "stopping"): "godo-irq-pin이 종료 중입니다. 잠시 후 다시 시도해주세요.",
+    # issue#14 Patch C2 — godo-mapping@active in System-tab services
+    # overview. Korean particle: "맵핑" → 핑 (no 받침) → 이.
+    ("godo-mapping@active", "starting"): "godo-mapping이 시동 중입니다. 잠시 후 다시 시도해주세요.",
+    ("godo-mapping@active", "stopping"): "godo-mapping이 종료 중입니다. 잠시 후 다시 시도해주세요.",
 }
 
 # --- issue#14 — mapping pipeline ----------------------------------------
@@ -322,14 +334,31 @@ MAPPING_TRACKER_STOP_TIMEOUT_S: Final[float] = 5.0
 # the entrypoint takes ~3-4 s to source ROS overlays + start nodes.
 MAPPING_CONTAINER_START_TIMEOUT_S: Final[float] = 8.0
 
-# Container-stop window. Ordering invariant (M5 fix):
-#   docker stop --time grace (10s) < TimeoutStopSec (20s) < webctl_timeout (25s)
-# so the trap's map_saver_cli save (~2-5 s) completes before any layer
-# escalates to SIGKILL.
-MAPPING_CONTAINER_STOP_TIMEOUT_S: Final[float] = 25.0
+# Container-stop window — *fallback* default when the webctl-owned
+# `webctl.mapping_webctl_stop_timeout_s` Tier-2 key is missing from
+# `tracker.toml`. Operator-tunable via Config tab; runtime value is
+# `cfg.mapping_webctl_stop_timeout_s` from Settings. The constant
+# pinned here is the schema's `default_repr`.
+#
+# Ordering invariant (issue#14 Maj-1 fold; was 10/20/25):
+#   docker stop --time grace (20s) < TimeoutStopSec (30s) < webctl_timeout (35s)
+# so the trap's map_saver_cli save (~2-5 s, possibly more on slow SD)
+# completes before any layer escalates to SIGKILL. The bump (was M5
+# 10/20/25) reflects the operator-locked "맵 한번 제작하면 평생 쓰는"
+# stake — torn lifetime asset is worse than a 10 s longer stop window.
+MAPPING_CONTAINER_STOP_TIMEOUT_S: Final[float] = 35.0
 
 # `docker inspect` polling cadence inside the start/stop wait loops.
 MAPPING_DOCKER_INSPECT_POLL_S: Final[float] = 0.25
+
+# issue#14 Maj-2 — cadence at which `start()`'s Phase-2 polling loop
+# re-reads `state.json` to detect a concurrent `stop()` (which writes
+# Stopping outside the flock). Set equal to the docker-inspect cadence
+# so the read is interleaved with the `docker inspect` poll without
+# adding extra latency. Lifting `_coordinator_flock` between Phase 1
+# (state-write) and Phase 2 (subprocess polling) is what lets a Stop
+# button interrupt a hung Start without blocking on a 409.
+MAPPING_STATE_REREAD_INTERVAL_S: Final[float] = 0.25
 
 # Default n for /api/mapping/journal?n=…
 MAPPING_JOURNAL_TAIL_DEFAULT_N: Final[int] = 50

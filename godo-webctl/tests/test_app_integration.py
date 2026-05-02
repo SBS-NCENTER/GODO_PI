@@ -86,6 +86,8 @@ def _settings_for(
         mapping_runtime_dir=mapping_runtime_dir or (base / "mapping_rt"),
         mapping_image_tag="godo-mapping:dev",
         docker_bin=Path("/usr/bin/docker"),
+        # issue#14 Maj-1: tests pin the schema default ladder ceiling.
+        mapping_webctl_stop_timeout_s=35.0,
     )
 
 
@@ -228,6 +230,7 @@ async def test_calibrate_timeout_returns_504(
         mapping_runtime_dir=s.mapping_runtime_dir,
         mapping_image_tag=s.mapping_image_tag,
         docker_bin=s.docker_bin,
+        mapping_webctl_stop_timeout_s=s.mapping_webctl_stop_timeout_s,
     )
     async with _client(s) as cl:
         token = await _login_admin(cl)
@@ -2011,6 +2014,7 @@ def test_lifespan_legacy_migration_creates_active_symlink(
         mapping_runtime_dir=tmp_path / "mapping_rt",
         mapping_image_tag="godo-mapping:dev",
         docker_bin=Path("/usr/bin/docker"),
+        mapping_webctl_stop_timeout_s=35.0,
     )
 
     # Manually invoke the migration helper that the lifespan uses.
@@ -2076,6 +2080,7 @@ def test_lifespan_warns_every_boot_when_map_path_set(
         mapping_runtime_dir=tmp_path / "mapping_rt",
         mapping_image_tag="godo-mapping:dev",
         docker_bin=Path("/usr/bin/docker"),
+        mapping_webctl_stop_timeout_s=35.0,
     )
 
     def _boot_and_count_warns() -> int:
@@ -2221,6 +2226,7 @@ async def test_system_amcl_rate_tracker_timeout_returns_504(
         mapping_runtime_dir=s.mapping_runtime_dir,
         mapping_image_tag=s.mapping_image_tag,
         docker_bin=s.docker_bin,
+        mapping_webctl_stop_timeout_s=s.mapping_webctl_stop_timeout_s,
     )
     async with _client(s) as cl:
         r = await cl.get("/api/system/amcl_rate")
@@ -2463,13 +2469,14 @@ async def test_get_config_returns_projected_dict(
     assert body["network.ue_port"] == 6666
 
 
-async def test_get_config_schema_returns_48_rows(
+async def test_get_config_schema_returns_51_rows(
     tmp_path: Path,
     tmp_map_pair: Path,
 ) -> None:
     """The schema is mirrored from C++; the endpoint serves the local
-    parse cache, not a UDS round-trip. issue#12 fold added 2 rows
-    (webctl.pose_stream_hz, webctl.scan_stream_hz) — count 46 → 48."""
+    parse cache, not a UDS round-trip. issue#14 Maj-1 fold added 3 rows
+    (webctl.mapping_docker_stop_grace_s, webctl.mapping_systemd_stop_timeout_s,
+    webctl.mapping_webctl_stop_timeout_s) — count 48 → 51."""
     s = _settings_for(
         uds_socket=tmp_path / "u.sock",
         map_path=tmp_map_pair,
@@ -2480,7 +2487,7 @@ async def test_get_config_schema_returns_48_rows(
     assert r.status_code == HTTPStatus.OK
     rows = r.json()
     assert isinstance(rows, list)
-    assert len(rows) == 48
+    assert len(rows) == 51
     # Each row has the documented keys.
     for row in rows:
         assert {
@@ -2896,7 +2903,11 @@ async def test_get_system_services_anon_returns_200_with_redacted_env(
     body = r.json()
     assert "services" in body
     assert isinstance(body["services"], list)
-    assert len(body["services"]) == 3
+    # issue#14 Patch C2: 4 services after godo-mapping@active joined
+    # ALLOWED_SERVICES.
+    assert len(body["services"]) == 4
+    names = {entry["name"] for entry in body["services"]}
+    assert "godo-mapping@active" in names
     for entry in body["services"]:
         assert tuple(entry.keys()) == SYSTEM_SERVICES_FIELDS
         assert entry["env_redacted"]["JWT_SECRET"] == "<redacted>"
@@ -3104,6 +3115,85 @@ async def test_post_system_service_restart_user_role_returns_403(
         )
     assert r.status_code == HTTPStatus.FORBIDDEN
     assert r.json()["err"] == "admin_required"
+
+
+async def test_post_system_service_godo_mapping_active_blocked_when_mapping_running(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    """issue#14 Mode-B M2(a) hard-block (2026-05-02 KST):
+    /api/system/service/godo-mapping@active/{start,stop,restart} must
+    return 409 mapping_pipeline_active when mapping coordinator is in
+    {Starting, Running, Stopping}, so a curl / second-tab admin cannot
+    bypass the SPA UI gate and corrupt state.json."""
+    from godo_webctl import mapping as mapping_mod
+
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    fake_status = mapping_mod.MappingStatus(
+        state=mapping_mod.MappingState.RUNNING,
+        map_name="studio_test",
+        container_id_short="abc123",
+        started_at="2026-05-02T00:00:00Z",
+        error_detail=None,
+        journal_tail_available=False,
+    )
+    with mock.patch("godo_webctl.app.mapping_mod.status", return_value=fake_status):
+        async with _client(s) as cl:
+            token = await _login_admin(cl)
+            for action in ("start", "stop", "restart"):
+                r = await cl.post(
+                    f"/api/system/service/godo-mapping@active/{action}",
+                    headers=_auth(token),
+                )
+                assert r.status_code == HTTPStatus.CONFLICT, (
+                    f"action {action} expected 409, got {r.status_code}"
+                )
+                body = r.json()
+                assert body == {
+                    "ok": False,
+                    "err": "mapping_pipeline_active",
+                    "detail": "매핑 진행 중입니다. Map > Mapping 탭에서 Stop 버튼을 사용하세요.",
+                }
+
+
+async def test_post_system_service_godo_mapping_active_allowed_when_mapping_idle(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    """Mapping in Idle (or Failed) state → System tab admin endpoint
+    falls through to the regular services.control() path. Verifies the
+    M2(a) gate does NOT block legitimate operator escape-hatch use."""
+    from godo_webctl import mapping as mapping_mod
+
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+    )
+    idle_status = mapping_mod.MappingStatus(
+        state=mapping_mod.MappingState.IDLE,
+        map_name=None,
+        container_id_short=None,
+        started_at=None,
+        error_detail=None,
+        journal_tail_available=False,
+    )
+    with (
+        mock.patch("godo_webctl.app.mapping_mod.status", return_value=idle_status),
+        mock.patch("godo_webctl.app.services_mod.control", return_value="inactive"),
+    ):
+        async with _client(s) as cl:
+            token = await _login_admin(cl)
+            r = await cl.post(
+                "/api/system/service/godo-mapping@active/restart",
+                headers=_auth(token),
+            )
+    assert r.status_code == HTTPStatus.OK
+    assert r.json() == {"ok": True, "status": "inactive"}
 
 
 async def test_post_system_service_invalid_action_returns_400(

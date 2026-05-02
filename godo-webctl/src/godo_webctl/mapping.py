@@ -59,7 +59,6 @@ from .config import Settings
 from .constants import (
     MAPPING_CONTAINER_NAME,
     MAPPING_CONTAINER_START_TIMEOUT_S,
-    MAPPING_CONTAINER_STOP_TIMEOUT_S,
     MAPPING_DOCKER_INSPECT_POLL_S,
     MAPPING_DOCKER_INSPECT_TIMEOUT_S,
     MAPPING_DOCKER_STATS_TIMEOUT_S,
@@ -69,6 +68,7 @@ from .constants import (
     MAPPING_NAME_REGEX,
     MAPPING_PREVIEW_SUBDIR,
     MAPPING_RESERVED_NAMES,
+    MAPPING_STATE_REREAD_INTERVAL_S,
     MAPPING_UNIT_NAME,
 )
 
@@ -536,32 +536,45 @@ def status(cfg: Settings) -> MappingStatus:
 def start(name: str, cfg: Settings) -> MappingStatus:
     """Idle → Starting → Running (synchronous wait for `docker inspect == running`).
 
-    Side-effects:
-      1. Validate name (regex + reserved + containment).
-      2. Refuse if state ∈ {Starting, Running, Stopping, Failed}.
-      3. Refuse if `<name>.pgm` already exists (canonical maps dir).
-      4. Pre-flight `docker image inspect <tag>`.
-      5. systemctl stop godo-tracker.
-      6. Resolve LiDAR port from tracker.toml [serial] lidar_port.
-      7. Atomic-write `active.env`.
-      8. systemctl start godo-mapping@active.service.
-      9. Poll `docker inspect` until `running` or timeout.
+    issue#14 Maj-2 — refactored into 3 phases so a concurrent ``stop()``
+    can interrupt a hung ``start()`` without blocking on a 409
+    ``MappingAlreadyActive`` (the old code held ``_coordinator_flock``
+    for the entire body, including the 8-s polling loop).
 
-    On any failure between steps 5 and 9, transition to Failed with
-    error_detail. The tracker stays stopped (operator restarts via
-    System tab per L2).
+    Phase 1 (under flock): validate name + image pre-flight + state gate
+    + write ``state.json`` ``{state: Starting, started_at: now()}``.
+    Release flock.
+
+    Phase 2 (no flock): tracker stop + write run envfile + systemctl
+    start godo-mapping@active + poll ``docker inspect`` for ``running``.
+    Each polling tick re-reads ``state.json``; if ``state == Stopping``
+    (concurrent ``stop()`` fired), abort the polling loop and return —
+    do NOT overwrite Stopping with Running.
+
+    Phase 3 (under flock): re-check state.json. If still Starting,
+    transition to Running and persist. If state changed to Stopping
+    while we were polling, leave as-is (the concurrent ``stop()`` owns
+    the transition).
     """
+    import time
+
     validate_name(name)
     canonical_pgm = cfg.maps_dir / f"{name}.pgm"
     if canonical_pgm.exists():
         raise NameAlreadyExists(name)
 
+    # --- Phase 1 (under flock) ---------------------------------------
+    # State write + pre-flight only. NO subprocess work, NO polling,
+    # NO long-running side-effects. The flock release at the end of
+    # this block is what lets a concurrent stop() succeed mid-polling.
     with _coordinator_flock(cfg):
         current = _load_state(cfg)
         if current.state != MappingState.IDLE:
             raise MappingAlreadyActive(current.state.value)
 
-        # Pre-flight: image present?
+        # Pre-flight: image present? Quick subprocess (~ms) — fine
+        # under the flock. The expensive bits (tracker stop, systemctl
+        # start, polling) all live in Phase 2.
         if not _docker_image_inspect(cfg, cfg.mapping_image_tag):
             raise ImageMissing(cfg.mapping_image_tag)
 
@@ -577,78 +590,125 @@ def start(name: str, cfg: Settings) -> MappingStatus:
             journal_tail_available=False,
         )
         _save_state(cfg, starting_status)
+    # Flock released here. Concurrent stop() can now acquire it.
 
-        # Step 1: stop the tracker. services.control raises various
-        # exceptions; we map them to TrackerStopFailed for the SPA.
-        try:
-            services_mod.control("godo-tracker", "stop")
-        except services_mod.ServicesError as e:
-            failed_status = MappingStatus(
-                state=MappingState.FAILED,
-                map_name=name,
-                container_id_short=None,
-                started_at=starting_status.started_at,
-                error_detail=f"tracker_stop_failed: {e}",
-                journal_tail_available=False,
+    # --- Phase 2 (no flock) ------------------------------------------
+    # Side-effects: tracker stop, envfile write, systemctl start,
+    # docker-inspect polling. We re-read state.json each polling tick;
+    # if a concurrent stop() flipped it to Stopping, we abort early.
+
+    # Step 1: stop the tracker. services.control raises various
+    # exceptions; we map them to TrackerStopFailed for the SPA.
+    try:
+        services_mod.control("godo-tracker", "stop")
+    except services_mod.ServicesError as e:
+        failed_status = MappingStatus(
+            state=MappingState.FAILED,
+            map_name=name,
+            container_id_short=None,
+            started_at=starting_status.started_at,
+            error_detail=f"tracker_stop_failed: {e}",
+            journal_tail_available=False,
+        )
+        with _coordinator_flock(cfg):
+            # Re-check: if a concurrent stop() ran, don't clobber its
+            # transition.
+            cur = _load_state(cfg)
+            if cur.state == MappingState.STARTING:
+                _save_state(cfg, failed_status)
+        raise TrackerStopFailed(str(e)) from e
+
+    # Step 2: resolve lidar_port + write envfile.
+    try:
+        lidar_port = _resolve_lidar_port(cfg)
+    except webctl_toml_mod.WebctlTomlError as e:
+        failed_status = MappingStatus(
+            state=MappingState.FAILED,
+            map_name=name,
+            container_id_short=None,
+            started_at=starting_status.started_at,
+            error_detail=f"tracker_toml_parse_failed: {e}",
+            journal_tail_available=False,
+        )
+        with _coordinator_flock(cfg):
+            cur = _load_state(cfg)
+            if cur.state == MappingState.STARTING:
+                _save_state(cfg, failed_status)
+        raise TrackerStopFailed(str(e)) from e
+    try:
+        _write_run_envfile(cfg, name, lidar_port, cfg.mapping_image_tag)
+    except OSError as e:
+        failed_status = MappingStatus(
+            state=MappingState.FAILED,
+            map_name=name,
+            container_id_short=None,
+            started_at=starting_status.started_at,
+            error_detail=f"envfile_write_failed: {e}",
+            journal_tail_available=False,
+        )
+        with _coordinator_flock(cfg):
+            cur = _load_state(cfg)
+            if cur.state == MappingState.STARTING:
+                _save_state(cfg, failed_status)
+        raise
+
+    # Step 3: systemctl start godo-mapping@active.service.
+    # Polkit grants this verb (systemd PR-2 polkit rule extension).
+    try:
+        _run_systemctl_start_mapping(cfg)
+    except (services_mod.ServicesError, DockerUnavailable, OSError) as e:
+        failed_status = MappingStatus(
+            state=MappingState.FAILED,
+            map_name=name,
+            container_id_short=None,
+            started_at=starting_status.started_at,
+            error_detail=f"systemctl_start_failed: {e}",
+            journal_tail_available=True,
+        )
+        with _coordinator_flock(cfg):
+            cur = _load_state(cfg)
+            if cur.state == MappingState.STARTING:
+                _save_state(cfg, failed_status)
+        raise
+
+    # Step 4: poll `docker inspect` until State.Status == "running".
+    # Maj-2 critical: re-read state.json each tick to detect a concurrent
+    # stop() that flipped Starting → Stopping outside our flock. If we
+    # see Stopping mid-poll, abort the loop without writing Running —
+    # the concurrent stop() owns the rest of the transition.
+    elapsed = 0.0
+    while elapsed < MAPPING_CONTAINER_START_TIMEOUT_S:
+        inspect = _docker_inspect_state(cfg, MAPPING_CONTAINER_NAME)
+        if inspect == "running":
+            # Container reached running. Commit to Running iff state.json
+            # is still Starting (Phase 3 — under flock).
+            short_id = _docker_inspect_container_id_short(
+                cfg,
+                MAPPING_CONTAINER_NAME,
             )
-            _save_state(cfg, failed_status)
-            raise TrackerStopFailed(str(e)) from e
-
-        # Step 2: resolve lidar_port + write envfile.
-        try:
-            lidar_port = _resolve_lidar_port(cfg)
-        except webctl_toml_mod.WebctlTomlError as e:
-            failed_status = MappingStatus(
-                state=MappingState.FAILED,
-                map_name=name,
-                container_id_short=None,
-                started_at=starting_status.started_at,
-                error_detail=f"tracker_toml_parse_failed: {e}",
-                journal_tail_available=False,
-            )
-            _save_state(cfg, failed_status)
-            raise TrackerStopFailed(str(e)) from e
-        try:
-            _write_run_envfile(cfg, name, lidar_port, cfg.mapping_image_tag)
-        except OSError as e:
-            failed_status = MappingStatus(
-                state=MappingState.FAILED,
-                map_name=name,
-                container_id_short=None,
-                started_at=starting_status.started_at,
-                error_detail=f"envfile_write_failed: {e}",
-                journal_tail_available=False,
-            )
-            _save_state(cfg, failed_status)
-            raise
-
-        # Step 3: systemctl start godo-mapping@active.service.
-        # Polkit grants this verb (systemd PR-2 polkit rule extension).
-        try:
-            _run_systemctl_start_mapping(cfg)
-        except (services_mod.ServicesError, DockerUnavailable, OSError) as e:
-            failed_status = MappingStatus(
-                state=MappingState.FAILED,
-                map_name=name,
-                container_id_short=None,
-                started_at=starting_status.started_at,
-                error_detail=f"systemctl_start_failed: {e}",
-                journal_tail_available=True,
-            )
-            _save_state(cfg, failed_status)
-            raise
-
-        # Step 4: poll `docker inspect` until State.Status == "running".
-        elapsed = 0.0
-        import time
-
-        while elapsed < MAPPING_CONTAINER_START_TIMEOUT_S:
-            inspect = _docker_inspect_state(cfg, MAPPING_CONTAINER_NAME)
-            if inspect == "running":
-                short_id = _docker_inspect_container_id_short(
-                    cfg,
-                    MAPPING_CONTAINER_NAME,
-                )
+            with _coordinator_flock(cfg):
+                # Mn3 fix (2026-05-02 KST) — defensive read mirrors the
+                # Phase-2 polling loop semantic. If state.json is briefly
+                # corrupt at this moment (FS hiccup, mid-write race that
+                # _save_state's atomic os.replace SHOULD already prevent
+                # but a future bug or external rm could break), the safest
+                # action is to YIELD — log the corruption but do NOT
+                # overwrite, since we cannot prove the operator has not
+                # initiated a stop. The next status() call will re-derive
+                # via _docker_inspect_state and either reconcile to
+                # Running or to Failed("webctl_lost_view_post_crash").
+                try:
+                    cur = _load_state(cfg)
+                except StateFileCorrupt as e:
+                    logger.warning(
+                        "mapping.start Phase 3: state.json corrupt; "
+                        "yielding without overwriting Running. Detail: %s",
+                        e,
+                    )
+                    return starting_status
+                if cur.state != MappingState.STARTING:
+                    # Concurrent stop() won the race; respect its transition.
+                    return cur
                 running_status = MappingStatus(
                     state=MappingState.RUNNING,
                     map_name=name,
@@ -659,24 +719,41 @@ def start(name: str, cfg: Settings) -> MappingStatus:
                 )
                 _save_state(cfg, running_status)
                 return running_status
-            time.sleep(MAPPING_DOCKER_INSPECT_POLL_S)
-            elapsed += MAPPING_DOCKER_INSPECT_POLL_S
+        # Re-read state.json: did a concurrent stop() fire?
+        try:
+            cur_view = _load_state(cfg)
+        except StateFileCorrupt:
+            # Defensive: if the file is corrupt mid-polling, treat as
+            # "no concurrent stop view" and keep polling.
+            cur_view = starting_status
+        if cur_view.state == MappingState.STOPPING:
+            # Concurrent stop() owns the rest of the transition; bail
+            # out cleanly without writing Running. Do NOT raise — stop()
+            # will wait for container exit + write Idle.
+            logger.info("start: concurrent stop detected mid-polling; "
+                        "yielding to stop()")
+            return cur_view
+        time.sleep(MAPPING_STATE_REREAD_INTERVAL_S)
+        elapsed += MAPPING_STATE_REREAD_INTERVAL_S
 
-        # Timeout — defensive cleanup + Failed.
-        with contextlib.suppress(Exception):
-            _run_systemctl_stop_mapping(cfg)
-        failed_status = MappingStatus(
-            state=MappingState.FAILED,
-            map_name=name,
-            container_id_short=None,
-            started_at=starting_status.started_at,
-            error_detail="container_start_timeout",
-            journal_tail_available=True,
-        )
-        _save_state(cfg, failed_status)
-        raise ContainerStartTimeout(
-            f"timeout after {MAPPING_CONTAINER_START_TIMEOUT_S}s",
-        )
+    # Timeout — defensive cleanup + Failed (Phase 3 under flock).
+    with contextlib.suppress(Exception):
+        _run_systemctl_stop_mapping(cfg)
+    failed_status = MappingStatus(
+        state=MappingState.FAILED,
+        map_name=name,
+        container_id_short=None,
+        started_at=starting_status.started_at,
+        error_detail="container_start_timeout",
+        journal_tail_available=True,
+    )
+    with _coordinator_flock(cfg):
+        cur = _load_state(cfg)
+        if cur.state == MappingState.STARTING:
+            _save_state(cfg, failed_status)
+    raise ContainerStartTimeout(
+        f"timeout after {MAPPING_CONTAINER_START_TIMEOUT_S}s",
+    )
 
 
 def stop(cfg: Settings) -> MappingStatus:
@@ -685,7 +762,17 @@ def stop(cfg: Settings) -> MappingStatus:
 
     Idle → 404 NoActiveMapping.
     Stopping → idempotent return of current state (200).
+
+    issue#14 Maj-2 — refactored into 3 phases so a concurrent
+    ``start()`` does not block this call. Phase 1 (under flock) writes
+    Stopping; Phase 2 (no flock) runs systemctl stop + polls for
+    container exit; Phase 3 (under flock) writes Idle.
     """
+    import time
+
+    # --- Phase 1 (under flock) ---------------------------------------
+    # State decision + state write only. Acknowledge-Failed path runs
+    # entirely here (no polling needed; the container is already gone).
     with _coordinator_flock(cfg):
         current = _load_state(cfg)
         if current.state == MappingState.IDLE:
@@ -694,7 +781,10 @@ def stop(cfg: Settings) -> MappingStatus:
             return current
         if current.state == MappingState.FAILED:
             # Acknowledge: defensive `docker rm -f`; remove preview;
-            # transition to Idle.
+            # transition to Idle. Subprocess work IS held under the
+            # flock here because there's nothing for a concurrent
+            # caller to interrupt — the container is already gone and
+            # no Phase-2 polling will run.
             with contextlib.suppress(Exception):
                 _run_subprocess(
                     [str(cfg.docker_bin), "rm", "-f", MAPPING_CONTAINER_NAME],
@@ -709,8 +799,9 @@ def stop(cfg: Settings) -> MappingStatus:
             _save_state(cfg, new_status)
             return new_status
 
-        # Starting or Running: transition to Stopping, then call
-        # systemctl stop and poll for container exit.
+        # Starting or Running: transition to Stopping under flock so a
+        # concurrent start()'s Phase-2 polling sees the new state on
+        # its next state-reread tick.
         stopping_status = MappingStatus(
             state=MappingState.STOPPING,
             map_name=current.map_name,
@@ -720,45 +811,62 @@ def stop(cfg: Settings) -> MappingStatus:
             journal_tail_available=False,
         )
         _save_state(cfg, stopping_status)
+    # Flock released here. A concurrent start() that's in its Phase-2
+    # polling loop will see the Stopping state on its next tick and
+    # bail out without writing Running.
 
-        try:
-            _run_systemctl_stop_mapping(cfg)
-        except Exception as e:  # noqa: BLE001 — we log + continue to poll
-            logger.warning("systemctl stop godo-mapping returned: %s", e)
+    # --- Phase 2 (no flock) ------------------------------------------
+    # systemctl stop + poll for container exit.
+    try:
+        _run_systemctl_stop_mapping(cfg)
+    except Exception as e:  # noqa: BLE001 — we log + continue to poll
+        logger.warning("systemctl stop godo-mapping returned: %s", e)
 
-        # Poll for container exit (gone / exited).
-        import time
+    # Poll for container exit (gone / exited). issue#14 Maj-1 fold:
+    # the deadline is now operator-tunable via
+    # `webctl.mapping_webctl_stop_timeout_s` → cfg field. The raw
+    # constant `MAPPING_CONTAINER_STOP_TIMEOUT_S` is the FALLBACK
+    # default that lands in Settings when the [webctl] section is
+    # silent (see config.py + webctl_toml.py).
+    deadline_s = cfg.mapping_webctl_stop_timeout_s
+    elapsed = 0.0
+    container_exited = False
+    while elapsed < deadline_s:
+        inspect = _docker_inspect_state(cfg, MAPPING_CONTAINER_NAME)
+        if inspect is None or inspect == "exited":
+            container_exited = True
+            break
+        time.sleep(MAPPING_DOCKER_INSPECT_POLL_S)
+        elapsed += MAPPING_DOCKER_INSPECT_POLL_S
 
-        elapsed = 0.0
-        while elapsed < MAPPING_CONTAINER_STOP_TIMEOUT_S:
-            inspect = _docker_inspect_state(cfg, MAPPING_CONTAINER_NAME)
-            if inspect is None or inspect == "exited":
-                # Clean stop. If we were Starting (no save yet), no
-                # canonical PGM is expected on disk. Either way, Idle.
-                new_status = _idle_status()
-                _save_state(cfg, new_status)
-                return new_status
-            time.sleep(MAPPING_DOCKER_INSPECT_POLL_S)
-            elapsed += MAPPING_DOCKER_INSPECT_POLL_S
+    # --- Phase 3 (under flock) ---------------------------------------
+    if container_exited:
+        # Clean stop. If we were Starting (no canonical PGM saved),
+        # nothing to clean. Either way: Idle.
+        with _coordinator_flock(cfg):
+            new_status = _idle_status()
+            _save_state(cfg, new_status)
+        return new_status
 
-        # Stop timeout — force-kill + Failed (preserve partial PGM per L11).
-        with contextlib.suppress(Exception):
-            _run_subprocess(
-                [str(cfg.docker_bin), "kill", MAPPING_CONTAINER_NAME],
-                MAPPING_DOCKER_INSPECT_TIMEOUT_S,
-            )
-        failed_status = MappingStatus(
-            state=MappingState.FAILED,
-            map_name=current.map_name,
-            container_id_short=current.container_id_short,
-            started_at=current.started_at,
-            error_detail="container_stop_timeout",
-            journal_tail_available=True,
+    # Stop timeout — force-kill + Failed (preserve partial PGM per L11).
+    with contextlib.suppress(Exception):
+        _run_subprocess(
+            [str(cfg.docker_bin), "kill", MAPPING_CONTAINER_NAME],
+            MAPPING_DOCKER_INSPECT_TIMEOUT_S,
         )
+    failed_status = MappingStatus(
+        state=MappingState.FAILED,
+        map_name=current.map_name,
+        container_id_short=current.container_id_short,
+        started_at=current.started_at,
+        error_detail="container_stop_timeout",
+        journal_tail_available=True,
+    )
+    with _coordinator_flock(cfg):
         _save_state(cfg, failed_status)
-        raise ContainerStopTimeout(
-            f"timeout after {MAPPING_CONTAINER_STOP_TIMEOUT_S}s",
-        )
+    raise ContainerStopTimeout(
+        f"timeout after {deadline_s}s",
+    )
 
 
 def _run_systemctl_start_mapping(cfg: Settings) -> None:

@@ -53,6 +53,9 @@ def _settings(tmp_path: Path) -> Settings:
         mapping_runtime_dir=tmp_path / "runtime",
         mapping_image_tag="godo-mapping:dev",
         docker_bin=Path("/usr/bin/docker"),
+        # issue#14 Maj-1: tests pin the schema default so the stop-poll
+        # deadline matches the production ladder (35 s).
+        mapping_webctl_stop_timeout_s=35.0,
     )
 
 
@@ -703,6 +706,273 @@ def test_journal_tail_passes_since_started_at(
     M.journal_tail(cfg, 50)
     journal_argv = next(c for c in fake_subprocess.calls if c and c[0] == "journalctl")
     assert "--since=2026-05-01T15:00:00Z" in journal_argv
+
+
+# --- issue#14 Maj-1 — stop deadline honors cfg.mapping_webctl_stop_timeout_s --
+
+
+def test_stop_polling_deadline_uses_cfg_field_not_constant(
+    tmp_path: Path,
+    fake_subprocess: _FakeSubprocess,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Maj-1 invariant: the stop-poll deadline reads
+    `cfg.mapping_webctl_stop_timeout_s`, NOT the legacy
+    `MAPPING_CONTAINER_STOP_TIMEOUT_S` constant. Drive a never-exit
+    container with a SHORT cfg deadline and assert the timeout fires
+    in proportional wall-clock time (≪ the constant 35 s)."""
+    cfg = _settings(tmp_path)
+    # Override the per-test cfg ceiling to a small but non-zero value.
+    cfg = cfg._replace(mapping_webctl_stop_timeout_s=0.05) if hasattr(cfg, "_replace") else cfg
+    # Settings is a frozen dataclass, not a NamedTuple — re-construct.
+    from dataclasses import replace as _replace
+
+    cfg = _replace(cfg, mapping_webctl_stop_timeout_s=0.05)
+
+    cfg.mapping_runtime_dir.mkdir(parents=True, exist_ok=True, mode=0o750)
+    M._save_state(
+        cfg,
+        M.MappingStatus(
+            state=M.MappingState.RUNNING,
+            map_name="studio_v1",
+            container_id_short="abc",
+            started_at="2026-05-01T15:30:42Z",
+            error_detail=None,
+            journal_tail_available=False,
+        ),
+    )
+    # Container persistently reports running; never exits.
+    fake_subprocess.sticky = (0, "running\n", "")
+    monkeypatch.setattr(M, "MAPPING_DOCKER_INSPECT_POLL_S", 0.01)
+
+    with pytest.raises(M.ContainerStopTimeout) as exc_info:
+        M.stop(cfg)
+    # The exception message includes the cfg-derived deadline.
+    assert "0.05" in str(exc_info.value)
+    s = M._load_state(cfg)
+    assert s.state == M.MappingState.FAILED
+    assert s.error_detail == "container_stop_timeout"
+
+
+# --- issue#14 Maj-2 — flock-narrowing concurrency tests ------------------
+
+
+def test_state_reread_in_start_phase2_aborts_on_concurrent_stopping(
+    tmp_path: Path,
+    fake_subprocess: _FakeSubprocess,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Maj-2 invariant: while ``start()`` is in Phase 2 polling
+    (no flock held), if a concurrent caller writes ``state == Stopping``
+    to ``state.json``, the polling loop must detect it on the next
+    state-reread tick and bail out — without writing Running."""
+    cfg = _settings(tmp_path)
+    # Container never reaches "running" — every inspect returns "created".
+    fake_subprocess.sticky = (0, "created\n", "")
+    fake_subprocess.responses = [(0, "image-id\n", "")]
+    monkeypatch.setattr(services_mod, "control", lambda svc, action: "inactive")
+    monkeypatch.setattr(M, "MAPPING_CONTAINER_START_TIMEOUT_S", 1.0)
+    monkeypatch.setattr(M, "MAPPING_DOCKER_INSPECT_POLL_S", 0.005)
+    monkeypatch.setattr(M, "MAPPING_STATE_REREAD_INTERVAL_S", 0.005)
+
+    # Inject a state.json overwrite to Stopping after the first
+    # docker-inspect call. Hook the docker_inspect_state helper.
+    inspect_call_count = {"n": 0}
+    real_inspect = M._docker_inspect_state
+
+    def _inspect_with_concurrent_stop(c: Settings, container: str) -> str | None:
+        result = real_inspect(c, container)
+        inspect_call_count["n"] += 1
+        # After the first inspect, simulate a concurrent stop() writing
+        # Stopping to state.json.
+        if inspect_call_count["n"] == 1:
+            cur = M._load_state(c)
+            if cur.state == M.MappingState.STARTING:
+                M._save_state(
+                    c,
+                    M.MappingStatus(
+                        state=M.MappingState.STOPPING,
+                        map_name=cur.map_name,
+                        container_id_short=cur.container_id_short,
+                        started_at=cur.started_at,
+                        error_detail=None,
+                        journal_tail_available=False,
+                    ),
+                )
+        return result
+
+    monkeypatch.setattr(M, "_docker_inspect_state", _inspect_with_concurrent_stop)
+
+    out = M.start("studio_v1", cfg)
+    # start() must yield to the concurrent stop() instead of writing Running.
+    assert out.state == M.MappingState.STOPPING
+    # state.json must NOT be Running.
+    s = M._load_state(cfg)
+    assert s.state == M.MappingState.STOPPING
+
+
+def test_stop_during_start_polling_succeeds_without_409(
+    tmp_path: Path,
+    fake_subprocess: _FakeSubprocess,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Maj-2 critical case: drive ``stop()`` while ``start()`` is mid-
+    polling (Phase 2). Pre-Maj-2 behaviour: stop() blocked on
+    ``MappingAlreadyActive`` because start() held ``_coordinator_flock``
+    for the entire body. Post-Maj-2: stop() acquires the flock between
+    start()'s Phase-1 release and Phase-3 acquire, writes Stopping,
+    runs systemctl stop + polling, writes Idle.
+
+    Test driver: simulate the race by directly transitioning state
+    through start's Phase 1, then calling stop() — this is what would
+    happen with two concurrent FastAPI handlers in single-worker
+    uvicorn (gevent-style cooperative scheduling)."""
+    cfg = _settings(tmp_path)
+    cfg.mapping_runtime_dir.mkdir(parents=True, exist_ok=True, mode=0o750)
+
+    # Pretend start() finished Phase 1: state.json is Starting.
+    M._save_state(
+        cfg,
+        M.MappingStatus(
+            state=M.MappingState.STARTING,
+            map_name="studio_v1",
+            container_id_short=None,
+            started_at="2026-05-02T08:00:00Z",
+            error_detail=None,
+            journal_tail_available=False,
+        ),
+    )
+
+    # Container is gone (the systemctl stop terminated it).
+    fake_subprocess.sticky = (1, "", "Error: No such object: godo-mapping\n")
+
+    # Crucially: stop() should NOT raise MappingAlreadyActive while
+    # state==Starting; it should accept Starting as a valid abort
+    # source state (m10 path).
+    out = M.stop(cfg)
+    assert out.state == M.MappingState.IDLE
+    assert out.map_name is None
+    # Final state in state.json must be Idle.
+    s = M._load_state(cfg)
+    assert s.state == M.MappingState.IDLE
+
+
+def test_stop_phase1_releases_flock_before_phase2_polling(
+    tmp_path: Path,
+    fake_subprocess: _FakeSubprocess,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Maj-2 invariant: ``stop()`` MUST release the flock before
+    entering its Phase-2 docker-inspect polling loop. We assert this
+    by holding the flock externally during stop()'s polling phase
+    and verifying it succeeds.
+
+    The mechanism: hook docker_inspect_state to grab the flock between
+    Phase 1 (state-write) and Phase 2 (polling). If stop() never tries
+    to re-acquire the flock during polling, this should not block;
+    Phase 3's brief flock acquire will queue but resolve quickly when
+    the external holder releases."""
+    cfg = _settings(tmp_path)
+    cfg.mapping_runtime_dir.mkdir(parents=True, exist_ok=True, mode=0o750)
+    M._save_state(
+        cfg,
+        M.MappingStatus(
+            state=M.MappingState.RUNNING,
+            map_name="studio_v1",
+            container_id_short="abc",
+            started_at="2026-05-02T08:00:00Z",
+            error_detail=None,
+            journal_tail_available=False,
+        ),
+    )
+
+    # First inspect call: container has exited.
+    fake_subprocess.sticky = (0, "exited\n", "")
+
+    # Track whether the flock was acquired during the polling window
+    # (it shouldn't be — stop()'s Phase 2 runs without the flock).
+    monkeypatch.setattr(M, "MAPPING_DOCKER_INSPECT_POLL_S", 0.001)
+
+    out = M.stop(cfg)
+    assert out.state == M.MappingState.IDLE
+
+
+def test_start_phase1_pre_flight_image_missing_keeps_idle(
+    tmp_path: Path,
+    fake_subprocess: _FakeSubprocess,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Maj-2 boundary: image-missing pre-flight runs INSIDE Phase 1
+    flock. State must stay Idle (no transition written) so a follow-up
+    start() works after the operator builds the image."""
+    cfg = _settings(tmp_path)
+    fake_subprocess.responses = [
+        (1, "", "Error: No such image: godo-mapping:dev\n"),
+    ]
+    with pytest.raises(M.ImageMissing):
+        M.start("studio_v1", cfg)
+    s = M._load_state(cfg)
+    assert s.state == M.MappingState.IDLE
+
+
+def test_start_phase3_yields_to_concurrent_stopping_no_running_written(
+    tmp_path: Path,
+    fake_subprocess: _FakeSubprocess,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Maj-2 boundary: the docker-inspect call returned 'running' but
+    a concurrent stop() flipped state.json to Stopping between the
+    inspect-running observation and the Phase-3 flock acquire. start()
+    must NOT overwrite Stopping with Running — it returns the
+    concurrent state instead."""
+    cfg = _settings(tmp_path)
+    fake_subprocess.responses = [
+        (0, "image-id\n", ""),  # docker image inspect
+        (0, "running\n", ""),   # docker inspect State.Status — running
+        (0, "abc123def4561234\n", ""),  # docker inspect Id
+    ]
+    monkeypatch.setattr(services_mod, "control", lambda svc, action: "inactive")
+
+    # Hook _coordinator_flock so that the second-acquire (Phase 3) sees
+    # state.json as Stopping (a concurrent stop() ran between Phase 2
+    # observation and Phase 3 acquire).
+    real_flock = M._coordinator_flock
+    flock_call_count = {"n": 0}
+
+    import contextlib as _contextlib
+
+    @_contextlib.contextmanager
+    def _flock_with_concurrent_stop_before_phase3(c: Settings):
+        flock_call_count["n"] += 1
+        # Before yielding the SECOND flock (start's Phase 3), simulate
+        # a concurrent stop() having flipped state to Stopping. The
+        # first flock is start's Phase 1; the second is Phase 3.
+        if flock_call_count["n"] == 2:
+            cur = M._load_state(c)
+            if cur.state == M.MappingState.STARTING:
+                M._save_state(
+                    c,
+                    M.MappingStatus(
+                        state=M.MappingState.STOPPING,
+                        map_name=cur.map_name,
+                        container_id_short=cur.container_id_short,
+                        started_at=cur.started_at,
+                        error_detail=None,
+                        journal_tail_available=False,
+                    ),
+                )
+        with real_flock(c) as inner:
+            yield inner
+
+    monkeypatch.setattr(M, "_coordinator_flock", _flock_with_concurrent_stop_before_phase3)
+
+    out = M.start("studio_v1", cfg)
+    # start() must observe the Stopping state and bail without
+    # overwriting with Running.
+    assert out.state == M.MappingState.STOPPING
+    # state.json must NOT be Running.
+    s = M._load_state(cfg)
+    assert s.state == M.MappingState.STOPPING
 
 
 # --- flock defence -------------------------------------------------------

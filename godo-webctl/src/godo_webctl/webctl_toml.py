@@ -53,10 +53,36 @@ WEBCTL_SCAN_STREAM_HZ_DEFAULT: Final[int] = 30
 WEBCTL_STREAM_HZ_MIN: Final[int] = 1
 WEBCTL_STREAM_HZ_MAX: Final[int] = 60
 
+# issue#14 Maj-1 — webctl-owned mapping-stop timing ladder defaults +
+# range bounds. The defaults pin the "20 < 30 < 35" ladder that gives
+# nav2 `map_saver_cli` enough time to atomic-rename the PGM/YAML pair
+# before any layer escalates to SIGKILL — see config_defaults.hpp +
+# CODEBASE.md mapping-timing-ladder invariant.
+WEBCTL_MAPPING_DOCKER_STOP_GRACE_S_DEFAULT: Final[int] = 20
+WEBCTL_MAPPING_SYSTEMD_STOP_TIMEOUT_S_DEFAULT: Final[int] = 30
+WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S_DEFAULT: Final[int] = 35
+
+# Range bounds mirror the C++ schema row (min_d, max_d) for each key.
+WEBCTL_MAPPING_DOCKER_STOP_GRACE_S_MIN: Final[int] = 10
+WEBCTL_MAPPING_DOCKER_STOP_GRACE_S_MAX: Final[int] = 60
+WEBCTL_MAPPING_SYSTEMD_STOP_TIMEOUT_S_MIN: Final[int] = 20
+WEBCTL_MAPPING_SYSTEMD_STOP_TIMEOUT_S_MAX: Final[int] = 90
+WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S_MIN: Final[int] = 25
+WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S_MAX: Final[int] = 120
+
 # Env var names. Mirror the CLI / schema convention (UPPERCASE +
 # underscored prefix matching `GODO_WEBCTL_*`).
 _ENV_POSE_KEY: Final[str] = "GODO_WEBCTL_POSE_STREAM_HZ"
 _ENV_SCAN_KEY: Final[str] = "GODO_WEBCTL_SCAN_STREAM_HZ"
+_ENV_MAPPING_DOCKER_STOP_GRACE_S_KEY: Final[str] = (
+    "GODO_WEBCTL_MAPPING_DOCKER_STOP_GRACE_S"
+)
+_ENV_MAPPING_SYSTEMD_STOP_TIMEOUT_S_KEY: Final[str] = (
+    "GODO_WEBCTL_MAPPING_SYSTEMD_STOP_TIMEOUT_S"
+)
+_ENV_MAPPING_WEBCTL_STOP_TIMEOUT_S_KEY: Final[str] = (
+    "GODO_WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S"
+)
 
 
 class WebctlTomlError(ValueError):
@@ -68,10 +94,25 @@ class WebctlTomlError(ValueError):
 
 
 class WebctlSection(NamedTuple):
-    """Resolved webctl-owned config values, ready for SSE producers."""
+    """Resolved webctl-owned config values, ready for SSE producers
+    + the mapping-stop timing ladder (issue#14 Maj-1).
+
+    Ordering invariant on the timing trio (enforced by
+    ``read_webctl_section`` at parse time):
+
+        mapping_docker_stop_grace_s
+            < mapping_systemd_stop_timeout_s
+            < mapping_webctl_stop_timeout_s
+
+    A misordered TOML payload raises ``WebctlTomlError`` naming the
+    offending key, so a manually-edited ``tracker.toml`` cannot
+    produce a SIGKILL-mid-rename ladder."""
 
     pose_stream_hz: int
     scan_stream_hz: int
+    mapping_docker_stop_grace_s: int
+    mapping_systemd_stop_timeout_s: int
+    mapping_webctl_stop_timeout_s: int
 
 
 def _coerce_int(raw: object, key: str) -> int:
@@ -91,11 +132,16 @@ def _coerce_int(raw: object, key: str) -> int:
     raise WebctlTomlError(f"{key}: must be an integer (got {type(raw).__name__})")
 
 
-def _validate_range(value: int, key: str) -> int:
-    if not (WEBCTL_STREAM_HZ_MIN <= value <= WEBCTL_STREAM_HZ_MAX):
+def _validate_range(
+    value: int,
+    key: str,
+    *,
+    min_v: int = WEBCTL_STREAM_HZ_MIN,
+    max_v: int = WEBCTL_STREAM_HZ_MAX,
+) -> int:
+    if not (min_v <= value <= max_v):
         raise WebctlTomlError(
-            f"{key}: {value} out of range "
-            f"[{WEBCTL_STREAM_HZ_MIN}, {WEBCTL_STREAM_HZ_MAX}]",
+            f"{key}: {value} out of range [{min_v}, {max_v}]",
         )
     return value
 
@@ -130,21 +176,23 @@ def _resolve_one(
     default: int,
     toml_key: str,
     env_key: str,
+    min_v: int = WEBCTL_STREAM_HZ_MIN,
+    max_v: int = WEBCTL_STREAM_HZ_MAX,
 ) -> int:
     """Apply the precedence ladder: env > TOML > default. Each layer
     runs through type + range validation.
 
     Forward-compat: tracker-unrelated keys in ``[webctl]`` (e.g. future
-    additions) are tolerated by ``read_webctl_section`` — only the two
-    keys this module knows about are validated. Drift surfaces in
-    parity tests, not at runtime.
+    additions) are tolerated by ``read_webctl_section`` — only the keys
+    this module knows about are validated. Drift surfaces in parity
+    tests, not at runtime.
     """
     if env_value is not None:
         coerced = _coerce_int(env_value, env_key)
-        return _validate_range(coerced, env_key)
+        return _validate_range(coerced, env_key, min_v=min_v, max_v=max_v)
     if toml_value is not None:
         coerced = _coerce_int(toml_value, toml_key)
-        return _validate_range(coerced, toml_key)
+        return _validate_range(coerced, toml_key, min_v=min_v, max_v=max_v)
     return default
 
 
@@ -246,4 +294,55 @@ def read_webctl_section(
         toml_key="webctl.scan_stream_hz",
         env_key=_ENV_SCAN_KEY,
     )
-    return WebctlSection(pose_stream_hz=pose, scan_stream_hz=scan)
+    # issue#14 Maj-1 — mapping-stop timing trio.
+    docker_grace = _resolve_one(
+        toml_value=section.get("mapping_docker_stop_grace_s"),
+        env_value=src.get(_ENV_MAPPING_DOCKER_STOP_GRACE_S_KEY),
+        default=WEBCTL_MAPPING_DOCKER_STOP_GRACE_S_DEFAULT,
+        toml_key="webctl.mapping_docker_stop_grace_s",
+        env_key=_ENV_MAPPING_DOCKER_STOP_GRACE_S_KEY,
+        min_v=WEBCTL_MAPPING_DOCKER_STOP_GRACE_S_MIN,
+        max_v=WEBCTL_MAPPING_DOCKER_STOP_GRACE_S_MAX,
+    )
+    systemd_timeout = _resolve_one(
+        toml_value=section.get("mapping_systemd_stop_timeout_s"),
+        env_value=src.get(_ENV_MAPPING_SYSTEMD_STOP_TIMEOUT_S_KEY),
+        default=WEBCTL_MAPPING_SYSTEMD_STOP_TIMEOUT_S_DEFAULT,
+        toml_key="webctl.mapping_systemd_stop_timeout_s",
+        env_key=_ENV_MAPPING_SYSTEMD_STOP_TIMEOUT_S_KEY,
+        min_v=WEBCTL_MAPPING_SYSTEMD_STOP_TIMEOUT_S_MIN,
+        max_v=WEBCTL_MAPPING_SYSTEMD_STOP_TIMEOUT_S_MAX,
+    )
+    webctl_timeout = _resolve_one(
+        toml_value=section.get("mapping_webctl_stop_timeout_s"),
+        env_value=src.get(_ENV_MAPPING_WEBCTL_STOP_TIMEOUT_S_KEY),
+        default=WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S_DEFAULT,
+        toml_key="webctl.mapping_webctl_stop_timeout_s",
+        env_key=_ENV_MAPPING_WEBCTL_STOP_TIMEOUT_S_KEY,
+        min_v=WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S_MIN,
+        max_v=WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S_MAX,
+    )
+    # Ordering invariant: docker_grace < systemd_timeout < webctl_timeout.
+    # A torn ladder means SIGKILL can fire mid-rename. Reject before any
+    # SSE / mapping consumer sees the misordered triple. Error message
+    # names the SECOND key in the broken pair so the operator sees the
+    # row to bump.
+    if not (docker_grace < systemd_timeout):
+        raise WebctlTomlError(
+            f"webctl.mapping_systemd_stop_timeout_s: must be > "
+            f"webctl.mapping_docker_stop_grace_s "
+            f"(got systemd={systemd_timeout}, docker={docker_grace})",
+        )
+    if not (systemd_timeout < webctl_timeout):
+        raise WebctlTomlError(
+            f"webctl.mapping_webctl_stop_timeout_s: must be > "
+            f"webctl.mapping_systemd_stop_timeout_s "
+            f"(got webctl={webctl_timeout}, systemd={systemd_timeout})",
+        )
+    return WebctlSection(
+        pose_stream_hz=pose,
+        scan_stream_hz=scan,
+        mapping_docker_stop_grace_s=docker_grace,
+        mapping_systemd_stop_timeout_s=systemd_timeout,
+        mapping_webctl_stop_timeout_s=webctl_timeout,
+    )

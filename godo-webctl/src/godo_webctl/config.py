@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Final
 
 from .constants import (
+    MAPPING_CONTAINER_STOP_TIMEOUT_S,
     MAPPING_IMAGE_TAG_DEFAULT,
     MAPPING_RUNTIME_DIR_DEFAULT,
 )
@@ -89,6 +90,20 @@ class Settings:
     # issue#14: docker binary location. /usr/bin/docker on Debian/Trixie.
     # Tests override via GODO_WEBCTL_DOCKER_BIN to point at a fake path.
     docker_bin: Path
+    # issue#14 Maj-1: webctl-side mapping.stop() polling deadline (seconds).
+    # Sourced from the [webctl] section of tracker.toml via
+    # webctl_toml.read_webctl_section; env override
+    # GODO_WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S overrides the TOML value.
+    # Pairs with `webctl.mapping_systemd_stop_timeout_s` (in the unit
+    # file, sed-substituted by install.sh) and
+    # `webctl.mapping_docker_stop_grace_s` (in the unit file's
+    # `docker stop --time=` argument). Ordering invariant:
+    #     docker_grace < systemd_timeout < webctl_timeout
+    # is enforced inside `webctl_toml.read_webctl_section` at startup.
+    # The raw constant `MAPPING_CONTAINER_STOP_TIMEOUT_S` in
+    # `constants.py` is the FALLBACK default (35 s); runtime code reads
+    # this `Settings` field.
+    mapping_webctl_stop_timeout_s: float
 
 
 # Documented defaults — single source for code + README + systemd env-file.
@@ -112,6 +127,11 @@ _DEFAULTS: Final[dict[str, str]] = {
     "GODO_WEBCTL_MAPPING_RUNTIME_DIR": MAPPING_RUNTIME_DIR_DEFAULT,
     "GODO_WEBCTL_MAPPING_IMAGE_TAG": MAPPING_IMAGE_TAG_DEFAULT,
     "GODO_WEBCTL_DOCKER_BIN": "/usr/bin/docker",
+    # issue#14 Maj-1 — Settings fallback default. Runtime value typically
+    # comes from the [webctl] section of tracker.toml, but if Settings
+    # is constructed without going through the TOML reader (tests, dev
+    # scripts) this default keeps the field finite.
+    "GODO_WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S": str(MAPPING_CONTAINER_STOP_TIMEOUT_S),
 }
 
 # Per-field parser. Same keys (in same order) as _DEFAULTS.
@@ -135,6 +155,7 @@ _PARSERS: Final[dict[str, Callable[[str], Any]]] = {
     "GODO_WEBCTL_MAPPING_RUNTIME_DIR": Path,
     "GODO_WEBCTL_MAPPING_IMAGE_TAG": str,
     "GODO_WEBCTL_DOCKER_BIN": Path,
+    "GODO_WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S": float,
 }
 
 # env-var name → Settings field name. Drift between this and the dataclass
@@ -159,6 +180,7 @@ _ENV_TO_FIELD: Final[dict[str, str]] = {
     "GODO_WEBCTL_MAPPING_RUNTIME_DIR": "mapping_runtime_dir",
     "GODO_WEBCTL_MAPPING_IMAGE_TAG": "mapping_image_tag",
     "GODO_WEBCTL_DOCKER_BIN": "docker_bin",
+    "GODO_WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S": "mapping_webctl_stop_timeout_s",
 }
 
 

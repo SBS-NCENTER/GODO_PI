@@ -499,10 +499,96 @@ def test_map_entry_to_dict_uses_mtime_unix_float(tmp_path: Path) -> None:
     entries = M.list_pairs(tmp_path)
     assert len(entries) == 1
     d = entries[0].to_dict()
-    assert set(d.keys()) == {"name", "size_bytes", "mtime_unix", "is_active"}
+    # Operator UX 2026-05-02 KST: width_px / height_px / resolution_m
+    # added so the SPA Map list can render `W×H px (X.X×Y.Y m)`.
+    assert set(d.keys()) == {
+        "name",
+        "size_bytes",
+        "mtime_unix",
+        "is_active",
+        "width_px",
+        "height_px",
+        "resolution_m",
+    }
     assert isinstance(d["mtime_unix"], float)
     # Sanity: mtime_unix should be within a few seconds of now.
     assert abs(float(d["mtime_unix"]) - time.time()) < 60.0
+
+
+# --- read_yaml_resolution (Operator UX 2026-05-02 KST) -----------------
+
+
+def test_read_yaml_resolution_typical(tmp_path: Path) -> None:
+    """Standard slam_toolbox YAML carries `resolution: <float>`."""
+    p = tmp_path / "x.yaml"
+    p.write_text(
+        "image: x.pgm\nresolution: 0.025\norigin: [0, 0, 0]\n"
+        "occupied_thresh: 0.65\nfree_thresh: 0.196\nnegate: 0\n",
+    )
+    assert M.read_yaml_resolution(p) == 0.025
+
+
+def test_read_yaml_resolution_legacy_quarter(tmp_path: Path) -> None:
+    """Pre-issue#13-cand maps carry `resolution: 0.05`."""
+    p = tmp_path / "x.yaml"
+    p.write_text("image: x.pgm\nresolution: 0.050\norigin: [0,0,0]\n")
+    assert M.read_yaml_resolution(p) == 0.05
+
+
+def test_read_yaml_resolution_with_inline_comment(tmp_path: Path) -> None:
+    p = tmp_path / "x.yaml"
+    p.write_text("resolution: 0.10  # 10cm/cell coarse\n")
+    assert M.read_yaml_resolution(p) == 0.10
+
+
+def test_read_yaml_resolution_missing_returns_none(tmp_path: Path) -> None:
+    """Operator UX must NOT fail list_pairs when a YAML is malformed —
+    return None and let the SPA show '—' for the dimension cell."""
+    p = tmp_path / "x.yaml"
+    p.write_text("image: x.pgm\norigin: [0,0,0]\n")
+    assert M.read_yaml_resolution(p) is None
+
+
+def test_read_yaml_resolution_non_numeric_returns_none(tmp_path: Path) -> None:
+    p = tmp_path / "x.yaml"
+    p.write_text("resolution: not-a-number\n")
+    assert M.read_yaml_resolution(p) is None
+
+
+def test_read_yaml_resolution_missing_file_returns_none(tmp_path: Path) -> None:
+    p = tmp_path / "ghost.yaml"
+    assert M.read_yaml_resolution(p) is None
+
+
+def test_list_pairs_carries_dimensions_and_resolution(tmp_path: Path) -> None:
+    """End-to-end: list_pairs populates width_px / height_px /
+    resolution_m on every entry; the to_dict() exposes them."""
+    _make_pair(tmp_path, _NAME_GOOD)
+    entries = M.list_pairs(tmp_path)
+    assert len(entries) == 1
+    e = entries[0]
+    # _write_pgm makes a 4×4 fill; _write_yaml uses resolution: 0.05.
+    assert e.width_px == 4
+    assert e.height_px == 4
+    assert e.resolution_m == 0.05
+    d = e.to_dict()
+    assert d["width_px"] == 4
+    assert d["height_px"] == 4
+    assert d["resolution_m"] == 0.05
+
+
+def test_list_pairs_tolerates_malformed_yaml_resolution(tmp_path: Path) -> None:
+    """A YAML without a parseable `resolution:` line yields
+    resolution_m=None — list_pairs still returns the entry."""
+    pgm = tmp_path / f"{_NAME_GOOD}.pgm"
+    yaml = tmp_path / f"{_NAME_GOOD}.yaml"
+    pgm.write_bytes(b"P5\n8 8\n255\n" + bytes([0] * 64))
+    yaml.write_text("image: x.pgm\norigin: [0,0,0]\n")  # no resolution line
+    entries = M.list_pairs(tmp_path)
+    assert len(entries) == 1
+    assert entries[0].width_px == 8
+    assert entries[0].height_px == 8
+    assert entries[0].resolution_m is None
 
 
 # --- read_pgm_dimensions (Track D scale fix) --------------------------

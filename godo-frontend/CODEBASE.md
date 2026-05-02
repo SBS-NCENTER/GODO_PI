@@ -2526,3 +2526,96 @@ void` callback prop. In origin-pick mode pointer-down emits
   + 2 api + 1 mapViewportNoWheel + 1 already-existing infrastructure).
 - playwright: deferred (no e2e change for issue#3; HIL is the
   load-bearing acceptance gate per plan §"Definition of Done").
+
+---
+
+## 2026-05-02 09:13 KST — issue#14 Patch C: System tab integration of mapping pipeline
+
+Operator request: surface godo-mapping@active in the System tab's
+services overview block (alongside the 3 existing units), with
+action buttons disabled and a tooltip directing the operator to the
+Map > Mapping tab. Also distinguish the godo-family processes in
+the process table by giving the `godo` category an accent color so
+both godo-family categories (`godo` + `managed`) are visually
+grouped against the general-process noise.
+
+### Added
+
+- `src/components/ProcessTable.svelte` — `.name-godo` style adds
+  `color: var(--color-accent)` (was bold-only). Both `name-godo` +
+  `name-managed` are now bold + colored, so a quick visual scan of
+  the Processes tab groups godo-family rows together.
+- `src/components/ServiceStatusCard.svelte` — two new optional
+  props: `actionsDisabled: boolean` + `actionsDisabledTooltip:
+  string`. When set, the Start/Stop/Restart buttons are disabled
+  (regardless of admin status) and a hint string renders below the
+  card. Used by `routes/System.svelte` for the `godo-mapping@active`
+  card.
+- `src/routes/System.svelte` — services-grid layout switched from
+  `auto-fit + minmax(360px, 1fr)` (4 columns on a wide viewport) to
+  fixed `repeat(2, minmax(0, 1fr))` (2x2 grid) so the 4 service
+  cards display consistently. Mobile (< 720 px) drops to 1 column.
+- `tests/unit/processTable.test.ts` — 2 new cases:
+  `godo-category name carries name-godo class with accent color` +
+  `general-category name carries no godo-family class`.
+- `tests/unit/system.test.ts` — `seedServicesStoreWithMapping()`
+  helper + 3 new cases:
+  `renders all 4 service cards including godo-mapping@active`,
+  `godo-mapping@active row disables admin action buttons + shows
+  tooltip hint`,
+  `godo-mapping@active anon viewer sees no action buttons`.
+
+### Changed
+
+- `src/components/ServiceStatusCard.svelte` — button `disabled=`
+  expression now `busy || actionsDisabled` so the UI gate is
+  independent of the polkit gate (operator may still
+  `curl POST /api/system/service/godo-mapping@active/stop` directly;
+  same path Map > Mapping uses).
+- `src/routes/System.svelte` — passes
+  `actionsDisabled={svc.name === 'godo-mapping@active'}` +
+  `actionsDisabledTooltip='Map > Mapping 탭에서 제어'` per card.
+
+### Removed
+
+- (none)
+
+### Invariants
+
+- **(ad) godo-mapping-system-tab-readonly** — issue#14 Patch C2.
+  The System tab's services overview MUST render
+  `godo-mapping@active` as a status-only row: action buttons are
+  rendered (so the layout is consistent) but disabled with a Korean
+  tooltip directing the operator to Map > Mapping. The polkit rule
+  + ALLOWED_SERVICES whitelist allow the verb (so a curl POST
+  works), but the System tab's UI gate keeps the operator on the
+  proper control path. A future writer who removes the
+  `actionsDisabled` prop without consulting this invariant breaks
+  the operator-locked "Map > Mapping is the SOLE mapping-control
+  surface in the SPA" contract.
+
+  - SSOT: `services.ALLOWED_SERVICES` in webctl (4 entries after
+    issue#14 Patch C2). Frontend hard-codes the equality check
+    `svc.name === 'godo-mapping@active'` in `routes/System.svelte`;
+    drift between the unit name string and the systemd unit-file
+    template is caught by `tests/unit/system.test.ts::godo-mapping
+    @active row disables admin action buttons + shows tooltip
+    hint`.
+  - The disabled hint string `Map > Mapping 탭에서 제어` is pinned
+    in `tests/unit/system.test.ts`. A future writer who renames
+    the Map > Mapping sub-tab MUST update this string in lockstep.
+
+- **(ae) godo-family-process-color-grouping** — issue#14 Patch C1.
+  The Processes table colors both `godo` and `managed` categories,
+  not just `managed`. The current convention:
+  - `general` — no special styling (plain mono font, default color).
+  - `godo` — bold + `color: var(--color-accent)` (issue#14 C1).
+  - `managed` — bold + `color: var(--color-status-warn)` (Mode-A M5).
+
+  Both `name-godo` + `name-managed` MUST stay bold + visibly
+  distinguished from `general` so the operator can scan the table
+  and find godo-family processes at a glance. A future writer who
+  drops the color from one of them breaks the operator's triage
+  affordance. Pinned by `tests/unit/processTable.test.ts::godo-
+  category name carries name-godo class with accent color` +
+  `general-category name carries no godo-family class`.

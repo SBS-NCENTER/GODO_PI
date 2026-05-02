@@ -405,11 +405,20 @@ export interface RestartPendingResponse {
 // JSON shape for one row of GET /api/maps. Mirrors backend
 // `maps.MapEntry.to_dict()` (mtime is float epoch seconds, NOT raw
 // nanoseconds — per Mode-A N3 wire format).
+//
+// Operator UX 2026-05-02 KST: width_px / height_px / resolution_m
+// added so the SPA Map list can render `W×H px (X.X×Y.Y m)`. Any field
+// may be null if the corresponding header is malformed (graceful
+// degradation — the row still appears, the SPA shows '—' for unknown
+// dimensions).
 export interface MapEntry {
   name: string;
   size_bytes: number;
   mtime_unix: number;
   is_active: boolean;
+  width_px: number | null;
+  height_px: number | null;
+  resolution_m: number | null;
 }
 
 // GET /api/maps response = array of MapEntry. The store keeps the array

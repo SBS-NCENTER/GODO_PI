@@ -267,7 +267,15 @@
         {:else}
           <div class="services-grid" data-testid="services-grid">
             {#each svcState.services as svc (svc.name)}
-              <ServiceStatusCard service={svc} {isAdmin} {nowUnix} />
+              <ServiceStatusCard
+                service={svc}
+                {isAdmin}
+                {nowUnix}
+                actionsDisabled={svc.name === 'godo-mapping@active'}
+                actionsDisabledTooltip={svc.name === 'godo-mapping@active'
+                  ? 'Map > Mapping 탭에서 제어'
+                  : ''}
+              />
             {/each}
           </div>
         {/if}
@@ -385,10 +393,22 @@
     font-size: 14px;
   }
   .services-grid {
+    /* issue#14 Patch C2 (2026-05-02): 2x2 grid for the 4-service set
+       (godo-irq-pin, godo-mapping@active, godo-tracker, godo-webctl).
+       `auto-fit + minmax(360px, 1fr)` would have produced 4 columns
+       on a wide viewport, which breaks the operator's mental model
+       of "managed unit cards on one row, peripheral cards on another".
+       The fixed 2-column grid keeps the layout consistent across
+       viewport widths (drops to 1 column below 720 px). */
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 8px;
     margin-top: 8px;
+  }
+  @media (max-width: 720px) {
+    .services-grid {
+      grid-template-columns: minmax(0, 1fr);
+    }
   }
   .services-stale {
     font-size: 13px;

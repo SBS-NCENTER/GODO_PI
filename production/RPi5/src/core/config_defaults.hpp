@@ -158,4 +158,20 @@ inline constexpr std::string_view AMCL_LIVE_CARRY_SCHEDULE_M       =
 inline constexpr int              WEBCTL_POSE_STREAM_HZ_DEFAULT    = 30;
 inline constexpr int              WEBCTL_SCAN_STREAM_HZ_DEFAULT    = 30;
 
+// issue#14 Maj-1 — webctl-owned mapping-stop timing ladder defaults.
+// Defaults pin the SIGTERM→SIGKILL grace ladder. The ordering invariant
+//   docker_stop_grace (20) < systemd_stop_timeout (30) < webctl_stop_timeout (35)
+// is what gives nav2 `map_saver_cli` enough time to atomic-rename the
+// PGM/YAML pair before any layer escalates to SIGKILL — the difference
+// between a complete lifetime asset and a torn write. install.sh
+// sed-substitutes the docker grace + systemd timeout into the unit file;
+// webctl's `mapping.stop()` reads `webctl_stop_timeout` from
+// `cfg.mapping_webctl_stop_timeout_s` (Settings, mirrored from the
+// `[webctl]` section of `tracker.toml` via `webctl_toml.py`). See
+// production/RPi5/CODEBASE.md invariant (r) and godo-webctl/CODEBASE.md
+// `mapping-timing-ladder` invariant.
+inline constexpr int              WEBCTL_MAPPING_DOCKER_STOP_GRACE_S_DEFAULT   = 20;
+inline constexpr int              WEBCTL_MAPPING_SYSTEMD_STOP_TIMEOUT_S_DEFAULT = 30;
+inline constexpr int              WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S_DEFAULT = 35;
+
 }  // namespace godo::config::defaults

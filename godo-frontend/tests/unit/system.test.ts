@@ -124,6 +124,57 @@ function seedServicesStore(): void {
   });
 }
 
+function seedServicesStoreWithMapping(): void {
+  // issue#14 Patch C2: includes godo-mapping@active so the
+  // System.svelte renders 4 cards in the 2x2 grid.
+  systemServices.set({
+    services: [
+      {
+        name: 'godo-irq-pin',
+        active_state: 'inactive',
+        sub_state: 'dead',
+        main_pid: null,
+        active_since_unix: 0,
+        memory_bytes: null,
+        env_redacted: {},
+        env_stale: false,
+      },
+      {
+        name: 'godo-mapping@active',
+        active_state: 'inactive',
+        sub_state: 'dead',
+        main_pid: null,
+        active_since_unix: 0,
+        memory_bytes: null,
+        env_redacted: {},
+        env_stale: false,
+      },
+      {
+        name: 'godo-tracker',
+        active_state: 'active',
+        sub_state: 'running',
+        main_pid: 1234,
+        active_since_unix: 0,
+        memory_bytes: 0,
+        env_redacted: {},
+        env_stale: false,
+      },
+      {
+        name: 'godo-webctl',
+        active_state: 'active',
+        sub_state: 'running',
+        main_pid: 5678,
+        active_since_unix: 0,
+        memory_bytes: 0,
+        env_redacted: {},
+        env_stale: false,
+      },
+    ],
+    _arrival_ms: Date.now(),
+    err: null,
+  });
+}
+
 describe('System page', () => {
   it('renders five panels (PR-2: +services), registers one diag subscriber on mount, and unsubs on unmount', () => {
     expect(_getSubscriberCountForTests()).toBe(0);
@@ -323,6 +374,81 @@ describe('System page', () => {
     flushSync();
 
     expect(apiPostSpy).toHaveBeenCalledWith('/api/system/service/godo-tracker/restart');
+
+    unmount(cmp);
+  });
+
+  // --- issue#14 Patch C2 — godo-mapping@active in services overview ----
+
+  it('renders all 4 service cards including godo-mapping@active (issue#14 C2)', () => {
+    seedServicesStoreWithMapping();
+    const cmp = mount(System, { target, props: {} });
+    flushSync();
+
+    expect(target.querySelector('[data-testid="service-status-card-godo-irq-pin"]')).not.toBeNull();
+    expect(
+      target.querySelector('[data-testid="service-status-card-godo-mapping@active"]'),
+    ).not.toBeNull();
+    expect(target.querySelector('[data-testid="service-status-card-godo-tracker"]')).not.toBeNull();
+    expect(target.querySelector('[data-testid="service-status-card-godo-webctl"]')).not.toBeNull();
+
+    unmount(cmp);
+  });
+
+  it('godo-mapping@active row disables admin action buttons + shows tooltip hint (issue#14 C2)', () => {
+    setAdminSession();
+    seedServicesStoreWithMapping();
+    const cmp = mount(System, { target, props: {} });
+    flushSync();
+
+    // godo-mapping@active row's three buttons are present but DISABLED.
+    const startBtn = target.querySelector(
+      '[data-testid="svc-action-start-godo-mapping@active"]',
+    ) as HTMLButtonElement;
+    const stopBtn = target.querySelector(
+      '[data-testid="svc-action-stop-godo-mapping@active"]',
+    ) as HTMLButtonElement;
+    const restartBtn = target.querySelector(
+      '[data-testid="svc-action-restart-godo-mapping@active"]',
+    ) as HTMLButtonElement;
+    expect(startBtn).not.toBeNull();
+    expect(stopBtn).not.toBeNull();
+    expect(restartBtn).not.toBeNull();
+    expect(startBtn.disabled).toBe(true);
+    expect(stopBtn.disabled).toBe(true);
+    expect(restartBtn.disabled).toBe(true);
+
+    // Tooltip hint string visible to operator.
+    const hint = target.querySelector(
+      '[data-testid="svc-actions-disabled-hint-godo-mapping@active"]',
+    ) as HTMLElement;
+    expect(hint).not.toBeNull();
+    expect(hint.textContent?.trim()).toBe('Map > Mapping 탭에서 제어');
+
+    // Anti-pin: the OTHER admin rows (e.g. godo-tracker) keep their
+    // buttons enabled — disabling is scoped to godo-mapping@active.
+    const trackerStart = target.querySelector(
+      '[data-testid="svc-action-start-godo-tracker"]',
+    ) as HTMLButtonElement;
+    expect(trackerStart.disabled).toBe(false);
+
+    unmount(cmp);
+  });
+
+  it('godo-mapping@active anon viewer sees no action buttons (no tooltip either) (issue#14 C2)', () => {
+    auth.set(null);
+    seedServicesStoreWithMapping();
+    const cmp = mount(System, { target, props: {} });
+    flushSync();
+
+    // Anon viewer: action buttons are not rendered at all (the entire
+    // {#if isAdmin} block is empty), and the disabled-hint isn't either.
+    expect(
+      target.querySelector('[data-testid="svc-action-start-godo-mapping@active"]'),
+    ).toBeNull();
+    expect(
+      target.querySelector('[data-testid="svc-actions-disabled-hint-godo-mapping@active"]'),
+    ).toBeNull();
 
     unmount(cmp);
   });

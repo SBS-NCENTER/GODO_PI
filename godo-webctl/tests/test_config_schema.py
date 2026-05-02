@@ -93,31 +93,35 @@ def test_parse_three_rows_preserves_order() -> None:
 
 
 def test_parse_rejects_short_row_count(tmp_path: Path) -> None:
-    """The default `EXPECTED_ROW_COUNT` is 48; a 1-row file via the
+    """The default `EXPECTED_ROW_COUNT` is 51; a 1-row file via the
     public path raises."""
     src = _make_synthetic_source(
         '{"a.x", ValueType::Int, 0.0, 10.0, "1", ReloadClass::Hot, "f"},',
-        expected=48,  # the wrapper claims 48, but only 1 row in body
+        expected=51,  # the wrapper claims 51, but only 1 row in body
     )
     src_path = tmp_path / "config_schema.hpp"
     src_path.write_text(src)
     with pytest.raises(schema_mod.ConfigSchemaError) as ei:
         schema_mod.load_schema(source_path=src_path)
     assert "1" in str(ei.value)
-    assert "48" in str(ei.value)
+    assert "51" in str(ei.value)
 
 
-def test_load_schema_real_source_returns_48_rows() -> None:
+def test_load_schema_real_source_returns_51_rows() -> None:
     """TB1 fold: load by real path; pin row count + alphabetical sort.
-    issue#12 fold: 46 → 48 (2 new webctl.* rows)."""
+    issue#14 Maj-1 fold: 48 → 51 (3 new webctl.mapping_* rows)."""
     rows = schema_mod.load_schema()
-    assert len(rows) == 48
+    assert len(rows) == 51
     # Alphabetical (matches the C++ pin in config_schema.hpp).
     names = [r.name for r in rows]
     assert names == sorted(names)
     # issue#12 — webctl.* rows present.
     assert "webctl.pose_stream_hz" in names
     assert "webctl.scan_stream_hz" in names
+    # issue#14 Maj-1 — webctl.mapping_* rows present.
+    assert "webctl.mapping_docker_stop_grace_s" in names
+    assert "webctl.mapping_systemd_stop_timeout_s" in names
+    assert "webctl.mapping_webctl_stop_timeout_s" in names
 
 
 def test_load_schema_caches_parse() -> None:

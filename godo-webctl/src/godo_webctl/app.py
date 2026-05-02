@@ -93,6 +93,7 @@ from .constants import (
     MAPPING_JOURNAL_TAIL_DEFAULT_N,
     MAPPING_JOURNAL_TAIL_MAX_N,
     MAPPING_NAME_MAX_LEN,
+    MAPPING_UNIT_NAME,
     MAPS_ACTIVE_BASENAME,
     ORIGIN_BODY_MAX_BYTES,
     ORIGIN_X_Y_ABS_MAX_M,
@@ -1778,6 +1779,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         action: str,
         claims: auth_mod.Claims = Depends(auth_mod.require_admin),
     ) -> JSONResponse:
+        # issue#14 Mode-B M2(a) hard-block (2026-05-02 KST) — System tab
+        # admin endpoint must NOT bypass the Map > Mapping coordinator
+        # while a mapping run is in flight. The SPA's ServiceStatusCard
+        # `actionsDisabled` prop is a UX gate only; this server-side gate
+        # is what stops a curl / second-tab admin from killing the
+        # container mid-run and corrupting state.json.
+        #
+        # When state ∈ {Starting, Running, Stopping}, the only valid
+        # control path is /api/mapping/stop (which manages state.json
+        # and respects the Maj-1 timing ladder).
+        if name == MAPPING_UNIT_NAME.removesuffix(".service"):
+            mapping_state = await asyncio.to_thread(mapping_mod.status, cfg)
+            if mapping_state.state in (
+                mapping_mod.MappingState.STARTING,
+                mapping_mod.MappingState.RUNNING,
+                mapping_mod.MappingState.STOPPING,
+            ):
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "err": "mapping_pipeline_active",
+                        "detail": (
+                            "매핑 진행 중입니다. Map > Mapping 탭에서 Stop 버튼을 사용하세요."
+                        ),
+                    },
+                    status_code=HTTPStatus.CONFLICT,
+                )
         try:
             status = await asyncio.to_thread(services_mod.control, name, action)
         except services_mod.UnknownService:

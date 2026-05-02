@@ -44,20 +44,23 @@ def _show(
 
 def test_snapshot_returns_pinned_fields() -> None:
     """Every entry contains exactly the SYSTEM_SERVICES_FIELDS keys, in
-    that order."""
+    that order. issue#14 Patch C2: count is now 4 (godo-mapping@active
+    joined ALLOWED_SERVICES)."""
     with mock.patch(
         "godo_webctl.system_services.services.service_show",
         side_effect=lambda name: _show(name),
     ):
         snap = system_services.snapshot()
     assert isinstance(snap, list)
-    assert len(snap) == 3  # godo-tracker, godo-webctl, godo-irq-pin
+    assert len(snap) == 4  # godo-tracker, godo-webctl, godo-irq-pin, godo-mapping@active
     for entry in snap:
         assert tuple(entry.keys()) == SYSTEM_SERVICES_FIELDS
 
 
 def test_snapshot_returns_alphabetical_service_order() -> None:
-    """ALLOWED_SERVICES is a frozenset; we sort for stable wire order."""
+    """ALLOWED_SERVICES is a frozenset; we sort for stable wire order.
+    issue#14 Patch C2: alphabetical includes godo-mapping@active before
+    godo-tracker."""
     with mock.patch(
         "godo_webctl.system_services.services.service_show",
         side_effect=lambda name: _show(name),
@@ -65,7 +68,12 @@ def test_snapshot_returns_alphabetical_service_order() -> None:
         snap = system_services.snapshot()
     names = [e["name"] for e in snap]
     assert names == sorted(names)
-    assert names == ["godo-irq-pin", "godo-tracker", "godo-webctl"]
+    assert names == [
+        "godo-irq-pin",
+        "godo-mapping@active",
+        "godo-tracker",
+        "godo-webctl",
+    ]
 
 
 def test_snapshot_redacts_secret_keys() -> None:
@@ -99,7 +107,7 @@ def test_snapshot_handles_memory_not_set() -> None:
 
 def test_snapshot_one_service_failed_returns_unknown_state() -> None:
     """M5 fold pin: when `service_show` raises for one service, that
-    entry has `active_state="unknown"` and the other 2 services have
+    entry has `active_state="unknown"` and the other 3 services have
     real values. The aggregate endpoint never returns 503."""
 
     def _show_one(name: str) -> services.ServiceShow:
@@ -117,12 +125,15 @@ def test_snapshot_one_service_failed_returns_unknown_state() -> None:
     assert by_name["godo-tracker"]["main_pid"] is None
     assert by_name["godo-webctl"]["active_state"] == "active"
     assert by_name["godo-irq-pin"]["active_state"] == "active"
+    # issue#14 Patch C2 — godo-mapping@active is now also in the snapshot.
+    assert by_name["godo-mapping@active"]["active_state"] == "active"
 
 
 def test_snapshot_cache_hit_within_ttl() -> None:
     """T1 fold: monkeypatch `service_show` and assert exact call_count
-    after two calls within TTL. Expect 3 (one per service × 1 invocation),
-    NOT 6."""
+    after two calls within TTL. issue#14 Patch C2: 4 services in
+    ALLOWED_SERVICES (was 3) → expect 4 (one per service × 1 invocation),
+    NOT 8."""
     show_mock = mock.MagicMock(side_effect=lambda name: _show(name))
     # snapshot() reads `time.monotonic_ns()` once per call.
     times = iter([0, 100_000_000])
@@ -135,12 +146,13 @@ def test_snapshot_cache_hit_within_ttl() -> None:
     ):
         first = system_services.snapshot()
         second = system_services.snapshot()
-    assert show_mock.call_count == 3
+    assert show_mock.call_count == 4
     assert first is second
 
 
 def test_snapshot_cache_miss_after_ttl() -> None:
-    """T1 fold: advance time past TTL between calls; assert call_count == 6."""
+    """T1 fold: advance time past TTL between calls; assert call_count == 8.
+    issue#14 Patch C2: 4 services × 2 calls = 8."""
     show_mock = mock.MagicMock(side_effect=lambda name: _show(name))
     # TTL = 1 s = 1_000_000_000 ns. Second call at 2 s > expiry (1 s).
     times = iter([0, 2_000_000_000])
@@ -153,7 +165,7 @@ def test_snapshot_cache_miss_after_ttl() -> None:
     ):
         first = system_services.snapshot()
         second = system_services.snapshot()
-    assert show_mock.call_count == 6
+    assert show_mock.call_count == 8
     assert first is not second
 
 

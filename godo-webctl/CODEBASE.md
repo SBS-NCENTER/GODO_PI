@@ -2666,3 +2666,125 @@ the rule unblocks at runtime.
      + `test_app_integration::test_calibrate_empty_body_byte_identical_to_pre_issue3`.
      A future writer who introduces an unconditional `seed_x_m`
      emit fails BOTH cases.
+
+---
+
+## 2026-05-02 08:57 KST — issue#14 Maj-1: mapping-stop timing ladder operator-tunable + ordering invariant
+
+Mode-B Maj-1 finding: the stop-timing chain was too tight against
+nav2 `map_saver_cli`'s atomic-rename window. Operator stake "맵 한번
+제작하면 평생 쓰는" demanded both (a) wider defaults and (b)
+SPA-tunable knobs so future HIL findings can adjust without code
+changes. Tracker schema rows are the SSOT (production/RPi5
+CODEBASE.md (r) extended); webctl is the runtime consumer.
+
+### Added
+
+- `webctl_toml.py` — `WebctlSection` extended with 3 new fields
+  (`mapping_docker_stop_grace_s`, `mapping_systemd_stop_timeout_s`,
+  `mapping_webctl_stop_timeout_s`), 6 new module-level constants
+  (defaults + min/max), 3 new env-var keys, ordering-invariant
+  validation in `read_webctl_section` (raises `WebctlTomlError`
+  with the offending key when the trio is misordered).
+- `config.py::Settings.mapping_webctl_stop_timeout_s` — new field
+  + matching `_DEFAULTS` / `_PARSERS` / `_ENV_TO_FIELD` row.
+  Fallback default sourced from `constants.MAPPING_CONTAINER_STOP_TIMEOUT_S`
+  (35.0 s). Runtime value typically comes from the `[webctl]`
+  section of `tracker.toml`.
+- `mapping.py` — `stop()` polling loop now reads
+  `cfg.mapping_webctl_stop_timeout_s`; the legacy constant is the
+  fallback when the [webctl] section is silent.
+- `constants.MAPPING_STATE_REREAD_INTERVAL_S = 0.25` — Tier-1 cadence
+  for issue#14 Maj-2's start-Phase-2 state-reread loop (used by
+  the upcoming flock-narrowing refactor).
+- `tests/test_webctl_toml.py` — 14 new cases covering the 3 new
+  keys: defaults when section missing, TOML reads, env override,
+  out-of-range bounds (per-key parametrized), ordering invariant
+  in three permutations, partial-override-against-defaults.
+- `tests/test_constants.py::test_mapping_unit_file_timing_values_match_constant`
+  — pins the AS-CHECKED-IN unit file's `--time=20` + `TimeoutStopSec=30s`
+  literals against the constants. Catches drift between the unit
+  file (which `install -m 0644` ships verbatim before the first
+  webctl boot) and the operator-locked 20/30/35 ladder.
+- `tests/test_mapping.py::test_stop_polling_deadline_uses_cfg_field_not_constant`
+  — pins the contract that `mapping.stop()` reads
+  `cfg.mapping_webctl_stop_timeout_s`, not the legacy constant.
+
+### Changed
+
+- `constants.MAPPING_CONTAINER_STOP_TIMEOUT_S` value 25.0 → 35.0
+  (now the FALLBACK default, mirrored by webctl.mapping_webctl_stop_timeout_s
+  default in webctl_toml.py + the schema row default_repr).
+- `constants.py` — comment block on `MAPPING_CONTAINER_STOP_TIMEOUT_S`
+  rewritten to explain the new role (fallback default; runtime value
+  in Settings).
+- `mapping.py` — `stop()` polling loop now uses `cfg.mapping_webctl_stop_timeout_s`
+  for the deadline + the `ContainerStopTimeout` exception message.
+- `tests/test_constants.py::test_mapping_container_stop_timeout_ordering_invariant`
+  — pin updated to the new 20/30/35 ladder.
+- `tests/test_constants.py::test_mapping_container_stop_timeout_s_pinned`
+  removed (the value is now operator-tunable; the ordering invariant
+  is the new pin).
+- `tests/test_config.py::test_empty_env_uses_defaults` — asserts the
+  new `Settings.mapping_webctl_stop_timeout_s == 35.0` default.
+- `tests/test_config.py::test_each_env_var_overrides_default` — adds
+  `GODO_WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S=60.0` override.
+- `tests/test_config_schema_parity.py` — row count pin 48 → 51,
+  + `test_webctl_mapping_timing_rows_present` for the 3 new schema rows.
+- `tests/test_config_schema.py` — row count pin 48 → 51 in both the
+  parser and the load-schema cases.
+- `tests/test_config_view.py::test_project_schema_view_real_source`
+  — assertion 48 → 51 + presence checks for the 3 new rows.
+- `tests/test_app_integration.py::test_get_config_schema_returns_51_rows`
+  — renamed and bumped from 48.
+- All Settings constructions in tests (`test_mapping.py`,
+  `test_mapping_sse.py`, `test_sse.py`, `test_app_integration.py`)
+  add `mapping_webctl_stop_timeout_s=35.0`.
+- `config_schema.py::EXPECTED_ROW_COUNT` 48 → 51.
+
+### Removed
+
+- (none)
+
+### Invariants
+
+- **(ad) mapping-timing-ladder** — the stop-timing trio
+  (`webctl.mapping_docker_stop_grace_s`,
+  `webctl.mapping_systemd_stop_timeout_s`,
+  `webctl.mapping_webctl_stop_timeout_s`) must satisfy the
+  strict ordering
+  `docker_grace_s < systemd_timeout_s < webctl_timeout_s`
+  at every layer:
+
+  1. **Tracker schema bounds** — per-row min/max in
+     `config_schema.hpp` allow ranges that overlap (docker [10, 60],
+     systemd [20, 90], webctl [25, 120]). The schema does NOT
+     cross-check the trio — that's webctl's job.
+  2. **Webctl single drift-catch** — `webctl_toml.read_webctl_section`
+     enforces the strict-greater-than check at startup; a misordered
+     `tracker.toml` raises `WebctlTomlError` naming the second key
+     in the broken pair (`webctl.mapping_systemd_stop_timeout_s` for
+     docker≥systemd, `webctl.mapping_webctl_stop_timeout_s` for
+     systemd≥webctl). The error message includes both numeric values
+     so the operator sees what to bump.
+  3. **install.sh** — sed-substitutes `docker_stop_grace` +
+     `systemd_stop_timeout` from the `[webctl]` section into the
+     `godo-mapping@.service` template at install time. The
+     as-checked-in unit file MUST also satisfy the invariant so a
+     bare `install -m 0644` (before the first webctl boot writes
+     tracker.toml) still produces a valid ladder. Pinned by
+     `tests/test_constants.py::test_mapping_unit_file_timing_values_match_constant`.
+  4. **mapping.py** — `stop()` reads
+     `cfg.mapping_webctl_stop_timeout_s`, not the legacy
+     `MAPPING_CONTAINER_STOP_TIMEOUT_S` constant. The constant is
+     the fallback default that lands in Settings via
+     `_DEFAULTS["GODO_WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S"]` when
+     the env / TOML are silent — its value (35) is pinned in
+     `test_constants.py::test_mapping_container_stop_timeout_ordering_invariant`.
+  5. **Cross-stack ownership**: tracker schema rows are the SSOT
+     (production/RPi5/CODEBASE.md (r) extended for the 3 new rows).
+     Webctl reads via `webctl_toml`, install.sh awks the section,
+     mapping.py consumes the cfg field. The operator-locked stake
+     "맵 한번 제작하면 평생 쓰는" mandates this ladder be operator-
+     tunable; the SPA Config tab is schema-driven so the rows
+     surface automatically (no frontend change).

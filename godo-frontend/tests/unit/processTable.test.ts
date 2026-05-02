@@ -161,6 +161,37 @@ describe('<ProcessTable/>', () => {
     unmount(cmp);
   });
 
+  it('godo-category name carries name-godo class with accent color (issue#14 C1)', () => {
+    // pid=300 is godo_smoke (category=godo). After issue#14 Patch C1
+    // both godo-family categories (`godo` + `managed`) get a
+    // distinguishing color + bold weight; the test pins the class is
+    // present so the styling rule applies.
+    const cmp = mount(ProcessTable, { target, props: { snapshot: snapshot() } });
+    flushSync();
+    const cell = target.querySelector('[data-testid="proc-row-300"] .name-cell') as HTMLElement;
+    expect(cell).not.toBeNull();
+    expect(cell.classList.contains('name-godo')).toBe(true);
+    expect(cell.dataset.category).toBe('godo');
+    // Anti-pin: it must NOT be classed as `name-general` or `name-managed`.
+    expect(cell.classList.contains('name-managed')).toBe(false);
+    expect(cell.classList.contains('name-general')).toBe(false);
+    unmount(cmp);
+  });
+
+  it('general-category name carries no godo-family class (issue#14 C1 anti-test)', () => {
+    // pid=200 is bash (category=general). Must NOT receive either
+    // godo-family class — those are reserved for the operator's
+    // visual-grouping affordance.
+    const cmp = mount(ProcessTable, { target, props: { snapshot: snapshot() } });
+    flushSync();
+    const cell = target.querySelector('[data-testid="proc-row-200"] .name-cell') as HTMLElement;
+    expect(cell).not.toBeNull();
+    expect(cell.classList.contains('name-godo')).toBe(false);
+    expect(cell.classList.contains('name-managed')).toBe(false);
+    expect(cell.dataset.category).toBe('general');
+    unmount(cmp);
+  });
+
   it('count summary reflects filtered visible / total', () => {
     const cmp = mount(ProcessTable, { target, props: { snapshot: snapshot() } });
     flushSync();

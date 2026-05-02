@@ -54,6 +54,7 @@ def _settings(tracker_toml_path: Path | None = None) -> Settings:
         mapping_runtime_dir=Path("/tmp/mapping_rt"),
         mapping_image_tag="godo-mapping:dev",
         docker_bin=Path("/usr/bin/docker"),
+        mapping_webctl_stop_timeout_s=35.0,
     )
 
 

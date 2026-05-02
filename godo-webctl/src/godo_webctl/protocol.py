@@ -360,6 +360,25 @@ GODO_PROCESS_NAMES: Final[frozenset[str]] = frozenset(
     },
 )
 
+# issue#14 Mode-B N1 fix (2026-05-02 KST) — docker-family processes are
+# god-family in this project. Operator confirmed docker is only used for
+# the mapping container (`godo-mapping@active.service` → `docker run
+# --name godo-mapping ...`). The mapping container itself + its
+# containerd shim are PID-namespaced from the host so the children
+# inside the container show up as `python3` / `ros2` / etc. (untracked),
+# but the parent `docker run` and the `containerd-shim*` host-side
+# parents ARE visible. Mark them godo-family so the SPA's process list
+# bold+accent treatment includes them at-a-glance.
+#
+# Pinned by `tests/test_processes.py::test_classify_pid_docker_family`.
+DOCKER_MAPPING_PROCESS_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        "docker",       # `docker run --name godo-mapping ...` parent
+        "dockerd",      # docker daemon (host-side, always running once installed)
+        "containerd",   # containerd daemon
+    },
+)
+
 # Subset of GODO_PROCESS_NAMES that maps to `services.ALLOWED_SERVICES`
 # units. Asymmetry vs. `services.ALLOWED_SERVICES`: this set is the
 # PROCESS-LIST view (argv-derived basenames), not the SYSTEMD-UNIT view

@@ -254,12 +254,20 @@
   }
   /* Mode-A M5 + Final fold O1: typography over background shading.
      `name-managed` uses the existing `--color-status-warn` token in
-     both light + dark modes; no raw hex literals. */
+     both light + dark modes; no raw hex literals.
+     issue#14 Patch C1 (2026-05-02): the `godo` category (any process
+     in GODO_PROCESS_NAMES that isn't a managed unit, e.g. `godo_smoke`,
+     `godo_jitter`, `godo_freed_passthrough`) now gets a distinguishing
+     accent color in addition to the bold weight, so both halves of the
+     godo-family (`godo` + `managed`) are visually grouped against the
+     general-process noise. Operator stake: System tab triage at a
+     glance. */
   .name-cell {
     font-family: var(--font-mono);
   }
   .name-godo {
     font-weight: bold;
+    color: var(--color-accent);
   }
   .name-managed {
     font-weight: bold;

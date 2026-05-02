@@ -93,6 +93,14 @@ const std::set<std::string>& allowed_keys() {
         // production/RPi5/CODEBASE.md invariant (r).
         "webctl.pose_stream_hz",
         "webctl.scan_stream_hz",
+        // issue#14 Maj-1 — webctl-owned mapping-stop timing ladder.
+        // Same ownership pattern as pose/scan_stream_hz: tracker stores
+        // verbatim, webctl is the sole consumer (install.sh seds the
+        // docker + systemd values into the unit file; mapping.py reads
+        // the webctl deadline at stop time).
+        "webctl.mapping_docker_stop_grace_s",
+        "webctl.mapping_systemd_stop_timeout_s",
+        "webctl.mapping_webctl_stop_timeout_s",
     };
     return k;
 }
@@ -230,6 +238,10 @@ void apply_toml_file(Config& c, const std::filesystem::path& path) {
     // verbatim; no tracker logic path consumes it (CODEBASE.md (r)).
     if (auto v = tbl["webctl"]["pose_stream_hz"].value<int64_t>(); v) c.webctl_pose_stream_hz = static_cast<int>(*v);
     if (auto v = tbl["webctl"]["scan_stream_hz"].value<int64_t>(); v) c.webctl_scan_stream_hz = static_cast<int>(*v);
+    // issue#14 Maj-1 — webctl-owned mapping-stop timing ladder.
+    if (auto v = tbl["webctl"]["mapping_docker_stop_grace_s"].value<int64_t>();   v) c.webctl_mapping_docker_stop_grace_s   = static_cast<int>(*v);
+    if (auto v = tbl["webctl"]["mapping_systemd_stop_timeout_s"].value<int64_t>(); v) c.webctl_mapping_systemd_stop_timeout_s = static_cast<int>(*v);
+    if (auto v = tbl["webctl"]["mapping_webctl_stop_timeout_s"].value<int64_t>();  v) c.webctl_mapping_webctl_stop_timeout_s  = static_cast<int>(*v);
 }
 
 // Linear search over the envp array.
@@ -513,6 +525,10 @@ void apply_env(Config& c, char** envp) {
     // issue#12 — webctl-owned schema rows.
     if (auto v = env_get(envp, "GODO_WEBCTL_POSE_STREAM_HZ")) c.webctl_pose_stream_hz = parse_int_or_throw(*v, "GODO_WEBCTL_POSE_STREAM_HZ");
     if (auto v = env_get(envp, "GODO_WEBCTL_SCAN_STREAM_HZ")) c.webctl_scan_stream_hz = parse_int_or_throw(*v, "GODO_WEBCTL_SCAN_STREAM_HZ");
+    // issue#14 Maj-1 — webctl-owned mapping-stop timing ladder.
+    if (auto v = env_get(envp, "GODO_WEBCTL_MAPPING_DOCKER_STOP_GRACE_S"))   c.webctl_mapping_docker_stop_grace_s   = parse_int_or_throw(*v, "GODO_WEBCTL_MAPPING_DOCKER_STOP_GRACE_S");
+    if (auto v = env_get(envp, "GODO_WEBCTL_MAPPING_SYSTEMD_STOP_TIMEOUT_S")) c.webctl_mapping_systemd_stop_timeout_s = parse_int_or_throw(*v, "GODO_WEBCTL_MAPPING_SYSTEMD_STOP_TIMEOUT_S");
+    if (auto v = env_get(envp, "GODO_WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S"))  c.webctl_mapping_webctl_stop_timeout_s  = parse_int_or_throw(*v, "GODO_WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S");
 }
 
 // CLI parser — tiny, explicit. `--key=value` or `--key value`.
@@ -620,6 +636,10 @@ void apply_cli(Config& c, int argc, char** argv) {
         // issue#12 — webctl-owned schema rows.
         {"webctl-pose-stream-hz",          [](Config& cc, const std::string& v){ cc.webctl_pose_stream_hz          = parse_int_or_throw(v, "--webctl-pose-stream-hz"); }},
         {"webctl-scan-stream-hz",          [](Config& cc, const std::string& v){ cc.webctl_scan_stream_hz          = parse_int_or_throw(v, "--webctl-scan-stream-hz"); }},
+        // issue#14 Maj-1 — webctl-owned mapping-stop timing ladder.
+        {"webctl-mapping-docker-stop-grace-s",   [](Config& cc, const std::string& v){ cc.webctl_mapping_docker_stop_grace_s   = parse_int_or_throw(v, "--webctl-mapping-docker-stop-grace-s"); }},
+        {"webctl-mapping-systemd-stop-timeout-s",[](Config& cc, const std::string& v){ cc.webctl_mapping_systemd_stop_timeout_s = parse_int_or_throw(v, "--webctl-mapping-systemd-stop-timeout-s"); }},
+        {"webctl-mapping-webctl-stop-timeout-s", [](Config& cc, const std::string& v){ cc.webctl_mapping_webctl_stop_timeout_s  = parse_int_or_throw(v, "--webctl-mapping-webctl-stop-timeout-s"); }},
     };
     for (const auto& kv : parse_cli(argc, argv)) {
         auto it = handlers.find(kv.key);
@@ -828,6 +848,31 @@ void validate_gpio(const Config& c) {
     require_pin_in_range(c.gpio_live_toggle_pin, "gpio_live_toggle_pin");
 }
 
+// issue#14 Mode-B M1 fix (2026-05-02 KST) — webctl mapping-stop timing
+// ladder ordering invariant. Same check the apply path (apply.cpp)
+// enforces, applied at Config::load so a hand-edited tracker.toml is
+// rejected at next webctl-driven tracker boot rather than producing a
+// torn ladder that webctl cannot read.
+void validate_webctl_mapping_ladder(const Config& c) {
+    const int docker_s  = c.webctl_mapping_docker_stop_grace_s;
+    const int systemd_s = c.webctl_mapping_systemd_stop_timeout_s;
+    const int webctl_s  = c.webctl_mapping_webctl_stop_timeout_s;
+    if (!(docker_s < systemd_s)) {
+        throw std::runtime_error(
+            "config: webctl.mapping ladder violated: "
+            "docker_stop_grace_s (" + std::to_string(docker_s) +
+            ") must be < systemd_stop_timeout_s (" +
+            std::to_string(systemd_s) + ")");
+    }
+    if (!(systemd_s < webctl_s)) {
+        throw std::runtime_error(
+            "config: webctl.mapping ladder violated: "
+            "systemd_stop_timeout_s (" + std::to_string(systemd_s) +
+            ") must be < webctl_stop_timeout_s (" +
+            std::to_string(webctl_s) + ")");
+    }
+}
+
 }  // namespace
 
 Config Config::make_default() {
@@ -901,6 +946,11 @@ Config Config::make_default() {
     c.webctl_pose_stream_hz          = cfg_defaults::WEBCTL_POSE_STREAM_HZ_DEFAULT;
     c.webctl_scan_stream_hz          = cfg_defaults::WEBCTL_SCAN_STREAM_HZ_DEFAULT;
 
+    // issue#14 Maj-1 — webctl-owned mapping-stop timing ladder defaults.
+    c.webctl_mapping_docker_stop_grace_s   = cfg_defaults::WEBCTL_MAPPING_DOCKER_STOP_GRACE_S_DEFAULT;
+    c.webctl_mapping_systemd_stop_timeout_s = cfg_defaults::WEBCTL_MAPPING_SYSTEMD_STOP_TIMEOUT_S_DEFAULT;
+    c.webctl_mapping_webctl_stop_timeout_s  = cfg_defaults::WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S_DEFAULT;
+
     return c;
 }
 
@@ -933,6 +983,7 @@ Config Config::load(int argc, char** argv, char** envp) {
     apply_cli(c, argc, argv);
     validate_amcl(c);
     validate_gpio(c);
+    validate_webctl_mapping_ladder(c);
     return c;
 }
 

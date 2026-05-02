@@ -129,6 +129,26 @@ struct Config {
     int                 webctl_pose_stream_hz{};
     int                 webctl_scan_stream_hz{};
 
+    // issue#14 Maj-1 — webctl-owned mapping-stop timing ladder.
+    // Operator-tunable SIGTERM→SIGKILL grace ladder for the mapping
+    // pipeline. Tracker stores the values verbatim through the apply /
+    // render_toml round-trip; no tracker logic path reads them.
+    // Consumers:
+    //   - `webctl.mapping_docker_stop_grace_s` → install.sh sed-substitutes
+    //      into godo-mapping@.service `ExecStop=docker stop --time=<X>`.
+    //   - `webctl.mapping_systemd_stop_timeout_s` → install.sh sed-substitutes
+    //      into godo-mapping@.service `TimeoutStopSec=<Y>s`.
+    //   - `webctl.mapping_webctl_stop_timeout_s` → mapping.stop()'s
+    //      polling deadline (godo-webctl Settings field
+    //      `mapping_webctl_stop_timeout_s`).
+    // Ordering invariant `docker_stop_grace < systemd_stop_timeout <
+    // webctl_stop_timeout` is enforced by webctl's
+    // `webctl_toml.read_webctl_section` (single drift-catch site;
+    // tracker stores any in-range trio without cross-checking).
+    int                 webctl_mapping_docker_stop_grace_s{};
+    int                 webctl_mapping_systemd_stop_timeout_s{};
+    int                 webctl_mapping_webctl_stop_timeout_s{};
+
     // Build a Config with defaults applied from core/config_defaults.hpp.
     static Config make_default();
 

@@ -125,6 +125,17 @@
     if (row.type === 'bool') return (def === 'true') === value;
     return def === value;
   }
+
+  // issue#14 Mode-B N2 fix (2026-05-02 KST): a few rows need a stronger
+  // hint than the standard reload-class glyph. webctl.mapping_systemd_stop_timeout_s
+  // is special-cased because the value lives inside the systemd unit
+  // file (godo-mapping@.service's TimeoutStopSec=) — clicking Apply +
+  // tracker Restart does NOT propagate to the unit file. Operator must
+  // re-run install.sh to apply.
+  const SPECIAL_HINTS: Record<string, string> = {
+    'webctl.mapping_systemd_stop_timeout_s':
+      '값 변경 후 install.sh 재실행 필요 (sudo bash production/RPi5/systemd/install.sh && sudo systemctl daemon-reload).',
+  };
 </script>
 
 <table class="config-table" data-testid="config-table">
@@ -157,7 +168,14 @@
           {/if}
           <code>{row.name}</code>
         </td>
-        <td class="col-desc">{row.description}</td>
+        <td class="col-desc">
+          {row.description}
+          {#if SPECIAL_HINTS[row.name]}
+            <div class="special-hint" data-testid="special-hint-{row.name}">
+              ⚠ {SPECIAL_HINTS[row.name]}
+            </div>
+          {/if}
+        </td>
         <td class="col-current">
           <div class="current-value">{fmtCurrent(current[row.name])}</div>
           <div class="default-hint" data-testid="default-{row.name}">
@@ -284,6 +302,15 @@
     font-size: 0.85em;
     margin-right: 4px;
     cursor: help;
+  }
+  .special-hint {
+    margin-top: var(--space-1);
+    padding: 2px var(--space-2);
+    border-left: 3px solid var(--color-warn, #f57c00);
+    background: var(--color-bg-elev);
+    color: var(--color-text-muted);
+    font-size: 0.85em;
+    border-radius: 0 var(--radius-sm, 4px) var(--radius-sm, 4px) 0;
   }
   .glyph {
     display: inline-flex;

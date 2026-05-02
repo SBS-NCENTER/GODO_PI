@@ -569,12 +569,40 @@ def status(cfg: Settings) -> MappingStatus:
         # under the coordinator flock — status() is read-mostly.
         if inspect in ("created", "restarting"):
             return s
-        # Container gone — inspect returns None or "exited"/"dead"/
-        # "removing"/"paused". Transition to Failed for Running
-        # ("crashed") OR Idle for Stopping (clean stop) — but we cannot
-        # tell from inspect-None alone whether a Stopping path was clean
-        # vs aborted. Conservative: Stopping → Idle (no container is the
-        # success-shape for stop), Running/Starting → Failed.
+        # issue#16 HIL hot-fix v7 (2026-05-02 KST) — operator second-
+        # mapping HIL on v6 (PR #69) hit a separate race: a healthy
+        # second `mapping.start()` was marked
+        # `webctl_lost_view_post_crash` ~1 s after Phase-1 wrote
+        # Starting, even though start() Phase-2 was still running and
+        # the container was about to come up. Root cause: the systemd
+        # unit's `ExecStartPre=/usr/bin/docker rm -f godo-mapping`
+        # runs BEFORE ExecStart, so for ~100-500 ms there is no
+        # container at all — `docker inspect` returns None ("No such
+        # object"). v6 only handled non-None transients ("created",
+        # "restarting"); inspect=None still landed on the gone-branch
+        # and overwrote Starting with Failed.
+        #
+        # Fix: when state is Starting and inspect is None, treat as
+        # transient. start()'s own Phase-2 polling has the authoritative
+        # write for "Starting timed out" → Failed
+        # ("container_start_timeout") — status() must not pre-empt
+        # that with a webctl_lost_view_post_crash that races on the
+        # ExecStartPre window. The next status() tick (or Phase-2's
+        # next iteration) will see "running" once ExecStart fires.
+        #
+        # Running/Stopping with inspect=None remains the gone-branch:
+        # those states imply the container was previously seen running,
+        # so its disappearance is a genuine crash (Running) or a
+        # successful stop (Stopping).
+        if inspect is None and s.state == MappingState.STARTING:
+            return s
+        # Container gone — inspect returns None for Running/Stopping
+        # OR a terminal state ("exited"/"dead"/"removing"/"paused").
+        # Transition to Failed for Running ("crashed") OR Idle for
+        # Stopping (clean stop) — but we cannot tell from inspect-None
+        # alone whether a Stopping path was clean vs aborted.
+        # Conservative: Stopping → Idle (no container is the
+        # success-shape for stop), Running → Failed.
         if s.state == MappingState.STOPPING:
             new_status = _idle_status()
             _save_state(cfg, new_status)
@@ -1412,6 +1440,78 @@ def _check_state_clean(cfg: Settings) -> PrecheckRow:
     )
 
 
+def _check_mapping_unit_clean(cfg: Settings) -> PrecheckRow:
+    """systemd unit `godo-mapping@active.service` is NOT in `failed`,
+    AND no `godo-mapping` container is lingering on the docker side.
+
+    issue#16 v7 (2026-05-02 KST) — operator HIL on PR #69 hit
+    `precheck-passes-but-Start-fails` because the 6 pre-v7 rows
+    (lidar, tracker, image, disk, name, state.json) were ALL green
+    while the systemd unit was in a residual `failed` state from a
+    prior SIGKILL (t5 22:27:16, t6 22:54:47). systemctl-start of
+    a `failed` unit silently chains a reset internally on most
+    distros, but the operator's mental model is "all green = ready",
+    so the failed-state Start surprised them. Same shape applies to
+    a `godo-mapping` container that hung in `exited` state without
+    being removed.
+
+    Failure detail strings are lowercase + underscore-snake so the
+    SPA can map them to friendly Korean tooltips deterministically.
+    """
+    # 1) systemctl is-failed semantics: returncode 0 + stdout=="failed"
+    # means the unit is in failed state. Any other shape = not failed.
+    try:
+        proc = _run_subprocess(
+            ["systemctl", "is-failed", "--no-pager", MAPPING_UNIT_NAME],
+            services_mod.SUBPROCESS_TIMEOUT_S,
+        )
+    except DockerUnavailable as e:
+        # Reusing the DockerUnavailable shape from _run_subprocess for
+        # timeout/permission errors — it isn't docker per se but it
+        # IS a subprocess transport problem we can't recover from here.
+        return PrecheckRow(
+            name="mapping_unit_clean",
+            ok=False,
+            value=None,
+            detail=f"systemctl_unavailable: {e}",
+        )
+    if proc.returncode == 0 and proc.stdout.strip() == "failed":
+        return PrecheckRow(
+            name="mapping_unit_clean",
+            ok=False,
+            value="failed",
+            detail="systemd_unit_failed_run_reset_failed",
+        )
+
+    # 2) Lingering container: any state ≠ None means a previous run's
+    # container is still on the docker side. ExecStartPre's
+    # `docker rm -f` would clean it on next Start, but presenting it
+    # in precheck removes the surprise.
+    try:
+        container_state = _docker_inspect_state(cfg, MAPPING_CONTAINER_NAME)
+    except DockerUnavailable as e:
+        return PrecheckRow(
+            name="mapping_unit_clean",
+            ok=False,
+            value=None,
+            detail=f"docker_unavailable: {e}",
+        )
+    if container_state is not None and container_state != "removing":
+        return PrecheckRow(
+            name="mapping_unit_clean",
+            ok=False,
+            value=container_state,
+            detail=f"container_lingering_{container_state}",
+        )
+
+    return PrecheckRow(
+        name="mapping_unit_clean",
+        ok=True,
+        value=None,
+        detail=None,
+    )
+
+
 def precheck(cfg: Settings, name: str | None = None) -> PrecheckResult:
     """Run all 6 checks in fixed PRECHECK_CHECK_NAMES order and return
     a `PrecheckResult`.
@@ -1426,6 +1526,7 @@ def precheck(cfg: Settings, name: str | None = None) -> PrecheckResult:
         _check_disk_space_mb(cfg),
         _check_name_available(cfg, name),
         _check_state_clean(cfg),
+        _check_mapping_unit_clean(cfg),
     ]
     # Defensive — pin order against the wire-side tuple.
     if tuple(r.name for r in rows) != PRECHECK_CHECK_NAMES:

@@ -552,8 +552,13 @@ PRECHECK_FIELDS: Final[tuple[str, ...]] = ("ready", "checks")
 # trivial.
 PRECHECK_CHECK_FIELDS: Final[tuple[str, ...]] = ("name", "ok", "value", "detail")
 
-# Canonical names (and emit order) of the 6 checks. Drift here breaks
+# Canonical names (and emit order) of the 7 checks. Drift here breaks
 # the SPA's labelled rows. Pinned by `tests/test_protocol.py`.
+#
+# v7 (2026-05-02 KST) added `mapping_unit_clean` after operator HIL
+# surfaced precheck-passes-but-Start-fails cases caused by a
+# `failed`-state systemd unit OR a lingering `godo-mapping` container
+# that the other 6 rows didn't catch.
 PRECHECK_CHECK_NAMES: Final[tuple[str, ...]] = (
     "lidar_readable",
     "tracker_stopped",
@@ -561,6 +566,7 @@ PRECHECK_CHECK_NAMES: Final[tuple[str, ...]] = (
     "disk_space_mb",
     "name_available",
     "state_clean",
+    "mapping_unit_clean",
 )
 
 # Disk-free threshold for the `disk_space_mb` check. Tier-1 mirror of the

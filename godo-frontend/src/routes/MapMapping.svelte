@@ -42,6 +42,19 @@
     disk_space_mb: '디스크 공간 (≥ 500 MB)',
     name_available: '맵 이름 사용 가능',
     state_clean: '이전 매핑 상태 정리됨',
+    mapping_unit_clean: '매핑 unit/컨테이너 잔여 없음',
+  };
+
+  // issue#16 v7 — Korean tooltip for known mapping_unit_clean failure
+  // detail strings. Falls back to the raw `detail` for unknown shapes.
+  const PRECHECK_DETAIL_KO: Record<string, string> = {
+    systemd_unit_failed_run_reset_failed:
+      '이전 실행이 비정상 종료되어 systemd unit이 failed로 남아 있습니다. 터미널에서 `sudo systemctl reset-failed godo-mapping@active.service` 실행 후 다시 시도해 주세요.',
+    container_lingering_exited: 'godo-mapping 컨테이너가 종료된 채 남아 있습니다. 다음 Start 시 자동 정리됩니다.',
+    container_lingering_running: 'godo-mapping 컨테이너가 여전히 실행 중입니다.',
+    container_lingering_created: 'godo-mapping 컨테이너가 생성됐으나 아직 실행 전입니다.',
+    container_lingering_paused: 'godo-mapping 컨테이너가 paused 상태입니다.',
+    container_lingering_dead: 'godo-mapping 컨테이너가 dead 상태입니다.',
   };
 
   let status = $state<MappingStatus | null>(null);
@@ -62,6 +75,18 @@
     // each tick so a fresh keystroke surfaces in the next URL.
     unsubPrecheck = precheckStore.subscribe((p) => (precheck = p));
     startPrecheck(() => name);
+  });
+
+  // issue#16 v7 — clear stale lastError when mapping transitions to a
+  // resting state (Idle). Without this, after the operator clicks 확인
+  // on a Failed view, the underlying error string from a prior 409
+  // (mapping_already_active) or other onStart failure stays painted
+  // beneath the all-green precheck rows even though state.json is now
+  // Idle. Operator HIL 2026-05-02 evening surfaced this UX paper-cut.
+  $effect(() => {
+    if (status?.state === MAPPING_STATE_IDLE) {
+      lastError = null;
+    }
   });
   onDestroy(() => {
     unsub?.();
@@ -228,7 +253,9 @@
                 {PRECHECK_LABEL_KO[row.name] ?? row.name}
               </span>
               {#if row.detail}
-                <span class="precheck-detail">— {row.detail}</span>
+                <span class="precheck-detail">
+                  — {PRECHECK_DETAIL_KO[row.detail] ?? row.detail}
+                </span>
               {/if}
               {#if row.name === 'lidar_readable' && row.ok === false}
                 <button

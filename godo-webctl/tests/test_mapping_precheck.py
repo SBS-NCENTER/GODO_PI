@@ -82,8 +82,19 @@ def all_pass_subprocess(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     def _fake_run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         if argv[:3] == ["systemctl", "is-active", "--no-pager"]:
             return subprocess.CompletedProcess(argv, 0, stdout="inactive\n", stderr="")
+        # v7 — _check_mapping_unit_clean uses `systemctl is-failed`. The
+        # systemd convention is rc=0+stdout="failed" means failed; rc=1
+        # means not-failed. Mock to "not failed".
+        if argv[:3] == ["systemctl", "is-failed", "--no-pager"]:
+            return subprocess.CompletedProcess(argv, 1, stdout="active\n", stderr="")
         if argv[1:3] == ["image", "inspect"]:
             return subprocess.CompletedProcess(argv, 0, stdout="image-id\n", stderr="")
+        # v7 — _check_mapping_unit_clean also calls _docker_inspect_state
+        # for `godo-mapping`. Mock "no such container" (the clean state).
+        if argv[1:3] == ["inspect", "--format"]:
+            return subprocess.CompletedProcess(
+                argv, 1, stdout="", stderr="Error: No such object: godo-mapping\n",
+            )
         # Default: success, empty stdout.
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
@@ -319,6 +330,68 @@ def test_check_state_clean_running_state_fails(
     row = M._check_state_clean(cfg)
     assert row.ok is False
     assert row.detail == "running"
+
+
+# --- _check_mapping_unit_clean (v7) -------------------------------------
+
+
+def test_check_mapping_unit_clean_passes_when_no_unit_failure_no_container(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _settings(tmp_path)
+
+    def _fake_run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if argv[:2] == ["systemctl", "is-failed"]:
+            return subprocess.CompletedProcess(argv, 1, stdout="active\n", stderr="")
+        if argv[1:3] == ["inspect", "--format"]:
+            return subprocess.CompletedProcess(
+                argv, 1, stdout="", stderr="Error: No such object: godo-mapping\n",
+            )
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(M.subprocess, "run", _fake_run)
+    row = M._check_mapping_unit_clean(cfg)
+    assert row.ok is True
+    assert row.detail is None
+
+
+def test_check_mapping_unit_clean_fails_when_unit_in_failed_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _settings(tmp_path)
+
+    def _fake_run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if argv[:2] == ["systemctl", "is-failed"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="failed\n", stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(M.subprocess, "run", _fake_run)
+    row = M._check_mapping_unit_clean(cfg)
+    assert row.ok is False
+    assert row.value == "failed"
+    assert row.detail == "systemd_unit_failed_run_reset_failed"
+
+
+def test_check_mapping_unit_clean_fails_when_container_lingering(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _settings(tmp_path)
+
+    def _fake_run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if argv[:2] == ["systemctl", "is-failed"]:
+            return subprocess.CompletedProcess(argv, 1, stdout="active\n", stderr="")
+        if argv[1:3] == ["inspect", "--format"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="exited\n", stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(M.subprocess, "run", _fake_run)
+    row = M._check_mapping_unit_clean(cfg)
+    assert row.ok is False
+    assert row.value == "exited"
+    assert row.detail == "container_lingering_exited"
 
 
 # --- precheck() aggregator ----------------------------------------------

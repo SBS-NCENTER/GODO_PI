@@ -824,8 +824,13 @@ def test_precheck_check_fields_pinned() -> None:
 
 
 def test_precheck_check_names_pinned() -> None:
-    """Canonical names + emit order of the 6 checks. Drift here breaks
-    the SPA's labelled rows + Korean strings."""
+    """Canonical names + emit order of the 7 checks. Drift here breaks
+    the SPA's labelled rows + Korean strings.
+
+    v7 (2026-05-02 KST) added `mapping_unit_clean` after operator HIL
+    surfaced precheck-passes-but-Start-fails caused by a residual
+    systemd unit failed-state OR a lingering `godo-mapping` container.
+    """
     assert P.PRECHECK_CHECK_NAMES == (
         "lidar_readable",
         "tracker_stopped",
@@ -833,13 +838,14 @@ def test_precheck_check_names_pinned() -> None:
         "disk_space_mb",
         "name_available",
         "state_clean",
+        "mapping_unit_clean",
     )
 
 
 def test_precheck_check_names_cardinality() -> None:
-    """All 6 names must be unique."""
-    assert len(P.PRECHECK_CHECK_NAMES) == 6
-    assert len(set(P.PRECHECK_CHECK_NAMES)) == 6
+    """All 7 names must be unique."""
+    assert len(P.PRECHECK_CHECK_NAMES) == 7
+    assert len(set(P.PRECHECK_CHECK_NAMES)) == 7
 
 
 def test_precheck_disk_free_min_mb_pinned() -> None:

@@ -2878,6 +2878,100 @@ CODEBASE.md (r) extended); webctl is the runtime consumer.
      tunable; the SPA Config tab is schema-driven so the rows
      surface automatically (no frontend change).
 
+## 2026-05-03 00:30 KST — issue#16 HIL hot-fix v7: ExecStartPre race + precheck mapping_unit_clean row
+
+Operator HIL on v6 (deployed 23:27 KST 2026-05-02): first mapping
+saved cleanly, but second attempt ~2 s after the save hit
+`webctl_lost_view_post_crash` again. Plus a UX paper-cut: the SPA's
+Failed-state recovery flow left a stale `mapping_already_active` red
+banner painted under all-green precheck rows.
+
+### Root causes (two distinct races)
+
+1. **ExecStartPre window** — the systemd unit
+   `godo-mapping@active.service` runs
+   `ExecStartPre=/usr/bin/docker rm -f godo-mapping` BEFORE
+   `ExecStart=docker run ...`. For the ~100-500 ms between rm and
+   run there is no container at all → `docker inspect` returns None
+   → v6's gone-branch fires → state.json overwritten with Failed.
+   v6 only handled non-None transients (`"created"`, `"restarting"`);
+   inspect=None still landed on the gone branch.
+
+2. **Stale lastError UX** — `MapMapping.svelte` cleared `lastError`
+   only at the start of `onStart` / `onStop`. The Failed → 확인
+   → Idle transition didn't clear, so the prior failure string
+   stayed painted under the now-green precheck panel.
+
+3. **Bonus precheck gap** — operator's "전부 정상으로 Pre-check가
+   나오는데, 막상 제작하면 잘 안되네요" case was a `failed`-state
+   systemd unit (residual from a prior SIGKILL, never cleared via
+   `reset-failed`). The 6 pre-v7 rows did not look at the unit
+   state, so all-green precheck + immediate Start failure.
+
+### Changed (backend)
+
+- `mapping.py` `status()` reconcile (around L573) — `inspect is None
+  AND s.state == STARTING` now returns `s` untouched. Detailed
+  comment block pins the operator t8 incident timestamp
+  (22:54:47 KST → second-attempt failure ~14:36:43 UTC). Running
+  + inspect=None still goes to the gone branch (genuine crash);
+  Stopping + inspect=None still resolves to Idle.
+- `mapping.py` new `_check_mapping_unit_clean(cfg)` helper —
+  combines `systemctl is-failed godo-mapping@active.service` AND
+  `docker inspect godo-mapping`. Failure detail strings are
+  `systemd_unit_failed_run_reset_failed` /
+  `container_lingering_<state>` so the SPA can map them to friendly
+  Korean tooltips.
+- `mapping.py` `precheck()` row list extended from 6 → 7
+  (`mapping_unit_clean` appended after `state_clean`).
+- `protocol.py` `PRECHECK_CHECK_NAMES` 6 → 7. Comment expanded.
+
+### Changed (frontend)
+
+- `MapMapping.svelte` — `$effect` block clears `lastError = null`
+  whenever `status?.state === MAPPING_STATE_IDLE`. Clears the stale
+  banner the moment 확인 lands.
+- `MapMapping.svelte` `PRECHECK_LABEL_KO` adds row label
+  `mapping_unit_clean: '매핑 unit/컨테이너 잔여 없음'`.
+- `MapMapping.svelte` new `PRECHECK_DETAIL_KO` map — translates the
+  six known v7 detail strings into Korean operator-actionable
+  tooltips (e.g.
+  `systemd_unit_failed_run_reset_failed → '이전 실행이 비정상 종료되어
+  systemd unit이 failed로 남아 있습니다. 터미널에서 sudo systemctl
+  reset-failed godo-mapping@active.service 실행 후 다시 시도해 주세요.'`).
+  Falls back to the raw detail for unknown shapes.
+
+### Tests
+
+- `tests/test_mapping.py` two new cases pin v7 contract:
+  - `test_status_reconcile_starting_keeps_state_when_inspect_none` —
+    Starting + inspect=None → stays Starting.
+  - `test_status_reconcile_running_to_failed_when_inspect_none_unchanged`
+    — Running + inspect=None still → Failed (regression guard).
+- `tests/test_mapping_precheck.py` three new cases for the new row:
+  happy path, systemd-failed, container-lingering.
+- `tests/test_protocol.py` `PRECHECK_CHECK_NAMES` cardinality
+  assertion bumped 6 → 7; pinned tuple updated.
+- `tests/test_mapping_precheck.py` `all_pass_subprocess` fixture
+  extended with `is-failed` + `inspect --format` shapes so the
+  aggregator test sees a clean picture.
+
+### Untouched
+
+- `Failed → Acknowledge` (now 확인) UX path — still does
+  `docker rm -f` (correct for genuine Failed; v7 narrows
+  false-positives at the source).
+- `start()` Phase-2 polling — still loops on any non-"running"
+  inspect, transient handling unchanged.
+- ProcessTable classification, cp210x recovery (v5 gate), name +
+  disk + image precheck rows — all unchanged.
+
+### Out of scope (still tracked)
+
+- t5 22:27:16 trap-timeout — entrypoint trap exceeds
+  `docker stop --time=20` grace, leaving map unsaved on long
+  mapping sessions. Separate issue#16.1 candidate.
+
 ## 2026-05-02 23:30 KST — issue#16 HIL hot-fix v6: status() reconcile transient docker states
 
 Operator HIL on v5 surfaced a separate race: a healthy mapping container

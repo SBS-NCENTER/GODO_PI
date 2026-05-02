@@ -576,6 +576,66 @@ def test_status_reconcile_starting_keeps_state_when_inspect_transient(
     assert persisted.state == M.MappingState.STARTING
 
 
+def test_status_reconcile_starting_keeps_state_when_inspect_none(
+    tmp_path: Path,
+    fake_subprocess: _FakeSubprocess,
+) -> None:
+    """v7 fix — systemd unit's ExecStartPre runs `docker rm -f` BEFORE
+    ExecStart, leaving no container for ~100-500 ms while Phase-2
+    polling is still in progress. Pre-v7 a 1Hz status() reconcile that
+    landed in this window overwrote Starting with Failed
+    (`webctl_lost_view_post_crash`), short-circuiting start()'s own
+    Phase-2 timeout (`container_start_timeout`). v7 keeps Starting
+    state untouched when inspect=None; start() owns the authoritative
+    timeout writer for the Starting state."""
+    cfg = _settings(tmp_path)
+    cfg.mapping_runtime_dir.mkdir(parents=True, exist_ok=True, mode=0o750)
+    starting = M.MappingStatus(
+        state=M.MappingState.STARTING,
+        map_name="t8",
+        container_id_short=None,
+        started_at="2026-05-02T14:36:43Z",
+        error_detail=None,
+        journal_tail_available=False,
+    )
+    M._save_state(cfg, starting)
+    # docker inspect returncode != 0 with "No such" stderr → inspect = None
+    fake_subprocess.sticky = (1, "", "Error: No such object: godo-mapping\n")
+
+    out = M.status(cfg)
+
+    assert out.state == M.MappingState.STARTING
+    assert out.error_detail is None
+    persisted = M._load_state(cfg)
+    assert persisted.state == M.MappingState.STARTING
+
+
+def test_status_reconcile_running_to_failed_when_inspect_none_unchanged(
+    tmp_path: Path,
+    fake_subprocess: _FakeSubprocess,
+) -> None:
+    """v7 must NOT change the Running + inspect=None contract — that
+    case is a genuine crash (container previously running, now gone)
+    and webctl_lost_view_post_crash is the right signal."""
+    cfg = _settings(tmp_path)
+    cfg.mapping_runtime_dir.mkdir(parents=True, exist_ok=True, mode=0o750)
+    running = M.MappingStatus(
+        state=M.MappingState.RUNNING,
+        map_name="t8",
+        container_id_short="abc",
+        started_at="2026-05-02T14:36:43Z",
+        error_detail=None,
+        journal_tail_available=False,
+    )
+    M._save_state(cfg, running)
+    fake_subprocess.sticky = (1, "", "Error: No such object: godo-mapping\n")
+
+    out = M.status(cfg)
+
+    assert out.state == M.MappingState.FAILED
+    assert out.error_detail == "webctl_lost_view_post_crash"
+
+
 @pytest.mark.parametrize("transient_state", ["created", "restarting"])
 def test_status_reconcile_running_keeps_state_when_inspect_transient(
     tmp_path: Path,

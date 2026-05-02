@@ -160,6 +160,40 @@ void UdsServer::open() {
             std::string("uds_server::open: bind('") + tmp_path +
             "'): " + strerror_safe(e));
     }
+    // issue#10.1 quick-fix: stale-non-socket guard. We have observed
+    // /run/godo/ctl.sock occasionally lingering as a 0-byte regular file
+    // (provenance unconfirmed — could be webctl ENOENT-on-connect, a
+    // half-failed prior rename, or systemd-tmpfiles). POSIX rename(2)
+    // atomically overwrites regardless of the target's file type, so
+    // strictly speaking this guard is belt-and-braces. But:
+    //   1. If rename DOES fail mid-flight (e.g., ENOSPC, EACCES, an
+    //      out-of-band caller holding the path open), we want the next
+    //      tracker boot to clear the stale state explicitly rather
+    //      than inherit it.
+    //   2. The lstat → unlink-if-non-socket sequence makes the boot
+    //      log self-documenting: when stale state is found, stderr
+    //      records it. Future broader UDS audit (separate issue tracked
+    //      in NEXT_SESSION.md) may revisit; this is the minimal fix
+    //      that surfaces the failure mode.
+    //
+    // Live-socket targets (S_IFSOCK) are left alone — rename overwrites
+    // them atomically without affecting open connections to the inode.
+    struct stat target_stat{};
+    if (::lstat(socket_path_.c_str(), &target_stat) == 0 &&
+        !S_ISSOCK(target_stat.st_mode)) {
+        std::fprintf(stderr,
+            "uds_server::open: stale non-socket at '%s' "
+            "(mode=0%o, size=%lld); unlinking before atomic rename\n",
+            socket_path_.c_str(),
+            static_cast<unsigned>(target_stat.st_mode),
+            static_cast<long long>(target_stat.st_size));
+        if (::unlink(socket_path_.c_str()) < 0 && errno != ENOENT) {
+            std::fprintf(stderr,
+                "uds_server::open: stale unlink('%s') warning: %s\n",
+                socket_path_.c_str(), strerror_safe(errno).c_str());
+        }
+    }
+
     // Rename atomically over the target. POSIX rename(2): if the
     // destination exists, it is replaced atomically; if a concurrent
     // process holds the destination open, its existing connection is

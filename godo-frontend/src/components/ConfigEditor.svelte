@@ -8,7 +8,9 @@
    * removed; Apply is page-level (memory §"How to apply", invariant
    * (z)).
    *
-   * One row per schema entry (37 in production). Per-row columns:
+   * One row per schema entry (count is schema-driven; bound dynamically
+   * via the parent's `schema.length` — see Config.svelte hint paragraph).
+   * Per-row columns:
    *   [Reload-class indicator | Key | Description | Current | Editor]
    *
    * Type-aware input:

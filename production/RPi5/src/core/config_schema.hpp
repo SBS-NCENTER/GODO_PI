@@ -49,6 +49,17 @@ struct ConfigSchemaRow {
     std::string_view description;
 };
 
+// 53 rows — issue#10.1 fold (2026-05-03). New `serial.lidar_udev_serial`
+// row (String, Restart class, default = studio cp210x serial). Sole
+// consumer is install.sh which sed-substitutes the value into
+// 99-rplidar.rules.template; tracker stores verbatim through
+// apply / render_toml round-trip (CODEBASE.md (r) pattern). Operator
+// edits via Config tab + re-runs `sudo bash production/RPi5/systemd/
+// install.sh` to regenerate /etc/udev/rules.d/99-rplidar.rules. Strict
+// 32-char lowercase-hex format check lives in install.sh; the C++
+// validator only enforces the generic String contract (non-empty +
+// ASCII + ≤256 chars) so dev hosts can use any serial unmolested.
+//
 // 52 rows — issue#16.1 fold (2026-05-03). New webctl-owned row
 // `webctl.mapping_systemctl_subprocess_timeout_s` (Int, default 45,
 // Restart class) bounds the mapping coordinator's `systemctl
@@ -91,7 +102,7 @@ struct ConfigSchemaRow {
 // CODEBASE.md invariant (q).
 
 // clang-format off
-inline constexpr std::array<ConfigSchemaRow, 52> CONFIG_SCHEMA = {{
+inline constexpr std::array<ConfigSchemaRow, 53> CONFIG_SCHEMA = {{
     {"amcl.anneal_iters_per_phase",     ValueType::Int,    1.0,      200.0,    "10",                             ReloadClass::Recalibrate, "Track D-5: per-phase upper-bound iteration count for sigma annealing."},
     {"amcl.converge_xy_std_m",          ValueType::Double, 0.001,    1.0,      "0.015",                          ReloadClass::Recalibrate, "AMCL converge() xy_std exit threshold (m)."},
     {"amcl.converge_yaw_std_deg",       ValueType::Double, 0.01,     30.0,     "0.3",                            ReloadClass::Recalibrate, "AMCL converge() yaw_std exit threshold (deg)."},
@@ -133,6 +144,7 @@ inline constexpr std::array<ConfigSchemaRow, 52> CONFIG_SCHEMA = {{
     {"serial.freed_port",               ValueType::String, 0.0,      0.0,      "/dev/ttyAMA0",                   ReloadClass::Restart,     "FreeD serial device path."},
     {"serial.lidar_baud",               ValueType::Int,    9600.0,   921600.0, "460800",                         ReloadClass::Restart,     "LiDAR serial baud."},
     {"serial.lidar_port",               ValueType::String, 0.0,      0.0,      "/dev/rplidar",                   ReloadClass::Restart,     "LiDAR serial device path."},
+    {"serial.lidar_udev_serial",        ValueType::String, 0.0,      0.0,      "2eca2bbb4d6eef1182aae9c2c169b110", ReloadClass::Restart,   "issue#10.1: cp210x USB serial (32 lowercase hex) used by 99-rplidar.rules.template to identify the studio LiDAR. Operator edits this then re-runs sudo bash production/RPi5/systemd/install.sh; install.sh sed-substitutes the placeholder. Tracker stores verbatim — install.sh is sole consumer (CODEBASE.md (r) pattern). Format check (32-char ^[0-9a-f]{32}$) lives in install.sh."},
     {"smoother.deadband_deg",           ValueType::Double, 0.0,      5.0,      "0.1",                            ReloadClass::Hot,         "Deadband on yaw (deg)."},
     {"smoother.deadband_mm",            ValueType::Double, 0.0,      200.0,    "10.0",                           ReloadClass::Hot,         "Deadband on translation (mm)."},
     {"smoother.divergence_deg",         ValueType::Double, 1.0,      45.0,     "10.0",                           ReloadClass::Restart,     "Divergence reject threshold (deg)."},
@@ -147,7 +159,7 @@ inline constexpr std::array<ConfigSchemaRow, 52> CONFIG_SCHEMA = {{
 }};
 // clang-format on
 
-static_assert(CONFIG_SCHEMA.size() == 52,
+static_assert(CONFIG_SCHEMA.size() == 53,
               "CONFIG_SCHEMA row count drifted; update tests + schema mirror");
 
 // O(N) lookup. N=40 keeps this trivially fine; O(log N) binary search is

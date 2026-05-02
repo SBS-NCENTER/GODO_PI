@@ -200,6 +200,7 @@ EffectiveValue read_effective(const Config& c, const ConfigSchemaRow& row) {
     else if (k == "serial.freed_port")               v.as_string = c.freed_port;
     else if (k == "serial.lidar_baud")               v.as_int    = c.lidar_baud;
     else if (k == "serial.lidar_port")               v.as_string = c.lidar_port;
+    else if (k == "serial.lidar_udev_serial")        v.as_string = c.lidar_udev_serial;
     else if (k == "smoother.deadband_deg")           v.as_double = c.deadband_deg;
     else if (k == "smoother.deadband_mm")            v.as_double = c.deadband_mm;
     else if (k == "smoother.divergence_deg")         v.as_double = c.divergence_deg;
@@ -267,6 +268,7 @@ bool apply_one(Config& c,
     else if (k == "serial.freed_port")               c.freed_port                      = vr.parsed_string;
     else if (k == "serial.lidar_baud")               c.lidar_baud                      = static_cast<int>(vr.parsed_double);
     else if (k == "serial.lidar_port")               c.lidar_port                      = vr.parsed_string;
+    else if (k == "serial.lidar_udev_serial")        c.lidar_udev_serial               = vr.parsed_string;
     else if (k == "smoother.deadband_deg")           c.deadband_deg                    = vr.parsed_double;
     else if (k == "smoother.deadband_mm")            c.deadband_mm                     = vr.parsed_double;
     else if (k == "smoother.divergence_deg")         c.divergence_deg                  = vr.parsed_double;

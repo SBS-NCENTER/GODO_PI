@@ -40,6 +40,7 @@ const std::set<std::string>& allowed_keys() {
         "network.ue_host",
         "network.ue_port",
         "serial.lidar_port",
+        "serial.lidar_udev_serial",
         "serial.lidar_baud",
         "serial.freed_port",
         "serial.freed_baud",
@@ -143,6 +144,7 @@ void apply_toml_file(Config& c, const std::filesystem::path& path) {
     if (auto v = tbl["network"]["ue_port"].value<int64_t>();       v) c.ue_port = static_cast<int>(*v);
 
     if (auto v = tbl["serial"]["lidar_port"].value<std::string>(); v) c.lidar_port = *v;
+    if (auto v = tbl["serial"]["lidar_udev_serial"].value<std::string>(); v) c.lidar_udev_serial = *v;
     if (auto v = tbl["serial"]["lidar_baud"].value<int64_t>();     v) c.lidar_baud = static_cast<int>(*v);
     if (auto v = tbl["serial"]["freed_port"].value<std::string>(); v) c.freed_port = *v;
     if (auto v = tbl["serial"]["freed_baud"].value<int64_t>();     v) c.freed_baud = static_cast<int>(*v);
@@ -428,6 +430,7 @@ void apply_env(Config& c, char** envp) {
     if (auto v = env_get(envp, "GODO_UE_HOST"))       c.ue_host = *v;
     if (auto v = env_get(envp, "GODO_UE_PORT"))       c.ue_port = parse_int_or_throw(*v, "GODO_UE_PORT");
     if (auto v = env_get(envp, "GODO_LIDAR_PORT"))    c.lidar_port = *v;
+    if (auto v = env_get(envp, "GODO_LIDAR_UDEV_SERIAL")) c.lidar_udev_serial = *v;
     if (auto v = env_get(envp, "GODO_LIDAR_BAUD"))    c.lidar_baud = parse_int_or_throw(*v, "GODO_LIDAR_BAUD");
     if (auto v = env_get(envp, "GODO_FREED_PORT"))    c.freed_port = *v;
     if (auto v = env_get(envp, "GODO_FREED_BAUD"))    c.freed_baud = parse_int_or_throw(*v, "GODO_FREED_BAUD");
@@ -574,6 +577,7 @@ void apply_cli(Config& c, int argc, char** argv) {
         {"ue-host",        [](Config& cc, const std::string& v){ cc.ue_host = v; }},
         {"ue-port",        [](Config& cc, const std::string& v){ cc.ue_port = parse_int_or_throw(v, "--ue-port"); }},
         {"lidar-port",     [](Config& cc, const std::string& v){ cc.lidar_port = v; }},
+        {"lidar-udev-serial", [](Config& cc, const std::string& v){ cc.lidar_udev_serial = v; }},
         {"lidar-baud",     [](Config& cc, const std::string& v){ cc.lidar_baud = parse_int_or_throw(v, "--lidar-baud"); }},
         {"freed-port",     [](Config& cc, const std::string& v){ cc.freed_port = v; }},
         {"freed-baud",     [](Config& cc, const std::string& v){ cc.freed_baud = parse_int_or_throw(v, "--freed-baud"); }},
@@ -897,6 +901,7 @@ Config Config::make_default() {
     c.ue_host        = std::string(cfg_defaults::UE_HOST);
     c.ue_port        = cfg_defaults::UE_PORT;
     c.lidar_port     = std::string(cfg_defaults::LIDAR_PORT);
+    c.lidar_udev_serial = std::string(cfg_defaults::LIDAR_UDEV_SERIAL);
     c.lidar_baud     = cfg_defaults::LIDAR_BAUD;
     c.freed_port     = std::string(cfg_defaults::FREED_PORT);
     c.freed_baud     = cfg_defaults::FREED_BAUD;

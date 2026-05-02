@@ -129,6 +129,19 @@ TEST_CASE("Config::load — TOML overrides defaults") {
     CHECK(c.t_ramp_ns == 250'000'000LL);
 }
 
+TEST_CASE("Config::load — issue#10.1: serial.lidar_udev_serial loaded from TOML") {
+    // Mirrors the existing `lidar_port` precedence pattern. Default
+    // is the studio cp210x serial; TOML override must replace it.
+    auto tmp = write_temp_toml(
+        "[serial]\n"
+        "lidar_udev_serial = \"deadbeefcafef00d0123456789abcdef\"\n"
+    );
+    Argv argv({});
+    Env  env({"GODO_CONFIG_PATH=" + tmp.path.string()});
+    Config c = Config::load(argv.argc, argv.argv.data(), env.ptr());
+    CHECK(c.lidar_udev_serial == "deadbeefcafef00d0123456789abcdef");
+}
+
 TEST_CASE("Config::load — env overrides TOML") {
     auto tmp = write_temp_toml(
         "[network]\n"

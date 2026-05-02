@@ -398,6 +398,42 @@
           (경우에 따라).
         </p>
       </aside>
+      <!-- issue#10.1 lidar-serial-help: 라이다 교체 시 cp210x USB factory
+           serial이 바뀌므로 99-rplidar.rules.template이 새 serial을
+           반영하도록 Config 탭에서 serial.lidar_udev_serial 값을
+           갱신하고 install.sh를 재실행해야 합니다. 이 카드는 SSH로
+           새 serial을 찾아내는 명령과 적용 절차를 안내합니다. -->
+      <aside class="help-section" data-testid="lidar-serial-help">
+        <h3>라이다 시리얼 번호 확인 방법 (issue#10.1)</h3>
+        <p class="help-intro">
+          라이다를 교체하면 cp210x USB 시리얼이 바뀌므로
+          <code>/dev/rplidar</code> 심볼릭 링크가 더 이상 잡히지 않습니다.
+          새 라이다의 32자리 hex 시리얼을 찾아 Config 탭의
+          <code>serial.lidar_udev_serial</code> 값을 갱신한 뒤
+          install.sh를 다시 실행해주세요.
+        </p>
+        <ol class="help-steps">
+          <li>
+            <span class="step-label">1. 새 라이다를 USB로 연결한 후 ttyUSB 노드 확인</span>
+            <pre><code>ls -l /dev/ttyUSB*</code></pre>
+          </li>
+          <li>
+            <span class="step-label">2. cp210x serial 추출 (32자리 lowercase hex)</span>
+            <pre><code>udevadm info -a -n /dev/ttyUSB0 | grep -m1 'ATTRS&#123;serial&#125;'</code></pre>
+          </li>
+          <li>
+            <span class="step-label">3. Config 탭에서 serial.lidar_udev_serial 값을 갱신 후 install.sh 재실행</span>
+            <pre><code>sudo bash production/RPi5/systemd/install.sh</code></pre>
+          </li>
+        </ol>
+        <p class="help-note">
+          install.sh는 32자리 hex 형식을 검증하고 통과하면
+          <code>99-rplidar.rules.template</code>의 <code>__LIDAR_SERIAL__</code>
+          자리에 새 값을 sed로 치환해 <code>/etc/udev/rules.d/99-rplidar.rules</code>를
+          생성합니다. 형식이 틀리면 기존 rule을 보존한 채 안내 메시지를
+          출력하며 실패합니다.
+        </p>
+      </aside>
     </div>
   {/if}
 </div>

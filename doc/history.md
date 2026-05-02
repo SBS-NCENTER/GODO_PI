@@ -10,6 +10,134 @@
 
 ---
 
+## 2026-05-03 (새벽 ~ 오전 — 04:30 KST → 07:00 KST+, 열여덟 번째 세션 — issue#16.1 t5 trap-timeout fix + issue#10 udev /dev/rplidar + 도움말 sub-tab — "오늘 한 작업이 안정성 장치 모음")
+
+### 한 줄 요약
+
+운영자 t5 사건(2h 5min 매핑 SIGKILL 손실)을 root cause부터 막는 4-layer 안전장치를 한 PR(#72)에 통합. 매핑 systemctl 호출에 별도 45초 deadline + ladder 4-step bump + 3-site validator + install.sh pre-deploy gate가 동일 PR에 합쳐져, "긴 매핑 데이터 손실 + deploy-time race + operator misconfig" 세 가지 사고 클래스를 한꺼번에 닫음. issue#10 (udev `/dev/rplidar` symlink)도 같은 PR에 묶여 USB 번호 흔들림 운영 클래스 제거. 추가로 chronicler 오타로 잘못 박힌 cp210x 시리얼(`B5E5E18DC...`) 정정, 그리고 운영자 요청으로 System 탭 4번째 sub-tab `도움말`을 신설해 backup 파일 수동 복원 안내를 노출 (백업 자체는 게이트가 timestamped로 자동 생성하지만 SSH 동선이 SPA에 visible하지 않았던 갭).
+
+### 1개 PR 머지
+
+| PR | issue# | 제목 | 결과 |
+|---|---|---|---|
+| #72 | issue#16.1 + issue#10 | mapping stop ladder bump + udev /dev/rplidar (+ 도움말 sub-tab follow-up commit) | merged 06:50 KST 2026-05-03 |
+
+### 핵심 발견 #1 — 매핑 systemctl 호출만 별도 deadline이 필요한 이유 (왜 `mapping_systemctl_subprocess_timeout_s = 45`)
+
+다른 서비스 (godo-tracker, godo-webctl, godo-irq-pin) 의 `systemctl stop`은 0.5초 안에 끝나서 generic `services.SUBPROCESS_TIMEOUT_S = 10s` wrapper로 충분함. 그러나 `godo-mapping@active.service`는 entrypoint trap 안에서 `map_saver_cli`가 PGM/YAML을 atomic-rename하는 디스크 I/O를 수행 — 2시간치 매핑 데이터의 경우 ~15초까지 걸릴 수 있음. systemd의 `TimeoutStopSec`는 30초로 설정돼 있으니 unit 자체는 충분히 기다리지만, **wrapper가 10초에 끊으면 그 안의 trap이 SIGKILL을 받기 전에 wrapper가 먼저 SIGKILL을 trigger**. 운영자 t5 사건이 정확히 이 경로.
+
+해결: 매핑 전용 schema row `webctl.mapping_systemctl_subprocess_timeout_s` (default 45 s)를 신설. start/stop 둘 다 이 row를 사용 (start는 ~1-2초라 45초는 여유; stop이 진짜 의미 있는 곳이지만 row 하나로 둘을 cover하는 게 row count + 운영자 mental model 모두 단순).
+
+일반화된 lesson: per-callsite의 deadline은 callsite의 worst-case I/O budget을 반영해야. 한 generic 상수가 모든 systemctl 호출을 cover한다는 가정은 매핑 같이 trap 디스크 I/O가 끼어드는 path에서 깨짐.
+
+### 핵심 발견 #2 — 4-step cascade ladder는 직전 계단보다 길어야 자연 종료가 보장됨
+
+매핑 stop은 단일 timeout이 아니라 여러 layer가 순차적으로 책임을 넘기는 cascade:
+
+```
+docker stop --time=30   ← entrypoint trap에 30s grace
+  ↓ (trap이 30s 안에 안 끝나면 Docker가 SIGKILL)
+systemd TimeoutStopSec=45s   ← unit 종료 인식까지 최대 45s
+  ↓
+systemctl wrapper 45s   ← 새 row, systemd 종료 대기
+  ↓
+webctl coordinator 50s   ← 전체 포기 deadline
+  ↓
+운영자에게 응답
+```
+
+각 계단이 직전보다 strict하게 짧으면 안쪽이 자연 종료되기 전에 바깥쪽이 SIGKILL을 trigger해서 deadlock 방지. 새 deadline 45s가 끼어들었으니 위쪽 ladder도 같이 키워야 일관성 유지: 20/30/35 → 30/45/50.
+
+일반화된 lesson: cascade timeout은 `level_n < level_{n+1}` 부등식 chain. 한 layer 추가/조정 시 전체 chain을 재검토해야.
+
+### 핵심 발견 #3 — 같은 검증을 3-site에서 enforce해야 misconfig을 entry-point에서 막을 수 있음
+
+`mapping_systemctl_subprocess_timeout_s < mapping_webctl_stop_timeout_s` 부등식은 운영자가 다음 셋 중 어느 쪽으로든 잘못 입력할 수 있음:
+
+| Entry point | 검증 사이트 | 사용자 액션 |
+|---|---|---|
+| tracker.toml에 손으로 잘못 적음 | C++ `Config::load` (config.cpp:856) | tracker boot |
+| SPA Config tab에서 row 변경 | C++ `apply_set` (apply.cpp:483) | 운영자 클릭 즉시 |
+| webctl 부팅 시 tracker.toml 재읽기 | Python `read_webctl_section` (webctl_toml.py:330) | webctl boot |
+
+세 사이트 모두 같은 부등식 + 같은 error 메시지 (offending key 이름 포함). Defense in depth — 한 곳이라도 빠지면 잘못된 ladder 상태로 잠시라도 동작 가능.
+
+일반화된 lesson: 운영자가 misconfig을 입력할 수 있는 모든 entry point를 audit하고, 각각에 같은 검증 logic을 mirror해야. 한 곳에서만 검증하면 다른 entry point가 silently 통과시킴.
+
+### 핵심 발견 #4 — install.sh pre-deploy gate가 막은 두 가지 사고 클래스
+
+이번 세션에서 가장 까다로웠던 부분. 라이브 `/var/lib/godo/tracker.toml`에 옛 ladder (20/30/35) override가 박혀 있는 상태에서 새 default (30/45/50+45) PR을 그대로 deploy하면:
+
+1. **t5 버그 잔존**: install.sh의 tomllib 파서가 tracker.toml의 docker=20 / systemd=30을 읽어 `godo-mapping@.service` 파일에 `--time=20` / `TimeoutStopSec=30s`로 sed-substitute. 새 default가 무시됨 → t5 사건의 trap 부족 시간이 그대로.
+2. **webctl boot 실패**: tracker.toml에 새 키 `mapping_systemctl_subprocess_timeout_s`가 없으니 schema default 45가 적용됨. 그러나 tracker.toml의 `webctl_stop_timeout=35`가 기존 옛 값. 새 validator가 `systemctl(45) >= webctl(35)` REJECT → webctl crash-loop.
+
+**한 PR이 두 가지 사고를 동시에 일으킴** — deploy-time race의 무서운 점.
+
+해결: install.sh 시작에 Python 게이트 (5-verdict 분기):
+- `LEGACY_TRIO_REWRITE` (정확히 (20/30/35) + 새 키 없음): 자동으로 (30/45/50+45)로 rewrite, **timestamped backup** 생성 (`/var/lib/godo/tracker.toml.bak.<unixts>` — Mode-A round 2 minor #2가 잡은 보강).
+- `OVERRIDE_LADDER_REFUSE` (운영자 hand-tuning이 새 invariant 위반): 명령어 안내 후 exit 1 (자동 rewrite는 운영자 의도를 무시할 수 있어 위험).
+- `ALREADY_NEW` / `EMPTY_OK` / `OVERRIDE_OK`: no-op.
+
+일반화된 lesson: schema-default 변경이 stateful runtime config와 부딪치는 경우, deploy step이 migration을 책임져야. "운영자가 손으로 고치겠지"는 명시적 안내 + automation 없이는 깨지는 가정.
+
+### 핵심 발견 #5 — udev `/dev/rplidar` symlink가 USB renumbering 운영 클래스를 통째로 제거 (issue#10)
+
+cp210x 드라이버는 USB 꽂힌 순서대로 `ttyUSB0`, `ttyUSB1` 번호 매김. 다른 USB 시리얼 장치 (예: 운영 도중 운영자가 임시로 디버그용 디바이스 plug-in)가 같이 있으면 부팅마다 번호 흔들림. HIL 도중 운영자가 tracker.toml의 `lidar_port`를 두 번 swap.
+
+해결: udev rule이 USB serial number로 라이다를 unique하게 식별 → `SYMLINK+="rplidar"`. 어떤 ttyUSBN이든 `/dev/rplidar`는 항상 그 라이다를 가리킴. tracker.toml의 default를 `/dev/rplidar`로 flip.
+
+`SYMLINK+=` (additive)이라 원래 `/dev/ttyUSBN` 노드는 그대로 살아있음 → fallback 가능. 시리얼 매칭 실패 시 (라이다 교체 등) symlink가 안 만들어지고 tracker는 ENOENT로 명확히 fail (silent 동작 X).
+
+일반화된 lesson: hardware identifier (serial number, MAC, etc) 기반 symlink는 enumeration-order dependency를 제거. 이런 ops bug는 한 번 인지하면 root-cause fix가 가능; symlink는 "더 나은 default"가 아니라 "고치지 않으면 반복되는 클래스 자체의 elimination."
+
+### 핵심 발견 #6 — chronicler 오타 cascade는 SSOT 중복으로 검출 (cp210x 시리얼)
+
+처음 udev rule 작성 시 NEXT_SESSION.md / PROGRESS.md:212 / doc/history.md:89에 박힌 시리얼 `B5E5E18DC2E699D7C89792F44F46416F`이 라이브 라이다(`udevadm info` 결과 `2eca2bbb4d6eef1182aae9c2c169b110`)와 불일치. Mode-A round 1 reviewer가 직접 라이브 검증해서 발견.
+
+원인 추적: PROGRESS.md:**310**에는 옛날 17번째 세션 즈음에 정확한 시리얼이 적혀 있었음. 17번째 세션 close (chronicler 단계)에서 PROGRESS.md:212/history.md:89/NEXT_SESSION.md에 같은 정보를 다시 적으면서 잘못된 값을 한꺼번에 cascade. 운영자가 "라이다 안 바꿨어요"라고 확인 → 시리얼은 변경 없음 → 옛날 entry가 ground truth.
+
+해결: 같은 PR에 stale-doc 3 곳 정정 commit. 운영 사고는 아니지만 chronicler discipline의 reliability 검증 사례.
+
+일반화된 lesson: 같은 정보를 여러 SSOT 후보 위치에 중복 기록하는 안티패턴이 있으면, 그 중복 자체가 "어느 entry가 옳은가" 검증의 toolset이 되기도 함. 하지만 근본 fix는 정보의 SSOT를 단일화하는 것 (이 경우엔 udev rule 파일 자체가 future SSOT, doc은 reference만).
+
+### 운영자 UX 결정 — 도움말 sub-tab + backup 복원 버튼은 없음
+
+게이트의 timestamped backup이 SPA에서 invisible했음 (기존 SSH 명령어를 운영자가 외워야 했음). 운영자가 두 옵션 사이에서 결정 요청:
+
+- 옵션 A: 풀 복원 UI 버튼 (백업 목록 + 선택 + 확인 모달 + cp + restart cascade) — ~150-200 LOC, polkit 필요, 한 클릭이 전체 설정 revert (위험)
+- 옵션 B: 패시브 리스팅 패널 (목록 + 명령어 표시, 실행 X)
+- 옵션 C: 도움말 텍스트만
+
+운영자 결정: **옵션 C, 그리고 새 sub-tab으로 분리** ("추후 다른 안내문도 적을 수 있도록"). System 탭에 4번째 sub-tab `도움말`을 신설 — 첫 카드는 backup 복원 안내 (`ls -la /var/lib/godo/tracker.toml.bak.*` → `sudo cp ...` → `sudo systemctl restart godo-webctl`, 마지막 노트는 godo-tracker Restart 필요시 안내). `.help-section` / `.help-*` 클래스는 generic — 미래 안내문이 들어와도 같은 스타일 재활용.
+
+복원 버튼을 일부러 만들지 않은 이유: 백업 복원은 1년에 0~1번 쓰는 행위, 한 클릭으로 전체 설정 revert는 사고 위험이 큼; SSH로 의도해서 치는 친마찰이 안전 마진. 운영자도 같은 판단.
+
+일반화된 lesson: rare-use + irreversible 액션은 UI 친화성보다 friction을 의도적으로 유지. discoverability는 help text로, 실행 path는 SSH로 분리.
+
+### 운영자 lessons + 잠금
+
+- t5 사건 incident time stamp (22:27:16 KST 2026-05-02) — 17번째 세션 마지막에 발생, 18번째 세션 우선순위 #1로 이연. 운영자가 incident가 일어난 직후가 아니라 다음 세션에서 fix를 plan-pipeline 거치자는 결정 — 데이터 손실 같은 high-impact 버그도 깊게 plan하는 가치 인식.
+- shell 빨간 점 = grep "no match" exit code 1 인지 ("이게 좋은 소식이에요" 학습). `grep ... || echo "(no matches — clean)"` 패턴이 향후 운영자 친화적 일상 명령으로 자리잡음.
+- backup 파일의 timestamp 의미 (Unix epoch seconds) 를 확인하고 싶으면 `date -d @<ts>` — 1777755567 = 2026-05-03 05:59:27 KST. timestamped backup이 다회 install.sh re-run에서 이전 백업을 보존한다는 점 운영자 확인.
+- 풀 파이프라인 (planner v1 → Mode-A r1 [REWORK] → planner v2 → Mode-A r2 [APPROVE] → writer → Mode-B [APPROVE]) 이 **4 critical + 6 major findings**을 round 1에서 잡아냄 → round 2에서 0 critical / 0 major / 7 minor로 수렴. 작은 PR (~245 LOC)에도 풀 파이프라인이 의미 있음을 다시 확인 (Mode-A r1이 잡아낸 C++ tracker plumbing 9-edit 누락이 round 1 없었으면 직접 deploy 시 사고).
+
+### 다음 세션 큐 (운영자-locked priority)
+
+1. **★ 진행 중 — Config 탭 빈 행 버그**: PR #72 머지 후 `/opt/godo-webctl`가 재배포 되지 않아 EXPECTED_ROW_COUNT(51) ↔ 새 tracker schema(52) 불일치로 webctl이 schema endpoint를 reject. 운영자 deploy 시퀀스 (rsync + uv sync + restart) 로 즉시 해결. SOP 강화 필요 (per-stack rsync 책임 명시).
+2. **★ 다음 PR — issue#10.1 cp210x 시리얼 입력 UI** (NEW): 운영자 요청으로 도움말에 "라이다 시리얼 확인 방법" 안내 + Config 탭에서 `/dev/rplidar` symlink가 매칭하는 시리얼을 입력 가능하게. 라이다 교체 시 udev rule 파일을 손으로 수정할 필요 없음. 설계 옵션 (full schema row + install.sh template / 도움말만 / 중간) 검토 필요.
+3. **issue#16.2** — preview `.tmp` cleanup (잔여 issue#14 race 마무리).
+4. **issue#11** — Live pipelined-parallel multi-thread.
+5. **issue#13 cont.** — distance-weighted AMCL likelihood.
+6. **issue#4** — AMCL silent-converge diagnostic.
+7. **issue#6** — B-MAPEDIT-3 yaw rotation.
+8. **issue#17** — GPIO UART 직결 (issue#10 + issue#16 mitigation이 운영에 충분치 않을 때만; t5 fix + symlink로 한 단계 deferred).
+9. **Bug B** — Live mode 정지 시 jitter 확장.
+10. **issue#7** — boom-arm masking (issue#4 결과 따라).
+
+**다음 free issue 정수: `issue#18`** (issue#10.1은 issue#10 sub-issue로 .M scheme 사용).
+
+---
+
 ## 2026-05-02 (심야 ~ cross-day — 21:30 KST 2026-05-02 → 00:50 KST 2026-05-03, 열일곱 번째 세션 — issue#16 v0..v7 hot-fix series ships + issue#15 PR #70 in flight + 리부트 cross-test 통과)
 
 ### 한 줄 요약

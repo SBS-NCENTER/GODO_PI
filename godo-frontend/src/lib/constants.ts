@@ -63,6 +63,22 @@ export const COUNTDOWN_TICK_MS = 1000;
 // backend's UDS round-trip cap is ~1 s; we give 3 s headroom for slow LAN.
 export const API_FETCH_TIMEOUT_MS = 3000;
 
+// issue#14 follow-up (operator HIL 2026-05-02 KST): /api/mapping/start
+// blocks for up to MAPPING_TRACKER_STOP_TIMEOUT_S (5) + tracker-down
+// settle (~10) + container-start polling (8) = ~25 s before responding.
+// /api/mapping/stop blocks for up to MAPPING_CONTAINER_STOP_TIMEOUT_S
+// (35 s — Maj-1 ladder). With API_FETCH_TIMEOUT_MS = 3 s the SPA aborts
+// the fetch long before the backend completes — operator sees
+// `request_aborted` while the backend successfully writes the PGM /
+// transitions state.json. Use this longer timeout for the two
+// mapping endpoints that drive multi-step subprocess work.
+//
+// 60 s margins both: start (~25 s real) + safety; stop (~35 s real)
+// + safety. If operator-tunable timing is bumped via Config tab beyond
+// 60 s combined, this constant must be re-tuned (or recomputed from
+// status snapshot).
+export const MAPPING_OPERATION_TIMEOUT_MS = 60000;
+
 // --- Storage keys -------------------------------------------------------
 export const STORAGE_KEY_TOKEN = 'godo:auth';
 export const STORAGE_KEY_THEME = 'godo:theme';

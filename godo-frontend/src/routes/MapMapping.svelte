@@ -13,6 +13,7 @@
   import {
     MAPPING_NAME_MAX_LEN,
     MAPPING_NAME_REGEX_SOURCE,
+    MAPPING_OPERATION_TIMEOUT_MS,
     MAPPING_RESERVED_NAMES,
   } from '$lib/constants';
   import {
@@ -80,7 +81,10 @@
     starting = true;
     lastError = null;
     try {
-      await apiPost('/api/mapping/start', { name });
+      // Long timeout — start blocks ~25 s for tracker stop + container
+      // start polling. Default 3 s aborts long before backend completes
+      // (operator sees request_aborted while backend keeps going).
+      await apiPost('/api/mapping/start', { name }, { timeoutMs: MAPPING_OPERATION_TIMEOUT_MS });
       void refreshMappingStatus();
     } catch (e) {
       lastError = e instanceof ApiError && e.body?.detail
@@ -97,7 +101,11 @@
     stopping = true;
     lastError = null;
     try {
-      await apiPost('/api/mapping/stop', {});
+      // Long timeout — stop blocks up to MAPPING_CONTAINER_STOP_TIMEOUT_S
+      // (35 s — Maj-1 ladder protects map_saver atomic-rename window).
+      // Default 3 s would abort while map is still being saved on the
+      // backend (operator's "맵은 저장됐는데 request_aborted 떠" symptom).
+      await apiPost('/api/mapping/stop', {}, { timeoutMs: MAPPING_OPERATION_TIMEOUT_MS });
       void refreshMappingStatus();
     } catch (e) {
       lastError = e instanceof ApiError && e.body?.err

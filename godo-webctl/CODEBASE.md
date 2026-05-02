@@ -2878,6 +2878,34 @@ CODEBASE.md (r) extended); webctl is the runtime consumer.
      tunable; the SPA Config tab is schema-driven so the rows
      surface automatically (no frontend change).
 
+## 2026-05-02 19:30 KST — issue#16 HIL hot-fix v2: cp210x auto-recovery in start path
+
+Operator HIL on PR #69 v1: first mapping attempt after tracker stop
+still failed with `webctl_lost_view_post_crash` (rplidar_node crashed
+inside container due to cp210x `set request 0x12 status: -110`).
+Precheck cannot detect this — file-layer open() succeeds even when
+the USB CDC control endpoint is wedged. Manual recovery button is
+insufficient because the operator cannot tell from precheck alone
+that recovery is needed.
+
+### Added
+
+- `Settings.mapping_auto_recover_lidar: bool` (default `True`,
+  env override `GODO_WEBCTL_MAPPING_AUTO_RECOVER_LIDAR`). Toggles
+  the auto-recovery in `mapping.start()` Phase 2 Step 2.5.
+- `mapping.start()` Phase 2 Step 2.5 — calls `recover_cp210x(cfg)`
+  before `systemctl start godo-mapping@active.service` whenever
+  `cfg.mapping_auto_recover_lidar` is true. Best-effort:
+  `CP210xRecoveryFailed` / `LidarPortNotResolvable` / `OSError` are
+  logged at WARNING and Start proceeds (the recovery being unable
+  to run is no worse than the pre-fix baseline; we want to give
+  systemctl a chance regardless).
+
+### Changed
+
+- Updated invariant (ae) to document the dual-entrypoint recovery
+  flow (manual button + automatic during start).
+
 ## 2026-05-02 17:51 KST — issue#16: mapping pre-check + cp210x recovery + ProcessTable refinement
 
 Spec memory: `.claude/memory/project_mapping_precheck_and_cp210x_recovery.md`.
@@ -2969,13 +2997,31 @@ for the CP2102N USB CDC stale-state race observed during issue#14 HIL):
 
 - **(ae) issue#16 — mapping precheck + cp210x recovery flow** — six
   fixed-order checks (PRECHECK_CHECK_NAMES) gate the SPA Start button
-  via `precheck.ready=True`. The cp210x recovery path is operator-driven
-  only — webctl never auto-invokes it on Start. Recovery uses systemd
-  oneshot + polkit (mirror of `godo-mapping@active.service` pattern),
-  NOT sudo or udev-chown. The bash helper at
+  via `precheck.ready=True`. Recovery uses systemd oneshot + polkit
+  (mirror of `godo-mapping@active.service` pattern), NOT sudo or
+  udev-chown. The bash helper at
   `/opt/godo-tracker/share/godo-cp210x-recover.sh` is ALSO defended by
   the same regex anchor that webctl uses (defence-in-depth — webctl
   should never produce a malformed USB_PATH that reaches the helper).
+
+  Recovery has TWO entrypoints:
+  1. Operator-driven via `POST /api/mapping/recover-lidar` — the SPA
+     "🔧 LiDAR USB 복구" button next to the precheck `lidar_readable`
+     row when it shows ✗.
+  2. Automatic during `mapping.start()` Phase 2 Step 2.5 — runs
+     unconditionally before `systemctl start godo-mapping@active`
+     (operator-tuneable via `[webctl] mapping_auto_recover_lidar` in
+     tracker.toml; default `True`). Best-effort: failures are logged
+     and Start continues. issue#16 HIL hot-fix v2 (2026-05-02 KST)
+     rationale: operator HIL surfaced that the first mapping attempt
+     after a tracker stop reliably fails with cp210x stale state
+     (`failed set request 0x12 status: -110`), and the precheck
+     cannot detect this — `open()` at the file layer succeeds even
+     when the USB CDC control endpoint is wedged. Auto-recovery in
+     the start path eliminates the first-attempt failure with a
+     ~1.5 s latency cost. Long-term path: issue#17 (GPIO UART direct
+     connection) removes the cp210x USB stack entirely.
+
   Spec memory:
   `.claude/memory/project_mapping_precheck_and_cp210x_recovery.md`.
 

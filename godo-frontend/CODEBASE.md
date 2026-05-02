@@ -2807,6 +2807,42 @@ Spec memory: `.claude/memory/project_mapping_precheck_and_cp210x_recovery.md`.
   anon viewer's click triggers the standard 401 → /login redirect.
   Spec memory: `.claude/memory/project_mapping_precheck_and_cp210x_recovery.md`.
 
+## 2026-05-02 19:30 KST — issue#16 HIL hot-fix v2: monitor grid reposition + numeric host strip
+
+### Added
+
+- `src/components/MappingHostStrip.svelte` — RPi5 host monitor strip.
+  Subscribes to the existing `resourcesExtended` SSE store. Renders
+  CPU avg + per-core CPU + MEM (used / total GiB) + DISK% in the
+  same compact "label / value" stat row format as
+  `MappingMonitorStrip`. NUMBERS ONLY — no bars, no animation. The
+  visual parity gives operator height alignment between the two
+  cells of the running-state monitor grid (operator HIL request).
+
+### Changed
+
+- `MapMapping.svelte` running-state view — monitor grid moved ABOVE
+  the preview canvas. Operator HIL: keeping resource pressure
+  visible while the slow-updating preview fills below. Replaced
+  `<ResourceBars snapshot={extendedSnapshot} />` with
+  `<MappingHostStrip />`; the strip self-subscribes via
+  `subscribeResourcesExtended` so MapMapping no longer needs to own
+  that subscription. Dropped the local `extendedSnapshot` state +
+  `unsubResExt`.
+- Inline `<h4>` headers ("Docker container", "RPi5 host") removed —
+  each strip carries its own header now, so the wrapper cells were
+  redundant.
+
+### Invariants
+
+- **(aj) issue#16 HIL v2 — monitor grid above preview** — when state
+  is `running`, the 2-cell grid (Docker + RPi5) sits ABOVE the
+  preview canvas, not below. Operator HIL rationale: long mapping
+  runs should not push resource numbers off-screen as the preview
+  grows. The two cells are self-contained strip components that
+  align in vertical height by construction (matching padding,
+  border, single-row stat layout).
+
 ## 2026-05-02 18:30 KST — issue#16 HIL hot-fix bundle
 
 Operator HIL on PR #69 surfaced four polish items; bundled into a

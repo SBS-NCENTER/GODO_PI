@@ -56,6 +56,7 @@ def _settings(tmp_path: Path) -> Settings:
         # issue#14 Maj-1: tests pin the schema default so the stop-poll
         # deadline matches the production ladder (35 s).
         mapping_webctl_stop_timeout_s=35.0,
+        mapping_auto_recover_lidar=True,
     )
 
 

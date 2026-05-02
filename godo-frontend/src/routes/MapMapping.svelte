@@ -7,9 +7,9 @@
    */
 
   import { onDestroy, onMount } from 'svelte';
+  import MappingHostStrip from '$components/MappingHostStrip.svelte';
   import MappingMonitorStrip from '$components/MappingMonitorStrip.svelte';
   import MappingPreviewCanvas from '$components/MappingPreviewCanvas.svelte';
-  import ResourceBars from '$components/ResourceBars.svelte';
   import { apiGet, apiPost, ApiError } from '$lib/api';
   import {
     MAPPING_NAME_MAX_LEN,
@@ -23,14 +23,12 @@
     MAPPING_STATE_RUNNING,
     MAPPING_STATE_STARTING,
     MAPPING_STATE_STOPPING,
-    type ExtendedResources,
     type MappingStatus,
     type PrecheckCheck,
     type PrecheckResult,
   } from '$lib/protocol';
   import { refreshMappingStatus, subscribeMappingStatus } from '$stores/mappingStatus';
   import { precheckStore, start as startPrecheck, stop as stopPrecheck } from '$stores/precheckStore';
-  import { subscribeResourcesExtended } from '$stores/resourcesExtended';
 
   const NAME_RE = new RegExp(MAPPING_NAME_REGEX_SOURCE);
 
@@ -49,19 +47,7 @@
   let status = $state<MappingStatus | null>(null);
   let unsub: (() => void) | null = null;
   let unsubPrecheck: (() => void) | null = null;
-  let unsubResExt: (() => void) | null = null;
   let precheck = $state<PrecheckResult>({ ready: false, checks: [] });
-  // issue#16 HIL hot-fix — RPi5 host resources rendered alongside the
-  // Docker container monitor in the running-state view. Default empty
-  // snapshot keeps the typing honest while the SSE backfills.
-  let extendedSnapshot = $state<ExtendedResources>({
-    cpu_per_core: [],
-    cpu_aggregate_pct: 0,
-    mem_total_mb: null,
-    mem_used_mb: null,
-    disk_pct: null,
-    published_mono_ns: 0,
-  });
   let name = $state('');
   let starting = $state(false);
   let stopping = $state(false);
@@ -75,13 +61,11 @@
     // issue#16 — start precheck polling. The closure reads `name` on
     // each tick so a fresh keystroke surfaces in the next URL.
     unsubPrecheck = precheckStore.subscribe((p) => (precheck = p));
-    unsubResExt = subscribeResourcesExtended((s) => (extendedSnapshot = s));
     startPrecheck(() => name);
   });
   onDestroy(() => {
     unsub?.();
     unsubPrecheck?.();
-    unsubResExt?.();
     stopPrecheck();
   });
 
@@ -303,20 +287,17 @@
       data-testid="mapping-stop-button">
       Stop & Save
     </button>
-    <MappingPreviewCanvas mapName={status.map_name} />
-    <!-- issue#16 HIL hot-fix — 2-column monitor grid: Docker container
-         SSE on the left, RPi5 host resources on the right. Operator
-         wants both visible simultaneously while mapping is running. -->
+    <!-- issue#16 HIL hot-fix v2 (2026-05-02 KST) — monitor grid moved
+         ABOVE the preview canvas so the operator can keep an eye on
+         resource pressure while the slow-updating preview fills in
+         below. RPi5 host strip uses numeric-only formatting (no bars,
+         no animation) so its vertical height aligns with the Docker
+         container strip — both panels read at a glance. -->
     <div class="monitor-grid" data-testid="mapping-monitor-grid">
-      <div class="monitor-cell">
-        <h4>Docker container</h4>
-        <MappingMonitorStrip />
-      </div>
-      <div class="monitor-cell">
-        <h4>RPi5 host</h4>
-        <ResourceBars snapshot={extendedSnapshot} />
-      </div>
+      <MappingMonitorStrip />
+      <MappingHostStrip />
     </div>
+    <MappingPreviewCanvas mapName={status.map_name} />
   {:else if status?.state === MAPPING_STATE_STOPPING}
     <p>저장 중… ({status.map_name})</p>
   {:else if status?.state === MAPPING_STATE_FAILED}
@@ -454,24 +435,23 @@
     font-size: 0.85em;
   }
 
-  /* issue#16 HIL hot-fix — 2-column monitor grid for the running view.
-     Docker container SSE on the left, RPi5 host resources on the right.
-     Collapses to a single column on narrow viewports so the operator's
+  /* issue#16 HIL hot-fix v2 — 2-column monitor grid for the running
+     view, positioned ABOVE the preview canvas. Docker container SSE
+     on the left, RPi5 host resources on the right. Each cell hosts a
+     self-contained strip component (MappingMonitorStrip /
+     MappingHostStrip) that owns its own header + border, so the grid
+     here is layout-only.  Single-column collapse below 900 px so the
      mobile preview path still reads cleanly. */
   .monitor-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: var(--space-3);
-    margin-top: var(--space-3);
+    margin-top: var(--space-2);
+    margin-bottom: var(--space-3);
   }
   @media (max-width: 900px) {
     .monitor-grid {
       grid-template-columns: 1fr;
     }
-  }
-  .monitor-cell h4 {
-    margin: 0 0 var(--space-2);
-    font-size: 0.95em;
-    color: var(--color-text-muted);
   }
 </style>

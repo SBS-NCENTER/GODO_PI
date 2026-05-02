@@ -285,6 +285,9 @@ export const EXTENDED_RESOURCES_POLL_FALLBACK_MS = 1000;
 export const SYSTEM_SUBTAB_OVERVIEW = 'overview';
 export const SYSTEM_SUBTAB_PROCESSES = 'processes';
 export const SYSTEM_SUBTAB_EXTENDED = 'extended';
+// issue#16.1 — manual restore hint for tracker.toml.bak.<unixts>; future
+// operator-side help notes can stack inside this subtab.
+export const SYSTEM_SUBTAB_HELP = 'help';
 
 // Sub-tab keys for `routes/Map.svelte`. URL-backed (unlike System): the
 // Overview sub-tab lives at `/map`, the Edit sub-tab lives at

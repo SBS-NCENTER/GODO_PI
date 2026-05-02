@@ -603,7 +603,36 @@ preview proxy needed.
 
 ## Change log
 
-### 2026-05-02 16:30 KST — issue#14 round 2 + Mode-B fold + PR #66 hotfix bundle + post-HIL UX polish
+### 2026-05-03 06:30 KST — issue#16.1 backup help — System tab 도움말 sub-tab
+
+#### Why
+
+Operator HIL on PR #72 verified install.sh's pre-deploy gate auto-rewrites
+the legacy mapping ladder trio + creates a timestamped backup at
+`/var/lib/godo/tracker.toml.bak.<unixts>`. The backup is a manual undo
+point but its existence + restore command sequence was not surfaced anywhere
+in the SPA — operator had to remember the path / sequence / SSH dance.
+
+Operator decision: ship a passive help text only (no restore button), and
+park it in a NEW `도움말` sub-tab on the System page so future operator-side
+notes can stack there without polluting the Overview sub-tab.
+
+#### What changed
+
+- `src/lib/constants.ts` — new `SYSTEM_SUBTAB_HELP = 'help'` constant.
+- `src/routes/System.svelte`:
+  - 4th sub-tab button `도움말` (`data-testid="subtab-help"`).
+  - New `{:else if activeSubtab === SYSTEM_SUBTAB_HELP}` branch with a
+    `.help-stack` flex column hosting one `.help-section` (the tracker.toml
+    backup restore guide). Future help notes drop in as additional
+    `<aside class="help-section">` blocks inside `.help-stack`.
+  - Generic `.help-section` / `.help-intro` / `.help-steps` / `.help-note`
+    styling — reused by every future help block.
+- No backend / no API endpoint / no destructive UI action. SSH-only manual
+  restore keeps a deliberate friction layer (restoring tracker.toml is
+  rare + irreversible-by-mistake-clickable).
+
+Rides along with PR #72 (issue#16.1 + issue#10).
 
 #### Why
 

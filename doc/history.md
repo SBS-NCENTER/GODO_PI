@@ -10,6 +10,95 @@
 
 ---
 
+## 2026-05-02 (심야 ~ cross-day — 21:30 KST 2026-05-02 → 00:50 KST 2026-05-03, 열일곱 번째 세션 — issue#16 v0..v7 hot-fix series ships + issue#15 PR #70 in flight + 리부트 cross-test 통과)
+
+### 한 줄 요약
+
+issue#16 (mapping pre-check + cp210x recovery + ProcessTable refinement)이 base feat + v1..v8 hot-fix 시리즈 9개 commit으로 한 PR (#69)에 squash-merge. 각 hot-fix가 운영자 HIL feedback에 즉응하며 서로 다른 race surface를 좁혀나간 ~3시간 20분의 iterative cycle. PR #69 머지 후 운영자가 RPi 리부트 + 16개 이상 테스트 매핑까지 stress-test해 풀 cycle 안정성 검증. issue#15 (Config 도메인 grouping + edit-input bg swap)는 세션 close 직전 PR #70로 묶어 open 상태로 이서받음.
+
+### 1개 PR 머지 + 1개 PR open
+
+| PR | issue# | 제목 | 결과 |
+|---|---|---|---|
+| #69 | issue#16 | mapping pre-check gate + cp210x driver recovery + ProcessTable refinement (v0..v7 hot-fix series) | merged 00:21 KST 2026-05-03 |
+| #70 | issue#15 | Config tab domain grouping + edit-input bg swap | open 00:37 KST 2026-05-03 |
+
+### 핵심 발견 #1 — `status()` reconcile은 transient docker state를 "container gone"과 구분해야
+
+운영자 t6 사건 (22:54:47 KST 2026-05-02). 매핑 컨테이너가 5분 이상 정상 동작하며 valid scan/odom 데이터까지 흘리고 있는데, `state.json`은 시작 ~1초 후 `Failed("webctl_lost_view_post_crash")`로 기록됐음. Root cause: `docker run` 직후 ~수십~수백 ms 동안 컨테이너 상태가 `"created"` (entrypoint 실행 직전); 1 Hz `/api/mapping/status` 폴링이 운 나쁘게 이 윈도우에 끼어들면 v6 이전 코드가 `"running"` 외 모든 상태를 gone-branch로 collapsed.
+
+v6 fix: `if inspect in ("created", "restarting"): return s` — gone-branch보다 먼저 transient 분기.
+
+이 버그의 downstream cost가 컸음 — 일단 `state.json`이 Failed로 가면 SPA가 "Acknowledge" 버튼만 표시하고, 그 핸들러는 `docker rm -f` (SIGTERM grace 없음, entrypoint trap 안 돌고, `map_saver_cli` 호출 안 됨). 운영자가 phantom banner 치우려고 클릭 → 정상 동작 중이던 5분짜리 컨테이너가 SIGKILL로 끊김 → `t6.{pgm,yaml}` 미저장.
+
+일반화된 lesson: persisted state vs external probe reconcile 시 probe의 transient 상태는 명시적으로 분류해야. "성공 형태가 아니면 모두 실패"라는 cliff 패턴은 race-prone.
+
+### 핵심 발견 #2 — `ExecStartPre` 윈도우는 같은 클래스의 race를 한 단계 더 좁힘
+
+운영자 t8 두 번째 시도 사건 (~14:36:43 UTC 2026-05-02). v6 deploy 후 정상 매핑 끝나고 ~2초 만에 두 번째 매핑 시작 → 같은 `webctl_lost_view_post_crash` 재발. Root cause: systemd unit의 `ExecStartPre=/usr/bin/docker rm -f godo-mapping`가 ExecStart 직전에 돌아서, ~100-500 ms 동안 컨테이너가 아예 없는 상태가 됨 → `docker inspect` returns None ("No such object"). v6는 None이 아닌 transient (`"created"`, `"restarting"`)만 처리했으므로 None은 여전히 gone-branch로.
+
+v7 fix: `if inspect is None and s.state == STARTING: return s`. `start()`의 Phase-2 polling deadline (`MAPPING_CONTAINER_START_TIMEOUT_S`)이 Starting state의 authoritative Failed-writer; `status()`는 ExecStartPre 윈도우를 가로질러 그 권한을 pre-empt하지 말 것. Running + None은 여전히 gone-branch로 (genuine crash); Stopping + None은 여전히 Idle로 (clean stop).
+
+일반화된 lesson: persisted state + external probe 사이의 transition은 단일 cliff가 아니라 per-state-pair 명시적 contract로 표현해야.
+
+### 핵심 발견 #3 — Pre-check rows는 Start를 막는 모든 조건을 enumerate해야 (residual systemd state 포함)
+
+운영자 인용: "전부 정상으로 Pre-check가 나오는데, 막상 제작하면 잘 안되네요". v7 이전의 6 rows (`lidar_readable`, `tracker_stopped`, `image_present`, `disk_space_mb`, `name_available`, `state_clean`)는 LiDAR + tracker + image + disk + name + state.json을 추적했지만, 이전 SIGKILL 이후 `reset-failed`로 정리되지 않은 systemd unit의 잔여 `failed` 상태는 어떤 row도 못 봤음. `exited` 상태로 남아있는 `godo-mapping` 컨테이너 잔여도 마찬가지.
+
+v7 fix: 7번째 row `mapping_unit_clean` 추가 (systemctl is-failed + docker inspect 결합). 실패 detail 문자열 (`systemd_unit_failed_run_reset_failed`, `container_lingering_<state>`)이 SPA의 `PRECHECK_DETAIL_KO`에서 운영자가 즉시 행동할 수 있는 한국어 tooltip으로 매핑됨 (예: "터미널에서 `sudo systemctl reset-failed godo-mapping@active.service` 실행 후 다시 시도해 주세요").
+
+일반화된 lesson: precheck panel은 "무엇이 Start를 막는가"의 운영자 정신 모델 — backend가 silently 강제하는 모든 gate가 row로 노출돼야. 그렇지 않으면 panel이 운영자를 능동적으로 misleading.
+
+### 핵심 발견 #4 — Failed-state UX 문자열은 underlying state heal 시 같이 clear돼야
+
+v6/v7 false-Failed 사건들이 acknowledge되고 나서, SPA의 `lastError` 빨간 banner (이전 409 응답에서 온 `mapping_already_active` 같은 문자열)가 모두-초록 precheck rows 아래에 painted된 채로 남아있었음. `state.json`은 idle인데 빨간 글자만 살아있는 모순 UX. v7 이전 `MapMapping.svelte`는 `onStart` / `onStop` 시작에서만 `lastError`를 clear했고, Failed → 확인 → Idle 전환은 그 변수를 안 건드림.
+
+v7 fix: `$effect(() => { if (status?.state === MAPPING_STATE_IDLE) lastError = null; })`.
+
+일반화된 lesson: transition에 묶인 ephemeral error 문자열은 inverse transition에서도 clear돼야 — 다음 사용자 action 때까지 미루면 stale 메시지가 mental model을 깨뜨림.
+
+### Process violation + lesson — main 직접 commit `8da6d5a`
+
+Parent가 17번째 세션 NEXT_SESSION.md rewrite를 PR 안 거치고 main에 직접 commit. 12번째 세션 `dd348ba`와 같은 anti-pattern 반복. CLAUDE.md §8 deployment workflow는 main에 가는 모든 변경이 PR을 거쳐 HIL traceability + 되돌리기 친화 history를 갖도록 설계됐음. NEXT_SESSION.md가 mechanical rewrite이긴 해도 세션의 나머지 변경과 함께 ship되는 cache (per `feedback_next_session_cache_role.md`); chronicler PR에 묶는 것이 옳은 형태.
+
+운영자 미지시지만 잠금: chronicler skill의 §0 pre-flight가 이미 `git checkout main && git pull --rebase && git checkout -b docs/...`을 명시. Parent는 chronicler 호출 직전의 NEXT_SESSION.md rewrite 단계에도 같은 discipline을 적용해야. Memory entry 후보 (Parent territory): `feedback_next_session_via_pr.md` 또는 기존 `feedback_check_branch_before_commit.md` 확장.
+
+### 운영자 workflow 관찰 — hot-fix series가 squash-merge되는 패턴
+
+PR #69는 base feat + v1..v8 = 9개 commit을 ~6시간 동안 흡수해서 squash-merge로 한 줄로 main에 들어감. main 히스토리는 one-PR-per-line으로 깔끔하지만 PR 내부 commit 메시지가 v0..v7 evolution log를 보존하고, per-stack `CODEBASE.md` change-log entries (timestamped 19:30 / 19:50 / 20:15 / 22:50 / 23:30 / 00:30 KST)가 같은 evolution을 더 거친 입자에서 다시 capture. 두 layer가 squash 후에도 살아남음.
+
+일반화된 lesson: HIL feedback에 따라 빠르게 iterate할 때, 개별 commit 메시지 + per-stack CODEBASE.md entries가 durable audit trail; squash-merge가 main 가독성을 지킴.
+
+### 운영자 housekeeping (out-of-band, PR 미경유)
+
+- journald → persistent storage 활성화 (`/var/log/journal/` 생성). 향후 부팅 후에도 이전 부팅 로그가 보존돼 SIGKILL/false-Failed 같은 사건의 진단 데이터가 살아남음.
+- `/var/lib/godo/maps/.preview/v11.pgm.tmp` 잔여 파일 수동 삭제. atomic-rename SIGTERM-during-fsync race의 흔적; 데이터 손실은 없음 (실제 `v11.pgm`은 정상 저장). 다음 세션의 issue#16.2가 자동화할 cleanup의 motivation.
+- PR #69 squash-merge는 운영자 직접 처리 (Parent 무관여).
+
+### 운영자 lesson + 잠금 (UI 텍스트)
+
+- Failed-recovery 버튼 라벨 `Acknowledge` → `확인`. 운영자 인용: "Acknowledge보다는 한국어가 더 자연스러워 여기선" — 주변 `시작 / 정지 / 저장` vocabulary와 톤 일치.
+- v0..v7 hot-fix 시리즈가 한 단일 bug class (`webctl_lost_view_post_crash` from over-aggressive reconcile)를 세 개의 독립 race surface (docker `created` transient + ExecStartPre None window + systemd unit failed-state invisibility)에서 좁혀나감. 각 fix가 독립적으로 필요; 어느 것도 충분하지 않음.
+- Test 카운트 932 → 941 (non-hardware) — v6/v7에서 5개 parametrized case 추가. `PRECHECK_CHECK_NAMES` cardinality 6 → 7.
+- Cross-reboot stress test (RPi reboot 00:09:45 KST → 16개 이상 매핑 cycle, 모두 clean): v0..v7 스택이 풀 cold-container 경로 + 부팅 cycle을 모두 견뎌낸 empirical 검증. PGM/YAML integrity scan: 모든 pair 정상, P5 magic 검증.
+
+### 다음 세션 큐 (운영자-locked priority — Tier A 명시적으로 18번째 세션으로 이연)
+
+1. **★ Tier A bundle — issue#16.1 + issue#10**:
+   - **issue#16.1 (NEW)** — t5 trap-timeout: `docker stop --time=20` grace가 entrypoint trap의 `map_saver_cli` cycle보다 짧을 수 있음 (긴 매핑 세션에서). 운영자 t5 사건은 2h 5min 매핑이 SIGKILL로 손실. Fix path: 별도 `mapping_stop_systemctl_timeout_s` (≥45 s; 현재 generic `SUBPROCESS_TIMEOUT_S=10s` 사용) + schema 기본값 ladder bump (docker_grace 20 → 30, systemd_timeout 30 → 45, webctl_stop_timeout 35 → 50). LOC ~30. Risk: 긴 매핑에서 데이터 손실.
+   - **issue#10** — udev rule `/dev/rplidar` symlink (`idVendor=10c4 idProduct=ea60 serial=B5E5E18DC2E699D7C89792F44F46416F`) → tracker.toml `serial.lidar_port`이 `/dev/ttyUSB0`에서 `/dev/rplidar`로 flip. USB renumbering ops bug 제거. LOC ~20 + udev rule 1개.
+2. **issue#15** — PR #70 운영자 deploy + HIL 대기.
+3. **issue#16.2 (NEW)** — preview `.tmp` cleanup (`v11.pgm.tmp` 잔여가 motivation; `preview_dumper.py:54-64` SIGTERM-during-fsync race). LOC ~10.
+4. **issue#11** — Live pipelined-parallel multi-thread.
+5. **issue#13 cont.** — distance-weighted AMCL likelihood.
+6. **issue#4** — AMCL silent-converge diagnostic.
+7. **issue#6** — B-MAPEDIT-3 yaw rotation.
+8. **issue#17** — GPIO UART 직결 (issue#10 + issue#16 mitigation이 운영에 충분치 않을 때만).
+9. **Bug B** — Live mode 정지 시 jitter 확장.
+10. **issue#7** — boom-arm masking (issue#4 결과 따라).
+
+**다음 free issue 정수: `issue#18`**.
+
 ## 2026-05-02 (cross-day — 21:30 KST 2026-05-01 → 16:00 KST 2026-05-02, 열여섯 번째 세션 — issue#14 SPA mapping pipeline ships + System tab 통합 + map UX 다듬기 + PR #66 backup hotfix bundle + issue#16/#17 후보 surfaced)
 
 ### 한 줄 요약

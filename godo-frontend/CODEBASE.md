@@ -2807,6 +2807,76 @@ Spec memory: `.claude/memory/project_mapping_precheck_and_cp210x_recovery.md`.
   anon viewer's click triggers the standard 401 → /login redirect.
   Spec memory: `.claude/memory/project_mapping_precheck_and_cp210x_recovery.md`.
 
+## 2026-05-03 00:30 KST — issue#16 HIL hot-fix v6 + v7: 확인 button + lastError $effect clear + 7th precheck row PRECHECK_DETAIL_KO (retroactive entry)
+
+> Retroactive change-log entry: PR #69's v6/v7 commits modified
+> `src/routes/MapMapping.svelte` but only logged the changes inside
+> `godo-webctl/CODEBASE.md` (combined backend + frontend section).
+> Doc gap filled here for completeness — chronicler audit
+> 2026-05-03 00:55 KST.
+
+### Why
+
+v6 (operator t6 incident, 22:54:47 KST 2026-05-02): a healthy mapping
+container ran for >5 min producing valid scan/odom but `state.json`
+went Failed `webctl_lost_view_post_crash` ~1 s into start because
+docker reported `"created"` (transient between `docker run` and
+entrypoint) which webctl misclassified as "container gone". The
+SPA's only recovery action in Failed state was an `Acknowledge`
+button whose handler runs `docker rm -f` (no SIGTERM grace, no map
+saver) — operator clicked it to clear the phantom banner and the
+still-healthy mapping was killed mid-flight.
+
+v7 (operator t8 second-attempt, ~14:36:43 UTC 2026-05-02): same
+class of bug surfaced again from `docker inspect`-returns-None
+during the systemd unit's `ExecStartPre=docker rm -f` window. Plus
+operator: "전부 정상으로 Pre-check가 나오는데, 막상 제작하면 잘
+안되네요" — a `failed`-state systemd unit was invisible to the 6
+pre-v7 precheck rows. Plus: Failed → 확인 → Idle transition left
+a stale `mapping_already_active` red banner painted under all-green
+precheck rows because `lastError` only cleared on next user action.
+
+### Changed
+
+- `src/routes/MapMapping.svelte` Failed-state recovery button label
+  `Acknowledge` → `확인`. Matches surrounding 시작/정지/저장 vocabulary.
+  `data-testid="mapping-acknowledge-button"` and the underlying
+  `onStop` handler unchanged so existing wiring + tests stay valid.
+- `src/routes/MapMapping.svelte` new `$effect` block clears
+  `lastError = null` whenever `status?.state === MAPPING_STATE_IDLE`.
+  Stale error strings (e.g. from a prior 409 `mapping_already_active`)
+  no longer survive past the underlying state healing.
+- `src/routes/MapMapping.svelte` `PRECHECK_LABEL_KO` adds a 7th
+  entry: `mapping_unit_clean: '매핑 unit/컨테이너 잔여 없음'`. Matches
+  the backend's new precheck row (combines `systemctl is-failed`
+  + `docker inspect godo-mapping`).
+- `src/routes/MapMapping.svelte` new `PRECHECK_DETAIL_KO` map —
+  translates the 6 known v7 detail strings into operator-actionable
+  Korean tooltips (e.g.
+  `systemd_unit_failed_run_reset_failed → '이전 실행이 비정상 종료되어
+  systemd unit이 failed로 남아 있습니다. 터미널에서 sudo systemctl
+  reset-failed godo-mapping@active.service 실행 후 다시 시도해
+  주세요.'`). Falls back to the raw detail string for unknown shapes
+  (forward-compatible with future detail additions).
+
+### Untouched
+
+- All other Map > Mapping sub-tab UX (preview canvas, monitor
+  strip, mode-aware gating, etc.).
+- `src/stores/precheckStore.ts` — the wire shape change (6 rows →
+  7 rows) is automatically absorbed because the store reads the
+  array verbatim from the backend; no explicit cardinality
+  assertion in the store.
+
+### Tests
+
+- 383 vitest unit tests pass unchanged. The existing tests query
+  precheck rows by `data-testid="precheck-row-{name}"`, both pre-v7
+  rows and the new `mapping_unit_clean` row use the same template.
+  No new frontend tests added in v6/v7 (the gates' correctness is
+  enforced backend-side by `tests/test_mapping_precheck.py` +
+  `tests/test_mapping.py`).
+
 ## 2026-05-02 19:30 KST — issue#16 HIL hot-fix v2: monitor grid reposition + numeric host strip
 
 ### Added

@@ -40,9 +40,10 @@
     SYSTEM_SUBTAB_OVERVIEW,
     SYSTEM_SUBTAB_PROCESSES,
   } from '$lib/constants';
-  import type { DiagFrame, ExtendedResources, ProcessesSnapshot } from '$lib/protocol';
+  import type { DiagFrame, ExtendedResources, MappingState, MappingStatus, ProcessesSnapshot } from '$lib/protocol';
   import { auth } from '$stores/auth';
   import { diagSparklines, subscribeDiag, type DiagSparklineState } from '$stores/diag';
+  import { subscribeMappingStatus } from '$stores/mappingStatus';
   import { subscribeProcesses } from '$stores/processes';
   import { subscribeResourcesExtended } from '$stores/resourcesExtended';
   import { subscribeSystemServices, type SystemServicesState } from '$stores/systemServices';
@@ -60,6 +61,11 @@
   let unsubServices: (() => void) | null = null;
   let unsubProcesses: (() => void) | null = null;
   let unsubResExt: (() => void) | null = null;
+  let unsubMapping: (() => void) | null = null;
+  // issue#16 HIL hot-fix — feed the current mapping state into the
+  // ProcessTable so the docker-family rows recolour (idle→green,
+  // running→blue) without the table needing to subscribe itself.
+  let mappingState = $state<MappingState | null>(null);
   let svcState = $state<SystemServicesState>({ services: [], _arrival_ms: null, err: null });
   let processesSnapshot = $state<ProcessesSnapshot>({
     processes: [],
@@ -97,6 +103,9 @@
     unsubServices = subscribeSystemServices((s) => (svcState = s));
     unsubProcesses = subscribeProcesses((s) => (processesSnapshot = s));
     unsubResExt = subscribeResourcesExtended((s) => (extendedSnapshot = s));
+    unsubMapping = subscribeMappingStatus((s: MappingStatus | null) => {
+      mappingState = s?.state ?? null;
+    });
     tickTimer = setInterval(() => (renderTick += 1), 1000);
   });
 
@@ -106,6 +115,7 @@
     unsubServices?.();
     unsubProcesses?.();
     unsubResExt?.();
+    unsubMapping?.();
     if (tickTimer !== null) clearInterval(tickTimer);
   });
 
@@ -338,7 +348,7 @@
       onCancel={() => (confirmShutdownOpen = false)}
     />
   {:else if activeSubtab === SYSTEM_SUBTAB_PROCESSES}
-    <ProcessTable snapshot={processesSnapshot} />
+    <ProcessTable snapshot={processesSnapshot} {mappingState} />
   {:else if activeSubtab === SYSTEM_SUBTAB_EXTENDED}
     <ResourceBars snapshot={extendedSnapshot} />
   {/if}

@@ -66,8 +66,7 @@ from typing import Any, Final, Literal
 
 from .constants import PROC_PATH, PROC_STAT_PATH
 from .protocol import (
-    DOCKER_CONTAINER_NAMES,
-    DOCKER_DAEMON_NAMES,
+    DOCKER_FAMILY_NAMES,
     GODO_PROCESS_NAMES,
     MANAGED_PROCESS_NAMES,
     PROCESS_FIELDS,
@@ -77,7 +76,14 @@ logger = logging.getLogger("godo_webctl.processes")
 
 # Wire-side classification values. ``Literal`` keeps the type system honest;
 # any new value must be added on both Python and TS sides.
-Category = Literal["general", "godo", "managed"]
+#
+# issue#16 HIL hot-fix (2026-05-02 KST) — added "docker" as a fourth
+# category for the docker-family (dockerd, containerd, docker,
+# containerd-shim*). The SPA picks the rendered colour based on the
+# current mapping state (idle → green, running → blue) so the operator
+# sees at a glance whether the docker daemons are sitting idle or are
+# actively driving the mapping container.
+Category = Literal["general", "godo", "managed", "docker"]
 
 # webctl-internal: argv-substring pattern that identifies our own
 # uvicorn/python process. We match argv[0]=="python*" or argv[0] basename
@@ -268,26 +274,21 @@ def classify_pid(name: str) -> Category:
     `MANAGED_PROCESS_NAMES` because the `godo-tracker.service` runs it,
     and also in `GODO_PROCESS_NAMES`) classifies as `managed`.
 
-    issue#14 Mode-B N1 fix: docker family classifies as ``godo`` since
-    docker is only used for the godo-mapping container in this project.
-    Container children inside the PID namespace are NOT detected (they
-    show as `python3`, `ros2`, etc. in /proc — untracked).
-    issue#16 refinement: split docker family into "always-running
-    daemons" (dockerd, containerd → ``general`` because they live from
-    boot regardless of mapping state) vs. "active-mapping processes"
-    (docker run-parent + containerd-shim* children → ``godo`` because
-    they only exist while a mapping run is in flight). Operator HIL
-    feedback: dockerd/containerd visible after mapping ended was
-    misleading; now only the run-parent + shim children stay flagged.
+    issue#16 HIL hot-fix (2026-05-02 KST) — docker-family processes
+    (`docker`, `dockerd`, `containerd`, `containerd-shim*`) classify as
+    ``docker``. The SPA picks the rendered colour based on the current
+    mapping state (idle → green, running → blue) so the operator sees
+    at a glance whether the docker daemons are sitting idle or are
+    actively driving the mapping container. Container children inside
+    the PID namespace are NOT detected (they show as `python3`, `ros2`,
+    etc. in /proc — untracked).
     """
     if name in MANAGED_PROCESS_NAMES:
         return "managed"
     if name in GODO_PROCESS_NAMES:
         return "godo"
-    if name in DOCKER_CONTAINER_NAMES or name.startswith("containerd-shim"):
-        return "godo"
-    if name in DOCKER_DAEMON_NAMES:
-        return "general"
+    if name in DOCKER_FAMILY_NAMES or name.startswith("containerd-shim"):
+        return "docker"
     return "general"
 
 

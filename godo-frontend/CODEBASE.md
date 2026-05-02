@@ -2806,3 +2806,59 @@ Spec memory: `.claude/memory/project_mapping_precheck_and_cp210x_recovery.md`.
   (NOT auto-on-Start) per spec. POST is admin-only on the backend; an
   anon viewer's click triggers the standard 401 → /login redirect.
   Spec memory: `.claude/memory/project_mapping_precheck_and_cp210x_recovery.md`.
+
+## 2026-05-02 18:30 KST — issue#16 HIL hot-fix bundle
+
+Operator HIL on PR #69 surfaced four polish items; bundled into a
+single follow-up commit on the same branch.
+
+### Added
+
+- `src/routes/MapMapping.svelte` — RPi5 host resources rendered
+  alongside `MappingMonitorStrip` in a 2-column grid while mapping
+  state is `running`. Subscribes to `subscribeResourcesExtended` in
+  onMount; collapses to a single column under 900 px viewport.
+- `ProcessTable.svelte` `mappingState` prop — accepts `MappingState |
+  null`. When `null` (e.g., the System tab subscription failed), the
+  docker-family rows fall back to the idle palette (green).
+
+### Changed
+
+- `src/lib/protocol.ts::ProcessCategory` extended to four values:
+  `'general' | 'godo' | 'managed' | 'docker'`. `docker` is the new
+  fourth category for docker-family processes (dockerd, containerd,
+  docker run-parent, containerd-shim*).
+- `ProcessTable.svelte` — adds `.name-docker` (bold + green via
+  `--color-status-ok`) and `.name-docker.docker-active` (bold + accent
+  blue). The active modifier is set when the prop says mapping state
+  is in {`starting`, `running`, `stopping`}. Operator HIL feedback:
+  the prior 2-category split (`dockerd`/`containerd` → plain
+  `general`) lost the at-a-glance visibility the operator wanted —
+  they want EVERY docker process bold, with colour signalling
+  activity instead of category.
+- `System.svelte` — subscribes to `subscribeMappingStatus` and passes
+  `mappingState` into `<ProcessTable>` so the docker rows recolour
+  reactively.
+- `MapMapping.svelte` heading text — dropped `(issue#14)` per
+  operator request; now reads `Mapping`. The badge still surfaces the
+  current state in plain text.
+
+### Invariants
+
+- **(ah) issue#16 HIL — docker-family colour swap is SPA-side, not
+  wire-side** — webctl emits a flat `category: 'docker'` value and the
+  SPA picks the colour from the current `mappingStatus`. This keeps
+  the wire payload stateless (the same SSE frame works for every
+  subscriber regardless of mapping state) and lets the SPA's reactive
+  graph drive the recolour without an extra round-trip. The colour
+  swap covers `starting` + `running` + `stopping` — anything that's
+  not idle counts as "actively driving the container".
+
+- **(ai) issue#16 HIL — Mapping running view shows BOTH Docker SSE +
+  RPi5 host resources** — `MapMapping.svelte` mounts a 2-column
+  monitor grid while state is `running`. Docker container metrics
+  (left, via `MappingMonitorStrip` SSE) sit alongside RPi5 host
+  resources (right, via `subscribeResourcesExtended`). Operator wants
+  both views in one pane during a long mapping run so they can
+  triage CPU/memory pressure on either side without tab-switching.
+  Single-column fallback below 900 px viewport.

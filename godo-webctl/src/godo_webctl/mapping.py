@@ -1158,20 +1158,27 @@ class PrecheckResult:
 
 
 def _check_lidar_readable(cfg: Settings) -> PrecheckRow:
-    """Open the LiDAR device with O_RDWR | O_EXCL to verify it is free.
+    """Probe that the LiDAR device file responds to ``open()``.
 
-    `O_EXCL` on a tty is the discipline knob: if godo-tracker still has
-    the port open (or the kernel still has the cp210x in stale-state),
-    the open fails fast with EBUSY / EACCES. On success we close
-    immediately — this is a non-destructive probe.
+    Semantics (operator-confirmed during issue#16 HIL): this check is a
+    "device file alive + permission OK" probe, NOT an "in use by anyone
+    else?" probe. Linux's tty driver does NOT honour ``O_EXCL`` at open
+    time (POSIX leaves the flag undefined without ``O_CREAT``; the
+    kernel ignores it on character devices), so a successful open here
+    only tells us the cp210x driver responded and the file permissions
+    permit access — godo-tracker holding the port concurrently does
+    NOT cause this open to fail.
 
-    The tracker side (production/RPi5/src/lidar/lidar_source_rplidar.cpp)
-    does NOT pass O_EXCL to the kernel — verified by grep for
-    `O_EXCL`/`TIOCEXCL` in the tracker source — so a precheck that races
-    a tracker mid-startup cannot starve the tracker via the exclusivity
-    flag. The first-opener-without-O_EXCL + second-opener-with-O_EXCL
-    case still fails the precheck (which is the intended signal: tracker
-    is up, mapping must wait for stop).
+    The "is it free?" semantics live in ``_check_tracker_stopped``:
+    when godo-tracker is the holder, that row is ✗ and the operator
+    must stop the tracker before mapping can start. The lidar_readable
+    row catches the OTHER class of failure: cable pulled, driver not
+    loaded, sysfs in stale state preventing any open.
+
+    ``O_NONBLOCK`` is set so the open does not wait for modem-state
+    (carrier-detect) on a USB-serial adapter — without it, opening a
+    tty whose CD line is low can block until a 60-s carrier-detect
+    timeout. We close immediately on success; this is non-destructive.
     """
     try:
         lidar_port = _resolve_lidar_port(cfg)
@@ -1183,7 +1190,7 @@ def _check_lidar_readable(cfg: Settings) -> PrecheckRow:
             detail=f"tracker_toml_parse_failed: {e}",
         )
     try:
-        fd = os.open(lidar_port, os.O_RDWR | os.O_EXCL)
+        fd = os.open(lidar_port, os.O_RDWR | os.O_NONBLOCK)
     except OSError as e:
         return PrecheckRow(
             name="lidar_readable",

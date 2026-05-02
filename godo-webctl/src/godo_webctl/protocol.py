@@ -365,26 +365,24 @@ GODO_PROCESS_NAMES: Final[frozenset[str]] = frozenset(
 # the mapping container (`godo-mapping@active.service` → `docker run
 # --name godo-mapping ...`).
 #
-# issue#16 refinement (2026-05-02 KST, spec §"ProcessTable classification
-# refinement", option (a)) — split the original single set so that
-# always-running daemons (dockerd, containerd) classify as `general` and
-# only the active-mapping processes (docker run-parent + containerd-shim*
-# children) classify as `godo`. Operator HIL feedback: "mapping이
-# 끝났는데도 dockerd, containerd가 계속 구동 중이네" — those daemons run
-# from boot regardless of mapping state, so flagging them as godo-family
-# was misleading.
+# issue#16 (2026-05-02 KST, spec §"ProcessTable classification
+# refinement"). The first revision split docker-family into two
+# categories (daemons → general; containers → godo); operator HIL
+# response: "기존에는 dockerd, containerd등 docker 관련 프로세스는
+# 파랑색이었어. 앞으로도 평상시에는 녹색에 볼드체, mapping이 running인
+# 경우 파랑에 볼드체로 부탁해" — they want ALL docker-family to stay
+# bold-stylised, with a state-aware colour swap on the SPA side
+# (mapping idle → green, mapping running → blue). Encode this on the
+# wire as a fourth `docker` category and let the SPA pick the colour
+# based on the mappingStatus store.
 #
 # Spec memory: `.claude/memory/project_mapping_precheck_and_cp210x_recovery.md`.
 # Pinned by `tests/test_processes.py::test_classify_pid_docker_family`.
-DOCKER_DAEMON_NAMES: Final[frozenset[str]] = frozenset(
-    {
-        "dockerd",      # docker daemon — always running once Docker is installed
-        "containerd",   # containerd daemon — same lifecycle as dockerd
-    },
-)
-DOCKER_CONTAINER_NAMES: Final[frozenset[str]] = frozenset(
+DOCKER_FAMILY_NAMES: Final[frozenset[str]] = frozenset(
     {
         "docker",       # `docker run --name godo-mapping ...` run-parent
+        "dockerd",      # docker daemon — always running once Docker is installed
+        "containerd",   # containerd daemon — same lifecycle as dockerd
     },
 )
 # `containerd-shim*` is matched by argv-prefix at classify time (the

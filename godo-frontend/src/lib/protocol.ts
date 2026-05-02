@@ -573,7 +573,13 @@ export const apiSystemServiceAction = (name: string, action: string): string =>
 // per invariant (m) — never compares published_mono_ns across the
 // C++/webctl boundary.
 
-export type ProcessCategory = 'general' | 'godo' | 'managed';
+// issue#16 HIL hot-fix (2026-05-02 KST) — added "docker" category for
+// docker-family processes (dockerd / containerd / docker run-parent /
+// containerd-shim*). The SPA picks the rendered colour based on the
+// current mapping state (idle → green, running → blue) so the operator
+// sees at a glance whether the docker daemons are sitting idle or are
+// actively driving the mapping container.
+export type ProcessCategory = 'general' | 'godo' | 'managed' | 'docker';
 
 export const PROCESS_FIELDS = [
   'name',

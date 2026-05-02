@@ -2900,7 +2900,8 @@ for the CP2102N USB CDC stale-state race observed during issue#14 HIL):
   `_check_tracker_stopped`, `_check_image_present`, `_check_disk_space_mb`,
   `_check_name_available`, `_check_state_clean`) run in fixed
   PRECHECK_CHECK_NAMES order. `_check_lidar_readable` opens the LiDAR
-  with `O_RDWR | O_EXCL` for a non-destructive busy probe.
+  with `O_RDWR | O_NONBLOCK` as a "device-file-openable" probe (the
+  flag form was reduced post-HIL — see Changed below).
   `_check_name_available` returns `ok=None` (pending) when the
   operator has not typed a name; this counts as not-ready so Start
   stays disabled.
@@ -2916,9 +2917,9 @@ for the CP2102N USB CDC stale-state race observed during issue#14 HIL):
   `PRECHECK_CHECK_NAMES` / `PRECHECK_DISK_FREE_MIN_MB` wire constants.
 - `protocol.ERR_CP210X_RECOVERY_FAILED` /
   `ERR_LIDAR_PORT_NOT_RESOLVABLE` error codes.
-- `protocol.DOCKER_DAEMON_NAMES` (frozenset {dockerd, containerd}) +
-  `protocol.DOCKER_CONTAINER_NAMES` (frozenset {docker}). Replace the
-  former `DOCKER_MAPPING_PROCESS_NAMES` set.
+- `protocol.DOCKER_FAMILY_NAMES` (frozenset {docker, dockerd, containerd}).
+  Replaces the former `DOCKER_MAPPING_PROCESS_NAMES` set; the
+  `containerd-shim*` prefix is matched at classify time.
 - `constants.MAPPING_CP210X_RECOVER_ENV_FILENAME = "cp210x-recover.env"` +
   `constants.MAPPING_CP210X_RECOVER_TIMEOUT_S = 15.0`.
 - `app.py::mapping_precheck_endpoint` (anonymous) +
@@ -2934,27 +2935,35 @@ for the CP2102N USB CDC stale-state race observed during issue#14 HIL):
 - `tests/test_protocol.py::test_precheck_*` — 5 new pinning tests for
   PRECHECK_FIELDS / PRECHECK_CHECK_FIELDS / PRECHECK_CHECK_NAMES /
   PRECHECK_DISK_FREE_MIN_MB + issue#16 error codes.
-- `tests/test_processes.py::test_docker_daemon_and_container_sets_disjoint`
-  — ensures the two new sets do not overlap (would make classify_pid
-  ambiguous).
+- `tests/test_processes.py::test_docker_family_disjoint_from_godo_and_managed`
+  — ensures the docker-family set does not overlap with the
+  godo/managed sets (would make classify_pid ambiguous).
 
 ### Changed
 
-- `processes.classify_pid(name)` — split docker family check. Order:
-  managed → godo (GODO_PROCESS_NAMES) → godo (DOCKER_CONTAINER_NAMES
-  or `containerd-shim*` prefix) → general (DOCKER_DAEMON_NAMES) →
-  general fallback. Daemons (dockerd/containerd) now classify as
-  `general` because they live from boot regardless of mapping state.
-- `processes.py` import: `DOCKER_MAPPING_PROCESS_NAMES` →
-  `DOCKER_DAEMON_NAMES` + `DOCKER_CONTAINER_NAMES`.
-- `tests/test_processes.py::test_classify_pid_docker_family` — assertions
-  flipped: dockerd/containerd → `general`, docker / containerd-shim* →
-  `godo`.
+- `processes.Category` Literal extended to four values:
+  `"general" | "godo" | "managed" | "docker"`. The SPA reads the
+  current mapping state and recolours the `docker` rows (idle → green,
+  mapping running → blue) without the wire payload needing a state
+  field.
+- `processes.classify_pid(name)` — single docker check. Order:
+  managed → godo (GODO_PROCESS_NAMES) → docker (DOCKER_FAMILY_NAMES or
+  `containerd-shim*` prefix) → general fallback.
+- `mapping._check_lidar_readable` — flag swap from `O_RDWR | O_EXCL` →
+  `O_RDWR | O_NONBLOCK`. POSIX leaves O_EXCL undefined without O_CREAT;
+  Linux's tty driver ignores it on character devices, so the original
+  flag was a no-op (operator HIL confirmed: lidar_readable showed ✓
+  even while godo-tracker held the port). Semantics: the row is now
+  unambiguously a "device file alive + permission OK" probe, NOT an
+  "in-use detection" probe — that role belongs to `tracker_stopped`.
+  O_NONBLOCK avoids the rare 60-s carrier-detect open-stall on
+  USB-serial adapters.
 
 ### Removed
 
-- `protocol.DOCKER_MAPPING_PROCESS_NAMES` — replaced by the two-set
-  split. No callers outside processes.py + the renamed test.
+- `protocol.DOCKER_MAPPING_PROCESS_NAMES` — replaced by
+  `DOCKER_FAMILY_NAMES`. No callers outside processes.py + the renamed
+  test.
 
 ### Invariants
 
@@ -2970,11 +2979,17 @@ for the CP2102N USB CDC stale-state race observed during issue#14 HIL):
   Spec memory:
   `.claude/memory/project_mapping_precheck_and_cp210x_recovery.md`.
 
-- **(af) issue#16 — ProcessTable classification refinement** — docker
-  family is split into "always-running daemons" (DOCKER_DAEMON_NAMES =
-  {dockerd, containerd}) which classify as `general` and "active-mapping
-  processes" (DOCKER_CONTAINER_NAMES = {docker} + `containerd-shim*`
-  prefix) which classify as `godo`. The classify_pid order is locked in
-  the function body; tests/test_processes.py pins both the new
-  classifications and the disjoint-set invariant. Operator HIL feedback
-  drove the split — daemons running after a mapping ended was misleading.
+- **(af) issue#16 — ProcessTable docker category** — docker-family
+  processes (`docker`, `dockerd`, `containerd`, `containerd-shim*`) all
+  classify as a single fourth category `docker`. The wire payload does
+  NOT carry mapping state; the SPA's System tab subscribes to
+  `mappingStatus` and applies a state-aware colour to `.name-docker`
+  cells (idle → `--color-status-ok` green, running → `--color-accent`
+  blue). Operator HIL feedback drove this two-step trajectory: first
+  refinement (16-original) split docker into two categories, but the
+  visual loss (dockerd/containerd dropping from bold-blue to plain
+  text) was operator-rejected. Final shape keeps everything bold and
+  trades colour for state. classify_pid order is locked: managed →
+  godo → docker → general fallback. tests/test_processes.py pins the
+  new four-value category set + the disjoint-set invariant against
+  godo/managed.

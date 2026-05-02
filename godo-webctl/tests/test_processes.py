@@ -245,44 +245,41 @@ def test_classify_pid_godo_webctl_is_managed() -> None:
 
 
 def test_classify_pid_docker_family() -> None:
-    """issue#14 Mode-B N1 fix (2026-05-02 KST) + issue#16 refinement
-    (2026-05-02 KST, spec option (a)): docker family is split.
-
-    - Always-running daemons (dockerd, containerd) classify as
-      ``general`` because they live from boot regardless of mapping
-      state. Operator HIL feedback: they were misleading after a
-      mapping run ended.
-    - Active-mapping processes (``docker`` run-parent and
-      ``containerd-shim*`` children) classify as ``godo`` because they
-      only exist while a mapping run is in flight.
+    """issue#16 HIL hot-fix (2026-05-02 KST): docker-family processes
+    (`docker`, `dockerd`, `containerd`, `containerd-shim*`) all
+    classify as ``docker``. The SPA picks the rendered colour based on
+    the current mapping state (idle → green, running → blue) so the
+    operator sees at a glance whether the docker daemons are sitting
+    idle or are actively driving the mapping container.
 
     Spec memory: `.claude/memory/project_mapping_precheck_and_cp210x_recovery.md`.
     """
-    # godo (active-mapping)
-    assert processes.classify_pid("docker") == "godo"
+    assert processes.classify_pid("docker") == "docker"
+    assert processes.classify_pid("dockerd") == "docker"
+    assert processes.classify_pid("containerd") == "docker"
     # `containerd-shim*` prefix match (kernel-truncated comm preserves
     # the prefix even when the full name is longer like
     # `containerd-shim-runc-v2`).
-    assert processes.classify_pid("containerd-shim") == "godo"
-    assert processes.classify_pid("containerd-shim-runc-v2") == "godo"
-    # general (always-running daemons)
-    assert processes.classify_pid("dockerd") == "general"
-    assert processes.classify_pid("containerd") == "general"
+    assert processes.classify_pid("containerd-shim") == "docker"
+    assert processes.classify_pid("containerd-shim-runc-v2") == "docker"
     # Negative: bare similar names do NOT match (no false positives).
     assert processes.classify_pid("docker-compose") == "general"
     assert processes.classify_pid("dockerized-app") == "general"
 
 
-def test_docker_daemon_and_container_sets_disjoint() -> None:
-    """issue#16: the two new docker sets must NOT overlap. A name that
-    appears in both would be classifier-ambiguous (current order makes
-    container win, but the membership invariant catches drift earlier)."""
+def test_docker_family_disjoint_from_godo_and_managed() -> None:
+    """issue#16 HIL hot-fix: the docker-family set must NOT overlap with
+    `GODO_PROCESS_NAMES` or `MANAGED_PROCESS_NAMES`. A name in both would
+    be classifier-ambiguous (current order makes managed/godo win, but
+    the membership invariant catches drift earlier)."""
     from godo_webctl.protocol import (
-        DOCKER_CONTAINER_NAMES,
-        DOCKER_DAEMON_NAMES,
+        DOCKER_FAMILY_NAMES,
+        GODO_PROCESS_NAMES,
+        MANAGED_PROCESS_NAMES,
     )
 
-    assert frozenset() == DOCKER_DAEMON_NAMES & DOCKER_CONTAINER_NAMES
+    assert frozenset() == DOCKER_FAMILY_NAMES & GODO_PROCESS_NAMES
+    assert frozenset() == DOCKER_FAMILY_NAMES & MANAGED_PROCESS_NAMES
 
 
 # --- enumerate_all_pids ---------------------------------------------------

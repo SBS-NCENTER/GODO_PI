@@ -104,6 +104,17 @@ class Settings:
     # `constants.py` is the FALLBACK default (35 s); runtime code reads
     # this `Settings` field.
     mapping_webctl_stop_timeout_s: float
+    # issue#16 HIL hot-fix v2 (2026-05-02 KST) — auto-recover the cp210x
+    # USB CDC driver before each `mapping.start()`. The first attempt
+    # after a tracker stop frequently hits the cp210x stale state
+    # (`failed set request 0x12 status: -110` in dmesg) which crashes
+    # rplidar_node inside the container. The precheck cannot detect
+    # this — open() at the file layer succeeds even when the USB CDC
+    # control endpoint is wedged. Auto-recovery before every Start
+    # eliminates the first-attempt failure with a ~1.5 s latency cost.
+    # Set to false to disable (operator-tuneable via tracker.toml
+    # `[webctl] mapping_auto_recover_lidar = false`).
+    mapping_auto_recover_lidar: bool
 
 
 # Documented defaults — single source for code + README + systemd env-file.
@@ -132,6 +143,7 @@ _DEFAULTS: Final[dict[str, str]] = {
     # is constructed without going through the TOML reader (tests, dev
     # scripts) this default keeps the field finite.
     "GODO_WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S": str(MAPPING_CONTAINER_STOP_TIMEOUT_S),
+    "GODO_WEBCTL_MAPPING_AUTO_RECOVER_LIDAR": "true",
 }
 
 # Per-field parser. Same keys (in same order) as _DEFAULTS.
@@ -156,6 +168,7 @@ _PARSERS: Final[dict[str, Callable[[str], Any]]] = {
     "GODO_WEBCTL_MAPPING_IMAGE_TAG": str,
     "GODO_WEBCTL_DOCKER_BIN": Path,
     "GODO_WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S": float,
+    "GODO_WEBCTL_MAPPING_AUTO_RECOVER_LIDAR": _parse_bool,
 }
 
 # env-var name → Settings field name. Drift between this and the dataclass
@@ -181,6 +194,7 @@ _ENV_TO_FIELD: Final[dict[str, str]] = {
     "GODO_WEBCTL_MAPPING_IMAGE_TAG": "mapping_image_tag",
     "GODO_WEBCTL_DOCKER_BIN": "docker_bin",
     "GODO_WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S": "mapping_webctl_stop_timeout_s",
+    "GODO_WEBCTL_MAPPING_AUTO_RECOVER_LIDAR": "mapping_auto_recover_lidar",
 }
 
 

@@ -7,6 +7,7 @@
    */
 
   import { onDestroy, onMount } from 'svelte';
+  import MappingHostStrip from '$components/MappingHostStrip.svelte';
   import MappingMonitorStrip from '$components/MappingMonitorStrip.svelte';
   import MappingPreviewCanvas from '$components/MappingPreviewCanvas.svelte';
   import { apiGet, apiPost, ApiError } from '$lib/api';
@@ -23,24 +24,75 @@
     MAPPING_STATE_STARTING,
     MAPPING_STATE_STOPPING,
     type MappingStatus,
+    type PrecheckCheck,
+    type PrecheckResult,
   } from '$lib/protocol';
   import { refreshMappingStatus, subscribeMappingStatus } from '$stores/mappingStatus';
+  import { precheckStore, start as startPrecheck, stop as stopPrecheck } from '$stores/precheckStore';
 
   const NAME_RE = new RegExp(MAPPING_NAME_REGEX_SOURCE);
 
+  // issue#16 — Korean labels for the precheck rows. Order does NOT
+  // matter here (we render in the order returned by the backend); the
+  // dictionary lookup just maps the canonical name to a human label.
+  const PRECHECK_LABEL_KO: Record<string, string> = {
+    lidar_readable: 'LiDAR 장치 읽기 가능',
+    tracker_stopped: 'godo-tracker 정지됨',
+    image_present: 'Docker 이미지 존재',
+    disk_space_mb: '디스크 공간 (≥ 500 MB)',
+    name_available: '맵 이름 사용 가능',
+    state_clean: '이전 매핑 상태 정리됨',
+    mapping_unit_clean: '매핑 unit/컨테이너 잔여 없음',
+  };
+
+  // issue#16 v7 — Korean tooltip for known mapping_unit_clean failure
+  // detail strings. Falls back to the raw `detail` for unknown shapes.
+  const PRECHECK_DETAIL_KO: Record<string, string> = {
+    systemd_unit_failed_run_reset_failed:
+      '이전 실행이 비정상 종료되어 systemd unit이 failed로 남아 있습니다. 터미널에서 `sudo systemctl reset-failed godo-mapping@active.service` 실행 후 다시 시도해 주세요.',
+    container_lingering_exited: 'godo-mapping 컨테이너가 종료된 채 남아 있습니다. 다음 Start 시 자동 정리됩니다.',
+    container_lingering_running: 'godo-mapping 컨테이너가 여전히 실행 중입니다.',
+    container_lingering_created: 'godo-mapping 컨테이너가 생성됐으나 아직 실행 전입니다.',
+    container_lingering_paused: 'godo-mapping 컨테이너가 paused 상태입니다.',
+    container_lingering_dead: 'godo-mapping 컨테이너가 dead 상태입니다.',
+  };
+
   let status = $state<MappingStatus | null>(null);
   let unsub: (() => void) | null = null;
+  let unsubPrecheck: (() => void) | null = null;
+  let precheck = $state<PrecheckResult>({ ready: false, checks: [] });
   let name = $state('');
   let starting = $state(false);
   let stopping = $state(false);
+  let recovering = $state(false);
   let lastError = $state<string | null>(null);
   let journalLines = $state<string[]>([]);
   let journalLoading = $state(false);
 
   onMount(() => {
     unsub = subscribeMappingStatus((s) => (status = s));
+    // issue#16 — start precheck polling. The closure reads `name` on
+    // each tick so a fresh keystroke surfaces in the next URL.
+    unsubPrecheck = precheckStore.subscribe((p) => (precheck = p));
+    startPrecheck(() => name);
   });
-  onDestroy(() => unsub?.());
+
+  // issue#16 v7 — clear stale lastError when mapping transitions to a
+  // resting state (Idle). Without this, after the operator clicks 확인
+  // on a Failed view, the underlying error string from a prior 409
+  // (mapping_already_active) or other onStart failure stays painted
+  // beneath the all-green precheck rows even though state.json is now
+  // Idle. Operator HIL 2026-05-02 evening surfaced this UX paper-cut.
+  $effect(() => {
+    if (status?.state === MAPPING_STATE_IDLE) {
+      lastError = null;
+    }
+  });
+  onDestroy(() => {
+    unsub?.();
+    unsubPrecheck?.();
+    stopPrecheck();
+  });
 
   function validateName(s: string): string | null {
     if (!s) return '이름을 입력해 주세요.';
@@ -51,13 +103,58 @@
   }
 
   let nameError = $derived(name === '' ? null : validateName(name));
+  // issue#16 — Start gate now also requires precheck.ready=true. The
+  // precheck endpoint includes a name-availability row, so once the
+  // operator types a valid+free name, the row flips to ok=true and the
+  // backend's `ready=true` aggregate matches our local nameError===null.
   let canStart = $derived(
-    status?.state === MAPPING_STATE_IDLE && nameError === null && name !== '' && !starting,
+    status?.state === MAPPING_STATE_IDLE &&
+      nameError === null &&
+      name !== '' &&
+      precheck.ready &&
+      !starting,
   );
   let canStop = $derived(
     status?.state === MAPPING_STATE_RUNNING ||
       status?.state === MAPPING_STATE_STARTING,
   );
+
+  // issue#16 — derived helpers for the precheck panel.
+  let lidarRow = $derived(
+    precheck.checks.find((c) => c.name === 'lidar_readable') ?? null,
+  );
+  let canRecoverLidar = $derived(
+    !recovering && lidarRow !== null && lidarRow.ok === false,
+  );
+
+  function rowGlyph(row: PrecheckCheck): string {
+    if (row.ok === true) return '✓';
+    if (row.ok === false) return '✗';
+    return '⋯'; // pending
+  }
+
+  function rowClass(row: PrecheckCheck): string {
+    if (row.ok === true) return 'precheck-row-ok';
+    if (row.ok === false) return 'precheck-row-fail';
+    return 'precheck-row-pending';
+  }
+
+  async function onRecoverLidar(): Promise<void> {
+    recovering = true;
+    lastError = null;
+    try {
+      await apiPost('/api/mapping/recover-lidar', {});
+      // The 1 Hz precheck tick will reflect the new state shortly.
+    } catch (e) {
+      lastError = e instanceof ApiError && e.body?.detail
+        ? `${e.body.err}: ${e.body.detail}`
+        : e instanceof Error
+          ? e.message
+          : String(e);
+    } finally {
+      recovering = false;
+    }
+  }
 
   // Operator UX 2026-05-02 KST: always-visible state badge so operators
   // see the current mapping coordinator state (idle / starting / running
@@ -133,13 +230,49 @@
 
 <section data-testid="map-mapping-section">
   <h3>
-    Mapping (issue#14)
+    Mapping
     <span class="state-badge {badge.cls}" data-testid="mapping-state-badge">
       {badge.text}
     </span>
   </h3>
 
   {#if status?.state === MAPPING_STATE_IDLE}
+    <!-- issue#16 — Pre-check panel. 6 fixed-order rows polled at 1 Hz. -->
+    <div class="precheck-panel" data-testid="mapping-precheck-panel">
+      <h4>준비 상태 (Pre-check)</h4>
+      {#if precheck.checks.length === 0}
+        <p class="hint">상태 확인 중…</p>
+      {:else}
+        <ul class="precheck-list">
+          {#each precheck.checks as row (row.name)}
+            <li class={rowClass(row)} data-testid={`precheck-row-${row.name}`}>
+              <span class="precheck-glyph" data-testid={`precheck-glyph-${row.name}`}>
+                {rowGlyph(row)}
+              </span>
+              <span class="precheck-label">
+                {PRECHECK_LABEL_KO[row.name] ?? row.name}
+              </span>
+              {#if row.detail}
+                <span class="precheck-detail">
+                  — {PRECHECK_DETAIL_KO[row.detail] ?? row.detail}
+                </span>
+              {/if}
+              {#if row.name === 'lidar_readable' && row.ok === false}
+                <button
+                  type="button"
+                  class="recover-btn"
+                  onclick={onRecoverLidar}
+                  disabled={!canRecoverLidar}
+                  data-testid="mapping-recover-lidar-button">
+                  🔧 LiDAR USB 복구
+                </button>
+              {/if}
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    </div>
+
     <div class="form">
       <label>
         이름:
@@ -155,6 +288,8 @@
         <p class="err">{nameError}</p>
       {:else if name === ''}
         <p class="hint">이름을 입력하면 Start 버튼이 활성화됩니다.</p>
+      {:else if !precheck.ready}
+        <p class="hint">준비 상태가 모두 통과해야 Start 버튼이 활성화됩니다.</p>
       {/if}
       <button
         type="button"
@@ -179,8 +314,17 @@
       data-testid="mapping-stop-button">
       Stop & Save
     </button>
+    <!-- issue#16 HIL hot-fix v2 (2026-05-02 KST) — monitor grid moved
+         ABOVE the preview canvas so the operator can keep an eye on
+         resource pressure while the slow-updating preview fills in
+         below. RPi5 host strip uses numeric-only formatting (no bars,
+         no animation) so its vertical height aligns with the Docker
+         container strip — both panels read at a glance. -->
+    <div class="monitor-grid" data-testid="mapping-monitor-grid">
+      <MappingMonitorStrip />
+      <MappingHostStrip />
+    </div>
     <MappingPreviewCanvas mapName={status.map_name} />
-    <MappingMonitorStrip />
   {:else if status?.state === MAPPING_STATE_STOPPING}
     <p>저장 중… ({status.map_name})</p>
   {:else if status?.state === MAPPING_STATE_FAILED}
@@ -199,7 +343,7 @@
         </details>
       {/if}
       <button type="button" onclick={onStop} data-testid="mapping-acknowledge-button">
-        Acknowledge
+        확인
       </button>
     </div>
   {/if}
@@ -266,5 +410,75 @@
     background: var(--color-status-err-bg, rgba(198, 40, 40, 0.12));
     color: var(--color-status-err, #c62828);
     border: 1px solid var(--color-status-err, #c62828);
+  }
+  /* issue#16 — Pre-check panel styles. */
+  .precheck-panel {
+    margin-bottom: var(--space-3);
+    padding: var(--space-2);
+    border: 1px solid var(--color-border);
+    border-radius: 4px;
+    background: var(--color-surface);
+  }
+  .precheck-panel h4 {
+    margin: 0 0 var(--space-2) 0;
+    font-size: 0.95em;
+  }
+  .precheck-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .precheck-list li {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: 0.9em;
+  }
+  .precheck-glyph {
+    display: inline-block;
+    width: 1.2em;
+    text-align: center;
+    font-weight: bold;
+  }
+  .precheck-row-ok .precheck-glyph {
+    color: var(--color-status-ok, #2e7d32);
+  }
+  .precheck-row-fail .precheck-glyph {
+    color: var(--color-status-err, #c62828);
+  }
+  .precheck-row-pending .precheck-glyph {
+    color: var(--color-text-muted);
+  }
+  .precheck-detail {
+    color: var(--color-text-muted);
+    font-size: 0.85em;
+  }
+  .recover-btn {
+    margin-left: auto;
+    padding: 2px 8px;
+    font-size: 0.85em;
+  }
+
+  /* issue#16 HIL hot-fix v2 — 2-column monitor grid for the running
+     view, positioned ABOVE the preview canvas. Docker container SSE
+     on the left, RPi5 host resources on the right. Each cell hosts a
+     self-contained strip component (MappingMonitorStrip /
+     MappingHostStrip) that owns its own header + border, so the grid
+     here is layout-only.  Single-column collapse below 900 px so the
+     mobile preview path still reads cleanly. */
+  .monitor-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--space-3);
+    margin-top: var(--space-2);
+    margin-bottom: var(--space-3);
+  }
+  @media (max-width: 900px) {
+    .monitor-grid {
+      grid-template-columns: 1fr;
+    }
   }
 </style>

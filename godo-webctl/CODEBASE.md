@@ -2877,3 +2877,465 @@ CODEBASE.md (r) extended); webctl is the runtime consumer.
      "맵 한번 제작하면 평생 쓰는" mandates this ladder be operator-
      tunable; the SPA Config tab is schema-driven so the rows
      surface automatically (no frontend change).
+
+## 2026-05-03 00:30 KST — issue#16 HIL hot-fix v7: ExecStartPre race + precheck mapping_unit_clean row
+
+Operator HIL on v6 (deployed 23:27 KST 2026-05-02): first mapping
+saved cleanly, but second attempt ~2 s after the save hit
+`webctl_lost_view_post_crash` again. Plus a UX paper-cut: the SPA's
+Failed-state recovery flow left a stale `mapping_already_active` red
+banner painted under all-green precheck rows.
+
+### Root causes (two distinct races)
+
+1. **ExecStartPre window** — the systemd unit
+   `godo-mapping@active.service` runs
+   `ExecStartPre=/usr/bin/docker rm -f godo-mapping` BEFORE
+   `ExecStart=docker run ...`. For the ~100-500 ms between rm and
+   run there is no container at all → `docker inspect` returns None
+   → v6's gone-branch fires → state.json overwritten with Failed.
+   v6 only handled non-None transients (`"created"`, `"restarting"`);
+   inspect=None still landed on the gone branch.
+
+2. **Stale lastError UX** — `MapMapping.svelte` cleared `lastError`
+   only at the start of `onStart` / `onStop`. The Failed → 확인
+   → Idle transition didn't clear, so the prior failure string
+   stayed painted under the now-green precheck panel.
+
+3. **Bonus precheck gap** — operator's "전부 정상으로 Pre-check가
+   나오는데, 막상 제작하면 잘 안되네요" case was a `failed`-state
+   systemd unit (residual from a prior SIGKILL, never cleared via
+   `reset-failed`). The 6 pre-v7 rows did not look at the unit
+   state, so all-green precheck + immediate Start failure.
+
+### Changed (backend)
+
+- `mapping.py` `status()` reconcile (around L573) — `inspect is None
+  AND s.state == STARTING` now returns `s` untouched. Detailed
+  comment block pins the operator t8 incident timestamp
+  (22:54:47 KST → second-attempt failure ~14:36:43 UTC). Running
+  + inspect=None still goes to the gone branch (genuine crash);
+  Stopping + inspect=None still resolves to Idle.
+- `mapping.py` new `_check_mapping_unit_clean(cfg)` helper —
+  combines `systemctl is-failed godo-mapping@active.service` AND
+  `docker inspect godo-mapping`. Failure detail strings are
+  `systemd_unit_failed_run_reset_failed` /
+  `container_lingering_<state>` so the SPA can map them to friendly
+  Korean tooltips.
+- `mapping.py` `precheck()` row list extended from 6 → 7
+  (`mapping_unit_clean` appended after `state_clean`).
+- `protocol.py` `PRECHECK_CHECK_NAMES` 6 → 7. Comment expanded.
+
+### Changed (frontend)
+
+- `MapMapping.svelte` — `$effect` block clears `lastError = null`
+  whenever `status?.state === MAPPING_STATE_IDLE`. Clears the stale
+  banner the moment 확인 lands.
+- `MapMapping.svelte` `PRECHECK_LABEL_KO` adds row label
+  `mapping_unit_clean: '매핑 unit/컨테이너 잔여 없음'`.
+- `MapMapping.svelte` new `PRECHECK_DETAIL_KO` map — translates the
+  six known v7 detail strings into Korean operator-actionable
+  tooltips (e.g.
+  `systemd_unit_failed_run_reset_failed → '이전 실행이 비정상 종료되어
+  systemd unit이 failed로 남아 있습니다. 터미널에서 sudo systemctl
+  reset-failed godo-mapping@active.service 실행 후 다시 시도해 주세요.'`).
+  Falls back to the raw detail for unknown shapes.
+
+### Tests
+
+- `tests/test_mapping.py` two new cases pin v7 contract:
+  - `test_status_reconcile_starting_keeps_state_when_inspect_none` —
+    Starting + inspect=None → stays Starting.
+  - `test_status_reconcile_running_to_failed_when_inspect_none_unchanged`
+    — Running + inspect=None still → Failed (regression guard).
+- `tests/test_mapping_precheck.py` three new cases for the new row:
+  happy path, systemd-failed, container-lingering.
+- `tests/test_protocol.py` `PRECHECK_CHECK_NAMES` cardinality
+  assertion bumped 6 → 7; pinned tuple updated.
+- `tests/test_mapping_precheck.py` `all_pass_subprocess` fixture
+  extended with `is-failed` + `inspect --format` shapes so the
+  aggregator test sees a clean picture.
+
+### Untouched
+
+- `Failed → Acknowledge` (now 확인) UX path — still does
+  `docker rm -f` (correct for genuine Failed; v7 narrows
+  false-positives at the source).
+- `start()` Phase-2 polling — still loops on any non-"running"
+  inspect, transient handling unchanged.
+- ProcessTable classification, cp210x recovery (v5 gate), name +
+  disk + image precheck rows — all unchanged.
+
+### Out of scope (still tracked)
+
+- t5 22:27:16 trap-timeout — entrypoint trap exceeds
+  `docker stop --time=20` grace, leaving map unsaved on long
+  mapping sessions. Separate issue#16.1 candidate.
+
+## 2026-05-02 23:30 KST — issue#16 HIL hot-fix v6: status() reconcile transient docker states
+
+Operator HIL on v5 surfaced a separate race: a healthy mapping container
+was marked `webctl_lost_view_post_crash` ~1 second into start, even
+though the container ran for >5 minutes producing valid scan/odom data.
+Confirmed via `docker ps` showing `Up 4 minutes` while
+`/api/mapping/status` returned `Failed`.
+
+### Root cause
+
+`status()` reconcile collapsed any non-`"running"` `_docker_inspect_state`
+return to the gone-branch:
+
+```python
+if inspect == "running":
+    # in-flight handling
+# else: container gone → Failed("webctl_lost_view_post_crash")
+```
+
+But Docker reports `"created"` between `docker run` and the entrypoint
+process actually executing (typically <500 ms but observable from a
+1 Hz polling loop on a cold container boot), and `"restarting"` during
+a `Restart=` cycle. Both are in-flight transient states, NOT "container
+gone". The 1 Hz `/api/mapping/status` polling from the SPA caught the
+`"created"` window and wrote `Failed` to `state.json` before start()'s
+own Phase-2 polling reconciled to `"running"`.
+
+The downstream cost was severe: once `state.json` was Failed, the SPA
+showed only an "Acknowledge" button whose handler (`mapping.stop()`'s
+Failed branch) runs `docker rm -f` — a SIGKILL, no SIGTERM grace, no
+trap, no `map_saver_cli`. Operator clicked Acknowledge to clear the
+phantom Failed banner; the still-healthy 5-min mapping container was
+killed mid-flight and `t6.{pgm,yaml}` never reached disk.
+
+### Changed
+
+- `mapping.py` `status()` reconcile (around L549) — added explicit
+  transient branch BEFORE the gone-branch:
+  ```python
+  if inspect in ("created", "restarting"):
+      return s   # keep persisted state; next tick re-reconciles
+  ```
+  Comment block expands the rationale and pins the operator t6
+  incident timestamp (22:54:47 KST 2026-05-02).
+- `tests/test_mapping.py` — two new parametrized test cases pinning the
+  v6 contract:
+  - `test_status_reconcile_starting_keeps_state_when_inspect_transient`
+    — Starting + inspect=`"created"`/`"restarting"` → state stays
+    Starting; `state.json` not overwritten.
+  - `test_status_reconcile_running_keeps_state_when_inspect_transient`
+    — Running + inspect=`"created"`/`"restarting"` → state stays Running.
+
+### Untouched
+
+- `mapping.start()` Phase-2 polling — already correctly loops on any
+  non-"running" inspect; transient `"created"` is handled by the existing
+  `time.sleep(MAPPING_STATE_REREAD_INTERVAL_S)` step. No change needed.
+- `Failed → Acknowledge` UX path — still does `docker rm -f` (correct
+  for genuine Failed; the bug was that v5/earlier wrote false Failed,
+  not that Acknowledge is wrong). v6 stops false Failed at the source;
+  Acknowledge stays as-is.
+- ProcessTable classification, cp210x recovery, precheck — all
+  unchanged from v5.
+
+### UI text bundle
+
+- `godo-frontend/src/routes/MapMapping.svelte` L319 — Failed-state
+  recovery button label `Acknowledge` → `확인`. `data-testid` (and the
+  associated `onStop` handler, which is `mapping.stop()`) unchanged.
+  Operator request 2026-05-02 evening: "Acknowledge보다는 한국어가
+  더 자연스러워" — also matches the surrounding 시작/정지/저장 vocabulary.
+
+## 2026-05-02 22:50 KST — issue#16 HIL hot-fix v5: gate cp210x recovery on lidar_readable
+
+v4 made auto-recovery work correctly (interface notation), but operator
+HIL on v4 surfaced that running the unbind/rebind cycle on EVERY Start
+unnecessarily disrupts a healthy USB CDC link and adds ~1.5 s latency
+even when not needed. Operator quote 2026-05-02 evening session: "지금
+정상 상태인데 매번 recovery가 도네".
+
+v5 narrows the firing condition: recovery now runs only when the
+in-process `_check_lidar_readable()` probe reports `ok=False`. The
+probe opens the LiDAR device file with `O_NONBLOCK` — a successful
+open means cp210x is bound and the control endpoint responds; recovery
+would only churn it. A failed open (ENODEV, hang past O_NONBLOCK,
+permission flap) is the exact symptom recovery exists to fix.
+
+### Why the original v2 stale-state symptom still triggers v5
+
+The v2 HIL evidence (`failed set request 0x12 status: -110` after
+tracker stop) presents AS a `lidar_readable` failure: the open() either
+returns ENODEV or the kernel's stale state interferes with the
+non-blocking probe. So the new gate correctly catches the same case
+that motivated v2..v4, while skipping the no-op churn when the link
+is healthy.
+
+### Changed
+
+- `mapping.start()` Step 2.5 — `recover_cp210x(cfg)` is now wrapped in
+  a `_check_lidar_readable(cfg)` probe. `lidar_check.ok is True` →
+  skip with debug log; `ok=False` (or `None`) → fire recovery, info-log
+  the reason from `lidar_check.detail`.
+- Comment block above the call rewritten to reflect the v5 gate
+  semantics; the v2 motivation comment retained as historical context.
+
+### Tests
+
+- Existing 932-test suite passes unchanged (test_mapping fixture
+  monkeypatches `recover_cp210x` to no-op — gate is invisible to the
+  start-flow integration tests; gate semantics implicit via existing
+  precheck unit tests on `_check_lidar_readable`).
+- No new assertions added — the gate is a code-path narrowing, not a
+  new behaviour surface.
+
+### Out of scope (filed as follow-up)
+
+- The 22:27:16 KST t5 mapping SIGKILL incident (trap exceeded the
+  20 s `docker stop --time=` grace, leaving t5 unsaved). Diagnosis:
+  `_run_systemctl_stop_mapping`'s `subprocess.run(timeout=10)` is
+  shorter than the unit's TimeoutStopSec (30 s) + ExecStop grace
+  (20 s), so webctl times out the systemctl client before the trap's
+  map_saver completes. Fix path: separate constant for stop-systemctl
+  timeout (≥45 s), and bump the schema-default ladder
+  (docker_grace 20→30, systemd_timeout 30→45,
+  webctl_stop_timeout 35→50). Tracked separately, not bundled into
+  v5 to keep the hot-fix surface tight.
+
+## 2026-05-02 20:15 KST — issue#16 HIL hot-fix v4: cp210x interface notation
+
+v3 visibility logs surfaced the real bug:
+
+```
+mapping.recover_cp210x: firing for lidar_port=/dev/ttyUSB0 usb_path=3-2
+godo-cp210x-recover.sh: line 19: echo: write error: No such device
+```
+
+The cp210x driver is a USB *interface* driver — its
+`/sys/bus/usb/drivers/cp210x/{bind,unbind}` sysfs files require USB
+INTERFACE notation (`<bus>-<port-chain>:<config>.<intf>`, e.g.
+`3-2:1.0`), NOT bare device notation (`<bus>-<port-chain>` like
+`3-2`). v1/v2/v3 wrote bare device notation and the kernel rejected
+every write with ENODEV → recovery never actually fixed any wedged
+state.
+
+### Changed
+
+- `_USB_PATH_REGEX` tightened from
+  `^[0-9]+-[0-9.]+$` → `^[0-9]+-[0-9.]+:[0-9]+\.[0-9]+$`. Bare
+  device notation is now rejected; only full interface notation
+  passes.
+- `_resolve_usb_sysfs_path` no longer strips the `:<config>.<intf>`
+  suffix — returns the whole interface segment (`1-1.4:1.0`,
+  `3-2:1.0`, `2-1:2.3`).
+- `production/RPi5/share/godo-cp210x-recover.sh` regex tightened
+  to match. Helper now also runs `udevadm settle --timeout=3` after
+  bind so /dev/ttyUSB* is recreated before mapping.start() proceeds
+  to systemctl-start of the mapping container.
+
+### Tests
+
+- `test_resolve_usb_sysfs_path_returns_full_interface_notation` —
+  confirms `:1.0` suffix preserved.
+- `test_resolve_usb_sysfs_path_news_pi01_layout` — pins the
+  operator HIL case (`3-2:1.0` from `/sys/.../usb3/3-2/3-2:1.0/...`).
+- `test_resolve_usb_sysfs_path_handles_complex_port_chain` —
+  multi-hop hub chain returns the leaf interface.
+- `test_resolve_usb_sysfs_path_handles_multi_interface_index` —
+  arbitrary `:<cfg>.<intf>` integers (e.g. `2-1:2.3`).
+- `test_resolve_usb_sysfs_path_no_interface_segment_raises` (NEW)
+  — bare device segment without interface = raise.
+- Malformed-payload parametrize set extended to include bare device
+  segments (`1-1.4` alone, `1-1.4:1` incomplete).
+- `_write_cp210x_envfile` test data updated to interface notation.
+
+## 2026-05-02 19:50 KST — issue#16 HIL hot-fix v3: robust USB sysfs resolver + visibility logs
+
+Operator HIL on hot-fix v2 surfaced that auto-recovery was silently
+no-op'ing on news-pi01 RPi 5. Diagnostic chain:
+
+1. `journalctl -u godo-cp210x-recover` → `-- No entries --` (oneshot
+   never fired).
+2. Manual `readlink /sys/class/tty/ttyUSB0/device | sed 's/:.*//'`
+   returned `ttyUSB0` not `1-1.4` — the kernel's symlink target on
+   this hardware does NOT carry a `:1.0` interface suffix.
+3. Old resolver raised `LidarPortNotResolvable` on the no-suffix
+   case; mapping.start() caught and silently logged WARNING; but
+   the WARNING was below the operator's grep window depth.
+
+### Changed
+
+- `_resolve_usb_sysfs_path` rewritten to walk `realpath()` segments
+  from tail to root and return the first segment matching the USB
+  port regex. Handles both observed sysfs layouts:
+  - (a) tail-segment is the interface (`.../1-1.4:1.0`)
+  - (b) tail-segment is the tty device (`.../1-1.4/ttyUSB0`)
+  Also rejects realpath outside `/sys/` (defence-in-depth).
+- `recover_cp210x` adds two `logger.info` lines:
+  - "firing for lidar_port=… usb_path=…" before the systemctl call
+  - "completed for usb_path=…" on success
+  Operator now sees POSITIVE evidence in `journalctl -u godo-webctl`
+  whether the recovery actually ran (the existing WARNING-only log
+  made silent-success indistinguishable from never-firing).
+- `tests/test_mapping_cp210x_recovery.py` — resolver tests rewritten
+  against `os.path.realpath` (was `os.readlink`) including a new
+  layout-(b) happy-path test that pins the news-pi01 case.
+
+## 2026-05-02 19:30 KST — issue#16 HIL hot-fix v2: cp210x auto-recovery in start path
+
+Operator HIL on PR #69 v1: first mapping attempt after tracker stop
+still failed with `webctl_lost_view_post_crash` (rplidar_node crashed
+inside container due to cp210x `set request 0x12 status: -110`).
+Precheck cannot detect this — file-layer open() succeeds even when
+the USB CDC control endpoint is wedged. Manual recovery button is
+insufficient because the operator cannot tell from precheck alone
+that recovery is needed.
+
+### Added
+
+- `Settings.mapping_auto_recover_lidar: bool` (default `True`,
+  env override `GODO_WEBCTL_MAPPING_AUTO_RECOVER_LIDAR`). Toggles
+  the auto-recovery in `mapping.start()` Phase 2 Step 2.5.
+- `mapping.start()` Phase 2 Step 2.5 — calls `recover_cp210x(cfg)`
+  before `systemctl start godo-mapping@active.service` whenever
+  `cfg.mapping_auto_recover_lidar` is true. Best-effort:
+  `CP210xRecoveryFailed` / `LidarPortNotResolvable` / `OSError` are
+  logged at WARNING and Start proceeds (the recovery being unable
+  to run is no worse than the pre-fix baseline; we want to give
+  systemctl a chance regardless).
+
+### Changed
+
+- Updated invariant (ae) to document the dual-entrypoint recovery
+  flow (manual button + automatic during start).
+
+## 2026-05-02 17:51 KST — issue#16: mapping pre-check + cp210x recovery + ProcessTable refinement
+
+Spec memory: `.claude/memory/project_mapping_precheck_and_cp210x_recovery.md`.
+
+Three patches in one PR (operator-decided 1단계 — short-term mitigation
+for the CP2102N USB CDC stale-state race observed during issue#14 HIL):
+
+1. `GET /api/mapping/precheck` — anonymous-readable readiness gate.
+2. `POST /api/mapping/recover-lidar` — admin-only manual cp210x driver
+   unbind/rebind (operator-driven via SPA button; NOT auto-on-Start).
+3. ProcessTable classification refinement — split docker family so
+   always-running daemons (dockerd/containerd) classify as `general`
+   and only active-mapping processes (docker run-parent +
+   containerd-shim*) stay as `godo`.
+
+### Added
+
+- `mapping.precheck(cfg, name)` + `PrecheckResult` / `PrecheckRow`
+  dataclasses. Six per-check helpers (`_check_lidar_readable`,
+  `_check_tracker_stopped`, `_check_image_present`, `_check_disk_space_mb`,
+  `_check_name_available`, `_check_state_clean`) run in fixed
+  PRECHECK_CHECK_NAMES order. `_check_lidar_readable` opens the LiDAR
+  with `O_RDWR | O_NONBLOCK` as a "device-file-openable" probe (the
+  flag form was reduced post-HIL — see Changed below).
+  `_check_name_available` returns `ok=None` (pending) when the
+  operator has not typed a name; this counts as not-ready so Start
+  stays disabled.
+- `mapping.recover_cp210x(cfg)` — resolve `cfg.serial.lidar_port` to
+  sysfs USB path via `/sys/class/tty/<basename>/device` symlink, write
+  `/run/godo/cp210x-recover.env` atomically, invoke `systemctl start
+  godo-cp210x-recover.service`. New `_USB_PATH_REGEX = ^[0-9]+-[0-9.]+$`
+  rejects any non-canonical bus-port form before the value reaches the
+  bash helper.
+- `mapping.CP210xRecoveryFailed` (→ HTTP 500) and
+  `mapping.LidarPortNotResolvable` (→ HTTP 400) exception classes.
+- `protocol.PRECHECK_FIELDS` / `PRECHECK_CHECK_FIELDS` /
+  `PRECHECK_CHECK_NAMES` / `PRECHECK_DISK_FREE_MIN_MB` wire constants.
+- `protocol.ERR_CP210X_RECOVERY_FAILED` /
+  `ERR_LIDAR_PORT_NOT_RESOLVABLE` error codes.
+- `protocol.DOCKER_FAMILY_NAMES` (frozenset {docker, dockerd, containerd}).
+  Replaces the former `DOCKER_MAPPING_PROCESS_NAMES` set; the
+  `containerd-shim*` prefix is matched at classify time.
+- `constants.MAPPING_CP210X_RECOVER_ENV_FILENAME = "cp210x-recover.env"` +
+  `constants.MAPPING_CP210X_RECOVER_TIMEOUT_S = 15.0`.
+- `app.py::mapping_precheck_endpoint` (anonymous) +
+  `mapping_recover_lidar_endpoint` (admin-only). Both bypass the L14
+  lock-out so the SPA can render the precheck panel + recovery surface
+  while a previous mapping run is mid-failure.
+- `tests/test_mapping_precheck.py` — 18 tests covering each helper's
+  happy + failure paths, name-pending semantics, aggregator order, and
+  to_dict() field-order pin.
+- `tests/test_mapping_cp210x_recovery.py` — 13 tests covering sysfs
+  resolver happy path + 5 malformed-payload rejection cases + envfile
+  atomic-write contract + subprocess argv pin + failure modes.
+- `tests/test_protocol.py::test_precheck_*` — 5 new pinning tests for
+  PRECHECK_FIELDS / PRECHECK_CHECK_FIELDS / PRECHECK_CHECK_NAMES /
+  PRECHECK_DISK_FREE_MIN_MB + issue#16 error codes.
+- `tests/test_processes.py::test_docker_family_disjoint_from_godo_and_managed`
+  — ensures the docker-family set does not overlap with the
+  godo/managed sets (would make classify_pid ambiguous).
+
+### Changed
+
+- `processes.Category` Literal extended to four values:
+  `"general" | "godo" | "managed" | "docker"`. The SPA reads the
+  current mapping state and recolours the `docker` rows (idle → green,
+  mapping running → blue) without the wire payload needing a state
+  field.
+- `processes.classify_pid(name)` — single docker check. Order:
+  managed → godo (GODO_PROCESS_NAMES) → docker (DOCKER_FAMILY_NAMES or
+  `containerd-shim*` prefix) → general fallback.
+- `mapping._check_lidar_readable` — flag swap from `O_RDWR | O_EXCL` →
+  `O_RDWR | O_NONBLOCK`. POSIX leaves O_EXCL undefined without O_CREAT;
+  Linux's tty driver ignores it on character devices, so the original
+  flag was a no-op (operator HIL confirmed: lidar_readable showed ✓
+  even while godo-tracker held the port). Semantics: the row is now
+  unambiguously a "device file alive + permission OK" probe, NOT an
+  "in-use detection" probe — that role belongs to `tracker_stopped`.
+  O_NONBLOCK avoids the rare 60-s carrier-detect open-stall on
+  USB-serial adapters.
+
+### Removed
+
+- `protocol.DOCKER_MAPPING_PROCESS_NAMES` — replaced by
+  `DOCKER_FAMILY_NAMES`. No callers outside processes.py + the renamed
+  test.
+
+### Invariants
+
+- **(ae) issue#16 — mapping precheck + cp210x recovery flow** — six
+  fixed-order checks (PRECHECK_CHECK_NAMES) gate the SPA Start button
+  via `precheck.ready=True`. Recovery uses systemd oneshot + polkit
+  (mirror of `godo-mapping@active.service` pattern), NOT sudo or
+  udev-chown. The bash helper at
+  `/opt/godo-tracker/share/godo-cp210x-recover.sh` is ALSO defended by
+  the same regex anchor that webctl uses (defence-in-depth — webctl
+  should never produce a malformed USB_PATH that reaches the helper).
+
+  Recovery has TWO entrypoints:
+  1. Operator-driven via `POST /api/mapping/recover-lidar` — the SPA
+     "🔧 LiDAR USB 복구" button next to the precheck `lidar_readable`
+     row when it shows ✗.
+  2. Automatic during `mapping.start()` Phase 2 Step 2.5 — runs
+     unconditionally before `systemctl start godo-mapping@active`
+     (operator-tuneable via `[webctl] mapping_auto_recover_lidar` in
+     tracker.toml; default `True`). Best-effort: failures are logged
+     and Start continues. issue#16 HIL hot-fix v2 (2026-05-02 KST)
+     rationale: operator HIL surfaced that the first mapping attempt
+     after a tracker stop reliably fails with cp210x stale state
+     (`failed set request 0x12 status: -110`), and the precheck
+     cannot detect this — `open()` at the file layer succeeds even
+     when the USB CDC control endpoint is wedged. Auto-recovery in
+     the start path eliminates the first-attempt failure with a
+     ~1.5 s latency cost. Long-term path: issue#17 (GPIO UART direct
+     connection) removes the cp210x USB stack entirely.
+
+  Spec memory:
+  `.claude/memory/project_mapping_precheck_and_cp210x_recovery.md`.
+
+- **(af) issue#16 — ProcessTable docker category** — docker-family
+  processes (`docker`, `dockerd`, `containerd`, `containerd-shim*`) all
+  classify as a single fourth category `docker`. The wire payload does
+  NOT carry mapping state; the SPA's System tab subscribes to
+  `mappingStatus` and applies a state-aware colour to `.name-docker`
+  cells (idle → `--color-status-ok` green, running → `--color-accent`
+  blue). Operator HIL feedback drove this two-step trajectory: first
+  refinement (16-original) split docker into two categories, but the
+  visual loss (dockerd/containerd dropping from bold-blue to plain
+  text) was operator-rejected. Final shape keeps everything bold and
+  trades colour for state. classify_pid order is locked: managed →
+  godo → docker → general fallback. tests/test_processes.py pins the
+  new four-value category set + the disjoint-set invariant against
+  godo/managed.

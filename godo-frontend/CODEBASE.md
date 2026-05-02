@@ -2756,3 +2756,145 @@ grouped against the general-process noise.
   affordance. Pinned by `tests/unit/processTable.test.ts::godo-
   category name carries name-godo class with accent color` +
   `general-category name carries no godo-family class`.
+
+## 2026-05-02 17:51 KST — issue#16: Mapping pre-check panel + LiDAR USB recover button
+
+Spec memory: `.claude/memory/project_mapping_precheck_and_cp210x_recovery.md`.
+
+### Added
+
+- `src/stores/precheckStore.ts` — 1 Hz polling of
+  `/api/mapping/precheck`. Mirrors mappingStatus.ts shape with one
+  difference: a caller-supplied `getName` accessor lets the URL query
+  string change between polls without re-subscribing. Empty name →
+  no `?name=` query (backend treats as pending). Network errors silently
+  retain the previous payload (no toast spam at 1 Hz).
+- `src/lib/protocol.ts` — `PRECHECK_FIELDS`, `PRECHECK_CHECK_FIELDS`,
+  `PRECHECK_CHECK_NAMES` mirrors + `PrecheckCheck` / `PrecheckResult`
+  types + `ERR_CP210X_RECOVERY_FAILED` / `ERR_LIDAR_PORT_NOT_RESOLVABLE`
+  error codes. Drift-pinned by inspection per the existing wire-mirror
+  discipline.
+- `src/routes/MapMapping.svelte` — Pre-check panel rendered above the
+  existing form when `state === idle`. Six labelled rows (Korean labels
+  per spec) with ✓/✗/⋯ glyph + optional detail text. Inline "🔧 LiDAR
+  USB 복구" button next to `lidar_readable` row when `ok===false`.
+  Start button gate updated to `precheck.ready && nameError===null &&
+  name !== ''` so the UI matches the backend's aggregate `ready=True`.
+- `tests/unit/precheckStore.test.ts` — 6 tests covering polling start /
+  query-string omit-when-empty / query-string-with-name / fresh-name-
+  per-tick / 5xx silent-degrade / stop().
+
+### Invariants
+
+- **(af) precheck-1Hz-polling-store** — `precheckStore` polls at
+  `MAPPING_STATUS_POLL_MS` (1 Hz, mirror of webctl
+  `MAPPING_MONITOR_TICK_S`). The store is page-local: `MapMapping.svelte`
+  is the sole subscriber, calls `start(getName)` in onMount and `stop()`
+  in onDestroy. The `getName` closure is read fresh on every tick so
+  the operator's keystrokes flow into the next URL without restarting
+  the timer. Errors silently leave the previous payload (no toast
+  spam — at 1 Hz a blip would flood the UI). Pinned by
+  `tests/unit/precheckStore.test.ts`.
+
+- **(ag) issue#16 — Start button gates on backend `precheck.ready`** —
+  `MapMapping.svelte`'s `canStart` derived now requires `precheck.ready`
+  in addition to the existing nameError + state.idle + !starting checks.
+  The backend's precheck includes its own name-availability row, so the
+  client-side `nameError` and the server-side row converge on the same
+  semantic. The "🔧 LiDAR USB 복구" button is only visible when
+  `lidar_readable` row's `ok === false`; recovery is operator-driven
+  (NOT auto-on-Start) per spec. POST is admin-only on the backend; an
+  anon viewer's click triggers the standard 401 → /login redirect.
+  Spec memory: `.claude/memory/project_mapping_precheck_and_cp210x_recovery.md`.
+
+## 2026-05-02 19:30 KST — issue#16 HIL hot-fix v2: monitor grid reposition + numeric host strip
+
+### Added
+
+- `src/components/MappingHostStrip.svelte` — RPi5 host monitor strip.
+  Subscribes to the existing `resourcesExtended` SSE store. Renders
+  CPU avg + per-core CPU + MEM (used / total GiB) + DISK% in the
+  same compact "label / value" stat row format as
+  `MappingMonitorStrip`. NUMBERS ONLY — no bars, no animation. The
+  visual parity gives operator height alignment between the two
+  cells of the running-state monitor grid (operator HIL request).
+
+### Changed
+
+- `MapMapping.svelte` running-state view — monitor grid moved ABOVE
+  the preview canvas. Operator HIL: keeping resource pressure
+  visible while the slow-updating preview fills below. Replaced
+  `<ResourceBars snapshot={extendedSnapshot} />` with
+  `<MappingHostStrip />`; the strip self-subscribes via
+  `subscribeResourcesExtended` so MapMapping no longer needs to own
+  that subscription. Dropped the local `extendedSnapshot` state +
+  `unsubResExt`.
+- Inline `<h4>` headers ("Docker container", "RPi5 host") removed —
+  each strip carries its own header now, so the wrapper cells were
+  redundant.
+
+### Invariants
+
+- **(aj) issue#16 HIL v2 — monitor grid above preview** — when state
+  is `running`, the 2-cell grid (Docker + RPi5) sits ABOVE the
+  preview canvas, not below. Operator HIL rationale: long mapping
+  runs should not push resource numbers off-screen as the preview
+  grows. The two cells are self-contained strip components that
+  align in vertical height by construction (matching padding,
+  border, single-row stat layout).
+
+## 2026-05-02 18:30 KST — issue#16 HIL hot-fix bundle
+
+Operator HIL on PR #69 surfaced four polish items; bundled into a
+single follow-up commit on the same branch.
+
+### Added
+
+- `src/routes/MapMapping.svelte` — RPi5 host resources rendered
+  alongside `MappingMonitorStrip` in a 2-column grid while mapping
+  state is `running`. Subscribes to `subscribeResourcesExtended` in
+  onMount; collapses to a single column under 900 px viewport.
+- `ProcessTable.svelte` `mappingState` prop — accepts `MappingState |
+  null`. When `null` (e.g., the System tab subscription failed), the
+  docker-family rows fall back to the idle palette (green).
+
+### Changed
+
+- `src/lib/protocol.ts::ProcessCategory` extended to four values:
+  `'general' | 'godo' | 'managed' | 'docker'`. `docker` is the new
+  fourth category for docker-family processes (dockerd, containerd,
+  docker run-parent, containerd-shim*).
+- `ProcessTable.svelte` — adds `.name-docker` (bold + green via
+  `--color-status-ok`) and `.name-docker.docker-active` (bold + accent
+  blue). The active modifier is set when the prop says mapping state
+  is in {`starting`, `running`, `stopping`}. Operator HIL feedback:
+  the prior 2-category split (`dockerd`/`containerd` → plain
+  `general`) lost the at-a-glance visibility the operator wanted —
+  they want EVERY docker process bold, with colour signalling
+  activity instead of category.
+- `System.svelte` — subscribes to `subscribeMappingStatus` and passes
+  `mappingState` into `<ProcessTable>` so the docker rows recolour
+  reactively.
+- `MapMapping.svelte` heading text — dropped `(issue#14)` per
+  operator request; now reads `Mapping`. The badge still surfaces the
+  current state in plain text.
+
+### Invariants
+
+- **(ah) issue#16 HIL — docker-family colour swap is SPA-side, not
+  wire-side** — webctl emits a flat `category: 'docker'` value and the
+  SPA picks the colour from the current `mappingStatus`. This keeps
+  the wire payload stateless (the same SSE frame works for every
+  subscriber regardless of mapping state) and lets the SPA's reactive
+  graph drive the recolour without an extra round-trip. The colour
+  swap covers `starting` + `running` + `stopping` — anything that's
+  not idle counts as "actively driving the container".
+
+- **(ai) issue#16 HIL — Mapping running view shows BOTH Docker SSE +
+  RPi5 host resources** — `MapMapping.svelte` mounts a 2-column
+  monitor grid while state is `running`. Docker container metrics
+  (left, via `MappingMonitorStrip` SSE) sit alongside RPi5 host
+  resources (right, via `subscribeResourcesExtended`). Operator wants
+  both views in one pane during a long mapping run so they can
+  triage CPU/memory pressure on either side without tab-switching.
+  Single-column fallback below 900 px viewport.

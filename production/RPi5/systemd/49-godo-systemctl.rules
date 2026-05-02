@@ -113,3 +113,30 @@ polkit.addRule(function(action, subject) {
     }
     return polkit.Result.YES;
 });
+
+// (d) systemctl start on godo-cp210x-recover.service (issue#16 — CP2102N
+// driver unbind/rebind one-shot). Operator-driven: the SPA "🔧 LiDAR
+// USB 복구" button calls POST /api/mapping/recover-lidar; webctl writes
+// /run/godo/cp210x-recover.env then issues
+// `systemctl start godo-cp210x-recover.service`. Webctl is the SOLE
+// caller; the unit body is `Type=oneshot RemainAfterExit=no`, so only
+// the `start` verb is meaningful (no `stop`/`restart` surface). Mirror
+// of rule (a) but scoped to the new unit. Lock-step with
+// `mapping._CP210X_RECOVER_UNIT` (must agree).
+polkit.addRule(function(action, subject) {
+    if (action.id !== "org.freedesktop.systemd1.manage-units") {
+        return;
+    }
+    if (!subject.isInGroup("ncenter")) {
+        return;
+    }
+    var unit = action.lookup("unit");
+    if (unit !== "godo-cp210x-recover.service") {
+        return;
+    }
+    var verb = action.lookup("verb");
+    if (verb !== "start") {
+        return;
+    }
+    return polkit.Result.YES;
+});

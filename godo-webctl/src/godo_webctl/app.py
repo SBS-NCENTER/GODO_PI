@@ -108,11 +108,13 @@ from .protocol import (
     ERR_BAD_N,
     ERR_CONTAINER_START_TIMEOUT,
     ERR_CONTAINER_STOP_TIMEOUT,
+    ERR_CP210X_RECOVERY_FAILED,
     ERR_DOCKER_UNAVAILABLE,
     ERR_EDIT_FAILED,
     ERR_IMAGE_MISSING,
     ERR_INVALID_MAP_NAME,
     ERR_INVALID_MAPPING_NAME,
+    ERR_LIDAR_PORT_NOT_RESOLVABLE,
     ERR_MAP_IS_ACTIVE,
     ERR_MAP_NOT_FOUND,
     ERR_MAPPING_ACTIVE,
@@ -1975,6 +1977,46 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except mapping_mod.MappingError as e:
             return _map_mapping_exc_to_response(e)
         return JSONResponse({"lines": lines}, status_code=HTTPStatus.OK)
+
+    # ---- /api/mapping/precheck (issue#16) ------------------------------
+    # Anonymous-readable: mirrors `/api/mapping/status` so the SPA's 1 Hz
+    # banner state stays consistent for unauthenticated viewers. NO L14
+    # lock-out — precheck must remain readable while mapping is active so
+    # the SPA can render the panel state coherently.
+    @app.get("/api/mapping/precheck")
+    async def mapping_precheck_endpoint(
+        name: Annotated[str | None, Query(max_length=MAPPING_NAME_MAX_LEN)] = None,
+    ) -> JSONResponse:
+        try:
+            result = await asyncio.to_thread(mapping_mod.precheck, cfg, name)
+        except mapping_mod.MappingError as e:
+            return _map_mapping_exc_to_response(e)
+        return JSONResponse(result.to_dict(), status_code=HTTPStatus.OK)
+
+    # ---- /api/mapping/recover-lidar (issue#16) -------------------------
+    # Admin-only manual recovery for the CP2102N USB CDC stale-state race
+    # observed during issue#14 HIL. Operator clicks "🔧 LiDAR USB 복구"
+    # in the SPA when the precheck `lidar_readable` row goes red. NOT
+    # automatic on Start — operator decides per spec memory
+    # `.claude/memory/project_mapping_precheck_and_cp210x_recovery.md`.
+    @app.post("/api/mapping/recover-lidar")
+    async def mapping_recover_lidar_endpoint(
+        claims: auth_mod.Claims = Depends(auth_mod.require_admin),
+    ) -> JSONResponse:
+        try:
+            await asyncio.to_thread(mapping_mod.recover_cp210x, cfg)
+        except mapping_mod.LidarPortNotResolvable as e:
+            return JSONResponse(
+                {"ok": False, "err": ERR_LIDAR_PORT_NOT_RESOLVABLE, "detail": str(e)},
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+        except mapping_mod.CP210xRecoveryFailed as e:
+            return JSONResponse(
+                {"ok": False, "err": ERR_CP210X_RECOVERY_FAILED, "detail": str(e)},
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+        activity_log.append("mapping_recover_lidar", claims.username)
+        return JSONResponse({"ok": True}, status_code=HTTPStatus.OK)
 
     # Keep FastAPI happy: it will reject 404s on unknown /api/* — but make
     # the dependency-side HTTPException flow uniform for SSE token paths.

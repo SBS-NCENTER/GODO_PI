@@ -391,3 +391,17 @@ MAPPING_DOCKER_INSPECT_TIMEOUT_S: Final[float] = 2.0
 
 # `du -sb` subprocess timeout for the in-progress preview PGM size.
 MAPPING_DU_TIMEOUT_S: Final[float] = 2.0
+
+# --- issue#16 — mapping pre-check + cp210x recovery ---------------------
+# Filename written under `cfg.mapping_runtime_dir.parent` (= /run/godo)
+# by `mapping.recover_cp210x` immediately before invoking
+# `systemctl start godo-cp210x-recover.service`. The systemd unit's
+# EnvironmentFile= reads this file to pick up `USB_PATH=<sysfs path>`.
+# Reference is /run/godo/cp210x-recover.env in production; tests put it
+# under tmp_path-derived runtime dirs.
+MAPPING_CP210X_RECOVER_ENV_FILENAME: Final[str] = "cp210x-recover.env"
+
+# `systemctl start godo-cp210x-recover.service` subprocess timeout. The
+# unit is a oneshot bash script that does unbind + 1 s sleep + bind, so
+# 15 s is generous against a stuck unbind/bind kernel write.
+MAPPING_CP210X_RECOVER_TIMEOUT_S: Final[float] = 15.0

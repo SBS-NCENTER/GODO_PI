@@ -46,6 +46,13 @@ install -d -m 0755 -o root -g root /opt/godo-tracker
 install -d -m 0755 -o root -g root /opt/godo-tracker/share
 install -m 0755 -o root -g root "$BIN_SRC"                          /opt/godo-tracker/godo_tracker_rt
 install -m 0755 -o root -g root "$SCRIPT_DIR/godo-irq-pin.sh"       /opt/godo-tracker/godo-irq-pin.sh
+# issue#16 — CP2102N unbind/rebind helper script. webctl invokes
+# `systemctl start godo-cp210x-recover.service`; the unit's ExecStart
+# runs this script after EnvironmentFile= pulls USB_PATH from
+# /run/godo/cp210x-recover.env (which webctl writes atomically before
+# the start verb).
+install -m 0755 -o root -g root "$RPI5_DIR/share/godo-cp210x-recover.sh" \
+                                /opt/godo-tracker/share/godo-cp210x-recover.sh
 # Cross-language SSOT — webctl parses this header to render the SPA
 # Config tab. /opt/godo-tracker/share/ is the production-side mirror
 # of the dev tree's `production/RPi5/src/core/config_schema.hpp`.
@@ -134,6 +141,11 @@ sed \
     "$SCRIPT_DIR/godo-mapping@.service" > "$MAPPING_UNIT_TMP"
 install -m 0644 "$MAPPING_UNIT_TMP" /etc/systemd/system/godo-mapping@.service
 echo "  godo-mapping unit timing: docker_stop_grace=${GODO_MAPPING_DOCKER_GRACE_S}s, TimeoutStopSec=${GODO_MAPPING_SYSTEMD_TIMEOUT_S}s (operator-tunable via Config tab → webctl.mapping_*)"
+# issue#16 — CP2102N recovery oneshot unit. NOT enabled (operator
+# never starts this directly); webctl is the sole caller via the SPA
+# "🔧 LiDAR USB 복구" button.
+install -m 0644 "$SCRIPT_DIR/godo-cp210x-recover.service" \
+                /etc/systemd/system/godo-cp210x-recover.service
 
 echo "[3/11] Installing watchdog drop-in"
 install -d -m 0755 /etc/systemd/system.conf.d

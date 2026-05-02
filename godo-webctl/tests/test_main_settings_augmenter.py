@@ -52,6 +52,7 @@ def _make_settings(
         mapping_image_tag="godo-mapping:dev",
         docker_bin=Path("/usr/bin/docker"),
         mapping_webctl_stop_timeout_s=webctl,
+        mapping_auto_recover_lidar=True,
     )
 
 

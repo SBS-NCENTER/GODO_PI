@@ -56,6 +56,7 @@ def _settings(tmp_path: Path) -> Settings:
         # issue#14 Maj-1: tests pin the schema default so the stop-poll
         # deadline matches the production ladder (35 s).
         mapping_webctl_stop_timeout_s=35.0,
+        mapping_auto_recover_lidar=True,
     )
 
 
@@ -257,6 +258,16 @@ def fake_subprocess(monkeypatch: pytest.MonkeyPatch) -> Iterator[_FakeSubprocess
     monkeypatch.setattr(M.subprocess, "run", fake)
     monkeypatch.setattr(M, "_run_systemctl_start_mapping", lambda cfg: None)
     monkeypatch.setattr(M, "_run_systemctl_stop_mapping", lambda cfg: None)
+    # issue#16 HIL hot-fix v2: mapping.start() Phase 2 Step 2.5 fires
+    # cp210x auto-recovery via recover_cp210x() which makes its own
+    # subprocess.run("systemctl start godo-cp210x-recover.service")
+    # call. The unit / sysfs / tracker.toml don't exist in the test
+    # environment; mock the function to a no-op so the start-flow
+    # tests don't have to grow extra queue entries (and so the queue
+    # responses still align with the docker-inspect calls they were
+    # written for). Recovery itself is unit-tested in
+    # test_mapping_cp210x_recovery.py.
+    monkeypatch.setattr(M, "recover_cp210x", lambda cfg: None)
     yield fake
 
 
@@ -523,6 +534,134 @@ def test_status_reconcile_running_to_failed_when_container_gone(
     assert out.started_at == "2026-05-01T15:00:00Z"  # M3 preserved
     assert out.error_detail == "webctl_lost_view_post_crash"
     assert out.journal_tail_available is True
+
+
+# --- issue#16 v6 — transient docker states stay in-flight ---------------
+
+
+@pytest.mark.parametrize("transient_state", ["created", "restarting"])
+def test_status_reconcile_starting_keeps_state_when_inspect_transient(
+    tmp_path: Path,
+    fake_subprocess: _FakeSubprocess,
+    transient_state: str,
+) -> None:
+    """v6 fix — `created` and `restarting` are in-flight transient docker
+    states between `docker run` and the entrypoint reaching "running".
+    Pre-v6 the reconcile collapsed them to webctl_lost_view_post_crash,
+    which raced with start()'s Phase-2 polling on a cold container boot
+    (operator t6 incident, 2026-05-02 22:54:47 KST). v6 keeps the
+    persisted Starting state untouched so the next status() tick (or
+    start()'s polling) reconciles to Running once the entrypoint
+    executes."""
+    cfg = _settings(tmp_path)
+    cfg.mapping_runtime_dir.mkdir(parents=True, exist_ok=True, mode=0o750)
+    starting = M.MappingStatus(
+        state=M.MappingState.STARTING,
+        map_name="t7",
+        container_id_short=None,
+        started_at="2026-05-02T13:54:46Z",
+        error_detail=None,
+        journal_tail_available=False,
+    )
+    M._save_state(cfg, starting)
+    fake_subprocess.sticky = (0, f"{transient_state}\n", "")
+
+    out = M.status(cfg)
+
+    assert out.state == M.MappingState.STARTING
+    assert out.started_at == "2026-05-02T13:54:46Z"
+    assert out.error_detail is None
+    # state.json must remain Starting on disk (no spurious overwrite).
+    persisted = M._load_state(cfg)
+    assert persisted.state == M.MappingState.STARTING
+
+
+def test_status_reconcile_starting_keeps_state_when_inspect_none(
+    tmp_path: Path,
+    fake_subprocess: _FakeSubprocess,
+) -> None:
+    """v7 fix — systemd unit's ExecStartPre runs `docker rm -f` BEFORE
+    ExecStart, leaving no container for ~100-500 ms while Phase-2
+    polling is still in progress. Pre-v7 a 1Hz status() reconcile that
+    landed in this window overwrote Starting with Failed
+    (`webctl_lost_view_post_crash`), short-circuiting start()'s own
+    Phase-2 timeout (`container_start_timeout`). v7 keeps Starting
+    state untouched when inspect=None; start() owns the authoritative
+    timeout writer for the Starting state."""
+    cfg = _settings(tmp_path)
+    cfg.mapping_runtime_dir.mkdir(parents=True, exist_ok=True, mode=0o750)
+    starting = M.MappingStatus(
+        state=M.MappingState.STARTING,
+        map_name="t8",
+        container_id_short=None,
+        started_at="2026-05-02T14:36:43Z",
+        error_detail=None,
+        journal_tail_available=False,
+    )
+    M._save_state(cfg, starting)
+    # docker inspect returncode != 0 with "No such" stderr → inspect = None
+    fake_subprocess.sticky = (1, "", "Error: No such object: godo-mapping\n")
+
+    out = M.status(cfg)
+
+    assert out.state == M.MappingState.STARTING
+    assert out.error_detail is None
+    persisted = M._load_state(cfg)
+    assert persisted.state == M.MappingState.STARTING
+
+
+def test_status_reconcile_running_to_failed_when_inspect_none_unchanged(
+    tmp_path: Path,
+    fake_subprocess: _FakeSubprocess,
+) -> None:
+    """v7 must NOT change the Running + inspect=None contract — that
+    case is a genuine crash (container previously running, now gone)
+    and webctl_lost_view_post_crash is the right signal."""
+    cfg = _settings(tmp_path)
+    cfg.mapping_runtime_dir.mkdir(parents=True, exist_ok=True, mode=0o750)
+    running = M.MappingStatus(
+        state=M.MappingState.RUNNING,
+        map_name="t8",
+        container_id_short="abc",
+        started_at="2026-05-02T14:36:43Z",
+        error_detail=None,
+        journal_tail_available=False,
+    )
+    M._save_state(cfg, running)
+    fake_subprocess.sticky = (1, "", "Error: No such object: godo-mapping\n")
+
+    out = M.status(cfg)
+
+    assert out.state == M.MappingState.FAILED
+    assert out.error_detail == "webctl_lost_view_post_crash"
+
+
+@pytest.mark.parametrize("transient_state", ["created", "restarting"])
+def test_status_reconcile_running_keeps_state_when_inspect_transient(
+    tmp_path: Path,
+    fake_subprocess: _FakeSubprocess,
+    transient_state: str,
+) -> None:
+    """A persisted Running view must not flip to Failed when an inspect
+    happens to land mid-restart. The recovery is best-effort and the
+    next tick will see "running" again."""
+    cfg = _settings(tmp_path)
+    cfg.mapping_runtime_dir.mkdir(parents=True, exist_ok=True, mode=0o750)
+    running = M.MappingStatus(
+        state=M.MappingState.RUNNING,
+        map_name="t7",
+        container_id_short="abc123def456",
+        started_at="2026-05-02T13:54:46Z",
+        error_detail=None,
+        journal_tail_available=False,
+    )
+    M._save_state(cfg, running)
+    fake_subprocess.sticky = (0, f"{transient_state}\n", "")
+
+    out = M.status(cfg)
+
+    assert out.state == M.MappingState.RUNNING
+    assert out.error_detail is None
 
 
 # --- monitor_snapshot composition -----------------------------------------

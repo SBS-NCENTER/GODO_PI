@@ -88,6 +88,7 @@ def _settings_for(
         docker_bin=Path("/usr/bin/docker"),
         # issue#14 Maj-1: tests pin the schema default ladder ceiling.
         mapping_webctl_stop_timeout_s=35.0,
+        mapping_auto_recover_lidar=True,
     )
 
 
@@ -231,6 +232,7 @@ async def test_calibrate_timeout_returns_504(
         mapping_image_tag=s.mapping_image_tag,
         docker_bin=s.docker_bin,
         mapping_webctl_stop_timeout_s=s.mapping_webctl_stop_timeout_s,
+        mapping_auto_recover_lidar=s.mapping_auto_recover_lidar,
     )
     async with _client(s) as cl:
         token = await _login_admin(cl)
@@ -2015,6 +2017,7 @@ def test_lifespan_legacy_migration_creates_active_symlink(
         mapping_image_tag="godo-mapping:dev",
         docker_bin=Path("/usr/bin/docker"),
         mapping_webctl_stop_timeout_s=35.0,
+        mapping_auto_recover_lidar=True,
     )
 
     # Manually invoke the migration helper that the lifespan uses.
@@ -2081,6 +2084,7 @@ def test_lifespan_warns_every_boot_when_map_path_set(
         mapping_image_tag="godo-mapping:dev",
         docker_bin=Path("/usr/bin/docker"),
         mapping_webctl_stop_timeout_s=35.0,
+        mapping_auto_recover_lidar=True,
     )
 
     def _boot_and_count_warns() -> int:
@@ -2227,6 +2231,7 @@ async def test_system_amcl_rate_tracker_timeout_returns_504(
         mapping_image_tag=s.mapping_image_tag,
         docker_bin=s.docker_bin,
         mapping_webctl_stop_timeout_s=s.mapping_webctl_stop_timeout_s,
+        mapping_auto_recover_lidar=s.mapping_auto_recover_lidar,
     )
     async with _client(s) as cl:
         r = await cl.get("/api/system/amcl_rate")

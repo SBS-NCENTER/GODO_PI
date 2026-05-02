@@ -20,13 +20,26 @@
    * suppression for v1; see feedback_pipeline_short_circuit.md.
    */
 
-  import type { ProcessEntry, ProcessesSnapshot } from '$lib/protocol';
+  import type { MappingState, ProcessEntry, ProcessesSnapshot } from '$lib/protocol';
+  import { MAPPING_STATE_RUNNING, MAPPING_STATE_STARTING, MAPPING_STATE_STOPPING } from '$lib/protocol';
 
   interface Props {
     snapshot: ProcessesSnapshot;
+    // issue#16 HIL hot-fix — tells the table whether the mapping
+    // pipeline is currently active. Docker-family rows render in
+    // accent (blue) when running, success (green) otherwise. Pass
+    // ``null`` to fall back to the idle palette (e.g. when the System
+    // tab can't read the mapping state for some reason).
+    mappingState?: MappingState | null;
   }
 
-  const { snapshot }: Props = $props();
+  const { snapshot, mappingState = null }: Props = $props();
+
+  const dockerActive = $derived(
+    mappingState === MAPPING_STATE_STARTING ||
+    mappingState === MAPPING_STATE_RUNNING ||
+    mappingState === MAPPING_STATE_STOPPING,
+  );
 
   let search = $state('');
   let godoOnly = $state(false);
@@ -146,7 +159,11 @@
     <tbody>
       {#each visible as p (p.pid)}
         <tr class:dup={p.duplicate} data-testid={`proc-row-${p.pid}`}>
-          <td class={`name-cell name-${p.category}`} data-category={p.category}>{p.name}</td>
+          <td
+            class={`name-cell name-${p.category}`}
+            class:docker-active={p.category === 'docker' && dockerActive}
+            data-category={p.category}
+          >{p.name}</td>
           <td class="num">{p.pid}</td>
           <td>{p.user}</td>
           <td>{p.state}</td>
@@ -272,6 +289,18 @@
   .name-managed {
     font-weight: bold;
     color: var(--color-status-warn);
+  }
+  /* issue#16 HIL hot-fix — docker-family rows render bold + colour
+     swap based on mapping state. Idle (default) → green so the
+     daemons read as "alive but not active"; mapping running → accent
+     blue (matches the godo-family palette) to signal "actively
+     driving the container". */
+  .name-docker {
+    font-weight: bold;
+    color: var(--color-status-ok);
+  }
+  .name-docker.docker-active {
+    color: var(--color-accent);
   }
   .cmdline {
     font-family: var(--font-mono);

@@ -245,21 +245,41 @@ def test_classify_pid_godo_webctl_is_managed() -> None:
 
 
 def test_classify_pid_docker_family() -> None:
-    """issue#14 Mode-B N1 fix (2026-05-02 KST): docker family processes
-    classify as `godo` (operator-confirmed: docker is only used for the
-    godo-mapping container in this project). Frontend ProcessTable
-    bolds + accent-colors them."""
-    assert processes.classify_pid("docker") == "godo"
-    assert processes.classify_pid("dockerd") == "godo"
-    assert processes.classify_pid("containerd") == "godo"
+    """issue#16 HIL hot-fix (2026-05-02 KST): docker-family processes
+    (`docker`, `dockerd`, `containerd`, `containerd-shim*`) all
+    classify as ``docker``. The SPA picks the rendered colour based on
+    the current mapping state (idle → green, running → blue) so the
+    operator sees at a glance whether the docker daemons are sitting
+    idle or are actively driving the mapping container.
+
+    Spec memory: `.claude/memory/project_mapping_precheck_and_cp210x_recovery.md`.
+    """
+    assert processes.classify_pid("docker") == "docker"
+    assert processes.classify_pid("dockerd") == "docker"
+    assert processes.classify_pid("containerd") == "docker"
     # `containerd-shim*` prefix match (kernel-truncated comm preserves
     # the prefix even when the full name is longer like
     # `containerd-shim-runc-v2`).
-    assert processes.classify_pid("containerd-shim") == "godo"
-    assert processes.classify_pid("containerd-shim-runc-v2") == "godo"
+    assert processes.classify_pid("containerd-shim") == "docker"
+    assert processes.classify_pid("containerd-shim-runc-v2") == "docker"
     # Negative: bare similar names do NOT match (no false positives).
     assert processes.classify_pid("docker-compose") == "general"
     assert processes.classify_pid("dockerized-app") == "general"
+
+
+def test_docker_family_disjoint_from_godo_and_managed() -> None:
+    """issue#16 HIL hot-fix: the docker-family set must NOT overlap with
+    `GODO_PROCESS_NAMES` or `MANAGED_PROCESS_NAMES`. A name in both would
+    be classifier-ambiguous (current order makes managed/godo win, but
+    the membership invariant catches drift earlier)."""
+    from godo_webctl.protocol import (
+        DOCKER_FAMILY_NAMES,
+        GODO_PROCESS_NAMES,
+        MANAGED_PROCESS_NAMES,
+    )
+
+    assert frozenset() == DOCKER_FAMILY_NAMES & GODO_PROCESS_NAMES
+    assert frozenset() == DOCKER_FAMILY_NAMES & MANAGED_PROCESS_NAMES
 
 
 # --- enumerate_all_pids ---------------------------------------------------

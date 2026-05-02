@@ -1,68 +1,76 @@
 # Next session — cold-start brief
 
 > Throwaway. Delete the moment the next session picks up the thread.
-> Refreshed 2026-05-01 20:30 KST (fifteenth-session full close — 3 PRs merged: #62 + #63 + #64; main = `d810e78`).
+> Refreshed 2026-05-02 16:30 KST (sixteenth-session full close — 3 PRs merged: #65 + #66 + #67; main = `f433889`).
 > Cache-role per `.claude/memory/feedback_next_session_cache_role.md` — SSOT = RAM (PROGRESS / history / per-stack CODEBASE.md / memory); this file is cache. 3-step absorb routine: read → record in SSOT → prune.
 
-## TL;DR (operator-locked priority order, refreshed 2026-05-01 20:30 KST)
+## TL;DR (operator-locked priority order, refreshed 2026-05-02 16:30 KST)
 
-1. **★ issue#14 — SPA Mapping pipeline + monitoring (P0, full pipeline)** — Plan authored this session. 1393-line plan body + Parent S1-S6 SSE-separation amendment in `.claude/tmp/plan_issue_14_mapping_pipeline_spa.md`. Mode-A deferred to sixteenth per operator's "Plan까지만 진행하자". Estimated ~2000 LOC across 4 stacks (webctl + godo-mapping + frontend + production/RPi5/systemd). 14 operator-locked decisions L1-L14: Map sub-tabs (Overview/Edit/Mapping), system-level Mapping mode, tracker auto-stop on entry, LiDAR USB shared via tracker's `serial.lidar_port`, regex `^[A-Za-z0-9._\-(),]+$` 1-64 chars, bind-mount `/var/lib/godo/maps/`, manual activate post-mapping, `godo-mapping@<name>.service` template, Python rclpy 1 Hz preview node, Docker socket via `usermod -aG docker ncenter`, polkit rule. Parent S1-S6: Mapping monitor SSE Docker-only (NOT combined with RPi5 stats), no fallback polling, SPA strip splits RPi5 (always live) + Docker (live ↔ "중단됨" frozen on close). **Sixteenth-session = Mode-A → Writer → Mode-B → PR → multi-stack deploy → HIL Scenarios A-F.** Full Planner output is the cold-start input.
+1. **★ issue#16 — Mapping pre-check gate + cp210x auto-recovery + dockerd/containerd classification** — Operator HIL on PR #67 surfaced a hardware-software race: `dmesg cp210x ttyUSB1: failed set request 0x12 status: -110` + rplidar SDK `code 80008004 (RESULT_OPERATION_TIMEOUT)` when mapping starts immediately after tracker stop. ~10s wait empirically required. Three patches: (1) `/api/mapping/precheck` endpoint + SPA Start gate (LiDAR readable / tracker stopped / image present / disk space / name-clash / state.json clean checks); (2) cp210x driver unbind/rebind via sysfs (polkit rule); (3) ProcessTable refinement: dockerd/containerd → "general" (always-running daemons), keep `docker run`/`containerd-shim*` → "godo" (mapping-active processes). Spec: `.claude/memory/project_mapping_precheck_and_cp210x_recovery.md`. Estimated ~200 LOC; planner-short-circuit eligible per `feedback_pipeline_short_circuit.md`.
 
-2. **issue#10 — udev rule for stable LiDAR symlink** — Acute after fifteenth-session USB swap incident (16:15:45 → ttyUSB0 → ttyUSB1, broke tracker until operator updated `serial.lidar_port` in tracker.toml). `/etc/udev/rules.d/99-rplidar.rules` matching `idVendor=10c4 idProduct=ea60 serial=2eca2bbb4d6eef1182aae9c2c169b110` → `SYMLINK+="rplidar"`; tracker.toml then points at `/dev/rplidar`. Small standalone PR; eliminates a recurring class of operational bugs.
+2. **issue#15 — Config tab domain grouping** — operator UX request 2026-05-01: replace alphabetical schema-row listing with collapsible groups by dotted-name prefix (AMCL, smoother, hint, live, oneshot, webctl, serial, network). Frontend-only ~80 LOC. Spec: `.claude/memory/project_config_tab_grouping.md`.
 
-3. **issue#11 — Live pipelined-parallel multi-thread** — Operator HIL insight from PR #62: "OneShot처럼 정밀하게 + CPU pipeline like 계산". With carry-hint locked basin (issue#5 ship), deeper schedule per tick is feasible if K-step distributed across cores 0/1/2 (CPU 3 RT-isolated). Reference: `project_pipelined_compute_pattern.md` "Why sequential ships first" — pipelined-parallel was the always-deferred follow-up. Architectural impact comparable to issue#5 (PR #62).
+3. **issue#10 — udev rule for stable LiDAR symlink** — `/etc/udev/rules.d/99-rplidar.rules` matching `idVendor=10c4 idProduct=ea60 serial=…` → `SYMLINK+="rplidar"`; tracker.toml then points at `/dev/rplidar`. Eliminates the recurring class of operational bugs from USB renumbering. **Note**: deprecated by issue#17 (GPIO direct connection) if/when that ships.
 
-4. **issue#13 (continued) — distance-weighted AMCL likelihood** (`r_cutoff` near-LiDAR down-weight). Memory: `project_calibration_alternatives.md` "Distance-weighted AMCL likelihood." Standalone single-knob algorithmic experiment; could ship before issue#11. Relevant after fifteenth-session's σ-tighten experiment confirmed standstill jitter floor is map-cell quantization, NOT σ — distance-weighted likelihood is a complementary axis to attack the same floor.
+4. **issue#11 — Live pipelined-parallel multi-thread** — Operator HIL insight from PR #62: "OneShot처럼 정밀하게 + CPU pipeline like 계산". With carry-hint locked basin (issue#5), deeper schedule per tick is feasible if K-step distributed across cores 0/1/2 (CPU 3 RT-isolated). Reference: `.claude/memory/project_pipelined_compute_pattern.md`.
 
-5. **issue#4 — AMCL silent-converge diagnostic** — Now has fifteenth's HIL data as comprehensive baseline (Live ±5 cm stationary / ±10 cm motion / yaw ±1°). Metric to detect "converged but wrong" cases. Source: `.claude/memory/project_amcl_multi_basin_observation.md` + `project_silent_degenerate_metric_audit.md`.
+5. **issue#13 (continued) — distance-weighted AMCL likelihood** (`r_cutoff` near-LiDAR down-weight). Standalone single-knob algorithmic experiment. Particularly relevant after fifteenth-session's σ-tighten experiment confirmed standstill jitter floor is map-cell quantization, NOT σ — distance-weighted likelihood is a complementary axis.
 
-6. **issue#6 — B-MAPEDIT-3 yaw rotation** — Frame redefinition (Problem 2 per `feedback_two_problem_taxonomy.md`). Operator-locked direction: revisit hint UI's two-point pattern as candidate UX. Spec: `.claude/memory/project_map_edit_origin_rotation.md` §B-MAPEDIT-3.
+6. **issue#4 — AMCL silent-converge diagnostic** — Now has fifteenth's HIL data as comprehensive baseline (Live ±5 cm stationary / ±10 cm motion / yaw ±1°). Source: `.claude/memory/project_amcl_multi_basin_observation.md` + `project_silent_degenerate_metric_audit.md`.
 
-7. **issue#7 — boom-arm angle masking (optional)** — Contingent on issue#4 diagnostic confirming pan-correlated cluster pattern.
+7. **issue#6 — B-MAPEDIT-3 yaw rotation** — Frame redefinition (Problem 2 per `feedback_two_problem_taxonomy.md`). Spec: `.claude/memory/project_map_edit_origin_rotation.md` §B-MAPEDIT-3.
 
-**Next free issue integer: `issue#15`** (issue#14 = mapping pipeline; partial issue#13 already used in PR #63).
+8. **issue#17 — GPIO UART direct connection** (on-demand) — long-term `cp210x` removal. Operator-locked: only ship if issue#16 mitigation is insufficient post deployment. Spec: `doc/RPLIDAR/RPi5_GPIO_UART_migration.md` + `.claude/memory/project_gpio_uart_migration.md`.
 
-## Where we are (2026-05-01 20:30 KST — fifteenth-session full close)
+9. **Bug B — Live mode standstill jitter ~5cm widening** — operator measurement data needed (current σ setting, jitter window, motion vs stationary). Not yet code; analysis-first work item.
 
-**main = `d810e78`** — 3 PRs merged this session:
+10. **issue#7 — boom-arm angle masking (optional)** — Contingent on issue#4 diagnostic confirming pan-correlated cluster pattern.
+
+**Next free issue integer: `issue#18`**.
+
+## Where we are (2026-05-02 16:30 KST — sixteenth-session full close)
+
+**main = `f433889`** — 3 PRs merged this session:
 
 | PR | issue | What | Merge style |
 |---|---|---|---|
-| #62 | issue#5 | feat(rpi5): Live mode pipelined-hint kernel | squash |
-| #63 | issue#5 follow-up + #12 + #13-cand | issue#5 default-flip + issue#12 latency defaults + issue#13-cand mapping resolution + frontend timestamps + memory σ-tighten experiment | squash |
-| #64 | docs | fifteenth-session close documentation cascade | squash |
+| #65 | docs | NEXT_SESSION cold-start cache rewrite for sixteenth | squash |
+| #66 | hotfix | backup uses active.pgm + Config input preserves empty + UX bundle (backup-flash, no-op suppression, amber dot, Edit column) | squash |
+| #67 | issue#14 | SPA mapping pipeline + monitor SSE + Map > Mapping sub-tab + System tab integration + Maj-1/Maj-2 + Mode-B C1+M1+M2 + post-HIL UX polish | squash |
 
-**Open PRs**: none.
+**Open PRs**: PR #68 (docs sixteenth-session close — chronicler bundle, awaiting operator merge).
 
-**Plan-only output**: `.claude/tmp/plan_issue_14_mapping_pipeline_spa.md` (1393 lines + Parent S1-S6 fold). Mode-A is sixteenth's first step.
-
-## Live system on news-pi01 (post fifteenth-session close)
+## Live system on news-pi01 (post sixteenth-session close)
 
 - **godo-irq-pin.service**: enabled, auto-start (unchanged).
-- **godo-webctl.service**: enabled, auto-start, listening 0.0.0.0:8080. **Updated this session** — `/opt/godo-webctl/` rsync'd from PR #63 (webctl_toml.py new module + SSE pose/scan rate config-driven + `EXPECTED_ROW_COUNT` 46 → 48). Logs show `SSE pose stream rate = 30 Hz, scan stream rate = 30 Hz` at boot.
-- **godo-tracker.service**: installed, NOT enabled per operator service-management policy. Binary at `/opt/godo-tracker/godo_tracker_rt` rebuilt by PR #62 + PR #63 (issue#5 Live carry-hint kernel + Config struct webctl_pose_stream_hz/webctl_scan_stream_hz fields). `/opt/godo-tracker/share/config_schema.hpp` install-time-mirrored at 48 rows.
-- **`/opt/godo-frontend/dist/`**: rebuilt from PR #63 (formatDateTime helper + Map+Backup list timestamp format `YYYY-MM-DD HH:MM`).
-- **polkit**: 14 rules (unchanged this session). issue#10 / issue#14 will add new rules.
+- **godo-webctl.service**: enabled, auto-start, listening 0.0.0.0:8080. **Updated this session** — `/opt/godo-webctl/` rsync'd from PR #67 (mapping coordinator + 3 new schema rows + Settings augmenter + ALLOWED_SERVICES extension + map_backup endpoint fix from PR #66).
+- **godo-tracker.service**: installed, NOT enabled per operator service-management policy. Binary at `/opt/godo-tracker/godo_tracker_rt` rebuilt by PR #67 (3 new `webctl.mapping_*_s` Config struct fields + `validate_webctl_mapping_ladder` cross-trio check). `/opt/godo-tracker/share/config_schema.hpp` install-time-mirrored at 51 rows (was 48).
+- **godo-mapping@active.service**: NEW — installed, NOT enabled. `--time=20` + `TimeoutStopSec=30s` (Maj-1 ladder bumped from 10s/20s/25s to 20s/30s/35s post Mode-B M5).
+- **`/opt/godo-frontend/dist/`**: rebuilt from PR #67 (Mapping sub-tab + state badge + map zoom auto-fit + UX polish).
+- **polkit**: 14 rules + new `(c)` for `godo-mapping@active.service` start/stop/restart by `ncenter` group.
+- **Docker image**: `godo-mapping:dev` rebuilt 2026-05-02 (3 days ago build of slam_toolbox_async.yaml had stale `resolution: 0.05` — operator rebuilt during HIL, now 0.025 m/cell applied so PGMs are 4× larger).
 - **`/var/lib/godo/tracker.toml`**: contains operator overrides:
-  - `[amcl] live_carry_pose_as_hint = 1` (redundant — matches new default; harmless to leave or delete)
-  - `[smoother] t_ramp_ms = 500` (**overrides new default 100 ms** — operator should edit to 100 OR delete to feel issue#12 latency improvement)
-  - `[serial] lidar_port = "/dev/ttyUSB1"` (USB swap recovery; will be replaced by `/dev/rplidar` once issue#10 ships)
-- **Active map**: `04.29_v3.pgm` with resolution 0.050 m/cell. Future SLAM runs pick up new default 0.025 (issue#13-cand partial via PR #63 commit `3225149`).
-- **Branch**: `main @ d810e78`, working tree clean (after fifteenth-session-close docs PR + cold-start PR if pending).
+  - `[serial] lidar_port = "/dev/ttyUSB0"` (after USB swap during HIL — was ttyUSB1 pre-HIL; will be obviated by issue#10 `/dev/rplidar` symlink)
+  - 3 new `webctl.mapping_*_s` rows present at default values (20/30/35) — operator can tune via Config tab "Docker 맵 제작" group
+- **Active map**: `04.29_v3.pgm` (0.05 m/cell, pre-issue#13-cand). New maps from this session (test_v4 etc., 0.025 m/cell, ~4× pixel count) sitting under `/var/lib/godo/maps/` ready to activate when operator chooses.
+- **`/run/godo/mapping/`**: state.json idle, active.env stale from last test run (left behind — harmless).
+- **Branch**: `main @ f433889`, local working tree clean (after sixteenth-session-close docs PR pending).
 
 ## Quick memory bookmarks (★ open these first on cold-start)
 
-Fifteenth session extended **one** existing memory entry; no new entries:
+This session added **3 NEW memory entries** + extended none:
 
-1. ★ `.claude/memory/project_hint_strong_command_semantics.md` — appended σ-tighten experiment finding (2026-05-01 PM KST). σ semantics now locked in BOTH directions (do NOT widen for AMCL search comfort, do NOT tighten beyond physical drift bounds). Future sessions probing σ to reduce standstill jitter should reflexively reject — the floor is map-cell quantization, not σ. PR #63 commit `6209b96`.
+1. ★ `.claude/memory/feedback_ssot_following_discipline.md` — when multiple naming schemes exist for the same concept, follow the upstream SSOT verbatim (don't paraphrase / alias / invent parallel names). Reinforced via Mode-A C1 fix on issue#14 plan.
+2. ★ `.claude/memory/project_gpio_uart_migration.md` — issue#17 long-term spec context. Trigger conditions, staged path, operator scenario fit.
+3. ★ `.claude/memory/project_mapping_precheck_and_cp210x_recovery.md` — issue#16 short-term spec context. Pre-check checks, cp210x recovery design, ProcessTable refinement.
 
-Carryover from fourteenth (now solidly on main):
-- `project_hint_strong_command_semantics.md` baseline (still active; fifteenth extended it)
-- `project_calibration_alternatives.md` (Live mode hint pipeline section is the spec issue#5 implemented; Far-range rough-hint section is still pending future work)
+Carryover (still active):
+- `project_hint_strong_command_semantics.md` (σ semantics locked both directions)
+- `project_calibration_alternatives.md` (Live carry hint + Far-range rough hint sections)
 - `project_pipelined_compute_pattern.md` (drives issue#11 design)
 - `project_amcl_multi_basin_observation.md` (drives issue#4)
-- `feedback_codebase_md_freshness.md`, `feedback_next_session_cache_role.md`, `feedback_check_branch_before_commit.md`
-- `feedback_two_problem_taxonomy.md`, `feedback_claudemd_concise.md`, `feedback_pipeline_short_circuit.md`, `feedback_emoji_allowed.md`
+- `project_config_tab_grouping.md` (issue#15 candidate spec)
+- `feedback_codebase_md_freshness.md`, `feedback_next_session_cache_role.md`, `feedback_check_branch_before_commit.md`, `feedback_two_problem_taxonomy.md`, `feedback_claudemd_concise.md`, `feedback_pipeline_short_circuit.md`, `feedback_emoji_allowed.md`, `feedback_toml_branch_compat.md`
 - `project_repo_topology.md`, `project_overview.md`, `project_test_sessions.md`, `project_studio_geometry.md`, `project_lens_context.md`
 - `project_cpu3_isolation.md`, `frontend_stack_decision.md`, `reference_history_md.md`
 - `project_lidar_overlay_tracker_decoupling.md`, `project_rplidar_cw_vs_ros_ccw.md`
@@ -71,66 +79,70 @@ Carryover from fourteenth (now solidly on main):
 - `project_videocore_gpu_for_matrix_ops.md`, `project_config_tab_edit_mode_ux.md`
 - `project_silent_degenerate_metric_audit.md`, `project_map_viewport_zoom_rules.md`, `project_map_edit_origin_rotation.md`
 - `project_repo_canonical.md`, `project_tracker_down_banner_action_hook.md`, `project_restart_pending_banner_stale.md`
-- `feedback_toml_branch_compat.md`
 
 ## Quick orientation files for next session
 
 1. **CLAUDE.md** §3 Phases + §6 Golden Rules + §8 Deployment + PR workflow + §7 agent pipeline.
-2. **`CODEBASE.md`** (root) — cross-stack scaffold + module roles. Unchanged this session.
-3. **`DESIGN.md`** (root) — TOC for SYSTEM_DESIGN + FRONT_DESIGN. Unchanged this session.
-4. **`.claude/memory/MEMORY.md`** — full index (33 lines).
-5. **PROGRESS.md** — current through 2026-05-01 fifteenth-session close.
-6. **doc/history.md** — Korean narrative through fifteenth.
-7. **`production/RPi5/CODEBASE.md`** invariants tail = `(r)` — webctl-owned schema rows: Config carries them verbatim; tracker logic never reads them. (issue#5 + issue#12 fold).
-8. **`godo-webctl/CODEBASE.md`** invariants tail = `(ac)` — webctl-owned schema rows: webctl reads its own `webctl.*` keys from `/var/lib/godo/tracker.toml` via `webctl_toml.read_webctl_section`.
-9. **`godo-frontend/CODEBASE.md`** invariants tail unchanged — only change-log entry (formatDateTime + Map/Backup timestamps include date).
-10. **`godo-mapping/CODEBASE.md`** invariants tail unchanged — change-log entry only (resolution 0.05 → 0.025 m/cell default).
-11. **`SYSTEM_DESIGN.md`** §6.4 (smoother default 100 ms note) + §11.5 NEW (Webctl-owned schema rows). Live mode pipelined-hint kernel section at line 405+.
+2. **`CODEBASE.md`** (root) — cross-stack scaffold + module roles. Includes `godo-mapping/` row + cross-stack arrow added in PR #67 round 1.
+3. **`DESIGN.md`** (root) — TOC for SYSTEM_DESIGN + FRONT_DESIGN.
+4. **`.claude/memory/MEMORY.md`** — full index (33+ lines).
+5. **PROGRESS.md** — current through 2026-05-02 sixteenth-session close.
+6. **doc/history.md** — Korean narrative through sixteenth.
+7. **`production/RPi5/CODEBASE.md`** — invariants (a)..(r) + 2026-05-02 entry adds 3 webctl-owned mapping-timing schema rows + cross-trio invariant.
+8. **`godo-webctl/CODEBASE.md`** — invariants extended (ad)/(ae)/(af) round 1; 2026-05-02 entry adds Settings augmenter + M2 hard-block + N1 docker-family classify + map dimensions reader.
+9. **`godo-frontend/CODEBASE.md`** — invariants extended (ac)/(ad) round 1, plus new (ad)(ae) for godo-mapping system-tab readonly + godo-family color grouping.
+10. **`godo-mapping/CODEBASE.md`** — preview node + LIDAR_DEV chain (round 1; round 2 didn't touch).
+11. **`SYSTEM_DESIGN.md`** §12 — full mapping pipeline design (D1 mode coordinator, D3 tracker-stop race, D8 preview node, M4 singleton-ticker, L11 failure recovery, M5 stop-timeout ordering, L14 lock-out).
+12. **`FRONT_DESIGN.md`** §8.5 — Map > Mapping sub-tab UX (3-sub-tab routing, L14 mode-aware gating, banner, S1 Docker-only monitor strip, S2 freeze-on-close, D5 PNG re-encode).
+13. **`doc/RPLIDAR/RPi5_GPIO_UART_migration.md`** — issue#17 spec (305 lines): UART pinout, Pi 5 5V rail capacity, decoupling cap, config.txt + tracker.toml + container changes, ~1hr work estimate.
 
 ## Issue labelling reminder (CLAUDE.md §6 SSOT)
 
-Operator-locked **issue#N.M** scheme is in **CLAUDE.md §6**. Sequential integer for distinct units; decimal for sub-issues stacked on a parent; Greek letters deprecated; feature codes (B-MAPEDIT etc.) are a separate axis. Next free integer: **issue#15**.
+Operator-locked **issue#N.M** scheme is in **CLAUDE.md §6**. Sequential integer for distinct units; decimal for sub-issues stacked on a parent; Greek letters deprecated; feature codes (B-MAPEDIT etc.) are a separate axis. Next free integer: **issue#18**.
 
 ## Throwaway scratch (`.claude/tmp/`)
 
-**Keep until issue#14 ships**:
-- `plan_issue_14_mapping_pipeline_spa.md` — sixteenth-session P0 input. 1393 lines + Parent S1-S6 amendment fold.
-
 **Keep for one more cycle, then prune**:
-- `plan_issue_5_live_pipelined_hint.md` — PR #62 reference (most thorough plan in repo with full Mode-A + Mode-B + Parent decision folds).
-- `plan_latency_defaults_and_issue_5_flip.md` — PR #63 reference (Mode-A REWORK → Route α adoption pattern; useful when issue#14 hits a similar webctl-namespaced-keys decision point).
+- `plan_issue_14_mapping_pipeline_spa.md` — comprehensive plan + Mode-A fold + S1-S6 amendment + Mode-B fold (round 1 + round 2). Most thorough plan in repo. Reference for next multi-stack PR (especially issue#16 which mirrors the Settings augmenter pattern).
+- `plan_issue_5_live_pipelined_hint.md` — PR #62 reference (full Mode-A + Mode-B + Parent decision folds).
+- `plan_latency_defaults_and_issue_5_flip.md` — PR #63 reference (REWORK → Route α adoption pattern).
 
-**Delete when convenient**:
-- Older plans (`plan_issue_3_pose_hint_ui.md`, `plan_track_b_*.md`, `plan_track_d_*.md`, `plan_phase4_2_*.md`, `plan_phase4_3.md`, `plan_p0_frontend.md`, `plan_pr_b_process_monitor.md`, `plan_pr_c_config_tab_edit_mode.md`, `plan_service_observability.md`, `plan_single_instance_locks.md`, `plan_mapping_pipeline_fix.md`, `plan_track_b_map_viewport_shared_zoom.md`, `plan_track_b_mapedit_2_origin_pick.md`, `plan_track_b_mapedit.md`, `plan_track_b_repeatability.md`, `plan_track_b_system.md`, `plan_track_d_3_cpp_amcl_cw_ccw.md`, `plan_track_d_5_sigma_annealing.md`, `plan_track_d_live_lidar.md`, `plan_track_d_scale_yflip.md`, `plan_track_e_map_management.md`).
-- All `review_mode_a_*.md` predecessors of the current plan-fold pattern (now folded inline into plans).
+**Delete when convenient** (older plans no longer referenced).
 
 ## Tasks alive for next session
 
-- **issue#14 — SPA Mapping pipeline + monitoring** (TL;DR #1 — P0 full pipeline, primary scope)
-- **issue#10 — udev rule for stable LiDAR symlink** (TL;DR #2 — small standalone, can interleave)
-- **issue#11 — Live pipelined-parallel multi-thread** (TL;DR #3)
-- **issue#13 (continued) — distance-weighted likelihood** (TL;DR #4)
-- **issue#4 — AMCL silent-converge diagnostic** (TL;DR #5)
-- **issue#6 — B-MAPEDIT-3 yaw rotation** (TL;DR #6)
-- **issue#7 — boom-arm angle masking** (TL;DR #7 — optional)
+- **issue#16 — Mapping pre-check + cp210x auto-recovery + dockerd/containerd classification** (TL;DR #1 — primary scope)
+- **issue#15 — Config tab domain grouping** (TL;DR #2 — small standalone)
+- **issue#10 — udev rule for stable LiDAR symlink** (TL;DR #3)
+- **issue#11 — Live pipelined-parallel multi-thread** (TL;DR #4)
+- **issue#13 (continued) — distance-weighted likelihood** (TL;DR #5)
+- **issue#4 — AMCL silent-converge diagnostic** (TL;DR #6)
+- **issue#6 — B-MAPEDIT-3 yaw rotation** (TL;DR #7)
+- **issue#17 — GPIO UART migration** (TL;DR #8 — on-demand)
+- **Bug B — Live mode standstill jitter** (TL;DR #9 — analysis-first)
+- **issue#7 — boom-arm angle masking** (TL;DR #10 — optional, contingent)
 
-## Sixteenth-session warm-up note
+## Seventeenth-session warm-up note
 
-The Plan #14 file is a complete handoff. Sixteenth-session can cold-start as:
+Sixteenth-session was a marathon afternoon (~21:30 KST 2026-05-01 → 16:00 KST 2026-05-02 cross-day, ~18.5 hours of active conversation). Three PRs landed including issue#14 mapping pipeline (largest single feature in the project, ~2000 LOC × 4 stacks). Mode-A → Writer → Mode-B → operator HIL → multiple post-HIL hot-fixes pattern was repeated for both round 1 and round 2 of issue#14. Operator quote: "정말 고생 많았어~~ 무지 잘된다."
+
+Seventeenth-session can cold-start as:
 1. Read CLAUDE.md (this file's parent) for operating rules.
 2. Read this NEXT_SESSION.md.
-3. Open `.claude/tmp/plan_issue_14_mapping_pipeline_spa.md` (1393 lines — read end-to-end including §15 Mode-A fold AND Parent decision S1-S6 amendment).
-4. Spawn Reviewer Mode-A on the plan. No re-Planner spawn needed.
-5. Standard pipeline: Mode-A (verdict) → Writer (multi-stack) → Mode-B → PR → multi-stack deploy → HIL.
+3. Open `.claude/memory/project_mapping_precheck_and_cp210x_recovery.md` for issue#16 spec context.
+4. (Optional) `.claude/memory/project_gpio_uart_migration.md` for issue#17 deferred-spec context.
+5. Standard pipeline (per `feedback_pipeline_short_circuit.md`): if issue#16 ≤200 LOC → direct writer + Mode-B fast path; otherwise full Planner → Mode-A → Writer → Mode-B.
 
-Operator's `tracker.toml` has redundant `t_ramp_ms = 500` override that should be edited to 100 (or deleted) to feel the issue#12 smoother latency improvement. Worth flagging in sixteenth's first operator interaction if not yet done.
+**Operator's tracker.toml has `lidar_port = "/dev/ttyUSB0"` (post HIL USB swap)**. Will be obviated by issue#10 `/dev/rplidar` symlink (or issue#17 GPIO direct).
+
+**Operator's `04.29_v3.pgm` (0.05 m/cell, pre-issue#13-cand) is still the active map**. New 0.025 m/cell maps (test_v4 etc.) sitting under `/var/lib/godo/maps/`; operator can activate when ready.
 
 ## Session-end cleanup
 
-- NEXT_SESSION.md: rewritten as a whole per the cache-role rule. 3-step absorb routine applied — issue#5 + issue#12 + issue#13-cand partial pruned (now on main and recorded in PROGRESS.md / doc/history.md / per-stack CODEBASE.md). issue#14 promoted to TL;DR #1 with full plan reference. issue#10/#11/#13(continued)/#4/#6/#7 carry over.
-- PROGRESS.md fifteenth-session block added at the top of the session log (PR #64).
-- doc/history.md fifteenth-session 한국어 block added (PR #64).
-- Per-stack CODEBASE.md files: all four touched stacks (`production/RPi5/`, `godo-webctl/`, `godo-frontend/`, `godo-mapping/`) got change-log entries in PR #62 + PR #63 commits. New invariants: RPi5 `(q)` Live pipelined-hint kernel ownership + RPi5 `(r)` webctl-owned schema rows + webctl `(ac)` webctl_toml.py SSOT.
-- `.claude/memory/`: 1 entry extended (`project_hint_strong_command_semantics.md` σ-tighten experiment finding, in PR #63 commit `6209b96`); MEMORY.md index unchanged (no new file).
-- Branches cleaned: `feat/issue-5-live-pipelined-hint` deleted; `feat/latency-defaults-and-issue-5-flip` deleted; `docs/2026-05-01-fifteenth-session-close` deleted. Local: clean.
-- Plan file location confirmed: `.claude/tmp/plan_issue_14_mapping_pipeline_spa.md` is gitignored (not tracked). Survives across sessions on the same host (news-pi01); next session reads from disk.
+- NEXT_SESSION.md: rewritten as a whole per the cache-role rule. 3-step absorb routine applied — issue#14 (now done in PR #67) pruned from TL;DR; issue#16 + #17 promoted from session-discovery; issue#15 carryover from fifteenth retained.
+- PROGRESS.md sixteenth-session block added at the top of the session log (PR #68).
+- doc/history.md sixteenth-session 한국어 block added (PR #68).
+- Per-stack CODEBASE.md files: 3 stacks (`production/RPi5/`, `godo-webctl/`, `godo-frontend/`) got new round 2 entries beyond what Writer wrote in round 1; godo-mapping/ unchanged in round 2 (round 1 entry from Writer is final).
+- `.claude/memory/`: 3 new entries (`feedback_ssot_following_discipline.md`, `project_gpio_uart_migration.md`, `project_mapping_precheck_and_cp210x_recovery.md`); `MEMORY.md` index updated.
+- Branches: `feat/issue-14-mapping-pipeline-spa` deleted on origin via squash-merge --delete-branch; local cleanup pending. `fix/backup-active-symlink-and-config-input-empty` deleted by PR #66 squash-merge. Local: clean after sixteenth-session-close docs PR push.
+- Plan file location confirmed: `.claude/tmp/plan_issue_14_mapping_pipeline_spa.md` is gitignored (not tracked). Survives across sessions on the same host (news-pi01).

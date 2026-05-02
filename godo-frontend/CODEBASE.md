@@ -603,6 +603,143 @@ preview proxy needed.
 
 ## Change log
 
+### 2026-05-02 16:30 KST — issue#14 round 2 + Mode-B fold + PR #66 hotfix bundle + post-HIL UX polish
+
+#### Why
+
+Round 1 (commit `9c44906`) shipped the Map > Mapping sub-tab + monitor
+strip + preview canvas + status store. Round 2 + Mode-B + post-HIL
+introduced (in chronological order):
+- Mapping state badge (always-visible) + name-empty hint
+- Long-fetch timeout for `/api/mapping/start|stop` (3 s → 60 s)
+- Map zoom auto-fit on first load (was 100% native — overflowed canvas)
+- Map zoom uses ACTUAL canvas dims (was `window.innerHeight` — caused
+  asymmetric clipping at the bottom because actual map area is smaller)
+- Backup flash banner + Apply no-op suppression + modified-key amber dot
+  + special-hint callout for `webctl.mapping_systemd_stop_timeout_s`
+  (PR #66 hotfix bundle)
+- Map list dimensions column (`WxH px (X.X×Y.Y m)`)
+- ProcessTable bolds + accent docker / containerd processes (Mode-B N1)
+- System.svelte 2x2 services grid + godo-mapping@active disabled buttons
+
+#### Added
+
+- `src/routes/MapMapping.svelte::stateBadge()` (always-visible status
+  badge) — green pill (Idle), amber pill (Starting/Running/Stopping),
+  red pill (Failed), muted (status fetch in flight). Pre-fix the
+  state was conveyed only indirectly via which body block rendered.
+- `src/routes/MapMapping.svelte` empty-name hint — when state=Idle and
+  name is empty: "이름을 입력하면 Start 버튼이 활성화됩니다." Replaces
+  the silent-disabled-button UX.
+- `src/lib/constants.ts::MAPPING_OPERATION_TIMEOUT_MS = 60000` — long
+  timeout for `/api/mapping/start|stop`. Default `apiPost`
+  `API_FETCH_TIMEOUT_MS = 3000` was aborting mid-flight while backend
+  was still polling (~25 s start, ~35 s stop), producing the
+  confusing UX "맵은 저장됐는데 request_aborted 떠".
+- `src/components/ConfigEditor.svelte::SPECIAL_HINTS` (Mode-B N2) —
+  per-row callout. Currently only `webctl.mapping_systemd_stop_timeout_s`
+  (which requires install.sh re-run beyond the standard Restart-class
+  reload). Format: amber-bordered `.special-hint` block under the
+  Description cell.
+- `src/components/MapListPanel.svelte::fmtDimensions()` (operator UX
+  2026-05-02) — renders `WxH px (X.X×Y.Y m)` when both dims and
+  resolution are known; falls back gracefully to `WxH px` (resolution
+  null) or `—` (dims null). New "해상도" column in the Map list table.
+- `tests/unit/map_list_panel.test.ts` — 3 new cases (typical /
+  resolution-null / both-null) pin the dimension cell renderer.
+- `tests/unit/processTable.test.ts` (Mode-B N1) — pins `.name-godo`
+  applies to docker / dockerd / containerd / containerd-shim* rows.
+- `tests/unit/config.test.ts` — 4 new cases (special-hint visible /
+  scoped-to-row / amber-dot at-default / amber-dot diverged-from-default).
+
+#### Changed
+
+- `src/lib/mapViewport.svelte.ts::setMapDims()` (operator UX
+  2026-05-02 follow-up) — accepts optional `canvasW` / `canvasH`
+  parameters. When provided, uses them as the fit reference; falls
+  back to `window.*` only when the caller hasn't measured (e.g. unit
+  tests without a real DOM). Pre-fix `_minZoom` used
+  `window.innerHeight` (full window) but actual canvas is smaller →
+  bottom asymmetric clipping when 4× larger PGMs (post-issue#13-cand)
+  loaded.
+- `src/lib/mapViewport.svelte.ts::setMapDims()` initial `_zoom` — was
+  `MAP_DEFAULT_ZOOM = 1.0` (native pixel size); now `_minZoom`
+  (auto-fit). First-load presentation fits the canvas without
+  requiring a drag. Operator can still zoom in to native via the
+  +/- buttons or numeric input.
+- `src/lib/mapViewport.svelte.ts::setMapDims()` — `_minZoom = min(viewportH/h, viewportW/w)`
+  now considers BOTH axes (was height-only). Wide-but-not-tall PGMs
+  no longer overflow horizontally at the floor zoom.
+- `src/components/MapUnderlay.svelte` — `setMapDims` call moved out
+  of the meta-subscribe callback into a `$effect` that watches both
+  `meta` (mapMetadata arrival) and `canvas` (`bind:this` binding) so
+  `getBoundingClientRect()` can measure the actual canvas before
+  the call. setMapDims's internal idempotency guards re-fires.
+- `src/lib/constants.ts::CONFIG_APPLY_RESULT_MARKER_TTL_MS` 2000 → 5000
+  — 2 s was too short for operators to read the per-row error detail
+  before it auto-cleared.
+- `src/routes/Config.svelte::setPending()` + `clearPending()` — drops
+  this row's `applyResults` entry IMMEDIATELY when operator types
+  again (or presses Escape). Pre-fix the ✗ marker stuck around for
+  the full TTL even after operator typed a corrected value, visually
+  misleading.
+- `src/routes/Config.svelte::onApplyClick()` — no-op suppression: when
+  pending coerced value equals current value, skip the PATCH for that
+  key. ✓ marker still shows so the operator sees their intent landed,
+  but Apply summary excludes no-op keys from the count
+  ("1개 키가 적용되었습니다" instead of "3개" when 2 of 3 were no-ops).
+  No PATCH fires → no activity log entry, no `restart_pending` race.
+- `src/components/ConfigEditor.svelte` column widths — `.col-edit`
+  pinned to 11em (matches `.col-current` 10em + slight margin for
+  the apply marker); `.col-desc` capped at 28em max so Description
+  no longer eats all the slack on narrow viewports. Operator HIL
+  request from the `amcl.map_path` truncation case.
+- `src/components/ConfigEditor.svelte::isAtDefault()` + `.modified-dot`
+  span — amber dot prepended to key name when current value differs
+  from schema default. Lets operator scan the column at a glance
+  and see which keys have been overridden from factory.
+- `src/routes/Dashboard.svelte` + `src/components/TrackerControls.svelte`
+  `doBackup()` (PR #66 follow-up) — wraps the existing `apiPost('/api/map/backup')`
+  + adds `showBackupFlash('ok'|'error', text)` helper that
+  auto-dismisses after `BACKUP_FLASH_DISMISS_MS = 3000`. Pre-fix
+  success was silent and failure persisted via `actionError` across
+  navigation.
+- `src/components/ProcessTable.svelte` — godo-family rows (any
+  process whose `category === 'godo'`) get bold + accent color via
+  `.name-godo` class. Mode-B N1 extended `category` to include
+  docker / dockerd / containerd / containerd-shim* (operator-confirmed:
+  docker is only used for godo-mapping in this project).
+- `src/routes/System.svelte` — services grid switched from vertical
+  list to 2x2 (godo-irq-pin / godo-tracker / godo-webctl /
+  godo-mapping@active). godo-mapping@active row's start/stop/restart
+  buttons rendered with `actionsDisabled={true}` + tooltip "Map >
+  Mapping 탭에서 제어" so operator drives mapping via the Mapping
+  sub-tab, not System tab.
+- `src/components/ServiceStatusCard.svelte` — generic
+  `actionsDisabled?: boolean` + `actionsDisabledTooltip?: string`
+  props (reusable beyond godo-mapping@active).
+
+#### Invariants
+
+- New `(ad)` (godo-mapping-system-tab-readonly) — godo-mapping@active
+  row in System tab services grid renders action buttons with
+  `actionsDisabled=true`. Operator drives mapping via Map > Mapping
+  sub-tab; backend M2(a) hard-block (409 mapping_pipeline_active)
+  prevents bypass during mapping.
+- New `(ae)` (godo-family-process-color-grouping) — `.name-godo` class
+  applies to processes whose backend `category === 'godo'`. Set
+  includes godo binaries + docker family per
+  `protocol.GODO_PROCESS_NAMES` ∪ `DOCKER_MAPPING_PROCESS_NAMES`.
+
+#### Tests
+
+- vitest 377 pass (43 files). Bundle 149.45 kB (gzip 53.26 kB) — within
+  budget after Mapping sub-tab + System.svelte changes + state badge +
+  3 new components.
+- npm run build clean.
+
+---
+
 ### 2026-05-01 23:21 KST — issue#14: SPA Mapping pipeline + monitor
 
 #### Added

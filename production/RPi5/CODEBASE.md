@@ -750,6 +750,80 @@ has been synced (`uv sync`).
 
 ---
 
+## 2026-05-02 16:30 KST — issue#14 round 2 + Mode-B fold — Maj-1 timing ladder operator-tunable + cross-trio invariant
+
+### Why
+
+issue#14 PR #67 round 1 shipped the systemd template + polkit + install.sh
+extension. Mode-B then surfaced two Major findings (M1 schema range
+overlap requires apply-time + Config::load enforcement; nav2
+`map_saver_cli` non-atomic write demands a longer SIGTERM→SIGKILL
+window) plus operator-locked stake "맵 한번 제작하면 평생 쓰는". This
+block bundles the round 2 + Mode-B fold + operator UX changes that
+landed on PR #67 between round 1 and merge. Tracker C++ is touched
+this time (3 new schema rows + Config struct fields + cross-trio
+validation); the systemd unit's timing values are bumped + made
+sed-substituted from operator-tunable Tier-2 keys.
+
+### Added
+
+- `src/core/config_schema.hpp` — 3 new webctl-owned schema rows under
+  `webctl.mapping_*` namespace:
+    - `webctl.mapping_docker_stop_grace_s` (int, [10, 60], default 20,
+      Restart) — sed-substituted into godo-mapping@.service
+      `--time=<X>` at install time.
+    - `webctl.mapping_systemd_stop_timeout_s` (int, [20, 90], default
+      30, Restart) — sed-substituted into TimeoutStopSec=<Y>s.
+    - `webctl.mapping_webctl_stop_timeout_s` (int, [25, 120], default
+      35, Restart) — read by webctl at runtime via the augmenter (see
+      godo-webctl change-log).
+  Schema row count `static_assert` 48 → 51.
+- `src/core/config.hpp` + `src/core/config_defaults.hpp` — 3 new int
+  fields + `WEBCTL_MAPPING_*_S_DEFAULT` constants mirroring the schema.
+- `src/core/config.cpp` — `validate_webctl_mapping_ladder()` enforces
+  the cross-trio ordering invariant `docker < systemd < webctl` at
+  every `Config::load()` (mirrors `validate_amcl` / `validate_gpio`
+  pattern). Catches hand-edited tracker.toml with torn ladder before
+  the binary boots into a degraded state.
+- `src/config/apply.cpp` — cross-trio invariant ALSO enforced at
+  apply time (mirrors existing `amcl.sigma_hit_schedule_m`
+  cross-field check). Operator can no longer save a torn ladder via
+  the SPA Config tab → tracker writes nothing on bad input → no crash
+  loop on next webctl boot.
+- `tests/test_config_apply.cpp::"apply_set webctl.mapping ladder: torn ordering rejected with bad_value"`
+  — three sub-cases (docker ≥ systemd; systemd ≥ webctl; valid bump
+  succeeds) pin the new apply.cpp gate.
+- `tests/test_config_schema.cpp` — schema row count expectation 48 → 51
+  + existence + range pins for the 3 new rows.
+- `systemd/godo-mapping@.service` — `--time=10` → `--time=20`,
+  `TimeoutStopSec=20s` → `TimeoutStopSec=30s` (Maj-1 stop-timing
+  bump). Comment block updated to reflect the new ordering invariant
+  values `docker grace 20s < TimeoutStopSec 30s < webctl 35s`.
+- `systemd/install.sh` — sed-substitutes `--time=<N>` and
+  `TimeoutStopSec=<N>s` from the live `[webctl]` section of
+  `tracker.toml` at install time. Originally awk-based parser
+  (Mode-B Mn1 caught it as whitespace-fragile) → replaced with
+  python3 tomllib (whitespace-resilient + robust against quoting
+  variants). Operator print: "godo-mapping unit timing:
+  docker_stop_grace=<X>s, TimeoutStopSec=<Y>s (operator-tunable via
+  Config tab → webctl.mapping_*)".
+
+### Changed
+
+- Invariant `(r)` (webctl-owned schema rows) extended — the 3 new
+  `webctl.mapping_*_s` rows join `webctl.pose_stream_hz` + `webctl.scan_stream_hz`.
+  Pattern: tracker stores them through render_toml round-trip;
+  tracker logic NEVER reads them (Config struct carries them but
+  `validate_webctl_mapping_ladder` is the only consumer at boot).
+
+### Tests
+
+- ctest 46 hardware-free pass. Schema parity (`test_config_schema`)
+  + apply path (`test_config_apply`) green for both happy + invalid
+  (cross-trio violation) cases.
+
+---
+
 ## 2026-05-01 23:21 KST — issue#14: SPA Mapping pipeline (systemd + polkit only — tracker unchanged)
 
 ### Why

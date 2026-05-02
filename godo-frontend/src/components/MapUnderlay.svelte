@@ -102,12 +102,25 @@
   let metaError = $state<string | null>(null);
   const _metaUnsub = mapMetadata.subscribe((v) => {
     meta = v;
-    if (v) {
-      // Mode-A M5 — factory-internal idempotency: every call after the
-      // first is a NO-OP regardless of caller, so this is safe even if
-      // map-switch routes through `null → fresh-non-null`.
-      viewport.setMapDims(v.width, v.height);
-    }
+    // setMapDims is now called from the $effect below (after canvas is
+    // bound + measured) so minZoom uses the actual map area instead of
+    // window.innerHeight.
+  });
+
+  // Operator UX 2026-05-02 KST: defer setMapDims until BOTH the metadata
+  // and the canvas binding are ready, so the factory can compute
+  // minZoom from the actual canvas dimensions (post-getBoundingClientRect).
+  // Pre-fix the call fired immediately on metadata arrival and used
+  // window.innerHeight as the viewport reference — the actual canvas
+  // is smaller (topbar/breadcrumb/sub-tab nav steal vertical space) so
+  // the auto-fit zoom overshot the canvas vertically and the bottom of
+  // the map clipped. setMapDims is internally idempotent so this effect
+  // can fire multiple times safely.
+  $effect(() => {
+    if (!meta || !canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+    viewport.setMapDims(meta.width, meta.height, rect.width, rect.height);
   });
   const _metaErrUnsub = mapMetadataError.subscribe((v) => {
     metaError = v;

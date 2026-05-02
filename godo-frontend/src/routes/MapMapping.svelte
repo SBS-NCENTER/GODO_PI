@@ -58,6 +58,23 @@
       status?.state === MAPPING_STATE_STARTING,
   );
 
+  // Operator UX 2026-05-02 KST: always-visible state badge so operators
+  // see the current mapping coordinator state (idle / starting / running
+  // / stopping / failed) at a glance without having to read which body
+  // block rendered. Pre-fix the only state cue was indirect (the form
+  // body shape) — operator could not tell "is this thing alive? is the
+  // status fetch still in flight?" without checking DevTools.
+  function stateBadge(s: string | undefined): { text: string; cls: string } {
+    if (s === undefined) return { text: '연결 중…', cls: 'badge-loading' };
+    if (s === MAPPING_STATE_IDLE)     return { text: '대기 (Idle)',          cls: 'badge-idle' };
+    if (s === MAPPING_STATE_STARTING) return { text: '시작 중 (Starting)',    cls: 'badge-active' };
+    if (s === MAPPING_STATE_RUNNING)  return { text: '매핑 중 (Running)',     cls: 'badge-active' };
+    if (s === MAPPING_STATE_STOPPING) return { text: '저장 중 (Stopping)',    cls: 'badge-active' };
+    if (s === MAPPING_STATE_FAILED)   return { text: '실패 (Failed)',         cls: 'badge-failed' };
+    return { text: s, cls: 'badge-loading' };
+  }
+  let badge = $derived(stateBadge(status?.state));
+
   async function onStart(): Promise<void> {
     if (!canStart) return;
     starting = true;
@@ -107,7 +124,12 @@
 </script>
 
 <section data-testid="map-mapping-section">
-  <h3>Mapping (issue#14)</h3>
+  <h3>
+    Mapping (issue#14)
+    <span class="state-badge {badge.cls}" data-testid="mapping-state-badge">
+      {badge.text}
+    </span>
+  </h3>
 
   {#if status?.state === MAPPING_STATE_IDLE}
     <div class="form">
@@ -123,6 +145,8 @@
       </label>
       {#if nameError}
         <p class="err">{nameError}</p>
+      {:else if name === ''}
+        <p class="hint">이름을 입력하면 Start 버튼이 활성화됩니다.</p>
       {/if}
       <button
         type="button"
@@ -205,5 +229,34 @@
     background: var(--color-surface);
     padding: var(--space-2);
     font-size: 0.8em;
+  }
+  .state-badge {
+    display: inline-block;
+    margin-left: var(--space-2);
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: 0.7em;
+    font-weight: 600;
+    vertical-align: middle;
+  }
+  .badge-loading {
+    background: var(--color-bg-elev);
+    color: var(--color-text-muted);
+    border: 1px solid var(--color-border);
+  }
+  .badge-idle {
+    background: var(--color-status-ok-bg, rgba(46, 125, 50, 0.12));
+    color: var(--color-status-ok, #2e7d32);
+    border: 1px solid var(--color-status-ok, #2e7d32);
+  }
+  .badge-active {
+    background: color-mix(in srgb, var(--color-warning, #f59e0b) 14%, var(--color-bg));
+    color: var(--color-warning, #f59e0b);
+    border: 1px solid var(--color-warning, #f59e0b);
+  }
+  .badge-failed {
+    background: var(--color-status-err-bg, rgba(198, 40, 40, 0.12));
+    color: var(--color-status-err, #c62828);
+    border: 1px solid var(--color-status-err, #c62828);
   }
 </style>

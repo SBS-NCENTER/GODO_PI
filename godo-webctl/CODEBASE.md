@@ -2877,3 +2877,104 @@ CODEBASE.md (r) extended); webctl is the runtime consumer.
      "맵 한번 제작하면 평생 쓰는" mandates this ladder be operator-
      tunable; the SPA Config tab is schema-driven so the rows
      surface automatically (no frontend change).
+
+## 2026-05-02 17:51 KST — issue#16: mapping pre-check + cp210x recovery + ProcessTable refinement
+
+Spec memory: `.claude/memory/project_mapping_precheck_and_cp210x_recovery.md`.
+
+Three patches in one PR (operator-decided 1단계 — short-term mitigation
+for the CP2102N USB CDC stale-state race observed during issue#14 HIL):
+
+1. `GET /api/mapping/precheck` — anonymous-readable readiness gate.
+2. `POST /api/mapping/recover-lidar` — admin-only manual cp210x driver
+   unbind/rebind (operator-driven via SPA button; NOT auto-on-Start).
+3. ProcessTable classification refinement — split docker family so
+   always-running daemons (dockerd/containerd) classify as `general`
+   and only active-mapping processes (docker run-parent +
+   containerd-shim*) stay as `godo`.
+
+### Added
+
+- `mapping.precheck(cfg, name)` + `PrecheckResult` / `PrecheckRow`
+  dataclasses. Six per-check helpers (`_check_lidar_readable`,
+  `_check_tracker_stopped`, `_check_image_present`, `_check_disk_space_mb`,
+  `_check_name_available`, `_check_state_clean`) run in fixed
+  PRECHECK_CHECK_NAMES order. `_check_lidar_readable` opens the LiDAR
+  with `O_RDWR | O_EXCL` for a non-destructive busy probe.
+  `_check_name_available` returns `ok=None` (pending) when the
+  operator has not typed a name; this counts as not-ready so Start
+  stays disabled.
+- `mapping.recover_cp210x(cfg)` — resolve `cfg.serial.lidar_port` to
+  sysfs USB path via `/sys/class/tty/<basename>/device` symlink, write
+  `/run/godo/cp210x-recover.env` atomically, invoke `systemctl start
+  godo-cp210x-recover.service`. New `_USB_PATH_REGEX = ^[0-9]+-[0-9.]+$`
+  rejects any non-canonical bus-port form before the value reaches the
+  bash helper.
+- `mapping.CP210xRecoveryFailed` (→ HTTP 500) and
+  `mapping.LidarPortNotResolvable` (→ HTTP 400) exception classes.
+- `protocol.PRECHECK_FIELDS` / `PRECHECK_CHECK_FIELDS` /
+  `PRECHECK_CHECK_NAMES` / `PRECHECK_DISK_FREE_MIN_MB` wire constants.
+- `protocol.ERR_CP210X_RECOVERY_FAILED` /
+  `ERR_LIDAR_PORT_NOT_RESOLVABLE` error codes.
+- `protocol.DOCKER_DAEMON_NAMES` (frozenset {dockerd, containerd}) +
+  `protocol.DOCKER_CONTAINER_NAMES` (frozenset {docker}). Replace the
+  former `DOCKER_MAPPING_PROCESS_NAMES` set.
+- `constants.MAPPING_CP210X_RECOVER_ENV_FILENAME = "cp210x-recover.env"` +
+  `constants.MAPPING_CP210X_RECOVER_TIMEOUT_S = 15.0`.
+- `app.py::mapping_precheck_endpoint` (anonymous) +
+  `mapping_recover_lidar_endpoint` (admin-only). Both bypass the L14
+  lock-out so the SPA can render the precheck panel + recovery surface
+  while a previous mapping run is mid-failure.
+- `tests/test_mapping_precheck.py` — 18 tests covering each helper's
+  happy + failure paths, name-pending semantics, aggregator order, and
+  to_dict() field-order pin.
+- `tests/test_mapping_cp210x_recovery.py` — 13 tests covering sysfs
+  resolver happy path + 5 malformed-payload rejection cases + envfile
+  atomic-write contract + subprocess argv pin + failure modes.
+- `tests/test_protocol.py::test_precheck_*` — 5 new pinning tests for
+  PRECHECK_FIELDS / PRECHECK_CHECK_FIELDS / PRECHECK_CHECK_NAMES /
+  PRECHECK_DISK_FREE_MIN_MB + issue#16 error codes.
+- `tests/test_processes.py::test_docker_daemon_and_container_sets_disjoint`
+  — ensures the two new sets do not overlap (would make classify_pid
+  ambiguous).
+
+### Changed
+
+- `processes.classify_pid(name)` — split docker family check. Order:
+  managed → godo (GODO_PROCESS_NAMES) → godo (DOCKER_CONTAINER_NAMES
+  or `containerd-shim*` prefix) → general (DOCKER_DAEMON_NAMES) →
+  general fallback. Daemons (dockerd/containerd) now classify as
+  `general` because they live from boot regardless of mapping state.
+- `processes.py` import: `DOCKER_MAPPING_PROCESS_NAMES` →
+  `DOCKER_DAEMON_NAMES` + `DOCKER_CONTAINER_NAMES`.
+- `tests/test_processes.py::test_classify_pid_docker_family` — assertions
+  flipped: dockerd/containerd → `general`, docker / containerd-shim* →
+  `godo`.
+
+### Removed
+
+- `protocol.DOCKER_MAPPING_PROCESS_NAMES` — replaced by the two-set
+  split. No callers outside processes.py + the renamed test.
+
+### Invariants
+
+- **(ae) issue#16 — mapping precheck + cp210x recovery flow** — six
+  fixed-order checks (PRECHECK_CHECK_NAMES) gate the SPA Start button
+  via `precheck.ready=True`. The cp210x recovery path is operator-driven
+  only — webctl never auto-invokes it on Start. Recovery uses systemd
+  oneshot + polkit (mirror of `godo-mapping@active.service` pattern),
+  NOT sudo or udev-chown. The bash helper at
+  `/opt/godo-tracker/share/godo-cp210x-recover.sh` is ALSO defended by
+  the same regex anchor that webctl uses (defence-in-depth — webctl
+  should never produce a malformed USB_PATH that reaches the helper).
+  Spec memory:
+  `.claude/memory/project_mapping_precheck_and_cp210x_recovery.md`.
+
+- **(af) issue#16 — ProcessTable classification refinement** — docker
+  family is split into "always-running daemons" (DOCKER_DAEMON_NAMES =
+  {dockerd, containerd}) which classify as `general` and "active-mapping
+  processes" (DOCKER_CONTAINER_NAMES = {docker} + `containerd-shim*`
+  prefix) which classify as `godo`. The classify_pid order is locked in
+  the function body; tests/test_processes.py pins both the new
+  classifications and the disjoint-set invariant. Operator HIL feedback
+  drove the split — daemons running after a mapping ended was misleading.

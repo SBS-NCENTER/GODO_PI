@@ -762,3 +762,48 @@ export interface MappingMonitorFrame {
 // by `tests/unit/mappingNameValidation.test.ts` for parity.
 export const MAPPING_NAME_REGEX_PATTERN_STR =
   '^[A-Za-z0-9_()-][A-Za-z0-9._()\\-,]{0,63}$';
+
+// --- issue#16 — mapping pre-check + cp210x recovery wire shapes -------
+// Mirror of `godo_webctl.protocol::PRECHECK_FIELDS` /
+// `PRECHECK_CHECK_FIELDS` / `PRECHECK_CHECK_NAMES` and the issue#16
+// error codes. Spec memory:
+// `.claude/memory/project_mapping_precheck_and_cp210x_recovery.md`.
+// Drift detected by inspection per godo-frontend/CODEBASE.md invariant.
+
+export const PRECHECK_FIELDS = ['ready', 'checks'] as const;
+
+export const PRECHECK_CHECK_FIELDS = ['name', 'ok', 'value', 'detail'] as const;
+
+// Canonical names + emit order of the 6 checks. Order matches the
+// backend's `precheck()` so the SPA can iterate the tuple to render
+// rows in the operator-locked sequence.
+export const PRECHECK_CHECK_NAMES = [
+  'lidar_readable',
+  'tracker_stopped',
+  'image_present',
+  'disk_space_mb',
+  'name_available',
+  'state_clean',
+] as const;
+
+export type PrecheckCheckName = (typeof PRECHECK_CHECK_NAMES)[number];
+
+// One row of the `checks` array. `ok` is `null` for the pending state
+// (operator hasn't typed a name yet); SPA renders ⋯. `value` and
+// `detail` are always emitted (null when absent) so the renderer's
+// shape is stable.
+export interface PrecheckCheck {
+  name: string;
+  ok: boolean | null;
+  value: number | string | null;
+  detail: string | null;
+}
+
+export interface PrecheckResult {
+  ready: boolean;
+  checks: PrecheckCheck[];
+}
+
+// issue#16 error codes (mirror of webctl `protocol.py::ERR_*`).
+export const ERR_CP210X_RECOVERY_FAILED = 'cp210x_recovery_failed';
+export const ERR_LIDAR_PORT_NOT_RESOLVABLE = 'lidar_port_not_resolvable';

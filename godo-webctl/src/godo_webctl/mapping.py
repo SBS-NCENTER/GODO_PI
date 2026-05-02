@@ -46,9 +46,11 @@ import fcntl
 import json
 import logging
 import os
+import re
 import secrets
+import shutil
 import subprocess
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -59,6 +61,8 @@ from .config import Settings
 from .constants import (
     MAPPING_CONTAINER_NAME,
     MAPPING_CONTAINER_START_TIMEOUT_S,
+    MAPPING_CP210X_RECOVER_ENV_FILENAME,
+    MAPPING_CP210X_RECOVER_TIMEOUT_S,
     MAPPING_DOCKER_INSPECT_POLL_S,
     MAPPING_DOCKER_INSPECT_TIMEOUT_S,
     MAPPING_DOCKER_STATS_TIMEOUT_S,
@@ -71,6 +75,22 @@ from .constants import (
     MAPPING_STATE_REREAD_INTERVAL_S,
     MAPPING_UNIT_NAME,
 )
+from .protocol import (
+    PRECHECK_CHECK_FIELDS,
+    PRECHECK_CHECK_NAMES,
+    PRECHECK_DISK_FREE_MIN_MB,
+)
+
+# issue#16 — sysfs USB path validator. Format `<bus>-<port[.port]*>` per
+# Linux USB sysfs naming (e.g. "1-1.4", "2-1", "3-2.1.4"). Used to reject
+# any resolver output that looks like an injection attempt before we
+# write it into the envfile + hand it to the bash helper.
+_USB_PATH_REGEX: re.Pattern[str] = re.compile(r"^[0-9]+-[0-9.]+$")
+
+# issue#16 — name of the systemd oneshot unit that runs the cp210x
+# unbind/rebind helper script. Mirrors the polkit rule (d) in
+# `production/RPi5/systemd/49-godo-systemctl.rules`.
+_CP210X_RECOVER_UNIT: str = "godo-cp210x-recover.service"
 
 logger = logging.getLogger("godo_webctl.mapping")
 
@@ -153,6 +173,22 @@ class MappingAlreadyActive(MappingError):
 
 class StateFileCorrupt(MappingError):
     """state.json could not be parsed; recovery is to delete + restart Idle."""
+
+
+# --- issue#16 — cp210x recovery exceptions -------------------------------
+
+
+class CP210xRecoveryFailed(MappingError):
+    """`systemctl start godo-cp210x-recover.service` returned non-zero,
+    OR the env file write failed mid-flight. Webctl maps to 500."""
+
+
+class LidarPortNotResolvable(MappingError):
+    """Could not resolve `cfg.serial.lidar_port` to a sysfs USB path
+    (the symlink target was malformed, the regex rejected the output,
+    or the device file was missing). Webctl maps to 400 — operator
+    needs to either re-plug the LiDAR or fix the lidar_port config
+    before retry."""
 
 
 # --- Validation ----------------------------------------------------------
@@ -1076,3 +1112,342 @@ def _df_bytes(path: Path) -> tuple[int | None, int | None]:
     avail = st.f_bavail * st.f_frsize
     total = st.f_blocks * st.f_frsize
     return (avail, total)
+
+
+# --- issue#16 — pre-check + cp210x recovery -------------------------------
+# Spec memory: `.claude/memory/project_mapping_precheck_and_cp210x_recovery.md`.
+# The 6 checks form a fixed-order tuple (PRECHECK_CHECK_NAMES); the SPA
+# polls 1 Hz and gates the Start button on `ready=True`. The operator
+# triggers cp210x recovery manually via the SPA when `lidar_readable`
+# fails — recovery is NOT automatic.
+
+
+@dataclass(frozen=True)
+class PrecheckRow:
+    """One row of the precheck `checks` array. `value` carries scalar
+    auxiliary info (disk MiB, image tag); `detail` carries the failure
+    reason string. Both default to None and are emitted as JSON null on
+    the wire so the SPA's row renderer has a fixed shape per row.
+
+    `ok=None` is the "pending" state — only used by `name_available`
+    when the operator hasn't typed a name yet. Pending rows count as
+    not-ready (so Start stays disabled) but are not "failure" red ✗.
+    """
+
+    name: str
+    ok: bool | None
+    value: int | str | None = None
+    detail: str | None = None
+
+
+@dataclass(frozen=True)
+class PrecheckResult:
+    """Wire shape of GET /api/mapping/precheck. Field order matches
+    `protocol.PRECHECK_FIELDS` exactly."""
+
+    ready: bool
+    checks: list[PrecheckRow] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ready": self.ready,
+            "checks": [
+                {f: getattr(row, f) for f in PRECHECK_CHECK_FIELDS} for row in self.checks
+            ],
+        }
+
+
+def _check_lidar_readable(cfg: Settings) -> PrecheckRow:
+    """Open the LiDAR device with O_RDWR | O_EXCL to verify it is free.
+
+    `O_EXCL` on a tty is the discipline knob: if godo-tracker still has
+    the port open (or the kernel still has the cp210x in stale-state),
+    the open fails fast with EBUSY / EACCES. On success we close
+    immediately — this is a non-destructive probe.
+
+    The tracker side (production/RPi5/src/lidar/lidar_source_rplidar.cpp)
+    does NOT pass O_EXCL to the kernel — verified by grep for
+    `O_EXCL`/`TIOCEXCL` in the tracker source — so a precheck that races
+    a tracker mid-startup cannot starve the tracker via the exclusivity
+    flag. The first-opener-without-O_EXCL + second-opener-with-O_EXCL
+    case still fails the precheck (which is the intended signal: tracker
+    is up, mapping must wait for stop).
+    """
+    try:
+        lidar_port = _resolve_lidar_port(cfg)
+    except webctl_toml_mod.WebctlTomlError as e:
+        return PrecheckRow(
+            name="lidar_readable",
+            ok=False,
+            value=None,
+            detail=f"tracker_toml_parse_failed: {e}",
+        )
+    try:
+        fd = os.open(lidar_port, os.O_RDWR | os.O_EXCL)
+    except OSError as e:
+        return PrecheckRow(
+            name="lidar_readable",
+            ok=False,
+            value=lidar_port,
+            detail=errno.errorcode.get(e.errno, str(e.errno)) if e.errno else str(e),
+        )
+    # Close defensively; if the descriptor disappeared (EBADF) treat as
+    # failure rather than success, since the device may have been pulled
+    # between open + close.
+    try:
+        os.close(fd)
+    except OSError as e:
+        return PrecheckRow(
+            name="lidar_readable",
+            ok=False,
+            value=lidar_port,
+            detail=f"close_failed: {e}",
+        )
+    return PrecheckRow(name="lidar_readable", ok=True, value=lidar_port, detail=None)
+
+
+def _check_tracker_stopped(cfg: Settings) -> PrecheckRow:
+    """`systemctl is-active godo-tracker.service` must return inactive
+    or failed before mapping can start (the tracker holds the LiDAR FD
+    in active state).
+    """
+    argv = ["systemctl", "is-active", "--no-pager", "godo-tracker.service"]
+    try:
+        proc = subprocess.run(  # noqa: S603 — argv is a list, no shell
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=services_mod.SUBPROCESS_TIMEOUT_S,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return PrecheckRow(
+            name="tracker_stopped",
+            ok=False,
+            value=None,
+            detail="systemctl_timeout",
+        )
+    state = proc.stdout.strip() or "unknown"
+    if state in ("inactive", "failed"):
+        return PrecheckRow(name="tracker_stopped", ok=True, value=state, detail=None)
+    return PrecheckRow(name="tracker_stopped", ok=False, value=state, detail=state)
+
+
+def _check_image_present(cfg: Settings) -> PrecheckRow:
+    """Reuses `_docker_image_inspect` so the precheck and the start path
+    agree byte-for-byte on what "image present" means."""
+    tag = cfg.mapping_image_tag
+    try:
+        present = _docker_image_inspect(cfg, tag)
+    except DockerUnavailable as e:
+        return PrecheckRow(
+            name="image_present",
+            ok=False,
+            value=tag,
+            detail=f"docker_unavailable: {e}",
+        )
+    if present:
+        return PrecheckRow(name="image_present", ok=True, value=tag, detail=None)
+    return PrecheckRow(
+        name="image_present",
+        ok=False,
+        value=tag,
+        detail="run docker build",
+    )
+
+
+def _check_disk_space_mb(cfg: Settings) -> PrecheckRow:
+    """`shutil.disk_usage(maps_dir).free // 1024**2`. Reports MiB so the
+    SPA can render "9500 MiB available" inline."""
+    try:
+        usage = shutil.disk_usage(str(cfg.maps_dir))
+    except (FileNotFoundError, OSError) as e:
+        return PrecheckRow(
+            name="disk_space_mb",
+            ok=False,
+            value=None,
+            detail=f"disk_usage_failed: {e}",
+        )
+    avail_mb = usage.free // (1024 * 1024)
+    if avail_mb >= PRECHECK_DISK_FREE_MIN_MB:
+        return PrecheckRow(
+            name="disk_space_mb",
+            ok=True,
+            value=avail_mb,
+            detail=None,
+        )
+    return PrecheckRow(
+        name="disk_space_mb",
+        ok=False,
+        value=avail_mb,
+        detail=f"need_at_least_{PRECHECK_DISK_FREE_MIN_MB}_mb",
+    )
+
+
+def _check_name_available(cfg: Settings, name: str | None) -> PrecheckRow:
+    """`name=None` (or empty) → `ok=None` (pending — operator typing).
+    Otherwise validate against the regex + reserved set + canonical PGM
+    existence. Returns ok=False with the failure reason on regex/exists.
+    """
+    if not name:
+        return PrecheckRow(name="name_available", ok=None, value=None, detail=None)
+    try:
+        validate_name(name)
+    except InvalidName as e:
+        return PrecheckRow(
+            name="name_available",
+            ok=False,
+            value=name,
+            detail=str(e),
+        )
+    if (cfg.maps_dir / f"{name}.pgm").exists():
+        return PrecheckRow(
+            name="name_available",
+            ok=False,
+            value=name,
+            detail="name_exists",
+        )
+    return PrecheckRow(name="name_available", ok=True, value=name, detail=None)
+
+
+def _check_state_clean(cfg: Settings) -> PrecheckRow:
+    """Webctl's `status()` does the docker-inspect reconcile; we leverage
+    it so a stale Starting/Running/Stopping state has already been
+    reconciled before we read it. Idle == clean."""
+    try:
+        s = status(cfg)
+    except MappingError as e:
+        return PrecheckRow(
+            name="state_clean",
+            ok=False,
+            value=None,
+            detail=f"status_failed: {e}",
+        )
+    if s.state == MappingState.IDLE:
+        return PrecheckRow(name="state_clean", ok=True, value="idle", detail=None)
+    return PrecheckRow(
+        name="state_clean",
+        ok=False,
+        value=s.state.value,
+        detail=s.state.value,
+    )
+
+
+def precheck(cfg: Settings, name: str | None = None) -> PrecheckResult:
+    """Run all 6 checks in fixed PRECHECK_CHECK_NAMES order and return
+    a `PrecheckResult`.
+
+    `ready` is `True` only when EVERY row is `ok is True`. A row with
+    `ok is None` (name_available pending) keeps `ready=False`.
+    """
+    rows: list[PrecheckRow] = [
+        _check_lidar_readable(cfg),
+        _check_tracker_stopped(cfg),
+        _check_image_present(cfg),
+        _check_disk_space_mb(cfg),
+        _check_name_available(cfg, name),
+        _check_state_clean(cfg),
+    ]
+    # Defensive — pin order against the wire-side tuple.
+    if tuple(r.name for r in rows) != PRECHECK_CHECK_NAMES:
+        raise RuntimeError(
+            f"precheck row-order drift: {tuple(r.name for r in rows)} "
+            f"!= {PRECHECK_CHECK_NAMES}",
+        )
+    ready = all(r.ok is True for r in rows)
+    return PrecheckResult(ready=ready, checks=rows)
+
+
+def _resolve_usb_sysfs_path(lidar_port: str) -> str:
+    """Resolve `/dev/ttyUSBn` → sysfs USB path (e.g. "1-1.4").
+
+    The kernel exposes `/sys/class/tty/<basename>/device` as a symlink
+    pointing at the USB interface, e.g.
+    `../../../../1-1.4:1.0`. The last path component carries the bus,
+    port chain, and interface number; we strip the `:1.0` suffix to get
+    the device-side path the cp210x driver's bind/unbind sysfs files
+    accept.
+
+    Raises `LidarPortNotResolvable` on any malformed input — the strict
+    regex is a defence-in-depth gate before the path reaches the bash
+    helper script (which ALSO validates with the same regex).
+    """
+    tty_basename = os.path.basename(lidar_port)
+    if not tty_basename:
+        raise LidarPortNotResolvable(f"empty_basename: {lidar_port!r}")
+    sysfs_link = f"/sys/class/tty/{tty_basename}/device"
+    try:
+        target = os.readlink(sysfs_link)
+    except (FileNotFoundError, OSError) as e:
+        raise LidarPortNotResolvable(f"readlink_failed: {sysfs_link}: {e}") from e
+    last_segment = os.path.basename(target.rstrip("/"))
+    if ":" not in last_segment:
+        raise LidarPortNotResolvable(f"no_interface_suffix: {target!r}")
+    usb_path = last_segment.split(":", 1)[0]
+    if not _USB_PATH_REGEX.match(usb_path):
+        raise LidarPortNotResolvable(f"invalid_usb_path: {usb_path!r}")
+    return usb_path
+
+
+def _write_cp210x_envfile(cfg: Settings, usb_path: str) -> Path:
+    """Atomic-write `/run/godo/cp210x-recover.env` carrying USB_PATH=<x>.
+
+    Lives one directory ABOVE `mapping_runtime_dir` (= /run/godo) since
+    the recovery unit is not mapping-instance scoped. The systemd unit's
+    EnvironmentFile= directive points at this absolute path.
+    """
+    parent = cfg.mapping_runtime_dir.parent
+    parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+    target = parent / MAPPING_CP210X_RECOVER_ENV_FILENAME
+    tmp_name = f".cp210x.{secrets.token_hex(4)}.env.tmp"
+    tmp = parent / tmp_name
+    body = f"USB_PATH={usb_path}\n"
+    try:
+        with tmp.open("w", encoding="utf-8") as f:
+            f.write(body)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, target)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+    return target
+
+
+def recover_cp210x(cfg: Settings) -> None:
+    """Resolve the LiDAR sysfs USB path, write the recovery envfile,
+    invoke `systemctl start godo-cp210x-recover.service`.
+
+    Operator-driven only: the SPA's "🔧 LiDAR USB 복구" button is the
+    sole caller. NOT automatic on Start — operator decides per spec
+    (`.claude/memory/project_mapping_precheck_and_cp210x_recovery.md`).
+
+    Raises `LidarPortNotResolvable` (mapped to 400) on any path-resolve
+    failure; raises `CP210xRecoveryFailed` (mapped to 500) on any I/O
+    or subprocess failure.
+    """
+    try:
+        lidar_port = _resolve_lidar_port(cfg)
+    except webctl_toml_mod.WebctlTomlError as e:
+        raise LidarPortNotResolvable(f"tracker_toml_parse_failed: {e}") from e
+    usb_path = _resolve_usb_sysfs_path(lidar_port)
+    try:
+        _write_cp210x_envfile(cfg, usb_path)
+    except OSError as e:
+        raise CP210xRecoveryFailed(f"envfile_write_failed: {e}") from e
+    argv = ["systemctl", "start", "--no-pager", _CP210X_RECOVER_UNIT]
+    try:
+        proc = subprocess.run(  # noqa: S603 — argv is a list, no shell
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=MAPPING_CP210X_RECOVER_TIMEOUT_S,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise CP210xRecoveryFailed(f"systemctl_timeout: {e}") from e
+    if proc.returncode != 0:
+        raise CP210xRecoveryFailed(
+            f"systemctl_start_failed: rc={proc.returncode} stderr={proc.stderr.strip()}",
+        )

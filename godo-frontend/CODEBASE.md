@@ -2756,3 +2756,53 @@ grouped against the general-process noise.
   affordance. Pinned by `tests/unit/processTable.test.ts::godo-
   category name carries name-godo class with accent color` +
   `general-category name carries no godo-family class`.
+
+## 2026-05-02 17:51 KST — issue#16: Mapping pre-check panel + LiDAR USB recover button
+
+Spec memory: `.claude/memory/project_mapping_precheck_and_cp210x_recovery.md`.
+
+### Added
+
+- `src/stores/precheckStore.ts` — 1 Hz polling of
+  `/api/mapping/precheck`. Mirrors mappingStatus.ts shape with one
+  difference: a caller-supplied `getName` accessor lets the URL query
+  string change between polls without re-subscribing. Empty name →
+  no `?name=` query (backend treats as pending). Network errors silently
+  retain the previous payload (no toast spam at 1 Hz).
+- `src/lib/protocol.ts` — `PRECHECK_FIELDS`, `PRECHECK_CHECK_FIELDS`,
+  `PRECHECK_CHECK_NAMES` mirrors + `PrecheckCheck` / `PrecheckResult`
+  types + `ERR_CP210X_RECOVERY_FAILED` / `ERR_LIDAR_PORT_NOT_RESOLVABLE`
+  error codes. Drift-pinned by inspection per the existing wire-mirror
+  discipline.
+- `src/routes/MapMapping.svelte` — Pre-check panel rendered above the
+  existing form when `state === idle`. Six labelled rows (Korean labels
+  per spec) with ✓/✗/⋯ glyph + optional detail text. Inline "🔧 LiDAR
+  USB 복구" button next to `lidar_readable` row when `ok===false`.
+  Start button gate updated to `precheck.ready && nameError===null &&
+  name !== ''` so the UI matches the backend's aggregate `ready=True`.
+- `tests/unit/precheckStore.test.ts` — 6 tests covering polling start /
+  query-string omit-when-empty / query-string-with-name / fresh-name-
+  per-tick / 5xx silent-degrade / stop().
+
+### Invariants
+
+- **(af) precheck-1Hz-polling-store** — `precheckStore` polls at
+  `MAPPING_STATUS_POLL_MS` (1 Hz, mirror of webctl
+  `MAPPING_MONITOR_TICK_S`). The store is page-local: `MapMapping.svelte`
+  is the sole subscriber, calls `start(getName)` in onMount and `stop()`
+  in onDestroy. The `getName` closure is read fresh on every tick so
+  the operator's keystrokes flow into the next URL without restarting
+  the timer. Errors silently leave the previous payload (no toast
+  spam — at 1 Hz a blip would flood the UI). Pinned by
+  `tests/unit/precheckStore.test.ts`.
+
+- **(ag) issue#16 — Start button gates on backend `precheck.ready`** —
+  `MapMapping.svelte`'s `canStart` derived now requires `precheck.ready`
+  in addition to the existing nameError + state.idle + !starting checks.
+  The backend's precheck includes its own name-availability row, so the
+  client-side `nameError` and the server-side row converge on the same
+  semantic. The "🔧 LiDAR USB 복구" button is only visible when
+  `lidar_readable` row's `ok === false`; recovery is operator-driven
+  (NOT auto-on-Start) per spec. POST is admin-only on the backend; an
+  anon viewer's click triggers the standard 401 → /login redirect.
+  Spec memory: `.claude/memory/project_mapping_precheck_and_cp210x_recovery.md`.

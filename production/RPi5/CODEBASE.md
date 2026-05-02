@@ -4396,3 +4396,68 @@ HIL findings can adjust without a code change.
   `map_saver_cli`, and the rename completed within the 20-s docker
   grace. No `signal: killed` in the container's exit log — the
   rename completed before any layer escalated.
+
+## 2026-05-02 17:51 KST — issue#16: CP2102N driver unbind/rebind oneshot unit + helper script + polkit rule (d)
+
+Spec memory: `.claude/memory/project_mapping_precheck_and_cp210x_recovery.md`.
+
+Short-term mitigation for the CP2102N USB CDC stale-state race observed
+during issue#14 HIL: tracker cleanup is verified clean, yet `dmesg`
+shows `cp210x ttyUSB1: failed set request 0x12 status: -110` and
+rplidar_node returns `RESULT_OPERATION_TIMEOUT` (0x80008004) on the
+next mapping start. Empirical workaround was a 10-s sleep between
+tracker stop and mapping start. Long-term path is issue#17 (GPIO UART
+direct, hardware re-wire); this PR ships the operator-driven recovery
+button so mapping HIL is unblocked in the meantime.
+
+### Added
+
+- `systemd/godo-cp210x-recover.service` — non-templated oneshot unit.
+  `EnvironmentFile=/run/godo/cp210x-recover.env`,
+  `ExecStart=/opt/godo-tracker/share/godo-cp210x-recover.sh`,
+  `TimeoutStartSec=10s`, `RemainAfterExit=no`. NOT enabled (operator
+  never starts directly); webctl is the sole caller via the SPA
+  "🔧 LiDAR USB 복구" button.
+- `share/godo-cp210x-recover.sh` — atomic CP2102N driver unbind+rebind
+  bash helper. Reads USB_PATH from environment. Validates with the
+  same regex anchor (`^[0-9]+-[0-9.]+$`) that webctl uses upstream
+  (defence-in-depth). Writes USB_PATH to
+  `/sys/bus/usb/drivers/cp210x/unbind`, sleeps 1 s, writes to
+  `.../bind`. chmod 755.
+- `systemd/49-godo-systemctl.rules` rule (d) — polkit gate for
+  `systemctl start godo-cp210x-recover.service` from the ncenter group.
+  Scoped to verb=start only (no stop/restart surface — Type=oneshot
+  RemainAfterExit=no, only start is meaningful). Mirror of rule (a)
+  pattern.
+- `systemd/install.sh` extension — installs the new helper script to
+  `/opt/godo-tracker/share/godo-cp210x-recover.sh` (chmod 755) and the
+  new unit file to `/etc/systemd/system/godo-cp210x-recover.service`.
+  Idempotent. Existing daemon-reload step picks up the new unit.
+
+### Changed
+
+- `systemd/install.sh` — `[1/11]` block extended to install the bash
+  helper alongside `godo-irq-pin.sh`. `[2/11]` block extended to install
+  the new unit file alongside `godo-mapping@.service`. No new step
+  numbers — just additions inside existing blocks.
+
+### Invariants
+
+- **(s) cp210x-recovery-via-systemd-oneshot** — issue#16. The CP2102N
+  driver unbind/rebind path lives entirely in systemd + polkit, NOT
+  sudo or udev-chown. The unit is operator-driven only:
+  - webctl writes `/run/godo/cp210x-recover.env` atomically
+    (`USB_PATH=<sysfs path>`) immediately before the start verb.
+  - The unit's EnvironmentFile= picks up `USB_PATH`; the bash helper
+    re-validates with the same regex anchor before writing to
+    `/sys/bus/usb/drivers/cp210x/{unbind,bind}`.
+  - polkit rule (d) is scoped to verb=start AND the exact unit name
+    `godo-cp210x-recover.service`. Adding `stop`/`restart` would be
+    meaningless (oneshot, RemainAfterExit=no) and is explicitly
+    rejected by the rule body.
+  - Lock-step parity with webctl `mapping._CP210X_RECOVER_UNIT` +
+    `mapping.recover_cp210x()` argv. A future writer changing the unit
+    name or argv must update both sides.
+
+  Spec memory:
+  `.claude/memory/project_mapping_precheck_and_cp210x_recovery.md`.

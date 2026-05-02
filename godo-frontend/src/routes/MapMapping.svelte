@@ -23,24 +23,50 @@
     MAPPING_STATE_STARTING,
     MAPPING_STATE_STOPPING,
     type MappingStatus,
+    type PrecheckCheck,
+    type PrecheckResult,
   } from '$lib/protocol';
   import { refreshMappingStatus, subscribeMappingStatus } from '$stores/mappingStatus';
+  import { precheckStore, start as startPrecheck, stop as stopPrecheck } from '$stores/precheckStore';
 
   const NAME_RE = new RegExp(MAPPING_NAME_REGEX_SOURCE);
 
+  // issue#16 — Korean labels for the precheck rows. Order does NOT
+  // matter here (we render in the order returned by the backend); the
+  // dictionary lookup just maps the canonical name to a human label.
+  const PRECHECK_LABEL_KO: Record<string, string> = {
+    lidar_readable: 'LiDAR 장치 읽기 가능',
+    tracker_stopped: 'godo-tracker 정지됨',
+    image_present: 'Docker 이미지 존재',
+    disk_space_mb: '디스크 공간 (≥ 500 MB)',
+    name_available: '맵 이름 사용 가능',
+    state_clean: '이전 매핑 상태 정리됨',
+  };
+
   let status = $state<MappingStatus | null>(null);
   let unsub: (() => void) | null = null;
+  let unsubPrecheck: (() => void) | null = null;
+  let precheck = $state<PrecheckResult>({ ready: false, checks: [] });
   let name = $state('');
   let starting = $state(false);
   let stopping = $state(false);
+  let recovering = $state(false);
   let lastError = $state<string | null>(null);
   let journalLines = $state<string[]>([]);
   let journalLoading = $state(false);
 
   onMount(() => {
     unsub = subscribeMappingStatus((s) => (status = s));
+    // issue#16 — start precheck polling. The closure reads `name` on
+    // each tick so a fresh keystroke surfaces in the next URL.
+    unsubPrecheck = precheckStore.subscribe((p) => (precheck = p));
+    startPrecheck(() => name);
   });
-  onDestroy(() => unsub?.());
+  onDestroy(() => {
+    unsub?.();
+    unsubPrecheck?.();
+    stopPrecheck();
+  });
 
   function validateName(s: string): string | null {
     if (!s) return '이름을 입력해 주세요.';
@@ -51,13 +77,58 @@
   }
 
   let nameError = $derived(name === '' ? null : validateName(name));
+  // issue#16 — Start gate now also requires precheck.ready=true. The
+  // precheck endpoint includes a name-availability row, so once the
+  // operator types a valid+free name, the row flips to ok=true and the
+  // backend's `ready=true` aggregate matches our local nameError===null.
   let canStart = $derived(
-    status?.state === MAPPING_STATE_IDLE && nameError === null && name !== '' && !starting,
+    status?.state === MAPPING_STATE_IDLE &&
+      nameError === null &&
+      name !== '' &&
+      precheck.ready &&
+      !starting,
   );
   let canStop = $derived(
     status?.state === MAPPING_STATE_RUNNING ||
       status?.state === MAPPING_STATE_STARTING,
   );
+
+  // issue#16 — derived helpers for the precheck panel.
+  let lidarRow = $derived(
+    precheck.checks.find((c) => c.name === 'lidar_readable') ?? null,
+  );
+  let canRecoverLidar = $derived(
+    !recovering && lidarRow !== null && lidarRow.ok === false,
+  );
+
+  function rowGlyph(row: PrecheckCheck): string {
+    if (row.ok === true) return '✓';
+    if (row.ok === false) return '✗';
+    return '⋯'; // pending
+  }
+
+  function rowClass(row: PrecheckCheck): string {
+    if (row.ok === true) return 'precheck-row-ok';
+    if (row.ok === false) return 'precheck-row-fail';
+    return 'precheck-row-pending';
+  }
+
+  async function onRecoverLidar(): Promise<void> {
+    recovering = true;
+    lastError = null;
+    try {
+      await apiPost('/api/mapping/recover-lidar', {});
+      // The 1 Hz precheck tick will reflect the new state shortly.
+    } catch (e) {
+      lastError = e instanceof ApiError && e.body?.detail
+        ? `${e.body.err}: ${e.body.detail}`
+        : e instanceof Error
+          ? e.message
+          : String(e);
+    } finally {
+      recovering = false;
+    }
+  }
 
   // Operator UX 2026-05-02 KST: always-visible state badge so operators
   // see the current mapping coordinator state (idle / starting / running
@@ -140,6 +211,40 @@
   </h3>
 
   {#if status?.state === MAPPING_STATE_IDLE}
+    <!-- issue#16 — Pre-check panel. 6 fixed-order rows polled at 1 Hz. -->
+    <div class="precheck-panel" data-testid="mapping-precheck-panel">
+      <h4>준비 상태 (Pre-check)</h4>
+      {#if precheck.checks.length === 0}
+        <p class="hint">상태 확인 중…</p>
+      {:else}
+        <ul class="precheck-list">
+          {#each precheck.checks as row (row.name)}
+            <li class={rowClass(row)} data-testid={`precheck-row-${row.name}`}>
+              <span class="precheck-glyph" data-testid={`precheck-glyph-${row.name}`}>
+                {rowGlyph(row)}
+              </span>
+              <span class="precheck-label">
+                {PRECHECK_LABEL_KO[row.name] ?? row.name}
+              </span>
+              {#if row.detail}
+                <span class="precheck-detail">— {row.detail}</span>
+              {/if}
+              {#if row.name === 'lidar_readable' && row.ok === false}
+                <button
+                  type="button"
+                  class="recover-btn"
+                  onclick={onRecoverLidar}
+                  disabled={!canRecoverLidar}
+                  data-testid="mapping-recover-lidar-button">
+                  🔧 LiDAR USB 복구
+                </button>
+              {/if}
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    </div>
+
     <div class="form">
       <label>
         이름:
@@ -155,6 +260,8 @@
         <p class="err">{nameError}</p>
       {:else if name === ''}
         <p class="hint">이름을 입력하면 Start 버튼이 활성화됩니다.</p>
+      {:else if !precheck.ready}
+        <p class="hint">준비 상태가 모두 통과해야 Start 버튼이 활성화됩니다.</p>
       {/if}
       <button
         type="button"
@@ -266,5 +373,55 @@
     background: var(--color-status-err-bg, rgba(198, 40, 40, 0.12));
     color: var(--color-status-err, #c62828);
     border: 1px solid var(--color-status-err, #c62828);
+  }
+  /* issue#16 — Pre-check panel styles. */
+  .precheck-panel {
+    margin-bottom: var(--space-3);
+    padding: var(--space-2);
+    border: 1px solid var(--color-border);
+    border-radius: 4px;
+    background: var(--color-surface);
+  }
+  .precheck-panel h4 {
+    margin: 0 0 var(--space-2) 0;
+    font-size: 0.95em;
+  }
+  .precheck-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .precheck-list li {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: 0.9em;
+  }
+  .precheck-glyph {
+    display: inline-block;
+    width: 1.2em;
+    text-align: center;
+    font-weight: bold;
+  }
+  .precheck-row-ok .precheck-glyph {
+    color: var(--color-status-ok, #2e7d32);
+  }
+  .precheck-row-fail .precheck-glyph {
+    color: var(--color-status-err, #c62828);
+  }
+  .precheck-row-pending .precheck-glyph {
+    color: var(--color-text-muted);
+  }
+  .precheck-detail {
+    color: var(--color-text-muted);
+    font-size: 0.85em;
+  }
+  .recover-btn {
+    margin-left: auto;
+    padding: 2px 8px;
+    font-size: 0.85em;
   }
 </style>

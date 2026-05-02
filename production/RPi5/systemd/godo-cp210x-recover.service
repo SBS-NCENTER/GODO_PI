@@ -1,0 +1,20 @@
+[Unit]
+Description=GODO — CP2102N driver unbind/rebind one-shot (issue#16)
+Documentation=file:///home/ncenter/projects/GODO/.claude/memory/project_mapping_precheck_and_cp210x_recovery.md
+DefaultDependencies=no
+After=systemd-tmpfiles-setup.service
+
+[Service]
+Type=oneshot
+# EnvironmentFile is non-optional (no leading `-`) — webctl's
+# mapping.recover_cp210x is the SOLE caller and writes the env file
+# atomically before issuing `systemctl start`. A future caller that
+# forgets the env-file write will fail-fast with "Failed to load
+# environment files", which is the desired contract pin.
+EnvironmentFile=/run/godo/cp210x-recover.env
+ExecStart=/opt/godo-tracker/share/godo-cp210x-recover.sh
+TimeoutStartSec=10s
+RemainAfterExit=no
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=godo-cp210x-recover

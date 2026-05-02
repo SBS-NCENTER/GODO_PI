@@ -363,21 +363,34 @@ GODO_PROCESS_NAMES: Final[frozenset[str]] = frozenset(
 # issue#14 Mode-B N1 fix (2026-05-02 KST) — docker-family processes are
 # god-family in this project. Operator confirmed docker is only used for
 # the mapping container (`godo-mapping@active.service` → `docker run
-# --name godo-mapping ...`). The mapping container itself + its
-# containerd shim are PID-namespaced from the host so the children
-# inside the container show up as `python3` / `ros2` / etc. (untracked),
-# but the parent `docker run` and the `containerd-shim*` host-side
-# parents ARE visible. Mark them godo-family so the SPA's process list
-# bold+accent treatment includes them at-a-glance.
+# --name godo-mapping ...`).
 #
+# issue#16 refinement (2026-05-02 KST, spec §"ProcessTable classification
+# refinement", option (a)) — split the original single set so that
+# always-running daemons (dockerd, containerd) classify as `general` and
+# only the active-mapping processes (docker run-parent + containerd-shim*
+# children) classify as `godo`. Operator HIL feedback: "mapping이
+# 끝났는데도 dockerd, containerd가 계속 구동 중이네" — those daemons run
+# from boot regardless of mapping state, so flagging them as godo-family
+# was misleading.
+#
+# Spec memory: `.claude/memory/project_mapping_precheck_and_cp210x_recovery.md`.
 # Pinned by `tests/test_processes.py::test_classify_pid_docker_family`.
-DOCKER_MAPPING_PROCESS_NAMES: Final[frozenset[str]] = frozenset(
+DOCKER_DAEMON_NAMES: Final[frozenset[str]] = frozenset(
     {
-        "docker",       # `docker run --name godo-mapping ...` parent
-        "dockerd",      # docker daemon (host-side, always running once installed)
-        "containerd",   # containerd daemon
+        "dockerd",      # docker daemon — always running once Docker is installed
+        "containerd",   # containerd daemon — same lifecycle as dockerd
     },
 )
+DOCKER_CONTAINER_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        "docker",       # `docker run --name godo-mapping ...` run-parent
+    },
+)
+# `containerd-shim*` is matched by argv-prefix at classify time (the
+# kernel-truncated comm sometimes shows the bare `containerd-shim` and
+# sometimes the longer `containerd-shim-runc-v2`); kept out of the set
+# above so the prefix discipline lives next to the consumer.
 
 # Subset of GODO_PROCESS_NAMES that maps to `services.ALLOWED_SERVICES`
 # units. Asymmetry vs. `services.ALLOWED_SERVICES`: this set is the
@@ -525,6 +538,44 @@ ERR_NO_ACTIVE_MAPPING: Final[str] = "no_active_mapping"
 ERR_PREVIEW_NOT_YET_PUBLISHED: Final[str] = "preview_not_yet_published"
 ERR_STATE_FILE_CORRUPT: Final[str] = "state_file_corrupt"
 ERR_BAD_N: Final[str] = "bad_n"
+
+# --- issue#16 — mapping pre-check + cp210x recovery wire shapes ---------
+# Spec memory: `.claude/memory/project_mapping_precheck_and_cp210x_recovery.md`.
+# The precheck endpoint (`GET /api/mapping/precheck`) is anonymous-readable
+# (mirrors `/api/mapping/status`) so the SPA's 1 Hz banner state stays
+# consistent. The recover-lidar endpoint (`POST /api/mapping/recover-lidar`)
+# is admin-only.
+PRECHECK_FIELDS: Final[tuple[str, ...]] = ("ready", "checks")
+
+# One row of the `checks` array. `value` carries auxiliary information
+# (e.g. disk-free MiB, image tag); `detail` carries a human-readable
+# failure reason. Both are emitted as JSON `null` on the wire when the
+# check has no extra info — fixed key set keeps the SPA's row renderer
+# trivial.
+PRECHECK_CHECK_FIELDS: Final[tuple[str, ...]] = ("name", "ok", "value", "detail")
+
+# Canonical names (and emit order) of the 6 checks. Drift here breaks
+# the SPA's labelled rows. Pinned by `tests/test_protocol.py`.
+PRECHECK_CHECK_NAMES: Final[tuple[str, ...]] = (
+    "lidar_readable",
+    "tracker_stopped",
+    "image_present",
+    "disk_space_mb",
+    "name_available",
+    "state_clean",
+)
+
+# Disk-free threshold for the `disk_space_mb` check. Tier-1 mirror of the
+# spec value (500 MiB). Smaller than this and the operator should clean
+# up before mapping — a single PGM is well under 100 MiB but the docker
+# image, intermediate slam_toolbox state, and an existing maps tree all
+# share the same volume.
+PRECHECK_DISK_FREE_MIN_MB: Final[int] = 500
+
+# issue#16 error codes (webctl-internal; no C++ wire counterpart). Mirror
+# in `lib/protocol.ts`.
+ERR_CP210X_RECOVERY_FAILED: Final[str] = "cp210x_recovery_failed"
+ERR_LIDAR_PORT_NOT_RESOLVABLE: Final[str] = "lidar_port_not_resolvable"
 
 
 # --- Canonical request encoders -------------------------------------------

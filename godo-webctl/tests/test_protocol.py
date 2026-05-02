@@ -806,3 +806,50 @@ def test_mapping_error_codes_pinned() -> None:
     assert P.ERR_PREVIEW_NOT_YET_PUBLISHED == "preview_not_yet_published"
     assert P.ERR_STATE_FILE_CORRUPT == "state_file_corrupt"
     assert P.ERR_BAD_N == "bad_n"
+
+
+# --- issue#16 — precheck + cp210x recovery wire pins --------------------
+
+
+def test_precheck_fields_pinned() -> None:
+    """Top-level envelope of `GET /api/mapping/precheck`. Drift from
+    this tuple breaks the SPA's precheckStore."""
+    assert P.PRECHECK_FIELDS == ("ready", "checks")
+
+
+def test_precheck_check_fields_pinned() -> None:
+    """One row of the `checks` array. The SPA renderer iterates this
+    tuple verbatim."""
+    assert P.PRECHECK_CHECK_FIELDS == ("name", "ok", "value", "detail")
+
+
+def test_precheck_check_names_pinned() -> None:
+    """Canonical names + emit order of the 6 checks. Drift here breaks
+    the SPA's labelled rows + Korean strings."""
+    assert P.PRECHECK_CHECK_NAMES == (
+        "lidar_readable",
+        "tracker_stopped",
+        "image_present",
+        "disk_space_mb",
+        "name_available",
+        "state_clean",
+    )
+
+
+def test_precheck_check_names_cardinality() -> None:
+    """All 6 names must be unique."""
+    assert len(P.PRECHECK_CHECK_NAMES) == 6
+    assert len(set(P.PRECHECK_CHECK_NAMES)) == 6
+
+
+def test_precheck_disk_free_min_mb_pinned() -> None:
+    """Tier-1 mirror of the spec value. Lowering this without operator
+    sign-off would let mapping start with insufficient disk."""
+    assert P.PRECHECK_DISK_FREE_MIN_MB == 500
+
+
+def test_issue16_error_codes_pinned() -> None:
+    """issue#16 error codes. Drift fails the SPA mirror in
+    `lib/protocol.ts`."""
+    assert P.ERR_CP210X_RECOVERY_FAILED == "cp210x_recovery_failed"
+    assert P.ERR_LIDAR_PORT_NOT_RESOLVABLE == "lidar_port_not_resolvable"

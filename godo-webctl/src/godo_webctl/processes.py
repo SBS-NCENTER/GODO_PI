@@ -66,7 +66,8 @@ from typing import Any, Final, Literal
 
 from .constants import PROC_PATH, PROC_STAT_PATH
 from .protocol import (
-    DOCKER_MAPPING_PROCESS_NAMES,
+    DOCKER_CONTAINER_NAMES,
+    DOCKER_DAEMON_NAMES,
     GODO_PROCESS_NAMES,
     MANAGED_PROCESS_NAMES,
     PROCESS_FIELDS,
@@ -267,18 +268,26 @@ def classify_pid(name: str) -> Category:
     `MANAGED_PROCESS_NAMES` because the `godo-tracker.service` runs it,
     and also in `GODO_PROCESS_NAMES`) classifies as `managed`.
 
-    issue#14 Mode-B N1 fix: docker family (`docker`, `dockerd`,
-    `containerd`, `containerd-shim*`) classifies as ``godo`` since
+    issue#14 Mode-B N1 fix: docker family classifies as ``godo`` since
     docker is only used for the godo-mapping container in this project.
     Container children inside the PID namespace are NOT detected (they
     show as `python3`, `ros2`, etc. in /proc — untracked).
+    issue#16 refinement: split docker family into "always-running
+    daemons" (dockerd, containerd → ``general`` because they live from
+    boot regardless of mapping state) vs. "active-mapping processes"
+    (docker run-parent + containerd-shim* children → ``godo`` because
+    they only exist while a mapping run is in flight). Operator HIL
+    feedback: dockerd/containerd visible after mapping ended was
+    misleading; now only the run-parent + shim children stay flagged.
     """
     if name in MANAGED_PROCESS_NAMES:
         return "managed"
     if name in GODO_PROCESS_NAMES:
         return "godo"
-    if name in DOCKER_MAPPING_PROCESS_NAMES or name.startswith("containerd-shim"):
+    if name in DOCKER_CONTAINER_NAMES or name.startswith("containerd-shim"):
         return "godo"
+    if name in DOCKER_DAEMON_NAMES:
+        return "general"
     return "general"
 
 

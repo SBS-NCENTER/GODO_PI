@@ -2878,6 +2878,38 @@ CODEBASE.md (r) extended); webctl is the runtime consumer.
      tunable; the SPA Config tab is schema-driven so the rows
      surface automatically (no frontend change).
 
+## 2026-05-02 19:50 KST — issue#16 HIL hot-fix v3: robust USB sysfs resolver + visibility logs
+
+Operator HIL on hot-fix v2 surfaced that auto-recovery was silently
+no-op'ing on news-pi01 RPi 5. Diagnostic chain:
+
+1. `journalctl -u godo-cp210x-recover` → `-- No entries --` (oneshot
+   never fired).
+2. Manual `readlink /sys/class/tty/ttyUSB0/device | sed 's/:.*//'`
+   returned `ttyUSB0` not `1-1.4` — the kernel's symlink target on
+   this hardware does NOT carry a `:1.0` interface suffix.
+3. Old resolver raised `LidarPortNotResolvable` on the no-suffix
+   case; mapping.start() caught and silently logged WARNING; but
+   the WARNING was below the operator's grep window depth.
+
+### Changed
+
+- `_resolve_usb_sysfs_path` rewritten to walk `realpath()` segments
+  from tail to root and return the first segment matching the USB
+  port regex. Handles both observed sysfs layouts:
+  - (a) tail-segment is the interface (`.../1-1.4:1.0`)
+  - (b) tail-segment is the tty device (`.../1-1.4/ttyUSB0`)
+  Also rejects realpath outside `/sys/` (defence-in-depth).
+- `recover_cp210x` adds two `logger.info` lines:
+  - "firing for lidar_port=… usb_path=…" before the systemctl call
+  - "completed for usb_path=…" on success
+  Operator now sees POSITIVE evidence in `journalctl -u godo-webctl`
+  whether the recovery actually ran (the existing WARNING-only log
+  made silent-success indistinguishable from never-firing).
+- `tests/test_mapping_cp210x_recovery.py` — resolver tests rewritten
+  against `os.path.realpath` (was `os.readlink`) including a new
+  layout-(b) happy-path test that pins the news-pi01 case.
+
 ## 2026-05-02 19:30 KST — issue#16 HIL hot-fix v2: cp210x auto-recovery in start path
 
 Operator HIL on PR #69 v1: first mapping attempt after tracker stop

@@ -62,63 +62,100 @@ def _settings(tmp_path: Path) -> Settings:
 # --- _resolve_usb_sysfs_path --------------------------------------------
 
 
-def test_resolve_usb_sysfs_path_happy_path(
+def test_resolve_usb_sysfs_path_layout_a_interface_suffix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`/sys/class/tty/ttyUSB1/device` symlinks to
-    `../../../1-1.4:1.0` → resolved to `1-1.4`."""
-    monkeypatch.setattr(M.os, "readlink", lambda p: "../../../1-1.4:1.0")
+    """Layout (a) — tail segment is the USB interface (`:1.0` suffix).
+    Resolver strips `:1.0` and returns `1-1.4`."""
+    monkeypatch.setattr(
+        M.os.path,
+        "realpath",
+        lambda p: "/sys/devices/platform/scb/fd500000.pcie/pci0000:00/0000:01:00.0/usb1/1-1/1-1.4/1-1.4:1.0/ttyUSB1/tty/ttyUSB1",
+    )
     assert M._resolve_usb_sysfs_path("/dev/ttyUSB1") == "1-1.4"
+
+
+def test_resolve_usb_sysfs_path_layout_b_no_interface_suffix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Layout (b) — tail segment is the tty device, USB port is one
+    level UP. issue#16 HIL hot-fix v3: walk-up resolver returns
+    `1-1.4` (parent) instead of raising on absence of `:` suffix.
+    Operator's news-pi01 RPi 5 hardware exhibits this layout."""
+    monkeypatch.setattr(
+        M.os.path,
+        "realpath",
+        lambda p: "/sys/devices/platform/scb/fd500000.pcie/pci0000:00/0000:01:00.0/usb1/1-1/1-1.4/ttyUSB0",
+    )
+    assert M._resolve_usb_sysfs_path("/dev/ttyUSB0") == "1-1.4"
 
 
 def test_resolve_usb_sysfs_path_handles_complex_port_chain(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(M.os, "readlink", lambda p: "../../../3-2.1.4:1.0")
+    """Multi-hop port chains (e.g. through a hub) — first non-prefix
+    match wins. `3-2.1.4` is the leaf, not `3-2.1` or `3-2`."""
+    monkeypatch.setattr(
+        M.os.path,
+        "realpath",
+        lambda p: "/sys/devices/.../usb3/3-2/3-2.1/3-2.1.4/3-2.1.4:1.0/ttyUSB0",
+    )
     assert M._resolve_usb_sysfs_path("/dev/ttyUSB0") == "3-2.1.4"
 
 
-def test_resolve_usb_sysfs_path_no_interface_suffix_raises(
+def test_resolve_usb_sysfs_path_no_usb_segment_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A symlink target without the `:1.0` interface suffix is malformed
-    and must not be silently passed through to the bash helper."""
-    monkeypatch.setattr(M.os, "readlink", lambda p: "../../../usb1")
+    """A realpath with no USB-port-shaped segment anywhere → raise.
+    Reaches the helper would mean a malformed unbind/bind write; the
+    regex gate is defence-in-depth (helper script also validates)."""
+    monkeypatch.setattr(M.os.path, "realpath", lambda p: "/sys/class/tty/ttyUSB1")
     with pytest.raises(M.LidarPortNotResolvable):
         M._resolve_usb_sysfs_path("/dev/ttyUSB1")
 
 
-def test_resolve_usb_sysfs_path_readlink_failure_raises(
+def test_resolve_usb_sysfs_path_realpath_failure_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def _raise(_p: str) -> str:
-        raise FileNotFoundError("/sys/class/tty/ttyUSB99/device")
+        raise OSError("ENOENT")
 
-    monkeypatch.setattr(M.os, "readlink", _raise)
+    monkeypatch.setattr(M.os.path, "realpath", _raise)
     with pytest.raises(M.LidarPortNotResolvable):
         M._resolve_usb_sysfs_path("/dev/ttyUSB99")
 
 
+def test_resolve_usb_sysfs_path_unexpected_root_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """realpath returning something outside /sys → reject. Defence-in-
+    depth — should never happen but the helper script's sysfs writes
+    must not be driven by an off-tree path."""
+    monkeypatch.setattr(M.os.path, "realpath", lambda p: "/etc/passwd")
+    with pytest.raises(M.LidarPortNotResolvable):
+        M._resolve_usb_sysfs_path("/dev/ttyUSB1")
+
+
 @pytest.mark.parametrize(
-    "evil_target",
+    "evil_realpath",
     [
-        "../../../evil; rm -rf /:1.0",
-        "../../../1-1.4 ; rm:1.0",
-        "../../../$(curl evil):1.0",
-        # passing whitespace
-        "../../../ :1.0",
-        # bare alphabet (no digits)
-        "../../../abc:1.0",
+        # Even with `/sys` prefix, malformed segments must be rejected.
+        # The walk-up looks for a USB-port-shaped segment; injection
+        # attempts produce no such segment.
+        "/sys/devices/.../evil; rm -rf //ttyUSB0",
+        "/sys/devices/.../$(curl evil)/ttyUSB0",
+        "/sys/devices/.../abc/ttyUSB0",  # bare alphabet, no digits
+        "/sys/devices/.../usb1/ttyUSB0",  # `usb1` is the controller, not a port
     ],
 )
 def test_resolve_usb_sysfs_path_rejects_malformed_payloads(
     monkeypatch: pytest.MonkeyPatch,
-    evil_target: str,
+    evil_realpath: str,
 ) -> None:
     """Defence-in-depth: the regex anchor rejects any non-canonical USB
     bus-port form before the value reaches the bash helper. (The helper
     itself ALSO validates with the same regex — belt and suspenders.)"""
-    monkeypatch.setattr(M.os, "readlink", lambda p: evil_target)
+    monkeypatch.setattr(M.os.path, "realpath", lambda p: evil_realpath)
     with pytest.raises(M.LidarPortNotResolvable):
         M._resolve_usb_sysfs_path("/dev/ttyUSB1")
 
@@ -182,7 +219,7 @@ def test_recover_cp210x_argv_pin(
     contract (the rule scopes to verb=start + the unit name)."""
     cfg = _settings(tmp_path)
     monkeypatch.setattr(M, "_resolve_lidar_port", lambda c: "/dev/ttyUSB1")
-    monkeypatch.setattr(M.os, "readlink", lambda p: "../../../1-1.4:1.0")
+    monkeypatch.setattr(M.os.path, "realpath", lambda p: "/sys/devices/.../1-1.4:1.0/ttyUSB1")
     M.recover_cp210x(cfg)
     assert fake_subprocess == [
         ["systemctl", "start", "--no-pager", "godo-cp210x-recover.service"],
@@ -196,7 +233,7 @@ def test_recover_cp210x_writes_envfile_before_systemctl(
 ) -> None:
     cfg = _settings(tmp_path)
     monkeypatch.setattr(M, "_resolve_lidar_port", lambda c: "/dev/ttyUSB1")
-    monkeypatch.setattr(M.os, "readlink", lambda p: "../../../1-1.4:1.0")
+    monkeypatch.setattr(M.os.path, "realpath", lambda p: "/sys/devices/.../1-1.4:1.0/ttyUSB1")
     M.recover_cp210x(cfg)
     envfile = cfg.mapping_runtime_dir.parent / MAPPING_CP210X_RECOVER_ENV_FILENAME
     assert envfile.exists()
@@ -209,7 +246,7 @@ def test_recover_cp210x_systemctl_failure_raises(
 ) -> None:
     cfg = _settings(tmp_path)
     monkeypatch.setattr(M, "_resolve_lidar_port", lambda c: "/dev/ttyUSB1")
-    monkeypatch.setattr(M.os, "readlink", lambda p: "../../../1-1.4:1.0")
+    monkeypatch.setattr(M.os.path, "realpath", lambda p: "/sys/devices/.../1-1.4:1.0/ttyUSB1")
 
     def _failing_run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(argv, 1, stdout="", stderr="permission denied\n")
@@ -226,7 +263,7 @@ def test_recover_cp210x_systemctl_timeout_raises(
 ) -> None:
     cfg = _settings(tmp_path)
     monkeypatch.setattr(M, "_resolve_lidar_port", lambda c: "/dev/ttyUSB1")
-    monkeypatch.setattr(M.os, "readlink", lambda p: "../../../1-1.4:1.0")
+    monkeypatch.setattr(M.os.path, "realpath", lambda p: "/sys/devices/.../1-1.4:1.0/ttyUSB1")
 
     def _timeout_run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         raise subprocess.TimeoutExpired(argv, 15.0)
@@ -247,6 +284,6 @@ def test_recover_cp210x_resolver_failure_propagates(
     def _bad_readlink(_p: str) -> str:
         raise FileNotFoundError("missing")
 
-    monkeypatch.setattr(M.os, "readlink", _bad_readlink)
+    monkeypatch.setattr(M.os.path, "realpath", _bad_readlink)
     with pytest.raises(M.LidarPortNotResolvable):
         M.recover_cp210x(cfg)

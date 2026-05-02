@@ -1392,34 +1392,51 @@ def precheck(cfg: Settings, name: str | None = None) -> PrecheckResult:
 
 
 def _resolve_usb_sysfs_path(lidar_port: str) -> str:
-    """Resolve `/dev/ttyUSBn` → sysfs USB path (e.g. "1-1.4").
+    """Resolve `/dev/ttyUSBn` → sysfs USB port path (e.g. "1-1.4").
 
     The kernel exposes `/sys/class/tty/<basename>/device` as a symlink
-    pointing at the USB interface, e.g.
-    `../../../../1-1.4:1.0`. The last path component carries the bus,
-    port chain, and interface number; we strip the `:1.0` suffix to get
-    the device-side path the cp210x driver's bind/unbind sysfs files
-    accept.
+    pointing AT or NEAR the USB interface node. Two sysfs layouts have
+    been observed in production / HIL:
 
-    Raises `LidarPortNotResolvable` on any malformed input — the strict
-    regex is a defence-in-depth gate before the path reaches the bash
-    helper script (which ALSO validates with the same regex).
+      (a) tail-segment is the interface, e.g. ``.../1-1.4:1.0``
+          (basename `1-1.4:1.0`, split on `:` → `1-1.4`)
+      (b) tail-segment is the tty device, e.g. ``.../1-1.4/ttyUSB0``
+          (basename `ttyUSB0`, no `:` suffix; the USB port lives one
+          level UP)
+
+    issue#16 HIL hot-fix v3 (2026-05-02 KST): the original resolver
+    only handled (a) and raised `LidarPortNotResolvable` on (b),
+    silently bypassing auto-recovery on RPi 5 hardware where layout
+    (b) was observed. The fix walks `realpath(symlink)` from tail to
+    root and returns the first segment matching the USB port regex —
+    works for both layouts without a per-host probe.
+
+    Raises `LidarPortNotResolvable` if no segment matches.
     """
     tty_basename = os.path.basename(lidar_port)
     if not tty_basename:
         raise LidarPortNotResolvable(f"empty_basename: {lidar_port!r}")
     sysfs_link = f"/sys/class/tty/{tty_basename}/device"
     try:
-        target = os.readlink(sysfs_link)
-    except (FileNotFoundError, OSError) as e:
-        raise LidarPortNotResolvable(f"readlink_failed: {sysfs_link}: {e}") from e
-    last_segment = os.path.basename(target.rstrip("/"))
-    if ":" not in last_segment:
-        raise LidarPortNotResolvable(f"no_interface_suffix: {target!r}")
-    usb_path = last_segment.split(":", 1)[0]
-    if not _USB_PATH_REGEX.match(usb_path):
-        raise LidarPortNotResolvable(f"invalid_usb_path: {usb_path!r}")
-    return usb_path
+        # `realpath` resolves the symlink fully into an absolute path
+        # rooted at /sys, even when the link is relative
+        # (`../../../...`). Walking the absolute path's segments gives
+        # the same answer regardless of which layout the kernel emitted.
+        real_path = os.path.realpath(sysfs_link)
+    except OSError as e:
+        raise LidarPortNotResolvable(f"realpath_failed: {sysfs_link}: {e}") from e
+    if not real_path or not real_path.startswith("/sys/"):
+        raise LidarPortNotResolvable(f"unexpected_realpath: {real_path!r}")
+    # Walk segments from tail to root; the first one matching
+    # `<bus>-<port-chain>` (with optional `:<config>.<intf>` suffix
+    # stripped) is the USB port we want.
+    for segment in reversed(real_path.split(os.sep)):
+        if not segment:
+            continue
+        candidate = segment.split(":", 1)[0]  # strip ':1.0' style suffix if present
+        if _USB_PATH_REGEX.match(candidate):
+            return candidate
+    raise LidarPortNotResolvable(f"no_usb_port_segment_in_path: {real_path!r}")
 
 
 def _write_cp210x_envfile(cfg: Settings, usb_path: str) -> Path:
@@ -1452,19 +1469,35 @@ def recover_cp210x(cfg: Settings) -> None:
     """Resolve the LiDAR sysfs USB path, write the recovery envfile,
     invoke `systemctl start godo-cp210x-recover.service`.
 
-    Operator-driven only: the SPA's "🔧 LiDAR USB 복구" button is the
-    sole caller. NOT automatic on Start — operator decides per spec
-    (`.claude/memory/project_mapping_precheck_and_cp210x_recovery.md`).
+    Two callers (issue#16 HIL hot-fix v2):
+      1. Operator-driven via `POST /api/mapping/recover-lidar` — the
+         SPA's "🔧 LiDAR USB 복구" button when precheck shows
+         `lidar_readable=False`.
+      2. Automatic during `mapping.start()` Phase 2 Step 2.5 — fires
+         unconditionally before the systemd unit boot whenever
+         `cfg.mapping_auto_recover_lidar` is true (default `True`).
 
-    Raises `LidarPortNotResolvable` (mapped to 400) on any path-resolve
-    failure; raises `CP210xRecoveryFailed` (mapped to 500) on any I/O
-    or subprocess failure.
+    Raises `LidarPortNotResolvable` (mapped to 400 on the manual
+    endpoint; logged + swallowed on the auto-recovery path) on any
+    path-resolve failure; raises `CP210xRecoveryFailed` (mapped to
+    500 / logged + swallowed) on I/O / subprocess failure.
     """
     try:
         lidar_port = _resolve_lidar_port(cfg)
     except webctl_toml_mod.WebctlTomlError as e:
         raise LidarPortNotResolvable(f"tracker_toml_parse_failed: {e}") from e
     usb_path = _resolve_usb_sysfs_path(lidar_port)
+    # issue#16 HIL hot-fix v3 — positive log so the operator can see in
+    # `journalctl -u godo-webctl` that the recovery actually fired and
+    # for which USB port. Without this the auto-recovery is invisible
+    # on the happy path (the only existing log was a WARNING on
+    # failure), making it impossible to tell "ran and succeeded" from
+    # "never ran" via the journal.
+    logger.info(
+        "mapping.recover_cp210x: firing for lidar_port=%s usb_path=%s",
+        lidar_port,
+        usb_path,
+    )
     try:
         _write_cp210x_envfile(cfg, usb_path)
     except OSError as e:
@@ -1484,3 +1517,4 @@ def recover_cp210x(cfg: Settings) -> None:
         raise CP210xRecoveryFailed(
             f"systemctl_start_failed: rc={proc.returncode} stderr={proc.stderr.strip()}",
         )
+    logger.info("mapping.recover_cp210x: completed for usb_path=%s", usb_path)

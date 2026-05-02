@@ -258,6 +258,16 @@ def fake_subprocess(monkeypatch: pytest.MonkeyPatch) -> Iterator[_FakeSubprocess
     monkeypatch.setattr(M.subprocess, "run", fake)
     monkeypatch.setattr(M, "_run_systemctl_start_mapping", lambda cfg: None)
     monkeypatch.setattr(M, "_run_systemctl_stop_mapping", lambda cfg: None)
+    # issue#16 HIL hot-fix v2: mapping.start() Phase 2 Step 2.5 fires
+    # cp210x auto-recovery via recover_cp210x() which makes its own
+    # subprocess.run("systemctl start godo-cp210x-recover.service")
+    # call. The unit / sysfs / tracker.toml don't exist in the test
+    # environment; mock the function to a no-op so the start-flow
+    # tests don't have to grow extra queue entries (and so the queue
+    # responses still align with the docker-inspect calls they were
+    # written for). Recovery itself is unit-tested in
+    # test_mapping_cp210x_recovery.py.
+    monkeypatch.setattr(M, "recover_cp210x", lambda cfg: None)
     yield fake
 
 

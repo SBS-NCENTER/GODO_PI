@@ -2878,6 +2878,61 @@ CODEBASE.md (r) extended); webctl is the runtime consumer.
      tunable; the SPA Config tab is schema-driven so the rows
      surface automatically (no frontend change).
 
+## 2026-05-02 22:50 KST — issue#16 HIL hot-fix v5: gate cp210x recovery on lidar_readable
+
+v4 made auto-recovery work correctly (interface notation), but operator
+HIL on v4 surfaced that running the unbind/rebind cycle on EVERY Start
+unnecessarily disrupts a healthy USB CDC link and adds ~1.5 s latency
+even when not needed. Operator quote 2026-05-02 evening session: "지금
+정상 상태인데 매번 recovery가 도네".
+
+v5 narrows the firing condition: recovery now runs only when the
+in-process `_check_lidar_readable()` probe reports `ok=False`. The
+probe opens the LiDAR device file with `O_NONBLOCK` — a successful
+open means cp210x is bound and the control endpoint responds; recovery
+would only churn it. A failed open (ENODEV, hang past O_NONBLOCK,
+permission flap) is the exact symptom recovery exists to fix.
+
+### Why the original v2 stale-state symptom still triggers v5
+
+The v2 HIL evidence (`failed set request 0x12 status: -110` after
+tracker stop) presents AS a `lidar_readable` failure: the open() either
+returns ENODEV or the kernel's stale state interferes with the
+non-blocking probe. So the new gate correctly catches the same case
+that motivated v2..v4, while skipping the no-op churn when the link
+is healthy.
+
+### Changed
+
+- `mapping.start()` Step 2.5 — `recover_cp210x(cfg)` is now wrapped in
+  a `_check_lidar_readable(cfg)` probe. `lidar_check.ok is True` →
+  skip with debug log; `ok=False` (or `None`) → fire recovery, info-log
+  the reason from `lidar_check.detail`.
+- Comment block above the call rewritten to reflect the v5 gate
+  semantics; the v2 motivation comment retained as historical context.
+
+### Tests
+
+- Existing 932-test suite passes unchanged (test_mapping fixture
+  monkeypatches `recover_cp210x` to no-op — gate is invisible to the
+  start-flow integration tests; gate semantics implicit via existing
+  precheck unit tests on `_check_lidar_readable`).
+- No new assertions added — the gate is a code-path narrowing, not a
+  new behaviour surface.
+
+### Out of scope (filed as follow-up)
+
+- The 22:27:16 KST t5 mapping SIGKILL incident (trap exceeded the
+  20 s `docker stop --time=` grace, leaving t5 unsaved). Diagnosis:
+  `_run_systemctl_stop_mapping`'s `subprocess.run(timeout=10)` is
+  shorter than the unit's TimeoutStopSec (30 s) + ExecStop grace
+  (20 s), so webctl times out the systemctl client before the trap's
+  map_saver completes. Fix path: separate constant for stop-systemctl
+  timeout (≥45 s), and bump the schema-default ladder
+  (docker_grace 20→30, systemd_timeout 30→45,
+  webctl_stop_timeout 35→50). Tracked separately, not bundled into
+  v5 to keep the hot-fix surface tight.
+
 ## 2026-05-02 20:15 KST — issue#16 HIL hot-fix v4: cp210x interface notation
 
 v3 visibility logs surfaced the real bug:

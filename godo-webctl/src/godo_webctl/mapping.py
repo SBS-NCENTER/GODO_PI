@@ -693,15 +693,27 @@ def start(name: str, cfg: Settings) -> MappingStatus:
                 _save_state(cfg, failed_status)
         raise
 
-    # Step 2.5: cp210x auto-recovery (issue#16 HIL hot-fix v2,
-    # 2026-05-02 KST). Operator HIL on PR #69 surfaced that the first
-    # mapping attempt after a tracker stop reliably fails with the
-    # cp210x stale state (`failed set request 0x12 status: -110`) which
-    # crashes rplidar_node inside the container. The precheck does not
-    # detect this — file-layer open() succeeds even when the USB CDC
-    # control endpoint is wedged. Auto-recovery here drives the
-    # unbind/rebind cycle before the container starts, eliminating the
-    # first-attempt failure at a ~1.5 s latency cost.
+    # Step 2.5: cp210x auto-recovery (issue#16 HIL hot-fix v5,
+    # 2026-05-02 KST). Operator HIL on PR #69 surfaced two issues with
+    # v2..v4's unconditional recovery:
+    #
+    #   (1) When the LiDAR is already healthy, unbind/rebind disrupts a
+    #       working USB CDC link — operator quote 2026-05-02 evening:
+    #       "지금 정상 상태인데 매번 recovery가 도네".
+    #   (2) The recovery cycle adds ~1.5 s latency to every Start, even
+    #       when not needed.
+    #
+    # v5 gate: only fire `recover_cp210x()` when `_check_lidar_readable()`
+    # reports `ok=False`. The lidar_readable check probes `open()` on the
+    # device file — a successful open means cp210x is bound and the
+    # control endpoint responds; recovery would only churn it. A failed
+    # open is the exact symptom recovery exists to fix (cp210x stale
+    # state, sysfs in pending unbind, permission flap).
+    #
+    # The original cp210x stale state from v2's HIL evidence (`failed
+    # set request 0x12 status: -110` after tracker stop) presents AS a
+    # lidar_readable failure: the open() either ENODEV or hangs past
+    # the O_NONBLOCK probe. So the gate correctly catches it.
     #
     # Best-effort: never fail Start because of recovery. If recovery
     # fails (polkit denied, helper missing, sysfs write rejected), the
@@ -711,13 +723,24 @@ def start(name: str, cfg: Settings) -> MappingStatus:
     # false` in tracker.toml. Long-term path: issue#17 (GPIO UART
     # direct connection) removes the cp210x USB stack entirely.
     if cfg.mapping_auto_recover_lidar:
-        try:
-            recover_cp210x(cfg)
-        except (CP210xRecoveryFailed, LidarPortNotResolvable, OSError) as e:
-            logger.warning(
-                "mapping.start: cp210x auto-recovery failed (best-effort, continuing): %s",
-                e,
+        lidar_check = _check_lidar_readable(cfg)
+        if lidar_check.ok is True:
+            logger.debug(
+                "mapping.start: lidar_readable ok (%s), skipping cp210x recovery",
+                lidar_check.value,
             )
+        else:
+            logger.info(
+                "mapping.start: lidar_readable failed (%s), firing cp210x recovery",
+                lidar_check.detail,
+            )
+            try:
+                recover_cp210x(cfg)
+            except (CP210xRecoveryFailed, LidarPortNotResolvable, OSError) as e:
+                logger.warning(
+                    "mapping.start: cp210x auto-recovery failed (best-effort, continuing): %s",
+                    e,
+                )
 
     # Step 3: systemctl start godo-mapping@active.service.
     # Polkit grants this verb (systemd PR-2 polkit rule extension).

@@ -85,3 +85,31 @@ polkit.addRule(function(action, subject) {
     }
     return polkit.Result.YES;
 });
+
+// (c) systemctl start/stop/restart on the godo-mapping@active.service
+// instance (issue#14 — SPA-driven SLAM mapping container). Scoped to
+// the fixed instance name `active` (decision D4) so an operator cannot
+// spawn arbitrary instances by running
+// `systemctl start godo-mapping@whatever.service`. webctl is the SOLE
+// caller — it sets `/run/godo/mapping/active.env` immediately before
+// the start verb so the unit's EnvironmentFile= picks up MAP_NAME,
+// LIDAR_DEV, IMAGE_TAG. Mirror of rule (a) but for the new mapping
+// surface; lock-step with `services.MAPPING_TEMPLATE_UNITS` /
+// `mapping.MAPPING_UNIT_NAME` (must agree).
+polkit.addRule(function(action, subject) {
+    if (action.id !== "org.freedesktop.systemd1.manage-units") {
+        return;
+    }
+    if (!subject.isInGroup("ncenter")) {
+        return;
+    }
+    var unit = action.lookup("unit");
+    if (unit !== "godo-mapping@active.service") {
+        return;
+    }
+    var verb = action.lookup("verb");
+    if (verb !== "start" && verb !== "stop" && verb !== "restart") {
+        return;
+    }
+    return polkit.Result.YES;
+});

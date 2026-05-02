@@ -621,9 +621,32 @@ pipeline" anchor.
 
 issue#12 introduces a new ownership pattern for the
 `CONFIG_SCHEMA[]` table: rows whose **runtime consumer is godo-webctl
-rather than the tracker itself**. The two current entries are
-`webctl.pose_stream_hz` and `webctl.scan_stream_hz` (SSE pose/scan
-stream cadence, default 30 Hz, range [1, 60], `ReloadClass::Restart`).
+rather than the tracker itself**. The current entries (5 total after
+issue#14 Maj-1 fold) are:
+
+1. `webctl.pose_stream_hz` — SSE pose stream cadence (Hz, default 30,
+   range [1, 60]).
+2. `webctl.scan_stream_hz` — SSE scan stream cadence (Hz, default 30,
+   range [1, 60]).
+3. `webctl.mapping_docker_stop_grace_s` — Docker SIGTERM→SIGKILL grace
+   window (seconds, default 20, range [10, 60]). install.sh
+   sed-substitutes the value into the `godo-mapping@.service` ExecStop
+   line at install time.
+4. `webctl.mapping_systemd_stop_timeout_s` — systemd unit
+   TimeoutStopSec (seconds, default 30, range [20, 90]). install.sh
+   sed-substitutes the value into the unit file.
+5. `webctl.mapping_webctl_stop_timeout_s` — webctl-side `mapping.stop()`
+   polling deadline (seconds, default 35, range [25, 120]). webctl
+   reads the value into `Settings.mapping_webctl_stop_timeout_s` from
+   `tracker.toml` at startup; `mapping.stop()` reads `cfg.<field>`
+   instead of the legacy `MAPPING_CONTAINER_STOP_TIMEOUT_S` constant.
+
+All five Restart class. Ordering invariant on the timing trio
+(enforced by webctl's `webctl_toml.read_webctl_section`):
+`docker_stop_grace_s < systemd_stop_timeout_s < webctl_stop_timeout_s`.
+A misordered TOML payload raises `WebctlTomlError` at webctl startup
+naming the offending key, so a manually-edited `tracker.toml` cannot
+produce a SIGKILL-mid-rename ladder that loses the lifetime asset.
 
 **Storage contract (Parent decision A1, post-Mode-A 2026-05-01 KST)**:
 the keys are first-class `Config` fields (`int webctl_pose_stream_hz`,
@@ -634,8 +657,9 @@ machinery touchpoint:
    `WEBCTL_POSE_STREAM_HZ_DEFAULT = 30`,
    `WEBCTL_SCAN_STREAM_HZ_DEFAULT = 30`.
 2. `core/config_schema.hpp` — schema rows declare type, range, default,
-   reload class. The row count moved 46 → 48 in lockstep with the C++
-   `static_assert` and webctl's `EXPECTED_ROW_COUNT`.
+   reload class. The row count moved 46 → 48 (issue#12) → 51 (issue#14
+   Maj-1) in lockstep with the C++ `static_assert` and webctl's
+   `EXPECTED_ROW_COUNT`.
 3. `core/config.cpp` — `allowed_keys()` set, `apply_toml_file`,
    `apply_env`, `apply_cli`, `Config::make_default`. CLI / env / TOML
    precedence matches every other Tier-2 Int row.
@@ -723,6 +747,66 @@ scripts/build.sh
 Expect `ctest -L hardware-free` to report every listed test green. If
 `test_csv_parity` is skipped, install `uv` and ensure `prototype/Python/`
 has been synced (`uv sync`).
+
+---
+
+## 2026-05-01 23:21 KST — issue#14: SPA Mapping pipeline (systemd + polkit only — tracker unchanged)
+
+### Why
+
+The new SPA Map > Mapping sub-tab drives a SLAM mapping container
+(`godo-mapping`) via webctl + systemd. Tracker behaviour is unchanged
+(it is stopped during mapping per L2). RPi5-side deliverables are
+therefore narrow: a new systemd template unit, a polkit rule
+extension, and an install.sh extension. No C++ code or schema row
+changes.
+
+### Added
+
+- `systemd/godo-mapping@.service` — template unit (instance `active`).
+  `EnvironmentFile=/run/godo/mapping/%i.env` reads MAP_NAME / LIDAR_DEV
+  / IMAGE_TAG written atomically by webctl. `ExecStart=` is
+  `/usr/bin/docker run --rm --name godo-mapping --network=host
+  --device=${LIDAR_DEV} -v /var/lib/godo/maps:/maps -e MAP_NAME=…
+  ${IMAGE_TAG}`. `Restart=no` (failures surface as Failed, never
+  silently retried). `TimeoutStopSec=20s` is the load-bearing M5 fix
+  satisfying the ordering invariant
+  `docker grace 10s < TimeoutStopSec 20s < webctl 25s`.
+- `systemd/godo-mapping@.env.example` — operator-readable reference
+  showing the three env-vars webctl writes at runtime.
+
+### Changed
+
+- `systemd/49-godo-systemctl.rules` — appended rule `(c)` granting
+  ncenter group `start`/`stop`/`restart` on the fixed instance
+  `godo-mapping@active.service`. Scoped narrowly so `systemctl start
+  godo-mapping@whatever.service` is denied (D4 — only `active` is a
+  valid instance).
+- `systemd/install.sh` — extended from `[1/8]..[7/8]` to
+  `[1/11]..[11/11]` adding (a) godo-mapping@.service install,
+  (b) godo-mapping@.env.example reference install,
+  (c) `/var/lib/godo/maps/.preview/` mkdir, (d) `usermod -aG docker
+  ncenter` with logout-and-back-in warning. NO install-time `mkdir
+  /run/godo/mapping/` (M2 fix — /run is tmpfs; webctl creates the
+  dir at runtime).
+
+### Tests
+
+- Manual: `systemd-analyze verify systemd/godo-mapping@.service`
+  produces zero warnings (clean parse).
+- HIL (operator on news-pi01) per Scenario A..H in the plan.
+
+### Notes
+
+- godo-mapping@.service is NOT enabled — operator service-management
+  policy (mirrors godo-tracker pattern). Webctl's
+  `POST /api/mapping/start` is the SOLE caller of `systemctl start
+  godo-mapping@active.service`.
+- Tracker `Config` schema unchanged (no new rows). issue#14's only
+  cross-stack dependency is webctl reading the existing
+  `serial.lidar_port` row from `tracker.toml` — and that read is via
+  the new `webctl_toml.read_tracker_serial_section()` helper, not via
+  UDS. Tracker has zero awareness of mapping mode.
 
 ---
 
@@ -4154,3 +4238,87 @@ the same endpoint pair, so both surfaces were affected.
      recalibrate class). Webctl handler emits the σ keys to the
      wire ONLY when the operator supplied them; tracker omits the
      σ override when the wire omits the key (no-op default applies).
+
+---
+
+## 2026-05-02 08:57 KST — issue#14 Maj-1: mapping-stop timing ladder bumped + made operator-tunable
+
+Mode-B Maj-1 finding: the stop-timing chain
+(docker `--time=10` → systemd `TimeoutStopSec=20s` → webctl
+`MAPPING_CONTAINER_STOP_TIMEOUT_S=25.0`) was too tight against
+nav2 `map_saver_cli`'s atomic-rename window on a slow SD card.
+A SIGKILL mid-rename produces a torn lifetime asset — the operator
+locked stake "맵 한번 제작하면 평생 쓰는" mandates a wider grace
+window, and operator-tunable knobs in the SPA Config tab so future
+HIL findings can adjust without a code change.
+
+### Added
+
+- 3 webctl-owned schema rows in `src/core/config_schema.hpp`:
+  `webctl.mapping_docker_stop_grace_s` (Int [10, 60], default 20),
+  `webctl.mapping_systemd_stop_timeout_s` (Int [20, 90], default 30),
+  `webctl.mapping_webctl_stop_timeout_s` (Int [25, 120], default 35).
+  All Restart class. Row count 48 → 51.
+- 3 matching `Config` fields in `src/core/config.hpp` +
+  `Config::make_default` defaults in `src/core/config.cpp`.
+- 3 matching `cfg_defaults::WEBCTL_MAPPING_*_S_DEFAULT` constants in
+  `src/core/config_defaults.hpp`.
+- `apply_one` + `read_effective` mappings in `src/config/apply.cpp`.
+- `apply_toml_file` parsers + `apply_env` env-var (`GODO_WEBCTL_MAPPING_*`)
+  + `apply_cli` CLI flag (`--webctl-mapping-*`) in `src/core/config.cpp`.
+- `tests/test_config_schema.cpp::TEST_CASE("issue#14 Maj-1: webctl.mapping_*_s
+  rows present (count went 48 → 51)")` — schema row presence + bounds + defaults.
+
+### Changed
+
+- `src/core/config_schema.hpp` — `static_assert(CONFIG_SCHEMA.size() == 48)`
+  → `== 51`; preface comment block extended to describe the new rows
+  + ordering invariant.
+- `src/config/apply.cpp` — `apply_one` and `read_effective` extended.
+- `src/core/config.cpp` — `allowed_keys()`, `apply_toml_file`,
+  `apply_env`, `apply_cli`, `make_default` all extended.
+- `systemd/godo-mapping@.service` — `docker stop --time=10` → `--time=20`,
+  `TimeoutStopSec=20s` → `TimeoutStopSec=30s`. Comment block updated to
+  reference the new ordering ladder + the install.sh sed-substitution
+  contract (defaults match the as-checked-in unit so a bare `install -m
+  0644` is safe before the first webctl boot).
+- `systemd/install.sh` — at install time, parse the `[webctl]` section
+  of `/var/lib/godo/tracker.toml` for `mapping_docker_stop_grace_s` +
+  `mapping_systemd_stop_timeout_s` (awk-based, no Python dep). sed
+  the values into the `godo-mapping@.service` template file before
+  installing it. Operator-facing log line:
+  `godo-mapping unit timing: docker_stop_grace=<X>s,
+  TimeoutStopSec=<Y>s (operator-tunable via Config tab → webctl.mapping_*)`.
+- `tests/test_config_apply.cpp` — pin updates: 48 → 51 row count, 47
+  → 50 commas in `apply_get_all` body, plus presence of the 3 new
+  webctl.mapping_* rows in both `apply_get_all` and `apply_get_schema`.
+- `tests/test_config_schema.cpp` — `TEST_CASE("CONFIG_SCHEMA has exactly
+  51 rows")` count bump.
+
+### Removed
+
+- (none)
+
+### Invariants tightened
+
+- (r) `webctl-owned schema rows` — extended row list (5 entries now,
+  was 2). The 3 new mapping_*_s rows follow the same Config-mapped
+  storage contract as pose/scan_stream_hz; tracker stores verbatim,
+  webctl is the sole runtime consumer (install.sh sed-substitutes
+  docker + systemd values into the unit file at install time;
+  webctl reads webctl_stop_timeout into Settings at startup).
+  Cross-stack ordering invariant
+  `docker_stop_grace_s < systemd_stop_timeout_s <
+  webctl_stop_timeout_s` is enforced by webctl's
+  `webctl_toml.read_webctl_section` (the SOLE drift-catch site;
+  tracker's per-row range validation does not cross-check the trio).
+  See godo-webctl/CODEBASE.md `mapping-timing-ladder` invariant.
+
+### HIL verification
+
+- After this lands + install.sh runs, operator triggers
+  `POST /api/mapping/stop` on a Running session. journalctl shows
+  the container received SIGTERM, the `entrypoint.sh` trap ran
+  `map_saver_cli`, and the rename completed within the 20-s docker
+  grace. No `signal: killed` in the container's exit log — the
+  rename completed before any layer escalated.

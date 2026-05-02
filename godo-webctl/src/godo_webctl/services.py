@@ -28,9 +28,22 @@ from .protocol import (
     SYSTEM_SERVICES_FIELDS,
 )
 
-# Whitelist — operator may only act on these three units. Adding a new
+# Whitelist — operator may only act on these units. Adding a new
 # service name is an explicit code change, not a runtime knob.
-ALLOWED_SERVICES: Final[frozenset[str]] = frozenset({"godo-tracker", "godo-webctl", "godo-irq-pin"})
+#
+# issue#14 Patch C2 (2026-05-02): `godo-mapping@active` joins the
+# whitelist so the System tab's services-overview block can render
+# its status alongside the other three. The polkit rule already
+# grants start/stop/restart for it (round-1 systemd PR-2). The SPA
+# disables the action buttons for this row at the UI layer with the
+# tooltip "Map > Mapping 탭에서 제어" — operator may still curl the
+# action endpoint directly (same path Map > Mapping uses).
+ALLOWED_SERVICES: Final[frozenset[str]] = frozenset({
+    "godo-tracker",
+    "godo-webctl",
+    "godo-irq-pin",
+    "godo-mapping@active",
+})
 
 ALLOWED_ACTIONS: Final[frozenset[str]] = frozenset({"start", "stop", "restart"})
 

@@ -20,8 +20,8 @@ using godo::core::config_schema::reload_class_to_string;
 using godo::core::config_schema::ValueType;
 using godo::core::config_schema::value_type_to_string;
 
-TEST_CASE("CONFIG_SCHEMA has exactly 48 rows (issue#12 fold added 2 webctl.* rows)") {
-    CHECK(CONFIG_SCHEMA.size() == 48);
+TEST_CASE("CONFIG_SCHEMA has exactly 51 rows (issue#14 Maj-1 fold added 3 webctl.mapping_* rows)") {
+    CHECK(CONFIG_SCHEMA.size() == 51);
 }
 
 TEST_CASE("CONFIG_SCHEMA rows are alphabetically ordered by name") {
@@ -82,6 +82,39 @@ TEST_CASE("issue#12: smoother.t_ramp_ms default_repr lowered 500 → 100") {
     const auto* row = find("smoother.t_ramp_ms");
     REQUIRE(row != nullptr);
     CHECK(row->default_repr == "100");
+}
+
+TEST_CASE("issue#14 Maj-1: webctl.mapping_*_s rows present (count went 48 → 51)") {
+    // Three webctl-owned mapping-stop timing rows. All Restart class
+    // because the values are wired into the godo-mapping@.service unit
+    // file at install time (sed) plus webctl Settings; both changes
+    // need a webctl restart to land. Ordering invariant
+    //   docker_stop_grace (default 20)
+    //     < systemd_stop_timeout (default 30)
+    //     < webctl_stop_timeout (default 35)
+    // is enforced by webctl's webctl_toml.read_webctl_section, NOT here
+    // (each tracker schema row only validates its own range).
+    const auto* docker  = find("webctl.mapping_docker_stop_grace_s");
+    const auto* systemd = find("webctl.mapping_systemd_stop_timeout_s");
+    const auto* webctl  = find("webctl.mapping_webctl_stop_timeout_s");
+    REQUIRE(docker  != nullptr);
+    REQUIRE(systemd != nullptr);
+    REQUIRE(webctl  != nullptr);
+    CHECK(docker->type        == ValueType::Int);
+    CHECK(systemd->type       == ValueType::Int);
+    CHECK(webctl->type        == ValueType::Int);
+    CHECK(docker->min_d       == 10.0);
+    CHECK(docker->max_d       == 60.0);
+    CHECK(systemd->min_d      == 20.0);
+    CHECK(systemd->max_d      == 90.0);
+    CHECK(webctl->min_d       == 25.0);
+    CHECK(webctl->max_d       == 120.0);
+    CHECK(docker->default_repr  == "20");
+    CHECK(systemd->default_repr == "30");
+    CHECK(webctl->default_repr  == "35");
+    CHECK(docker->reload_class  == ReloadClass::Restart);
+    CHECK(systemd->reload_class == ReloadClass::Restart);
+    CHECK(webctl->reload_class  == ReloadClass::Restart);
 }
 
 TEST_CASE("issue#12: webctl.pose_stream_hz + webctl.scan_stream_hz rows present (count went 46 → 48)") {

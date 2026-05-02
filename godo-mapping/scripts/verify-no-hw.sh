@@ -100,6 +100,12 @@ step "pytest godo-mapping/scripts/ (test_repeatability.py + test_pose_watch.py)"
 "${PYTEST_RUNNER[@]}" "${ROOT_DIR}/scripts/" -q \
     || fail "pytest under godo-mapping/scripts/ failed"
 
+# issue#14 — preview node pgm_encoder unit tests. Hardware-free
+# (pure stdlib + numpy; no rclpy).
+step "pytest godo-mapping/tests/ (test_preview_dumper_pgm_encoder.py)"
+"${PYTEST_RUNNER[@]}" "${ROOT_DIR}/tests/" -q \
+    || fail "pytest under godo-mapping/tests/ failed"
+
 if [[ "${MODE}" == "--quick" ]]; then
     step "OK (--quick)"
     # F11 audit reminder for operators (no-op in --quick — pinned visible).

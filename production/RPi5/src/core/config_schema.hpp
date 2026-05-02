@@ -49,9 +49,17 @@ struct ConfigSchemaRow {
     std::string_view description;
 };
 
-// 48 rows — issue#12 fold (2026-05-01 PM KST). Two new webctl-owned
-// schema rows (`webctl.pose_stream_hz`, `webctl.scan_stream_hz`,
-// default 30 Hz, Restart class) round out the count from 46 to 48.
+// 51 rows — issue#14 Maj-1 fold (2026-05-02). Three new webctl-owned
+// mapping-timing rows (`webctl.mapping_docker_stop_grace_s`,
+// `webctl.mapping_systemd_stop_timeout_s`,
+// `webctl.mapping_webctl_stop_timeout_s`, Restart class) make the
+// SIGTERM→SIGKILL grace ladder operator-tunable so a slow nav2
+// `map_saver_cli` rename does not lose the lifetime asset. Ordering
+// invariant `docker_stop_grace < systemd_stop_timeout < webctl_stop_timeout`
+// is enforced by webctl's `webctl_toml.read_webctl_section`.
+// issue#12 fold (2026-05-01 PM KST) added 2 webctl-owned cadence rows
+// (`webctl.pose_stream_hz`, `webctl.scan_stream_hz`, default 30 Hz,
+// Restart class), bringing the count 46 → 48.
 // Tracker stores them in Config via the standard apply/read_effective
 // round-trip but no tracker logic path reads the value — godo-webctl is
 // the sole consumer (see production/RPi5/CODEBASE.md invariant (r)).
@@ -76,7 +84,7 @@ struct ConfigSchemaRow {
 // CODEBASE.md invariant (q).
 
 // clang-format off
-inline constexpr std::array<ConfigSchemaRow, 48> CONFIG_SCHEMA = {{
+inline constexpr std::array<ConfigSchemaRow, 51> CONFIG_SCHEMA = {{
     {"amcl.anneal_iters_per_phase",     ValueType::Int,    1.0,      200.0,    "10",                             ReloadClass::Recalibrate, "Track D-5: per-phase upper-bound iteration count for sigma annealing."},
     {"amcl.converge_xy_std_m",          ValueType::Double, 0.001,    1.0,      "0.015",                          ReloadClass::Recalibrate, "AMCL converge() xy_std exit threshold (m)."},
     {"amcl.converge_yaw_std_deg",       ValueType::Double, 0.01,     30.0,     "0.3",                            ReloadClass::Recalibrate, "AMCL converge() yaw_std exit threshold (deg)."},
@@ -123,12 +131,15 @@ inline constexpr std::array<ConfigSchemaRow, 48> CONFIG_SCHEMA = {{
     {"smoother.divergence_deg",         ValueType::Double, 1.0,      45.0,     "10.0",                           ReloadClass::Restart,     "Divergence reject threshold (deg)."},
     {"smoother.divergence_mm",          ValueType::Double, 100.0,    10000.0,  "2000.0",                         ReloadClass::Restart,     "Divergence reject threshold (mm)."},
     {"smoother.t_ramp_ms",              ValueType::Int,    50.0,     5000.0,   "100",                            ReloadClass::Restart,     "Smoother ramp duration (ms). issue#12 default 500 → 100 ms (Live-primary architecture, 10 Hz LiDAR tick)."},
+    {"webctl.mapping_docker_stop_grace_s",   ValueType::Int,    10.0,    60.0,    "20",                             ReloadClass::Restart,     "issue#14 Maj-1: Docker container SIGTERM→SIGKILL grace window during mapping stop (seconds). Min 10 s for nav2 map_saver to atomic-rename the PGM/YAML pair. Webctl-owned — tracker stores verbatim through render_toml round-trip; webctl reads via webctl_toml.read_webctl_section; install.sh sed-substitutes into godo-mapping@.service `--time=<X>`."},
+    {"webctl.mapping_systemd_stop_timeout_s",ValueType::Int,    20.0,    90.0,    "30",                             ReloadClass::Restart,     "issue#14 Maj-1: systemd unit TimeoutStopSec for godo-mapping@active (seconds). Must be > webctl.mapping_docker_stop_grace_s. Requires reinstall to take effect (install.sh sed-substitutes into the .service file). Webctl-owned schema row."},
+    {"webctl.mapping_webctl_stop_timeout_s", ValueType::Int,    25.0,    120.0,   "35",                             ReloadClass::Restart,     "issue#14 Maj-1: webctl-side mapping.stop() polling deadline (seconds). Must be > webctl.mapping_systemd_stop_timeout_s. Webctl-owned schema row; webctl reads via webctl_toml.read_webctl_section, mapping.stop uses cfg.mapping_webctl_stop_timeout_s."},
     {"webctl.pose_stream_hz",           ValueType::Int,    1.0,      60.0,     "30",                             ReloadClass::Restart,     "issue#12: SSE pose stream poll cadence (Hz). Webctl-owned — tracker stores the value through render_toml round-trip but never reads it; godo-webctl reads /var/lib/godo/tracker.toml via webctl_toml.read_webctl_section. See production/RPi5/CODEBASE.md invariant (r)."},
     {"webctl.scan_stream_hz",           ValueType::Int,    1.0,      60.0,     "30",                             ReloadClass::Restart,     "issue#12: SSE scan stream poll cadence (Hz). Webctl-owned schema row; same convention as webctl.pose_stream_hz."},
 }};
 // clang-format on
 
-static_assert(CONFIG_SCHEMA.size() == 48,
+static_assert(CONFIG_SCHEMA.size() == 51,
               "CONFIG_SCHEMA row count drifted; update tests + schema mirror");
 
 // O(N) lookup. N=40 keeps this trivially fine; O(log N) binary search is

@@ -17,6 +17,7 @@ lock.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import signal
 import sys
@@ -82,9 +83,72 @@ def _log_resolved_sse_rates(settings: Settings) -> None:  # pragma: no cover —
     )
 
 
+def _augment_with_webctl_section(settings: Settings) -> Settings:
+    """issue#14 Maj-1 / Mode-B C1 fix (2026-05-02 KST) — bind the
+    operator-tunable ``webctl.mapping_webctl_stop_timeout_s`` schema row
+    from ``[webctl]`` in ``tracker.toml`` to the live ``Settings``
+    instance.
+
+    Without this hop, ``cfg.mapping_webctl_stop_timeout_s`` is ONLY fed
+    by the ``GODO_WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S`` env-var or the
+    schema-default constant, so an operator who edits the value via the
+    SPA Config tab → tracker writes via render_toml → webctl never
+    re-reads it. Result: Maj-1's "torn lifetime asset" guard reverts to
+    the default 35 s deadline regardless of operator intent.
+
+    Settings only carries the *runtime* knob: the docker_stop_grace_s
+    and systemd_stop_timeout_s rows live in the schema for the install.sh
+    sed-substitution path (re-read at install time, NOT at webctl boot)
+    so they have no Settings field to bind here.
+
+    Precedence (highest first):
+      1. Env var (``GODO_WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S``).
+         Already wins via ``load_settings()``.
+      2. ``[webctl]`` table value in ``tracker.toml``.
+         Resolved here.
+      3. Schema-default constants
+         (``WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S_DEFAULT`` in
+         ``webctl_toml``). Already the fallback inside
+         ``read_webctl_section``.
+
+    To preserve env precedence, we only overwrite the Settings field if
+    its current value matches the bare module default — meaning the
+    env-var did NOT fire. Otherwise an env-var override would be
+    silently downgraded to the TOML value here.
+
+    Failure tolerance mirrors ``_log_resolved_sse_rates``: malformed
+    TOML or missing file → keep env/default fallback, log WARNING.
+    """
+    try:
+        section = webctl_toml.read_webctl_section(settings.tracker_toml_path)
+    except (webctl_toml.WebctlTomlError, OSError) as e:
+        _logger.warning(
+            "webctl_toml: mapping_webctl_stop_timeout_s keeps env/default "
+            "fallback (%.1fs): %s",
+            settings.mapping_webctl_stop_timeout_s,
+            e,
+        )
+        return settings
+
+    webctl_default = float(webctl_toml.WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S_DEFAULT)
+    if settings.mapping_webctl_stop_timeout_s != webctl_default:
+        # Env override active — preserve.
+        return settings
+    new_value = float(section.mapping_webctl_stop_timeout_s)
+    if new_value == settings.mapping_webctl_stop_timeout_s:
+        return settings
+    _logger.info(
+        "mapping_webctl_stop_timeout_s resolved from %s: %.1fs",
+        settings.tracker_toml_path,
+        new_value,
+    )
+    return dataclasses.replace(settings, mapping_webctl_stop_timeout_s=new_value)
+
+
 def main() -> None:  # pragma: no cover — entrypoint shim
     settings = load_settings()
     _log_resolved_sse_rates(settings)
+    settings = _augment_with_webctl_section(settings)
     lock = PidFileLock(settings.pidfile_path)
     try:
         lock.acquire()

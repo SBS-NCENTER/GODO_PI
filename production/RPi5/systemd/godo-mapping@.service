@@ -1,0 +1,95 @@
+# godo-mapping@<instance>.service — issue#14 SPA-driven SLAM mapping container.
+#
+# Operator-driven: NOT enabled. webctl starts via systemctl on
+# POST /api/mapping/start and stops on POST /api/mapping/stop.
+# Single instance enforced (D4): the only valid instance name is `active`.
+# webctl writes /run/godo/mapping/active.env immediately before invoking
+# `systemctl start godo-mapping@active.service`; the unit's
+# EnvironmentFile= reads that file to learn MAP_NAME / LIDAR_DEV / IMAGE_TAG.
+#
+# Restart policy: NO. A crash (e.g. LiDAR USB unplug) becomes the operator's
+# Failed state in the SPA, surfaced via /api/mapping/journal — never silently
+# retried.
+#
+# Bind-mount /var/lib/godo/maps -> /maps so the saved PGM/YAML lands
+# directly at the canonical path (L6).
+
+[Unit]
+Description=GODO mapping container (instance: %i)
+After=docker.service
+Requires=docker.service
+ConditionPathExists=/run/godo/mapping/%i.env
+
+[Service]
+Type=simple
+User=ncenter
+Group=ncenter
+
+# Operator-locked single-instance discipline: the unit name encodes
+# instance, but webctl always uses `active` (D4). Any other instance
+# is operator-curiosity and refused at the polkit layer (rule scoped
+# to `godo-mapping@active.service` only).
+EnvironmentFile=/run/godo/mapping/%i.env
+# Environment fallback if envfile is silent on a key (defence-in-depth;
+# webctl is supposed to populate all three).
+Environment=MAP_NAME=
+Environment=LIDAR_DEV=/dev/ttyUSB0
+Environment=IMAGE_TAG=godo-mapping:dev
+
+# Idempotent pre-start cleanup: a previous crashed run may have left a
+# `godo-mapping` container in `exited` state. `docker rm -f` is a no-op
+# if the container doesn't exist (returns 1 with stderr "No such
+# container"; we prefix `-` so systemd ignores the failure).
+ExecStartPre=-/usr/bin/docker rm -f godo-mapping
+
+# Main container run. --rm so the container is auto-removed on exit
+# (matches existing run-mapping.sh path); --network=host for ROS DDS;
+# --device for the LiDAR; -v for the maps bind-mount.
+ExecStart=/usr/bin/docker run --rm \
+    --name godo-mapping \
+    --network=host \
+    --device=${LIDAR_DEV} \
+    -v /var/lib/godo/maps:/maps \
+    -e MAP_NAME=${MAP_NAME} \
+    ${IMAGE_TAG}
+
+# Graceful stop: SIGTERM the container (entrypoint.sh trap runs the
+# map saver), then SIGKILL after 20 s. The unit's TimeoutStopSec gives
+# systemd-side patience. issue#14 Maj-1: grace bumped 10s → 20s after
+# operator-locked "맵 한번 제작하면 평생 쓰는" stake — nav2
+# `map_saver_cli` rename can take longer than 5 s on a slow SD card,
+# and a SIGKILL mid-write is the difference between a complete asset
+# and a torn lifetime artefact.
+#
+# install.sh sed-substitutes the `--time=<N>` value from the
+# webctl-owned `webctl.mapping_docker_stop_grace_s` Tier-2 key (default
+# 20). Operators tune via Config tab → "Docker 맵 제작" group.
+ExecStop=/usr/bin/docker stop --time=20 godo-mapping
+
+Restart=no
+TimeoutStartSec=15s
+# TimeoutStopSec must satisfy:
+#   docker stop --time grace (20s)
+#     < TimeoutStopSec (30s)
+#     < MAPPING_CONTAINER_STOP_TIMEOUT_S (35s in webctl/constants.py)
+# so the trap's map_saver_cli save (~2-5 s, but possibly more on slow
+# SD) completes before any layer escalates to SIGKILL. issue#14 Maj-1
+# fold (was 10/20/25; now 20/30/35).
+#
+# install.sh sed-substitutes the value from the webctl-owned
+# `webctl.mapping_systemd_stop_timeout_s` Tier-2 key (default 30).
+TimeoutStopSec=30s
+
+# Logs: forward container stdout/stderr to journald so /api/mapping/journal
+# can `journalctl -u godo-mapping@active.service` and surface them.
+StandardOutput=journal
+StandardError=journal
+
+# No StateDirectory= (the bind-mount path /var/lib/godo/maps is already
+# created by godo-tracker.service's StateDirectory=godo).
+# No RuntimeDirectory= for the same reason — /run/godo is created by
+# godo-tracker.service.
+
+[Install]
+# Intentionally NO WantedBy= — operator must not `systemctl enable`
+# this unit. webctl is the only valid starter.

@@ -29,7 +29,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
         python3-colcon-common-extensions \
         build-essential \
+        python3-numpy \
     && rm -rf /var/lib/apt/lists/*
+
+# python3-numpy is the issue#14 preview-node dependency. python3-rclpy is
+# already pulled in by ros-jazzy-ros-base; numpy is on the same apt
+# layer to avoid a separate pip install (which would invalidate the
+# colcon-overlay layer below).
 
 # Build upstream Slamtec/rplidar_ros (ros2 branch) into a colcon overlay.
 # Pinned to a specific commit so the image is reproducible. The Debian
@@ -72,7 +78,9 @@ WORKDIR /godo-mapping
 
 COPY launch/  /godo-mapping/launch/
 COPY config/  /godo-mapping/config/
+COPY preview_node/  /godo-mapping/preview_node/
 COPY entrypoint.sh /godo-mapping/entrypoint.sh
-RUN chmod +x /godo-mapping/entrypoint.sh
+RUN chmod +x /godo-mapping/entrypoint.sh \
+    && chmod +x /godo-mapping/preview_node/preview_dumper.py
 
 ENTRYPOINT ["/godo-mapping/entrypoint.sh"]

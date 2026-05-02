@@ -1511,7 +1511,131 @@ consumer half lives in `godo-webctl/CODEBASE.md` invariant `(ac)`
 
 ---
 
-## 12. Change log
+## 12. SPA-driven mapping pipeline (issue#14)
+
+Operator triggers SLAM mapping from the SPA Map > Mapping sub-tab.
+The Phase 4-3 + Phase 4.5 plumbing is reused; godo-mapping joins as a
+fourth stack and webctl gains a mode coordinator.
+
+### 12.1. Mode coordinator (D1)
+
+The "is mapping in progress?" question is owned **entirely** by webctl.
+Tracker UDS is NOT extended. State derives from
+`(/run/godo/mapping/state.json, docker inspect output)`. The C++ code
+does not need to know about mapping mode — when mapping is active the
+tracker is stopped (L2), so `/run/godo/ctl.sock` is unavailable, which
+is the existing tracker-down behaviour for webctl.
+
+State machine (5 states):
+
+```text
+Idle ─► Starting ─► Running ─► Stopping ─► Idle
+         ╲           ╲           ╲
+          ╲           ╲           ╲ stop_timeout (defensive docker kill)
+           ╲           ╲           ╲
+            ╲           ▼           ▼
+             ╲       Failed (container_crashed)
+              ▼
+         Failed (image_missing / tracker_stop_failed /
+                 container_start_timeout)
+
+Failed ─► Idle  (operator acknowledge via POST /api/mapping/stop)
+```
+
+### 12.2. Tracker-stop race (D3)
+
+`POST /api/mapping/start` runs synchronously through:
+
+1. Validate name (regex + reserved + maps-dir uniqueness).
+2. Pre-flight `docker image inspect ${IMAGE_TAG}` (no auto-build).
+3. Persist `state.json` as Starting (single source of truth).
+4. `systemctl stop godo-tracker.service` (sync; ServicesError → Failed).
+5. Resolve `[serial] lidar_port` from tracker.toml.
+6. Atomic-write `/run/godo/mapping/active.env`.
+7. `systemctl start godo-mapping@active.service`.
+8. Poll `docker inspect State.Status == "running"` for up to
+   `MAPPING_CONTAINER_START_TIMEOUT_S = 8.0 s`.
+
+Step 8's polling cadence is `MAPPING_DOCKER_INSPECT_POLL_S = 0.25 s`.
+Failure at any step transitions to Failed; the tracker stays stopped
+(operator restarts via System tab per L2).
+
+### 12.3. Preview node design (D8)
+
+The container's launch graph spawns a Python rclpy node
+(`preview_node/preview_dumper.py`) that subscribes `/map`, throttles to
+1 Hz, and atomic-writes `/maps/.preview/<MAP_NAME>.pgm` (tmp + fsync +
+os.replace). `/maps/.preview/` is hidden from `maps.list_pairs` via the
+leading-dot subdirectory + `MAPS_NAME_REGEX` first-char rule.
+
+Pure encoder lives in `pgm_encoder.py` (numpy + stdlib) so unit tests
+run hardware-free under `verify-no-hw.sh --quick`.
+
+### 12.4. Singleton-ticker SSE broadcast (M4)
+
+`/api/mapping/monitor/stream` is a singleton-ticker broadcast: ONE
+asyncio task runs the per-second snapshot at any time, regardless of
+subscriber count; per-subscriber `asyncio.Queue` fans out the same
+`bytes` frame. Subprocess invocations (`docker stats` / `df` / `du`)
+happen once per tick, not once per subscriber × tick. Self-terminates
+when `container_state ∈ {no_active, exited}`.
+
+Docker-only frame shape (S1 amendment): RPi5 host stats stay in the
+existing `/api/system/resources/extended/stream`. The SPA's monitor
+strip subscribes to BOTH streams in parallel.
+
+### 12.5. Failure recovery (L11)
+
+Four mitigated cases:
+
+- **Image missing**: `POST /api/mapping/start` returns 412 with build
+  instructions. Webctl never auto-builds.
+- **Container crash mid-mapping**: webctl's status reconcile sees
+  `inspect == None or "exited"` while state was Running → transitions
+  to Failed with `error_detail="container_crashed"` and
+  `journal_tail_available=true`. Partial PGM (if entrypoint trap
+  ran) is preserved; the operator decides whether to keep it.
+- **LiDAR USB unplug mid-mapping**: rplidar driver fails inside the
+  container → container exits non-zero. Same code path as crash.
+- **Tracker stop fails before mapping start**: 503 with explicit
+  Korean error guiding the operator to the System tab.
+
+### 12.6. systemd template + polkit
+
+Unit: `godo-mapping@.service`, instance fixed to `active` (D4).
+EnvironmentFile=`/run/godo/mapping/%i.env` (resolves to `active.env`)
+written by webctl immediately before `systemctl start`. Restart=no
+(failures surface as Failed, never silently retried).
+
+Polkit rule (rule (c) in `49-godo-systemctl.rules`) grants ncenter
+group `start`/`stop`/`restart` ONLY on `godo-mapping@active.service`
+— scope explicitly excludes any other instance name (defence against
+operator typos / curiosity that would spawn a second container).
+
+Stop-timeout ordering invariant (M5):
+`docker stop --time=10 < TimeoutStopSec=20s < webctl_timeout=25s` so
+the entrypoint's `map_saver_cli` save (~2-5 s) completes before any
+layer escalates to SIGKILL.
+
+### 12.7. L14 lock-out
+
+When `mapping.status().state ∈ {Starting, Running, Stopping}`, four
+existing endpoints return 409 `mapping_active`:
+
+- `POST /api/calibrate`
+- `POST /api/live`
+- `POST /api/map/edit`
+- `POST /api/map/origin`
+
+`POST /api/maps/<name>/activate` and `DELETE /api/maps/<name>` are
+NOT blocked — operator may still browse / activate / delete *other*
+maps while mapping is in progress. The new map being created is
+special (filesystem write race) but doesn't exist at canonical path
+until container exit, so no race with activate.
+
+---
+
+## 13. Change log
 
 - **2026-04-24 (v3.1, FreeD transport pinned)**: FreeD transport is **hardware UART** on the RPi 5, not USB-CDC. Crane RS-232 → YL-128 (MAX3232) → PL011 UART0 (GPIO 14/15, 40-pin header). §6.3 gains two ops-checklist items: (a) YL-128 VCC MUST come from the Pi's 3V3 rail so both sides of the TTL link are 3.3 V — an Arduino R4 build previously suffered intermittent framing errors when resistor dividers were added "for safety"; the verified fix is identical 3.3 V rails with no divider; (b) `/boot/firmware/config.txt` needs `enable_uart=1` + `dtparam=uart0=on`, and `cmdline.txt` must drop `console=serial0,115200` so the kernel serial console does not own `/dev/ttyAMA0`. §11.2 default `FREED_PORT` updated from `/dev/ttyACM0` to `/dev/ttyAMA0`. A new Phase 4-1 doc deliverable `production/RPi5/doc/freed_wiring.md` captures the pin-by-pin wiring, config-file diff, and verification procedure.
 - **2026-04-24 (v3, post Mode-A review)**: five blocker-level findings addressed: (1) `std::atomic<T>` replaced with an explicit `Seqlock<T>` template (§6.1.1) — `Offset = {dx, dy, dyaw}` and `FreedPacket[29]` are both too wide for lock-free atomics on Cortex-A76 without LSE2. Multi-reader permitted (Thread D + webctl). (2) Smoother edge detection switched from float equality to seqlock **generation counter** (integer, exact), and ramp completion snaps `live ← target` by value-copy at `frac ≥ 1.0` (§6.4.2). (3) Phase 4-3 scope cut to three endpoints (`/health`, `/map/backup`, `/calibrate`); map editor + full React frontend moved to Phase 4.5 (§7). (4) Trigger IPC primitive unified across CLAUDE.md / §1 / §6.1.3 / §7 as `std::atomic<bool> calibrate_requested` (idempotent, queue upgrade path documented). (5) AMCL divergence clamp now compares `target_new` against `last_written` (not `live`), and explicit `calibrate_requested` bypasses the clamp — eliminates the kidnapped-recovery deadlock (§8). Additional: §6.1.2 time source pinned to `CLOCK_MONOTONIC`; §6.2 moves `mlockall` to `main()` before thread spawn, `g_running` is `std::atomic<bool>`, `clock_nanosleep` loops on `EINTR`, signals blocked process-wide; §6.3 IRQ list marked TBD-measure in Phase 4-1; §6.4.1 new cold-path deadband filter (10 mm / 0.1° default) suppresses sub-noise AMCL jitter; §6.5 removes the bogus "physical crane limit" comment, adds precondition docs + endpoint-identity / fixed-point unit tests; §11 new Runtime configuration section with two-tier constants (constexpr invariants + TOML-backed tunables) and reload classes (hot / restart / recalibrate) for future frontend editing; §12 renumbered from §11. Magic-number ban added as a code-review rule.

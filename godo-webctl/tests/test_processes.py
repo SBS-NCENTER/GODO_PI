@@ -244,6 +244,24 @@ def test_classify_pid_godo_webctl_is_managed() -> None:
     assert processes.classify_pid("godo-webctl") == "managed"
 
 
+def test_classify_pid_docker_family() -> None:
+    """issue#14 Mode-B N1 fix (2026-05-02 KST): docker family processes
+    classify as `godo` (operator-confirmed: docker is only used for the
+    godo-mapping container in this project). Frontend ProcessTable
+    bolds + accent-colors them."""
+    assert processes.classify_pid("docker") == "godo"
+    assert processes.classify_pid("dockerd") == "godo"
+    assert processes.classify_pid("containerd") == "godo"
+    # `containerd-shim*` prefix match (kernel-truncated comm preserves
+    # the prefix even when the full name is longer like
+    # `containerd-shim-runc-v2`).
+    assert processes.classify_pid("containerd-shim") == "godo"
+    assert processes.classify_pid("containerd-shim-runc-v2") == "godo"
+    # Negative: bare similar names do NOT match (no false positives).
+    assert processes.classify_pid("docker-compose") == "general"
+    assert processes.classify_pid("dockerized-app") == "general"
+
+
 # --- enumerate_all_pids ---------------------------------------------------
 
 

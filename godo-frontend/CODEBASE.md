@@ -603,6 +603,75 @@ preview proxy needed.
 
 ## Change log
 
+### 2026-05-01 23:21 KST — issue#14: SPA Mapping pipeline + monitor
+
+#### Added
+
+- `src/routes/MapMapping.svelte` — Map > Mapping sub-tab body. Hosts
+  name input + validation, Start/Stop buttons, live preview canvas,
+  Docker monitor strip, journal-tail panel on Failed.
+- `src/components/MappingBanner.svelte` — top-of-page banner shown when
+  `mappingStatus.state ∈ {starting, running, stopping}`. Mounted in
+  `App.svelte` between `<TopBar/>` and `<RestartPendingBanner/>`.
+- `src/components/MappingPreviewCanvas.svelte` — cache-busting `<img>`
+  refresh of `/api/mapping/preview` at 1 Hz. Re-encoded server-side to
+  PNG (D5) so no client-side PGM decoder is required.
+- `src/components/MappingMonitorStrip.svelte` — Docker-only monitor
+  strip (S1 amendment). Subscribes the new
+  `/api/mapping/monitor/stream` SSE endpoint; freezes the last frame
+  with a "중단됨" badge on stream close (S2 — no fallback polling).
+- `src/stores/mappingStatus.ts` — 1 Hz `/api/mapping/status` polling
+  store. Subscribe-counted lifecycle (mirrors `subscribeMode` /
+  `subscribeRestartPending`).
+- `src/lib/protocol.ts` — `MAPPING_STATE_*`, `MAPPING_STATUS_FIELDS`,
+  `MAPPING_MONITOR_FIELDS`, mapping error codes, regex pattern mirror.
+- `src/lib/constants.ts` — `MAP_SUBTAB_MAPPING`,
+  `MAPPING_STATUS_POLL_MS`, `MAPPING_PREVIEW_REFRESH_MS`,
+  `MAPPING_NAME_REGEX_SOURCE`, `MAPPING_NAME_MAX_LEN`,
+  `MAPPING_RESERVED_NAMES`.
+
+#### Changed
+
+- `src/routes/Map.svelte` — added Mapping sub-tab tab button + URL
+  `/map-mapping`. Edit sub-tab tab button is `disabled` while
+  `mappingActive` (L14). Subscribes to `mappingStatus`.
+- `src/routes.ts` — added `'/map-mapping': Map`.
+- `src/components/TrackerControls.svelte` — Calibrate / Live / Backup
+  buttons disabled while `mappingActive`; tooltip "매핑 중에는
+  사용할 수 없습니다". Subscribes to `mappingStatus`.
+- `src/App.svelte` — mounts `<MappingBanner/>` above
+  `<RestartPendingBanner/>`.
+
+#### Tests
+
+- `tests/unit/mappingNameValidation.test.ts` — 26 cases (regex parity
+  vs. webctl mirror, accept matrix, reject matrix, leading-dot C5
+  pin, reserved-name set).
+- `tests/unit/mappingProtocol.test.ts` — 5 cases pinning state strings,
+  field tuples, error codes.
+- `tests/unit/mappingStatusStore.test.ts` — 3 cases: subscribe starts
+  polling, fetch updates store, last unsubscribe stops polling.
+- `tests/unit/trackerControls.test.ts` — added `vi.mock('$stores/mappingStatus')`
+  shim so the existing 5 cases pass with the new dependency.
+
+#### New invariants
+
+`(ac)` Mapping sub-tab URL convention — `/map-mapping` URL routes to
+`Map.svelte` which auto-selects the Mapping sub-tab. Direct
+navigation, refresh, and browser back-button all preserve the
+sub-tab. Sister convention to `/map-edit` per Map sub-tab family.
+
+`(ad)` Mode-aware UI gating via `mappingStatus` store — when
+`mappingStatus.state ∈ {starting, running, stopping}`,
+`<TrackerControls/>` Calibrate / Live / Backup buttons + the
+Edit sub-tab tab button are disabled with a Korean tooltip.
+Backend-side L14 lock-out (`/api/calibrate`, `/api/live`,
+`/api/map/edit`, `/api/map/origin` return 409 `mapping_active`)
+is the load-bearing defence; SPA gating is UX. Drift between
+the two surfaces would mean the operator sees a
+clickable-but-failing button — pinned by lock-out tests in
+`godo-webctl/tests/test_app_integration.py`.
+
 ### 2026-05-01 18:36 KST — Map + Backup list timestamps: include date (YYYY-MM-DD HH:MM)
 
 #### Changed
@@ -2457,3 +2526,96 @@ void` callback prop. In origin-pick mode pointer-down emits
   + 2 api + 1 mapViewportNoWheel + 1 already-existing infrastructure).
 - playwright: deferred (no e2e change for issue#3; HIL is the
   load-bearing acceptance gate per plan §"Definition of Done").
+
+---
+
+## 2026-05-02 09:13 KST — issue#14 Patch C: System tab integration of mapping pipeline
+
+Operator request: surface godo-mapping@active in the System tab's
+services overview block (alongside the 3 existing units), with
+action buttons disabled and a tooltip directing the operator to the
+Map > Mapping tab. Also distinguish the godo-family processes in
+the process table by giving the `godo` category an accent color so
+both godo-family categories (`godo` + `managed`) are visually
+grouped against the general-process noise.
+
+### Added
+
+- `src/components/ProcessTable.svelte` — `.name-godo` style adds
+  `color: var(--color-accent)` (was bold-only). Both `name-godo` +
+  `name-managed` are now bold + colored, so a quick visual scan of
+  the Processes tab groups godo-family rows together.
+- `src/components/ServiceStatusCard.svelte` — two new optional
+  props: `actionsDisabled: boolean` + `actionsDisabledTooltip:
+  string`. When set, the Start/Stop/Restart buttons are disabled
+  (regardless of admin status) and a hint string renders below the
+  card. Used by `routes/System.svelte` for the `godo-mapping@active`
+  card.
+- `src/routes/System.svelte` — services-grid layout switched from
+  `auto-fit + minmax(360px, 1fr)` (4 columns on a wide viewport) to
+  fixed `repeat(2, minmax(0, 1fr))` (2x2 grid) so the 4 service
+  cards display consistently. Mobile (< 720 px) drops to 1 column.
+- `tests/unit/processTable.test.ts` — 2 new cases:
+  `godo-category name carries name-godo class with accent color` +
+  `general-category name carries no godo-family class`.
+- `tests/unit/system.test.ts` — `seedServicesStoreWithMapping()`
+  helper + 3 new cases:
+  `renders all 4 service cards including godo-mapping@active`,
+  `godo-mapping@active row disables admin action buttons + shows
+  tooltip hint`,
+  `godo-mapping@active anon viewer sees no action buttons`.
+
+### Changed
+
+- `src/components/ServiceStatusCard.svelte` — button `disabled=`
+  expression now `busy || actionsDisabled` so the UI gate is
+  independent of the polkit gate (operator may still
+  `curl POST /api/system/service/godo-mapping@active/stop` directly;
+  same path Map > Mapping uses).
+- `src/routes/System.svelte` — passes
+  `actionsDisabled={svc.name === 'godo-mapping@active'}` +
+  `actionsDisabledTooltip='Map > Mapping 탭에서 제어'` per card.
+
+### Removed
+
+- (none)
+
+### Invariants
+
+- **(ad) godo-mapping-system-tab-readonly** — issue#14 Patch C2.
+  The System tab's services overview MUST render
+  `godo-mapping@active` as a status-only row: action buttons are
+  rendered (so the layout is consistent) but disabled with a Korean
+  tooltip directing the operator to Map > Mapping. The polkit rule
+  + ALLOWED_SERVICES whitelist allow the verb (so a curl POST
+  works), but the System tab's UI gate keeps the operator on the
+  proper control path. A future writer who removes the
+  `actionsDisabled` prop without consulting this invariant breaks
+  the operator-locked "Map > Mapping is the SOLE mapping-control
+  surface in the SPA" contract.
+
+  - SSOT: `services.ALLOWED_SERVICES` in webctl (4 entries after
+    issue#14 Patch C2). Frontend hard-codes the equality check
+    `svc.name === 'godo-mapping@active'` in `routes/System.svelte`;
+    drift between the unit name string and the systemd unit-file
+    template is caught by `tests/unit/system.test.ts::godo-mapping
+    @active row disables admin action buttons + shows tooltip
+    hint`.
+  - The disabled hint string `Map > Mapping 탭에서 제어` is pinned
+    in `tests/unit/system.test.ts`. A future writer who renames
+    the Map > Mapping sub-tab MUST update this string in lockstep.
+
+- **(ae) godo-family-process-color-grouping** — issue#14 Patch C1.
+  The Processes table colors both `godo` and `managed` categories,
+  not just `managed`. The current convention:
+  - `general` — no special styling (plain mono font, default color).
+  - `godo` — bold + `color: var(--color-accent)` (issue#14 C1).
+  - `managed` — bold + `color: var(--color-status-warn)` (Mode-A M5).
+
+  Both `name-godo` + `name-managed` MUST stay bold + visibly
+  distinguished from `general` so the operator can scan the table
+  and find godo-family processes at a glance. A future writer who
+  drops the color from one of them breaks the operator's triage
+  affordance. Pinned by `tests/unit/processTable.test.ts::godo-
+  category name carries name-godo class with accent color` +
+  `general-category name carries no godo-family class`.

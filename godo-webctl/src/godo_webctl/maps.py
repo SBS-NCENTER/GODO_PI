@@ -54,6 +54,7 @@ from .constants import (
     MAPS_ACTIVE_BASENAME,
     MAPS_NAME_REGEX,
     PGM_HEADER_MAX_BYTES,
+    YAML_HEADER_MAX_BYTES,
 )
 
 logger = logging.getLogger("godo_webctl.maps")
@@ -102,7 +103,15 @@ class MapEntry:
     `mtime_ns` is preserved at full nanosecond precision for ordering;
     JSON serialisation (in app.py) emits `mtime_unix` as float epoch
     seconds (per Mode-A N3) — operators read epoch seconds, not raw
-    nanoseconds, on the wire."""
+    nanoseconds, on the wire.
+
+    Operator UX 2026-05-02 KST: `width_px` / `height_px` (parsed from the
+    PGM P5 header) and `resolution_m` (parsed from the YAML
+    `resolution:` line) let the SPA Map list show ``W×H px (X.X×Y.Y m)``
+    — useful since the project switched from 0.05 m/cell to 0.025 m/cell
+    defaults and operators need to see at-a-glance which maps are
+    high-resolution. Any field is `None` if the corresponding header is
+    missing/malformed (graceful degradation, NOT a list-skip)."""
 
     name: str
     pgm_path: Path
@@ -110,6 +119,9 @@ class MapEntry:
     pgm_size_bytes: int
     pgm_mtime_ns: int
     is_active: bool
+    width_px: int | None
+    height_px: int | None
+    resolution_m: float | None
 
     def to_dict(self) -> dict[str, object]:
         """JSON wire shape (per Mode-A N3): epoch-seconds float, NOT
@@ -119,6 +131,9 @@ class MapEntry:
             "size_bytes": self.pgm_size_bytes,
             "mtime_unix": self.pgm_mtime_ns / 1_000_000_000,
             "is_active": self.is_active,
+            "width_px": self.width_px,
+            "height_px": self.height_px,
+            "resolution_m": self.resolution_m,
         }
 
 
@@ -266,6 +281,40 @@ def read_active_name(maps_dir: Path) -> str | None:
 # --- Listing -----------------------------------------------------------
 
 
+def read_yaml_resolution(yaml_path: Path) -> float | None:
+    """Parse the ``resolution:`` line out of a slam_toolbox / map_saver
+    YAML companion. Returns the float in meters/cell, or None on any
+    parse failure (missing line, non-numeric, file unreadable). The full
+    YAML is intentionally NOT parsed via PyYAML — we already have a
+    line-based parser idiom elsewhere (see backup.py / map_yaml.py) and
+    a missing/malformed resolution must NEVER raise the entire
+    list_pairs call (graceful degradation per Mode-A discipline).
+
+    Header bytes are bounded by `YAML_HEADER_MAX_BYTES` so a 1 GB sparse
+    YAML never streams through Python."""
+    try:
+        with yaml_path.open("rb") as f:
+            head = f.read(YAML_HEADER_MAX_BYTES)
+    except OSError:
+        return None
+    text = head.decode("utf-8", errors="replace")
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("resolution"):
+            continue
+        # Match `resolution: <number>` (any whitespace around `:`).
+        _, _, rhs = stripped.partition(":")
+        rhs = rhs.strip()
+        # Strip an optional inline comment.
+        if "#" in rhs:
+            rhs = rhs.split("#", 1)[0].strip()
+        try:
+            return float(rhs)
+        except ValueError:
+            return None
+    return None
+
+
 def list_pairs(maps_dir: Path) -> list[MapEntry]:
     """Enumerate every `<stem>.pgm` + `<stem>.yaml` pair under `maps_dir`.
     Filenames not matching `MAPS_NAME_REGEX` (e.g. `active.pgm` is
@@ -309,6 +358,16 @@ def list_pairs(maps_dir: Path) -> list[MapEntry]:
             st = entry.stat()
         except OSError:
             continue
+        # Operator UX 2026-05-02 KST: surface PGM dimensions + YAML
+        # resolution so the SPA Map list can render
+        # `W×H px (X.X×Y.Y m)`. Either field may be None if the header
+        # is malformed; the row still appears (graceful degradation).
+        try:
+            width_px, height_px = read_pgm_dimensions(entry)
+        except (PgmHeaderInvalid, OSError):
+            width_px = None
+            height_px = None
+        resolution_m = read_yaml_resolution(yaml)
         entries.append(
             MapEntry(
                 name=stem,
@@ -317,6 +376,9 @@ def list_pairs(maps_dir: Path) -> list[MapEntry]:
                 pgm_size_bytes=st.st_size,
                 pgm_mtime_ns=st.st_mtime_ns,
                 is_active=(stem == active),
+                width_px=width_px,
+                height_px=height_px,
+                resolution_m=resolution_m,
             ),
         )
     entries.sort(key=lambda e: e.name)

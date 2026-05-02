@@ -405,11 +405,20 @@ export interface RestartPendingResponse {
 // JSON shape for one row of GET /api/maps. Mirrors backend
 // `maps.MapEntry.to_dict()` (mtime is float epoch seconds, NOT raw
 // nanoseconds — per Mode-A N3 wire format).
+//
+// Operator UX 2026-05-02 KST: width_px / height_px / resolution_m
+// added so the SPA Map list can render `W×H px (X.X×Y.Y m)`. Any field
+// may be null if the corresponding header is malformed (graceful
+// degradation — the row still appears, the SPA shows '—' for unknown
+// dimensions).
 export interface MapEntry {
   name: string;
   size_bytes: number;
   mtime_unix: number;
   is_active: boolean;
+  width_px: number | null;
+  height_px: number | null;
+  resolution_m: number | null;
 }
 
 // GET /api/maps response = array of MapEntry. The store keeps the array
@@ -656,3 +665,100 @@ export interface CalibrateBody {
   sigma_xy_m?: number;
   sigma_yaw_deg?: number;
 }
+
+// --- issue#14 — mapping pipeline wire shapes -------------------------
+// Mirror of `godo_webctl.protocol::MAPPING_STATE_*` /
+// `MAPPING_STATUS_FIELDS` / `MAPPING_MONITOR_FIELDS` and the mapping-
+// pipeline error codes. Drift detected by inspection per
+// godo-frontend/CODEBASE.md invariant (the new mapping block).
+
+export const MAPPING_STATE_IDLE = 'idle';
+export const MAPPING_STATE_STARTING = 'starting';
+export const MAPPING_STATE_RUNNING = 'running';
+export const MAPPING_STATE_STOPPING = 'stopping';
+export const MAPPING_STATE_FAILED = 'failed';
+
+export type MappingState =
+  | typeof MAPPING_STATE_IDLE
+  | typeof MAPPING_STATE_STARTING
+  | typeof MAPPING_STATE_RUNNING
+  | typeof MAPPING_STATE_STOPPING
+  | typeof MAPPING_STATE_FAILED;
+
+export const VALID_MAPPING_STATES: ReadonlySet<MappingState> = new Set<MappingState>([
+  MAPPING_STATE_IDLE,
+  MAPPING_STATE_STARTING,
+  MAPPING_STATE_RUNNING,
+  MAPPING_STATE_STOPPING,
+  MAPPING_STATE_FAILED,
+]);
+
+export const MAPPING_STATUS_FIELDS = [
+  'state',
+  'map_name',
+  'container_id_short',
+  'started_at',
+  'error_detail',
+  'journal_tail_available',
+] as const;
+
+export interface MappingStatus {
+  state: MappingState;
+  map_name: string | null;
+  container_id_short: string | null;
+  started_at: string | null; // ISO 8601 UTC
+  error_detail: string | null;
+  journal_tail_available: boolean;
+}
+
+// Mapping-pipeline error codes (mirror of `godo_webctl.protocol::ERR_*`).
+export const ERR_INVALID_MAPPING_NAME = 'invalid_mapping_name';
+export const ERR_NAME_EXISTS = 'name_exists';
+export const ERR_MAPPING_ALREADY_ACTIVE = 'mapping_already_active';
+export const ERR_MAPPING_ACTIVE = 'mapping_active';
+export const ERR_IMAGE_MISSING = 'image_missing';
+export const ERR_DOCKER_UNAVAILABLE = 'docker_unavailable';
+export const ERR_TRACKER_STOP_FAILED = 'tracker_stop_failed';
+export const ERR_CONTAINER_START_TIMEOUT = 'container_start_timeout';
+export const ERR_CONTAINER_STOP_TIMEOUT = 'container_stop_timeout';
+export const ERR_NO_ACTIVE_MAPPING = 'no_active_mapping';
+export const ERR_PREVIEW_NOT_YET_PUBLISHED = 'preview_not_yet_published';
+export const ERR_STATE_FILE_CORRUPT = 'state_file_corrupt';
+
+// Docker-only monitor frame (S1 amendment). RPi5 host stats live in
+// /api/system/resources/extended/stream.
+export const MAPPING_MONITOR_FIELDS = [
+  'valid',
+  'container_id_short',
+  'container_state',
+  'container_cpu_pct',
+  'container_mem_bytes',
+  'container_net_rx_bytes',
+  'container_net_tx_bytes',
+  'var_lib_godo_disk_avail_bytes',
+  'var_lib_godo_disk_total_bytes',
+  'in_progress_map_size_bytes',
+  'published_mono_ns',
+] as const;
+
+export type MappingContainerState = 'running' | 'exited' | 'no_active';
+
+export interface MappingMonitorFrame {
+  valid: boolean;
+  container_id_short: string | null;
+  container_state: MappingContainerState;
+  container_cpu_pct: number | null;
+  container_mem_bytes: number | null;
+  container_net_rx_bytes: number | null;
+  container_net_tx_bytes: number | null;
+  var_lib_godo_disk_avail_bytes: number | null;
+  var_lib_godo_disk_total_bytes: number | null;
+  in_progress_map_size_bytes: number | null;
+  published_mono_ns: number;
+}
+
+// MAPPING_NAME_REGEX_PATTERN_STR — mirror of webctl
+// `MAPPING_NAME_REGEX.pattern`. C5 fix: leading dot REJECTED. Pinned
+// by `tests/unit/mappingNameValidation.test.ts` for parity.
+export const MAPPING_NAME_REGEX_PATTERN_STR =
+  '^[A-Za-z0-9_()-][A-Za-z0-9._()\\-,]{0,63}$';

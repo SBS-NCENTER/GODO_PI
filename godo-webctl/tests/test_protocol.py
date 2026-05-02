@@ -716,12 +716,93 @@ def test_godo_process_names_match_cmake_executables() -> None:
 
 def test_managed_process_names_cardinality() -> None:
     """Mode-A M2 fold: `MANAGED_PROCESS_NAMES` is the process-name view
-    of `services.ALLOWED_SERVICES`; binary-vs-unit asymmetry means the
-    set membership differs by exactly the substitution
-    `godo-tracker → godo_tracker_rt`."""
+    of `services.ALLOWED_SERVICES` MINUS the units that don't appear in
+    the host process list (godo-mapping@active runs inside Docker — its
+    container processes show up as `slam_toolbox_node` etc., not as
+    `godo-mapping`). Binary-vs-unit asymmetry means the set membership
+    differs by exactly the substitution `godo-tracker → godo_tracker_rt`
+    AND the omission of `godo-mapping@active`.
+
+    issue#14 Patch C2 (2026-05-02): godo-mapping@active joined
+    ALLOWED_SERVICES so the System tab can render its status; it is
+    NOT added to MANAGED_PROCESS_NAMES because the docker container's
+    processes don't carry that argv-derived name."""
     from godo_webctl import services
 
     assert len(P.MANAGED_PROCESS_NAMES) == 3
-    assert len(services.ALLOWED_SERVICES) == 3
+    assert len(services.ALLOWED_SERVICES) == 4
     diff = P.MANAGED_PROCESS_NAMES.symmetric_difference(services.ALLOWED_SERVICES)
-    assert diff == {"godo-tracker", "godo_tracker_rt"}, f"Asymmetric-diff mismatch: {diff}"
+    assert diff == {
+        "godo-tracker",
+        "godo_tracker_rt",
+        "godo-mapping@active",
+    }, f"Asymmetric-diff mismatch: {diff}"
+
+
+# --- issue#14 — mapping pipeline state + monitor field pins -------------
+
+
+def test_mapping_state_strings_pinned() -> None:
+    """Mirrored on the SPA via `lib/protocol.ts::MAPPING_STATE_*`. Drift
+    detected by inspection per godo-frontend/CODEBASE.md invariant."""
+    assert P.MAPPING_STATE_IDLE == "idle"
+    assert P.MAPPING_STATE_STARTING == "starting"
+    assert P.MAPPING_STATE_RUNNING == "running"
+    assert P.MAPPING_STATE_STOPPING == "stopping"
+    assert P.MAPPING_STATE_FAILED == "failed"
+
+
+def test_valid_mapping_states_set_pinned() -> None:
+    assert frozenset(
+        {"idle", "starting", "running", "stopping", "failed"},
+    ) == P.VALID_MAPPING_STATES
+
+
+def test_mapping_status_fields_pinned() -> None:
+    """Wire shape of GET /api/mapping/status. Drift from this tuple
+    breaks the SPA's mappingStatus store."""
+    assert P.MAPPING_STATUS_FIELDS == (
+        "state",
+        "map_name",
+        "container_id_short",
+        "started_at",
+        "error_detail",
+        "journal_tail_available",
+    )
+
+
+def test_mapping_monitor_fields_pinned() -> None:
+    """Docker-only frame (S1 amendment). RPi5 host stats are in the
+    existing `/api/system/resources/extended/stream`. Drift in this
+    field tuple breaks the SPA's MappingMonitorStrip Docker region."""
+    assert P.MAPPING_MONITOR_FIELDS == (
+        "valid",
+        "container_id_short",
+        "container_state",
+        "container_cpu_pct",
+        "container_mem_bytes",
+        "container_net_rx_bytes",
+        "container_net_tx_bytes",
+        "var_lib_godo_disk_avail_bytes",
+        "var_lib_godo_disk_total_bytes",
+        "in_progress_map_size_bytes",
+        "published_mono_ns",
+    )
+
+
+def test_mapping_error_codes_pinned() -> None:
+    """All 13 mapping-pipeline error codes. Drift from this file fails
+    the SPA mirror in `lib/protocol.ts`."""
+    assert P.ERR_INVALID_MAPPING_NAME == "invalid_mapping_name"
+    assert P.ERR_NAME_EXISTS == "name_exists"
+    assert P.ERR_MAPPING_ALREADY_ACTIVE == "mapping_already_active"
+    assert P.ERR_MAPPING_ACTIVE == "mapping_active"
+    assert P.ERR_IMAGE_MISSING == "image_missing"
+    assert P.ERR_DOCKER_UNAVAILABLE == "docker_unavailable"
+    assert P.ERR_TRACKER_STOP_FAILED == "tracker_stop_failed"
+    assert P.ERR_CONTAINER_START_TIMEOUT == "container_start_timeout"
+    assert P.ERR_CONTAINER_STOP_TIMEOUT == "container_stop_timeout"
+    assert P.ERR_NO_ACTIVE_MAPPING == "no_active_mapping"
+    assert P.ERR_PREVIEW_NOT_YET_PUBLISHED == "preview_not_yet_published"
+    assert P.ERR_STATE_FILE_CORRUPT == "state_file_corrupt"
+    assert P.ERR_BAD_N == "bad_n"

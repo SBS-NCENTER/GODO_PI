@@ -48,8 +48,24 @@ beforeEach(() => {
   vi.spyOn(globalThis, 'fetch').mockResolvedValue(
     new Response(
       JSON.stringify([
-        { name: 'studio_v1', size_bytes: 16, mtime_unix: 1.0, is_active: true },
-        { name: 'studio_v2', size_bytes: 16, mtime_unix: 2.0, is_active: false },
+        {
+          name: 'studio_v1',
+          size_bytes: 16,
+          mtime_unix: 1.0,
+          is_active: true,
+          width_px: 200,
+          height_px: 200,
+          resolution_m: 0.05,
+        },
+        {
+          name: 'studio_v2',
+          size_bytes: 16,
+          mtime_unix: 2.0,
+          is_active: false,
+          width_px: 400,
+          height_px: 400,
+          resolution_m: 0.025,
+        },
       ]),
       { status: 200, headers: { 'content-type': 'application/json' } },
     ),
@@ -159,5 +175,107 @@ describe('MapListPanel — activate-dialog hide-button gate (M4)', () => {
     expect(target.querySelector('[data-testid="confirm-dialog"]')).not.toBeNull();
     expect(target.querySelector('[data-testid="confirm-ok"]')).not.toBeNull();
     expect(target.querySelector('[data-testid="confirm-primary-hidden"]')).toBeNull();
+  });
+});
+
+describe('MapListPanel — map dimensions cell (operator UX 2026-05-02)', () => {
+  it('renders W×H px (X.X×Y.Y m) for entries with both dims and resolution', async () => {
+    setHostname('127.0.0.1');
+    setAdminSession();
+
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const component = mount(MapListPanel, { target, props: {} });
+    cleanups.push(() => {
+      unmount(component);
+      target.remove();
+    });
+    await waitFor(
+      () => target.querySelector('[data-testid="map-dims-studio_v1"]'),
+      'studio_v1 dims cell',
+    );
+    // 200×200 px @ 0.05 m/cell → 10.0×10.0 m
+    const v1 = target.querySelector<HTMLTableCellElement>(
+      '[data-testid="map-dims-studio_v1"]',
+    );
+    expect(v1).not.toBeNull();
+    expect(v1!.textContent).toMatch(/200×200 px/);
+    expect(v1!.textContent).toMatch(/10\.0×10\.0 m/);
+
+    // 400×400 px @ 0.025 m/cell → 10.0×10.0 m (high-res of same area)
+    const v2 = target.querySelector<HTMLTableCellElement>(
+      '[data-testid="map-dims-studio_v2"]',
+    );
+    expect(v2).not.toBeNull();
+    expect(v2!.textContent).toMatch(/400×400 px/);
+    expect(v2!.textContent).toMatch(/10\.0×10\.0 m/);
+  });
+
+  it('renders W×H px alone when resolution is null (graceful degradation)', async () => {
+    setHostname('127.0.0.1');
+    setAdminSession();
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify([
+          {
+            name: 'studio_no_res',
+            size_bytes: 16,
+            mtime_unix: 1.0,
+            is_active: false,
+            width_px: 100,
+            height_px: 50,
+            resolution_m: null,
+          },
+        ]),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const component = mount(MapListPanel, { target, props: {} });
+    cleanups.push(() => {
+      unmount(component);
+      target.remove();
+    });
+    const cell = await waitFor<HTMLTableCellElement>(
+      () => target.querySelector<HTMLTableCellElement>('[data-testid="map-dims-studio_no_res"]'),
+      'no-resolution dims cell',
+    );
+    expect(cell.textContent!.trim()).toBe('100×50 px');
+  });
+
+  it('renders em-dash when both dims are null', async () => {
+    setHostname('127.0.0.1');
+    setAdminSession();
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify([
+          {
+            name: 'studio_corrupt_pgm',
+            size_bytes: 0,
+            mtime_unix: 1.0,
+            is_active: false,
+            width_px: null,
+            height_px: null,
+            resolution_m: null,
+          },
+        ]),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const component = mount(MapListPanel, { target, props: {} });
+    cleanups.push(() => {
+      unmount(component);
+      target.remove();
+    });
+    const cell = await waitFor<HTMLTableCellElement>(
+      () => target.querySelector<HTMLTableCellElement>(
+        '[data-testid="map-dims-studio_corrupt_pgm"]',
+      ),
+      'corrupt-pgm dims cell',
+    );
+    expect(cell.textContent!.trim()).toBe('—');
   });
 });

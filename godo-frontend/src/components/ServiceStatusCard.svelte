@@ -40,8 +40,26 @@
     nowUnix: number; // Date.now()/1000 from the parent; exposed as a prop
     // so unit tests can freeze "now" without monkeypatching Date.
     onAction?: (action: 'start' | 'stop' | 'restart') => void;
+    /**
+     * Optional UI-layer override that disables the action buttons even
+     * when the operator is admin. Used by the System tab for
+     * `godo-mapping@active`: the polkit rule grants the verb (so
+     * `curl POST /api/system/service/godo-mapping@active/stop` still
+     * works), but the System tab UI hides the buttons behind a tooltip
+     * so the operator goes through the Map > Mapping tab instead.
+     * issue#14 Patch C2.
+     */
+    actionsDisabled?: boolean;
+    actionsDisabledTooltip?: string;
   }
-  let { service, isAdmin, nowUnix, onAction }: Props = $props();
+  let {
+    service,
+    isAdmin,
+    nowUnix,
+    onAction,
+    actionsDisabled = false,
+    actionsDisabledTooltip = '',
+  }: Props = $props();
 
   let busy = $state(false);
   let lastError = $state<string | null>(null);
@@ -136,25 +154,33 @@
       {/if}
     </div>
     {#if isAdmin}
-      <div class="hstack">
+      <div class="hstack" title={actionsDisabled ? actionsDisabledTooltip : ''}>
         <button
-          disabled={busy}
+          disabled={busy || actionsDisabled}
           onclick={() => action('start')}
           data-testid={`svc-action-start-${service.name}`}>Start</button
         >
         <button
-          disabled={busy}
+          disabled={busy || actionsDisabled}
           onclick={() => action('stop')}
           data-testid={`svc-action-stop-${service.name}`}>Stop</button
         >
         <button
-          disabled={busy}
+          disabled={busy || actionsDisabled}
           onclick={() => action('restart')}
           data-testid={`svc-action-restart-${service.name}`}>Restart</button
         >
       </div>
     {/if}
   </div>
+  {#if actionsDisabled && actionsDisabledTooltip && isAdmin}
+    <div
+      class="muted actions-disabled-hint"
+      data-testid={`svc-actions-disabled-hint-${service.name}`}
+    >
+      {actionsDisabledTooltip}
+    </div>
+  {/if}
 
   <div class="kv-grid" style="margin-top: 8px;">
     <span>uptime</span>
@@ -189,6 +215,12 @@
   }
   .sub-state {
     font-size: var(--font-size-sm);
+  }
+  /* issue#14 Patch C2 — explanatory hint shown next to disabled action
+     row (e.g. godo-mapping@active card directs operator to Map > Mapping). */
+  .actions-disabled-hint {
+    font-size: var(--font-size-sm);
+    margin-top: var(--space-2);
   }
   .kv-grid {
     display: grid;

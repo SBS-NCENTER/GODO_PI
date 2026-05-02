@@ -245,3 +245,229 @@ def test_public_constants_pinned() -> None:
     assert wt.WEBCTL_SCAN_STREAM_HZ_DEFAULT == 30
     assert wt.WEBCTL_STREAM_HZ_MIN == 1
     assert wt.WEBCTL_STREAM_HZ_MAX == 60
+
+
+# ---- issue#14 — tracker-owned [serial] section reader -----------------
+
+
+def test_tracker_serial_default_when_missing_file(tmp_path: Path) -> None:
+    out = wt.read_tracker_serial_section(tmp_path / "no_such.toml")
+    assert out.lidar_port == wt.TRACKER_SERIAL_LIDAR_PORT_DEFAULT
+    assert wt.TRACKER_SERIAL_LIDAR_PORT_DEFAULT == "/dev/ttyUSB0"
+
+
+def test_tracker_serial_default_when_section_missing(tmp_path: Path) -> None:
+    p = tmp_path / "tracker.toml"
+    p.write_text("[network]\nue_host = \"127.0.0.1\"\n")
+    out = wt.read_tracker_serial_section(p)
+    assert out.lidar_port == "/dev/ttyUSB0"
+
+
+def test_tracker_serial_reads_value_verbatim(tmp_path: Path) -> None:
+    p = tmp_path / "tracker.toml"
+    p.write_text('[serial]\nlidar_port = "/dev/ttyUSB1"\n')
+    out = wt.read_tracker_serial_section(p)
+    assert out.lidar_port == "/dev/ttyUSB1"
+
+
+def test_tracker_serial_default_when_empty_string(tmp_path: Path) -> None:
+    """Empty string from TOML falls back to default (defence-in-depth)."""
+    p = tmp_path / "tracker.toml"
+    p.write_text('[serial]\nlidar_port = ""\n')
+    out = wt.read_tracker_serial_section(p)
+    assert out.lidar_port == "/dev/ttyUSB0"
+
+
+def test_tracker_serial_rejects_non_string(tmp_path: Path) -> None:
+    p = tmp_path / "tracker.toml"
+    p.write_text("[serial]\nlidar_port = 1234\n")
+    with pytest.raises(wt.WebctlTomlError):
+        wt.read_tracker_serial_section(p)
+
+
+def test_tracker_serial_rejects_table_section(tmp_path: Path) -> None:
+    """If [serial] is given as an array of tables (operator typo), reject
+    cleanly rather than silently use defaults."""
+    p = tmp_path / "tracker.toml"
+    p.write_text('[[serial]]\nlidar_port = "/dev/ttyUSB1"\n')
+    with pytest.raises(wt.WebctlTomlError):
+        wt.read_tracker_serial_section(p)
+
+
+def test_tracker_serial_propagates_malformed_toml(tmp_path: Path) -> None:
+    p = tmp_path / "tracker.toml"
+    p.write_text("[serial\nlidar_port = bogus\n")
+    with pytest.raises(wt.WebctlTomlError):
+        wt.read_tracker_serial_section(p)
+
+
+# ---- issue#14 Maj-1 — mapping-stop timing ladder ------------------------
+
+
+def test_mapping_timing_defaults_when_section_missing(tmp_path: Path) -> None:
+    """No [webctl] section → all 3 mapping_*_s fields fall to schema defaults."""
+    section = wt.read_webctl_section(tmp_path / "no_such.toml", env={})
+    assert section.mapping_docker_stop_grace_s == 20
+    assert section.mapping_systemd_stop_timeout_s == 30
+    assert section.mapping_webctl_stop_timeout_s == 35
+
+
+def test_mapping_timing_reads_from_toml(tmp_path: Path) -> None:
+    p = tmp_path / "tracker.toml"
+    p.write_text(
+        "[webctl]\n"
+        "mapping_docker_stop_grace_s = 25\n"
+        "mapping_systemd_stop_timeout_s = 40\n"
+        "mapping_webctl_stop_timeout_s = 50\n",
+    )
+    section = wt.read_webctl_section(p, env={})
+    assert section.mapping_docker_stop_grace_s == 25
+    assert section.mapping_systemd_stop_timeout_s == 40
+    assert section.mapping_webctl_stop_timeout_s == 50
+
+
+def test_mapping_timing_env_overrides_toml(tmp_path: Path) -> None:
+    p = tmp_path / "tracker.toml"
+    p.write_text(
+        "[webctl]\n"
+        "mapping_docker_stop_grace_s = 25\n"
+        "mapping_systemd_stop_timeout_s = 40\n"
+        "mapping_webctl_stop_timeout_s = 50\n",
+    )
+    env = {"GODO_WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S": "60"}
+    section = wt.read_webctl_section(p, env=env)
+    assert section.mapping_webctl_stop_timeout_s == 60
+
+
+@pytest.mark.parametrize("bad", [9, 5, 61, 100])
+def test_mapping_docker_stop_grace_s_out_of_range_raises(tmp_path: Path, bad: int) -> None:
+    """Range [10, 60] mirrors the C++ schema row."""
+    p = tmp_path / "tracker.toml"
+    p.write_text(f"[webctl]\nmapping_docker_stop_grace_s = {bad}\n")
+    with pytest.raises(wt.WebctlTomlError) as ei:
+        wt.read_webctl_section(p, env={})
+    assert "webctl.mapping_docker_stop_grace_s" in str(ei.value)
+
+
+@pytest.mark.parametrize("bad", [19, 0, 91, 200])
+def test_mapping_systemd_stop_timeout_s_out_of_range_raises(tmp_path: Path, bad: int) -> None:
+    """Range [20, 90] mirrors the C++ schema row."""
+    p = tmp_path / "tracker.toml"
+    # Pin docker stop grace below to isolate the systemd-key error.
+    p.write_text(
+        f"[webctl]\n"
+        f"mapping_docker_stop_grace_s = 15\n"
+        f"mapping_systemd_stop_timeout_s = {bad}\n",
+    )
+    with pytest.raises(wt.WebctlTomlError) as ei:
+        wt.read_webctl_section(p, env={})
+    assert "webctl.mapping_systemd_stop_timeout_s" in str(ei.value)
+
+
+@pytest.mark.parametrize("bad", [24, 0, 121, 999])
+def test_mapping_webctl_stop_timeout_s_out_of_range_raises(tmp_path: Path, bad: int) -> None:
+    """Range [25, 120] mirrors the C++ schema row."""
+    p = tmp_path / "tracker.toml"
+    p.write_text(
+        f"[webctl]\n"
+        f"mapping_docker_stop_grace_s = 15\n"
+        f"mapping_systemd_stop_timeout_s = 22\n"
+        f"mapping_webctl_stop_timeout_s = {bad}\n",
+    )
+    with pytest.raises(wt.WebctlTomlError) as ei:
+        wt.read_webctl_section(p, env={})
+    assert "webctl.mapping_webctl_stop_timeout_s" in str(ei.value)
+
+
+def test_mapping_timing_ordering_invariant_docker_ge_systemd_raises(
+    tmp_path: Path,
+) -> None:
+    """If docker_grace >= systemd_timeout, reject — SIGKILL would
+    fire while docker stop is still expecting to send TERM."""
+    p = tmp_path / "tracker.toml"
+    p.write_text(
+        "[webctl]\n"
+        "mapping_docker_stop_grace_s = 30\n"
+        "mapping_systemd_stop_timeout_s = 30\n"
+        "mapping_webctl_stop_timeout_s = 50\n",
+    )
+    with pytest.raises(wt.WebctlTomlError) as ei:
+        wt.read_webctl_section(p, env={})
+    msg = str(ei.value)
+    # Error message names the second key in the broken pair so the
+    # operator sees the row to bump.
+    assert "webctl.mapping_systemd_stop_timeout_s" in msg
+    assert "must be >" in msg
+
+
+def test_mapping_timing_ordering_invariant_systemd_ge_webctl_raises(
+    tmp_path: Path,
+) -> None:
+    """If systemd_timeout >= webctl_timeout, webctl's poll deadline
+    fires before systemd has a chance to clean-stop the unit."""
+    p = tmp_path / "tracker.toml"
+    p.write_text(
+        "[webctl]\n"
+        "mapping_docker_stop_grace_s = 15\n"
+        "mapping_systemd_stop_timeout_s = 50\n"
+        "mapping_webctl_stop_timeout_s = 50\n",
+    )
+    with pytest.raises(wt.WebctlTomlError) as ei:
+        wt.read_webctl_section(p, env={})
+    assert "webctl.mapping_webctl_stop_timeout_s" in str(ei.value)
+    assert "must be >" in str(ei.value)
+
+
+def test_mapping_timing_ordering_invariant_docker_gt_systemd_raises(
+    tmp_path: Path,
+) -> None:
+    """Strict-greater check (not just != ) — docker_grace > systemd
+    flips the ladder upside down."""
+    p = tmp_path / "tracker.toml"
+    p.write_text(
+        "[webctl]\n"
+        "mapping_docker_stop_grace_s = 50\n"
+        "mapping_systemd_stop_timeout_s = 30\n"
+        "mapping_webctl_stop_timeout_s = 60\n",
+    )
+    with pytest.raises(wt.WebctlTomlError):
+        wt.read_webctl_section(p, env={})
+
+
+def test_mapping_timing_defaults_satisfy_ordering_invariant() -> None:
+    """Schema defaults pinned in webctl_toml.py MUST satisfy the
+    ordering invariant — otherwise a fresh deploy with no [webctl]
+    overrides would crash at first `read_webctl_section` call."""
+    docker = wt.WEBCTL_MAPPING_DOCKER_STOP_GRACE_S_DEFAULT
+    systemd = wt.WEBCTL_MAPPING_SYSTEMD_STOP_TIMEOUT_S_DEFAULT
+    webctl = wt.WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S_DEFAULT
+    assert docker < systemd < webctl
+    # And the constants match the operator-locked 20/30/35 trio.
+    assert docker == 20
+    assert systemd == 30
+    assert webctl == 35
+
+
+def test_mapping_timing_partial_section_uses_defaults_for_missing(
+    tmp_path: Path,
+) -> None:
+    """If only one key is set, the others default to the schema."""
+    p = tmp_path / "tracker.toml"
+    p.write_text("[webctl]\nmapping_docker_stop_grace_s = 25\n")
+    section = wt.read_webctl_section(p, env={})
+    assert section.mapping_docker_stop_grace_s == 25
+    assert section.mapping_systemd_stop_timeout_s == 30  # default
+    assert section.mapping_webctl_stop_timeout_s == 35  # default
+
+
+def test_mapping_timing_partial_violating_ordering_still_rejected(
+    tmp_path: Path,
+) -> None:
+    """If a partial override breaks the ladder against defaults
+    (e.g. docker=35 against systemd_default=30), reject — the
+    invariant must hold against the EFFECTIVE values, not just the
+    operator-supplied ones."""
+    p = tmp_path / "tracker.toml"
+    p.write_text("[webctl]\nmapping_docker_stop_grace_s = 35\n")
+    with pytest.raises(wt.WebctlTomlError):
+        wt.read_webctl_section(p, env={})

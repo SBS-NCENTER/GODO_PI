@@ -741,6 +741,112 @@ JWT secret: `/var/lib/godo/auth/jwt_secret` (서버 첫 부팅 시 random 생성
 
 ---
 
+## 8.5. issue#14 — Map > Mapping sub-tab (operator-driven SLAM)
+
+Operator triggers SLAM mapping from a third Map sub-tab. The
+URL convention mirrors `/map-edit`: `/map-mapping` routes to
+`Map.svelte` which auto-selects the Mapping sub-tab.
+
+### 8.5.1. Three-sub-tab routing
+
+```text
+/map           → Overview  (existing)
+/map-edit      → Edit      (existing — disabled while mapping active)
+/map-mapping   → Mapping   (new)
+```
+
+`Map.svelte:pathToSubtab` dispatches on `route.path`. The Edit sub-tab
+tab button is `disabled` while `mappingStatus.state ∈ {starting,
+running, stopping}` (L14 lockout) with tooltip "매핑 중에는
+편집할 수 없습니다".
+
+### 8.5.2. Mode-aware gating (L14)
+
+`mappingStatus` store is a 1 Hz polling Svelte store
+(`/api/mapping/status`) with subscribe-counted lifecycle (mirrors
+`subscribeMode` / `subscribeRestartPending`). When `state ∈ {Starting,
+Running, Stopping}`:
+
+- `<TrackerControls/>` Calibrate / Live / Backup buttons disabled
+  with Korean tooltip.
+- `<MapEdit/>` Apply button disabled (the parent tab button is also
+  disabled, so the Edit body is unreachable in practice).
+- Any direct curl bypass is caught at the backend's L14 lock-out
+  (`/api/calibrate`, `/api/live`, `/api/map/edit`, `/api/map/origin`
+  return 409 `mapping_active`).
+
+### 8.5.3. Banner behaviour
+
+`<MappingBanner/>` mounts in `App.svelte` between `<TopBar/>` and
+`<RestartPendingBanner/>`. Visible when `state ∈ {Starting, Running,
+Stopping}`:
+
+```text
+● 매핑 진행 중: studio_2026_05_01_a   (시작 중)
+```
+
+Hidden on Idle (no banner). On Failed, the banner is hidden — the
+Mapping sub-tab body owns the failure UI (a top-level "still in
+progress" banner would mislead the operator into thinking mapping is
+recoverable mid-flight when it has actually crashed).
+
+Banner stack order (top to bottom):
+
+1. TopBar (always visible).
+2. MappingBanner (issue#14, when active).
+3. RestartPendingBanner (existing).
+4. Tracker-down banner (existing, when `tracker !== ok`).
+5. Page content.
+
+### 8.5.4. Mapping sub-tab body composition
+
+`routes/MapMapping.svelte` switches on `mappingStatus.state`:
+
+- **Idle**: name input + Start button. Client-side validation against
+  the regex mirror; backend re-validates with byte-equal regex.
+  Hint text "Start를 누르면 godo-tracker가 정지되고 godo-mapping
+  컨테이너가 시작됩니다…" sets operator expectations.
+- **Starting**: "컨테이너 시작 중… (<name>)" message; no Stop button
+  (the abort path lives at the API layer — operator can curl `/stop`
+  but the SPA doesn't surface it for Starting because the backend is
+  synchronously polling and would return Stopping → Idle on the next
+  status tick anyway).
+- **Running**: "매핑 진행 중: <name>" + Stop & Save button +
+  `<MappingPreviewCanvas/>` (1 Hz cache-bust `<img>`) +
+  `<MappingMonitorStrip/>` (Docker SSE).
+- **Stopping**: "저장 중… (<name>)" message.
+- **Failed**: red error block + `<details>` with on-demand
+  `/api/mapping/journal?n=50` fetch + Acknowledge button (POST
+  `/api/mapping/stop` from Failed clears `error_detail`).
+
+### 8.5.5. Monitor strip — Docker-only (S1 amendment)
+
+`<MappingMonitorStrip/>` renders six fields from
+`/api/mapping/monitor/stream`: container CPU%, mem bytes, net RX/TX
+bytes, disk-free bytes (var/lib/godo), in-progress map size bytes.
+**RPi5 host stats are NOT in this strip** — they live in the existing
+`/api/system/resources/extended/stream`. A future operator-facing
+"both regions side by side" view subscribes to both streams in
+parallel; the strip's responsibility ends at Docker.
+
+S2 amendment: when the SSE closes (mapping ended OR transient HTTP
+error), freeze the last frame and show a "중단됨" badge over the
+Docker section. **Never re-issue HTTP** — no fallback polling. The
+only way to refresh Docker stats post-close is to start a new mapping
+run.
+
+### 8.5.6. Preview canvas
+
+`<MappingPreviewCanvas/>` is a cache-busting `<img
+src="/api/mapping/preview?ts=<Date.now()>">` refreshed at 1 Hz
+(`MAPPING_PREVIEW_REFRESH_MS = 1000`). Webctl re-encodes the on-disk
+PGM to PNG (D5 amendment) so the SPA renders without any custom
+decoder. On a 404 (preview not yet published, or post-stop), the
+canvas shows "아직 미리보기 PGM이 발행되지 않았습니다 (1초 후
+재시도)" rather than a broken-image icon.
+
+---
+
 ## 9. 보류 / 추후 결정
 
 - **차트 라이브러리**: P1 진입 시 결정 (uPlot 후보, lightweight + Canvas 기반).

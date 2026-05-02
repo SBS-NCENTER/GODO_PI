@@ -48,6 +48,7 @@ Auxiliary stacks (not part of the runtime triangle):
 
 | Stack | Role | CODEBASE | README |
 |---|---|---|---|
+| `godo-mapping/` | Operator-driven Docker container running `slam_toolbox` + `rplidar_ros` + `rf2o_laser_odometry` + the issue#14 preview-PGM dumper. NOT a long-running daemon — webctl drives it via `systemctl start godo-mapping@active.service` on demand. | [`godo-mapping/CODEBASE.md`](./godo-mapping/CODEBASE.md) | [`godo-mapping/README.md`](./godo-mapping/README.md) |
 | `prototype/Python/` | Phase 1–2 algorithm prototyping (UV, Mac/Windows). Not deployed. | [`prototype/Python/CODEBASE.md`](./prototype/Python/CODEBASE.md) | [`prototype/Python/README.md`](./prototype/Python/README.md) |
 | `XR_FreeD_to_UDP/` | Legacy Arduino R4 FreeD→UDP firmware. Read-only rollback card. | — | [`XR_FreeD_to_UDP/README.md`](./XR_FreeD_to_UDP/README.md) |
 
@@ -127,17 +128,34 @@ Auxiliary stacks (not part of the runtime triangle):
 │   ├─ SSE /api/diag/stream                                         │
 │   ├─ SSE /api/scan/stream                                         │
 │   ├─ SSE /api/system/processes/stream                             │
-│   └─ SSE /api/system/resources/extended/stream                    │
+│   ├─ SSE /api/system/resources/extended/stream                    │
+│   └─ SSE /api/mapping/monitor/stream  (issue#14, only when active)│
 │                                                                   │
 │   Static: /opt/godo-frontend/dist/  (when GODO_WEBCTL_SPA_DIST=)  │
+└───────────────────────────────────────────────────────────────────┘
+       │ systemctl start godo-mapping@active.service
+       │ + atomic-write /run/godo/mapping/active.env
+       ▼
+┌───────────────────────────────────────────────────────────────────┐
+│  systemd template unit godo-mapping@active.service                │
+│  → docker run --rm --device=${LIDAR_DEV} -v /var/lib/godo/maps:…  │
+│        ${IMAGE_TAG}  (godo-mapping:dev)                           │
+│      └─► slam_toolbox + rplidar_ros + rf2o_laser_odometry         │
+│          + preview_dumper rclpy node                              │
+│              writes /maps/.preview/<name>.pgm @ 1 Hz              │
+│                                                                   │
+│  Mutually exclusive with godo-tracker (L2 — webctl stops tracker  │
+│  before starting mapping). Operator restarts tracker post-stop    │
+│  via SPA System tab. NOT enabled — webctl is the SOLE caller.     │
 └───────────────────────────────────────────────────────────────────┘
 ```
 
 Key invariants this picture enforces:
 
-- **Tracker is the single hardware owner.** No other process opens the LiDAR, the FreeD UART, or the UE UDP socket.
+- **Tracker is the single hardware owner during normal operation.** No other process opens the LiDAR, the FreeD UART, or the UE UDP socket. **Exception (issue#14)**: during mapping the tracker is stopped (L2) and the godo-mapping container takes the LiDAR; webctl orchestrates the handoff. After mapping the operator manually restarts the tracker via System tab.
 - **webctl is the single tracker client.** The SPA never speaks UDS directly; it only speaks HTTP/SSE to webctl. This makes the auth + audit boundary clean.
 - **Map files are tracker-owned at boot, webctl-owned for edits.** The tracker reads `/var/lib/godo/maps/active.{pgm,yaml}` once at startup; webctl writes to those files via atomic mkstemp + os.replace through `map_edit.py` (B-MAPEDIT). The `/var/lib/godo/restart_pending` sentinel is webctl-set + tracker-cleared (asymmetric ownership; both run as `ncenter`).
+- **issue#14 mapping pipeline mode is webctl-owned.** Tracker has zero awareness of mapping mode (no UDS extension). State.json at `/run/godo/mapping/state.json` is webctl's authoritative view, reconciled against `docker inspect`. Coordinator boundary is documented in `godo-webctl/CODEBASE.md` invariants `(ad)..(af)`.
 - **No SPA-to-tracker shortcut.** Even local-host SPA traffic transits webctl. This is by design — see `godo-frontend/CODEBASE.md` invariant (b) (loopback gate is two-layer).
 
 ---
@@ -146,13 +164,14 @@ Key invariants this picture enforces:
 
 Each stack's CODEBASE.md owns a lettered invariant list `(a)..(z)..(aa)..` plus a chronological change log. **Do not copy invariant text into this file.** When a behavior is established, the canonical text lives in the per-stack CODEBASE.md and this root file at most points to it by section name.
 
-Current invariant tail per stack (as of 2026-04-30):
+Current invariant tail per stack (as of 2026-05-01):
 
 | Stack | Invariants tail |
 |---|---|
 | `production/RPi5/CODEBASE.md` | `(o) godo-systemctl-polkit-discipline` |
-| `godo-webctl/CODEBASE.md` | `(aa) map_edit.py sole-owner` |
-| `godo-frontend/CODEBASE.md` | `(u) MapMaskCanvas sole-mask-state` |
+| `godo-webctl/CODEBASE.md` | `(af) issue#14 mapping preview path SSOT + PNG re-encode` |
+| `godo-frontend/CODEBASE.md` | `(ad) issue#14 mode-aware UI gating via mappingStatus` |
+| `godo-mapping/CODEBASE.md` | `(j) issue#14 LIDAR_DEV env-var SSOT chain` |
 
 The tail letter is just a quick orientation hint — letters do not increment monotonically (some have been retired or skipped). Always read the per-stack file for the canonical list.
 
@@ -171,6 +190,7 @@ CLAUDE.md                                ← Operating rules (golden rules + age
 │   ├── production/RPi5/CODEBASE.md      ← C++ tracker invariants + change log
 │   ├── godo-webctl/CODEBASE.md          ← Python webctl invariants + change log
 │   ├── godo-frontend/CODEBASE.md        ← Svelte SPA invariants + change log
+│   ├── godo-mapping/CODEBASE.md         ← SLAM container invariants + change log (issue#14)
 │   └── prototype/Python/CODEBASE.md     ← Prototype change log
 └── DESIGN.md                            ← Design-doc TOC (links SYSTEM + FRONT)
     ├── SYSTEM_DESIGN.md                 ← Backend / RT / AMCL / FreeD design

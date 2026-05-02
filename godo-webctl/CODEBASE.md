@@ -906,6 +906,113 @@ Pinned by:
   — `/api/config/schema` round-trip serves 48 rows including the two
   webctl.* entries.
 
+### (ad) issue#14 — Mapping coordinator location + state.json SSOT
+
+> Letter rationale: (a)..(ac) all in use as of 2026-05-01; next free
+> letter is (ad).
+
+`mapping.py` is the SOLE webctl-side writer of
+`<cfg.mapping_runtime_dir>/state.json` and the SOLE caller of
+`systemctl start|stop godo-mapping@active.service` from webctl. The
+C++ tracker is NEVER notified of mapping mode through UDS — coordinator
+state derives purely from `(state.json, docker inspect output)`. The
+tracker is stopped during mapping; `/run/godo/ctl.sock` is therefore
+unavailable, which is the existing tracker-down behaviour (webctl
+returns 503 on UDS unreachable per invariant `(n)`).
+
+**State machine** (5 states): Idle → Starting → Running → Stopping →
+Idle (success), or Failed from any of {Starting, Running, Stopping}
+(crash / timeout / image_missing / tracker_stop_failed). `mapping.stop`
+on Failed is the operator's "acknowledge" verb that returns to Idle
++ defensive `docker rm -f` + preview-file cleanup.
+
+**Boot-reconcile (M3)**: `_save_state` only writes a fresh `now()` as
+`started_at` on the Idle→Starting transition. All other transitions
+preserve the existing timestamp so a webctl restart mid-mapping
+followed by `journalctl -u godo-mapping@active.service
+--since=<started_at>` still surfaces the original launch window's logs.
+
+**Concurrency**: webctl is single-uvicorn-worker (invariant `(e)`).
+Every `start`/`stop` call acquires
+`fcntl.flock(<runtime_dir>/.lock, LOCK_EX | LOCK_NB)` as a defence-in-
+depth so a future writer adding workers cannot interleave transitions.
+Concurrent `start` raises `MappingAlreadyActive` → 409.
+
+**Tracker [serial] section reader**: `webctl_toml.read_tracker_serial_section()`
+is the SSOT for the LiDAR USB device path passed to the container.
+Reads tracker-owned `[serial] lidar_port` (canonical dotted name
+`serial.lidar_port`, verified at
+`production/RPi5/src/core/config_schema.hpp:120`). Operator-locked
+SSOT discipline — webctl reads tracker keys but does NOT add
+`serial_lidar_port` to `WebctlSection` (PR #63 lock-in).
+
+Pinned by:
+- `tests/test_mapping.py::test_state_json_round_trip_and_idle_default`
+- `tests/test_mapping.py::test_status_reconcile_preserves_started_at_when_running`
+- `tests/test_mapping.py::test_resolve_lidar_port_reads_tracker_serial_section`
+- `tests/test_mapping.py::test_concurrent_start_returns_409_via_flock`
+
+### (ae) issue#14 — Mapping monitor SSE producer lifecycle
+
+`mapping_sse.py::_MonitorBroadcast` is a **process-singleton** ticker.
+At most ONE asyncio task runs the per-tick monitor snapshot at any
+given time, regardless of how many HTTP subscribers are connected.
+Subscribers register a per-connection `asyncio.Queue` and the ticker
+fans out the same `bytes` frame to every queue (broadcast pattern,
+operator-locked M4 fix).
+
+**Cost-bound**: subprocess invocations (`docker stats` / `df` / `du`
+inside `monitor_snapshot`) happen once per tick (`MAPPING_MONITOR_TICK_S
+= 1.0 s`), NOT once per tick × subscriber count. Without this, N=5
+debug tabs would fork 5× `docker stats` per second on the same
+container — the Docker daemon's first-call cold-path latency makes
+the cost super-linear.
+
+**Lifecycle** (S2 amendment — no fallback polling):
+1. First subscriber: ticker task starts.
+2. Per-tick: snapshot composed, broadcast to all queues.
+3. `container_state ∈ {no_active, exited}`: emit one final frame,
+   broadcast `b"__close__"`, ticker task exits. Subscribers' generators
+   close cleanly.
+4. Subscriber disconnects: queue removed from broadcast list. If
+   subscriber count hits 0, ticker keeps running for
+   `MAPPING_MONITOR_IDLE_GRACE_S = 5.0 s` to absorb tab-switch
+   reconnects without thrash, then exits.
+
+**Slow-client policy**: per-subscriber `asyncio.Queue(maxsize=8)`.
+A subscriber whose queue fills (slow client) drops frames from the
+ticker's perspective — never blocks the broadcast for everyone else.
+The SPA's freshness gate surfaces the gap to the operator.
+
+Pinned by:
+- `tests/test_mapping_sse.py::test_singleton_ticker_one_snapshot_per_tick_regardless_of_subscriber_count`
+  (5 concurrent subscribers × 3 ticks → exactly 3 snapshot invocations).
+- `tests/test_mapping_sse.py::test_stream_self_terminates_when_container_exits_mid_stream`.
+
+### (af) issue#14 — Mapping preview path SSOT + PNG re-encode
+
+`mapping.preview_path(cfg, name)` is the SOLE producer of the realpath-
+contained `<cfg.maps_dir>/.preview/<name>.pgm` path used by
+`/api/mapping/preview`. The leading-dot subdirectory is hidden from
+`maps.list_pairs` (which rejects leading-dot stems via
+`MAPS_NAME_REGEX`) — the preview file never appears in Map > Overview.
+
+The preview node inside the container (`godo-mapping/preview_node/preview_dumper.py`)
+is the SOLE writer of these files; its atomic write (`tmp + os.replace`)
+guarantees the SPA never sees a half-written PGM.
+
+**D5 amendment**: webctl re-encodes the PGM to PNG via
+`map_image.render_pgm_to_png` so the SPA renders without a custom
+PGM decoder. The C5 leading-dot rejection means the preview file
+never collides with a regular map — even if the operator names the
+new map `studio_v1` and the canonical `studio_v1.pgm` ends up next to
+`.preview/studio_v1.pgm` in the same directory tree.
+
+Pinned by:
+- `tests/test_mapping.py::test_preview_path_returns_canonical_path_under_maps_dir`
+- `tests/test_mapping.py::test_preview_path_rejects_traversal_via_invalidname`
+- `tests/test_app_integration.py::test_get_mapping_preview_returns_404_when_idle`
+
 ## Phase 4.5 follow-up candidates
 
 - Deadline-based UDS timeout (single shared `monotonic()` budget per
@@ -917,6 +1024,116 @@ Pinned by:
   different uid.
 
 ## Change log
+
+### 2026-05-01 23:21 KST — issue#14: SPA Mapping pipeline + monitor
+
+Webctl now owns the full mode-coordinator state machine for the
+SPA-driven SLAM mapping pipeline (D1). The C++ tracker UDS surface is
+NOT extended — the coordinator's authoritative state is
+``<mapping_runtime_dir>/state.json`` reconciled against
+``docker inspect`` on every read.
+
+#### Added
+
+- `src/godo_webctl/mapping.py` — mode coordinator. Public surface
+  `start(name, cfg)`, `stop(cfg)`, `status(cfg)`, `preview_path(cfg, name)`,
+  `journal_tail(cfg, n)`, `monitor_snapshot(cfg)`. Exception hierarchy
+  `MappingError` + 10 specific subclasses.
+- `src/godo_webctl/mapping_sse.py` — singleton-ticker broadcast SSE
+  producer for `/api/mapping/monitor/stream` (M4). One ticker task,
+  per-subscriber `asyncio.Queue` fan-out; one snapshot invocation per
+  tick regardless of N subscribers. Self-terminates on container exit
+  (S2 — no fallback polling).
+- 6 new endpoints in `app.py`:
+  `POST /api/mapping/start` (admin),
+  `POST /api/mapping/stop` (admin),
+  `GET /api/mapping/status` (anon),
+  `GET /api/mapping/preview` (anon, PNG via `map_image.render_pgm_to_png`),
+  `GET /api/mapping/monitor/stream` (anon SSE),
+  `GET /api/mapping/journal?n=…` (anon).
+- L14 lock-out — `/api/calibrate`, `/api/live`, `/api/map/edit`,
+  `/api/map/origin` return 409 `mapping_active` when
+  `mapping.status().state ∈ {Starting, Running, Stopping}`.
+- `webctl_toml.read_tracker_serial_section()` — sibling helper that
+  reads tracker-owned `[serial] lidar_port` (canonical dotted name
+  `serial.lidar_port`, verified at
+  `production/RPi5/src/core/config_schema.hpp:120`). Does NOT add the
+  key to `WebctlSection` — tracker-owned schema rows stay out of the
+  webctl-namespaced dataclass per PR #63 lock-in.
+
+#### Changed
+
+- `config.py` — three new Settings fields: `mapping_runtime_dir`
+  (default `/run/godo/mapping`), `mapping_image_tag` (default
+  `godo-mapping:dev`), `docker_bin` (default `/usr/bin/docker`).
+- `protocol.py` — added `MAPPING_STATE_*`, `MAPPING_STATUS_FIELDS`,
+  `MAPPING_MONITOR_FIELDS`, 13 new error codes.
+- `constants.py` — Tier-1 mapping constants (regex, name max len,
+  reserved set, runtime dir default, container/unit names, image tag
+  default, SSE tick + idle grace, container start/stop timeouts,
+  docker subprocess timeouts, journal tail bounds).
+
+#### Tests
+
+- `tests/test_mapping.py` — 30 cases: state.json round-trip + corrupt
+  recovery, validate_name matrix (regex + reserved + leading-dot C5
+  pin), preview_path containment, lidar_port resolution from
+  tracker.toml, envfile atomic write, full state machine
+  Idle→Starting→Running happy path with mocked subprocess, image-
+  missing pre-flight (state stays Idle), tracker-stop-failed → Failed,
+  container_start_timeout → Failed + cleanup, abort path
+  Starting→Stopping→Idle (m10), Failed→Idle acknowledge with preview
+  cleanup, M3 boot-reconcile preserves `started_at`, monitor_snapshot
+  composition + partial-failure degradation, humanize-bytes parser
+  edge cases, journal_tail bounds + `--since` filter, flock defence.
+- `tests/test_mapping_sse.py` — 5 cases: one frame per tick,
+  self-terminate on Idle/exited, M4 singleton-ticker pin (5
+  subscribers × 3 ticks → exactly 3 snapshot invocations), cancel-safe.
+- `tests/test_app_integration.py` — 12 new cases covering the 6 new
+  endpoints + L14 lock-out for `/api/calibrate`, `/api/live`,
+  `/api/map/edit`, `/api/map/origin`.
+- `tests/test_constants.py` — 22 mapping-constant pins including the
+  M5 stop-timeout ordering invariant
+  (`docker grace 10s < TimeoutStopSec 20s < webctl 25s`).
+- `tests/test_protocol.py` — 5 mapping-protocol pins covering the
+  state-string set, status-field tuple, monitor-field tuple, error-
+  code values.
+- `tests/test_webctl_toml.py` — 6 tracker-serial section pins
+  (default-when-missing-file, default-when-missing-section, verbatim
+  read, empty-string fallback, non-string rejection, malformed-TOML
+  propagation).
+- `tests/test_config.py` — extended for the 3 new Settings fields.
+
+#### New invariants
+
+`(ad) Mapping coordinator location` — `mapping.py` is the SOLE writer
+of `<mapping_runtime_dir>/state.json` and the SOLE caller of
+`systemctl start|stop godo-mapping@active.service` from webctl. The
+tracker is NEVER notified of mapping mode through UDS; coordinator
+state derives purely from the file + `docker inspect`. Boot-reconcile
+preserves `started_at` (M3) so `journalctl --since=<started_at>`
+keeps surfacing the original launch window's logs after a webctl
+restart. Pinned by `tests/test_mapping.py::test_status_reconcile_*`.
+
+`(ae) Mapping monitor SSE producer lifecycle` — `mapping_sse.py`
+implements a process-singleton broadcast ticker. One asyncio task
+runs per process at any given time; per-subscriber `asyncio.Queue`
+fans out the same `bytes` frame. Subprocess cost is O(1) per tick
+regardless of subscriber count (M4). Ticker self-terminates within
+one tick of `container_state ∈ {no_active, exited}`; subscribers
+freeze the last frame and show "중단됨" badge (S2). No fallback
+HTTP polling. Pinned by
+`tests/test_mapping_sse.py::test_singleton_ticker_one_snapshot_per_tick_regardless_of_subscriber_count`.
+
+`(af) Mapping preview path SSOT + PNG re-encode` — `mapping.preview_path(cfg, name)`
+is the SOLE producer of the realpath-contained
+`<cfg.maps_dir>/.preview/<name>.pgm` path used by
+`/api/mapping/preview`. The endpoint re-encodes via
+`map_image.render_pgm_to_png` (D5 amendment) so the SPA renders PNG
+without a custom decoder. The `.preview/` subdirectory's leading dot
+keeps it out of `maps.list_pairs` (which rejects leading-dot names
+via `MAPS_NAME_REGEX`). Pinned by realpath-containment tests in
+`test_mapping.py`.
 
 ### 2026-05-01 18:07 KST — issue#5 default-flip + issue#12 latency defaults (combined PR)
 
@@ -2449,3 +2666,125 @@ the rule unblocks at runtime.
      + `test_app_integration::test_calibrate_empty_body_byte_identical_to_pre_issue3`.
      A future writer who introduces an unconditional `seed_x_m`
      emit fails BOTH cases.
+
+---
+
+## 2026-05-02 08:57 KST — issue#14 Maj-1: mapping-stop timing ladder operator-tunable + ordering invariant
+
+Mode-B Maj-1 finding: the stop-timing chain was too tight against
+nav2 `map_saver_cli`'s atomic-rename window. Operator stake "맵 한번
+제작하면 평생 쓰는" demanded both (a) wider defaults and (b)
+SPA-tunable knobs so future HIL findings can adjust without code
+changes. Tracker schema rows are the SSOT (production/RPi5
+CODEBASE.md (r) extended); webctl is the runtime consumer.
+
+### Added
+
+- `webctl_toml.py` — `WebctlSection` extended with 3 new fields
+  (`mapping_docker_stop_grace_s`, `mapping_systemd_stop_timeout_s`,
+  `mapping_webctl_stop_timeout_s`), 6 new module-level constants
+  (defaults + min/max), 3 new env-var keys, ordering-invariant
+  validation in `read_webctl_section` (raises `WebctlTomlError`
+  with the offending key when the trio is misordered).
+- `config.py::Settings.mapping_webctl_stop_timeout_s` — new field
+  + matching `_DEFAULTS` / `_PARSERS` / `_ENV_TO_FIELD` row.
+  Fallback default sourced from `constants.MAPPING_CONTAINER_STOP_TIMEOUT_S`
+  (35.0 s). Runtime value typically comes from the `[webctl]`
+  section of `tracker.toml`.
+- `mapping.py` — `stop()` polling loop now reads
+  `cfg.mapping_webctl_stop_timeout_s`; the legacy constant is the
+  fallback when the [webctl] section is silent.
+- `constants.MAPPING_STATE_REREAD_INTERVAL_S = 0.25` — Tier-1 cadence
+  for issue#14 Maj-2's start-Phase-2 state-reread loop (used by
+  the upcoming flock-narrowing refactor).
+- `tests/test_webctl_toml.py` — 14 new cases covering the 3 new
+  keys: defaults when section missing, TOML reads, env override,
+  out-of-range bounds (per-key parametrized), ordering invariant
+  in three permutations, partial-override-against-defaults.
+- `tests/test_constants.py::test_mapping_unit_file_timing_values_match_constant`
+  — pins the AS-CHECKED-IN unit file's `--time=20` + `TimeoutStopSec=30s`
+  literals against the constants. Catches drift between the unit
+  file (which `install -m 0644` ships verbatim before the first
+  webctl boot) and the operator-locked 20/30/35 ladder.
+- `tests/test_mapping.py::test_stop_polling_deadline_uses_cfg_field_not_constant`
+  — pins the contract that `mapping.stop()` reads
+  `cfg.mapping_webctl_stop_timeout_s`, not the legacy constant.
+
+### Changed
+
+- `constants.MAPPING_CONTAINER_STOP_TIMEOUT_S` value 25.0 → 35.0
+  (now the FALLBACK default, mirrored by webctl.mapping_webctl_stop_timeout_s
+  default in webctl_toml.py + the schema row default_repr).
+- `constants.py` — comment block on `MAPPING_CONTAINER_STOP_TIMEOUT_S`
+  rewritten to explain the new role (fallback default; runtime value
+  in Settings).
+- `mapping.py` — `stop()` polling loop now uses `cfg.mapping_webctl_stop_timeout_s`
+  for the deadline + the `ContainerStopTimeout` exception message.
+- `tests/test_constants.py::test_mapping_container_stop_timeout_ordering_invariant`
+  — pin updated to the new 20/30/35 ladder.
+- `tests/test_constants.py::test_mapping_container_stop_timeout_s_pinned`
+  removed (the value is now operator-tunable; the ordering invariant
+  is the new pin).
+- `tests/test_config.py::test_empty_env_uses_defaults` — asserts the
+  new `Settings.mapping_webctl_stop_timeout_s == 35.0` default.
+- `tests/test_config.py::test_each_env_var_overrides_default` — adds
+  `GODO_WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S=60.0` override.
+- `tests/test_config_schema_parity.py` — row count pin 48 → 51,
+  + `test_webctl_mapping_timing_rows_present` for the 3 new schema rows.
+- `tests/test_config_schema.py` — row count pin 48 → 51 in both the
+  parser and the load-schema cases.
+- `tests/test_config_view.py::test_project_schema_view_real_source`
+  — assertion 48 → 51 + presence checks for the 3 new rows.
+- `tests/test_app_integration.py::test_get_config_schema_returns_51_rows`
+  — renamed and bumped from 48.
+- All Settings constructions in tests (`test_mapping.py`,
+  `test_mapping_sse.py`, `test_sse.py`, `test_app_integration.py`)
+  add `mapping_webctl_stop_timeout_s=35.0`.
+- `config_schema.py::EXPECTED_ROW_COUNT` 48 → 51.
+
+### Removed
+
+- (none)
+
+### Invariants
+
+- **(ad) mapping-timing-ladder** — the stop-timing trio
+  (`webctl.mapping_docker_stop_grace_s`,
+  `webctl.mapping_systemd_stop_timeout_s`,
+  `webctl.mapping_webctl_stop_timeout_s`) must satisfy the
+  strict ordering
+  `docker_grace_s < systemd_timeout_s < webctl_timeout_s`
+  at every layer:
+
+  1. **Tracker schema bounds** — per-row min/max in
+     `config_schema.hpp` allow ranges that overlap (docker [10, 60],
+     systemd [20, 90], webctl [25, 120]). The schema does NOT
+     cross-check the trio — that's webctl's job.
+  2. **Webctl single drift-catch** — `webctl_toml.read_webctl_section`
+     enforces the strict-greater-than check at startup; a misordered
+     `tracker.toml` raises `WebctlTomlError` naming the second key
+     in the broken pair (`webctl.mapping_systemd_stop_timeout_s` for
+     docker≥systemd, `webctl.mapping_webctl_stop_timeout_s` for
+     systemd≥webctl). The error message includes both numeric values
+     so the operator sees what to bump.
+  3. **install.sh** — sed-substitutes `docker_stop_grace` +
+     `systemd_stop_timeout` from the `[webctl]` section into the
+     `godo-mapping@.service` template at install time. The
+     as-checked-in unit file MUST also satisfy the invariant so a
+     bare `install -m 0644` (before the first webctl boot writes
+     tracker.toml) still produces a valid ladder. Pinned by
+     `tests/test_constants.py::test_mapping_unit_file_timing_values_match_constant`.
+  4. **mapping.py** — `stop()` reads
+     `cfg.mapping_webctl_stop_timeout_s`, not the legacy
+     `MAPPING_CONTAINER_STOP_TIMEOUT_S` constant. The constant is
+     the fallback default that lands in Settings via
+     `_DEFAULTS["GODO_WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S"]` when
+     the env / TOML are silent — its value (35) is pinned in
+     `test_constants.py::test_mapping_container_stop_timeout_ordering_invariant`.
+  5. **Cross-stack ownership**: tracker schema rows are the SSOT
+     (production/RPi5/CODEBASE.md (r) extended for the 3 new rows).
+     Webctl reads via `webctl_toml`, install.sh awks the section,
+     mapping.py consumes the cfg field. The operator-locked stake
+     "맵 한번 제작하면 평생 쓰는" mandates this ladder be operator-
+     tunable; the SPA Config tab is schema-driven so the rows
+     surface automatically (no frontend change).

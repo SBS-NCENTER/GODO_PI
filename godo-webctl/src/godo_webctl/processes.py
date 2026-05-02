@@ -66,6 +66,7 @@ from typing import Any, Final, Literal
 
 from .constants import PROC_PATH, PROC_STAT_PATH
 from .protocol import (
+    DOCKER_MAPPING_PROCESS_NAMES,
     GODO_PROCESS_NAMES,
     MANAGED_PROCESS_NAMES,
     PROCESS_FIELDS,
@@ -265,10 +266,18 @@ def classify_pid(name: str) -> Category:
     process that appears in BOTH sets (e.g. `godo_tracker_rt`, in
     `MANAGED_PROCESS_NAMES` because the `godo-tracker.service` runs it,
     and also in `GODO_PROCESS_NAMES`) classifies as `managed`.
+
+    issue#14 Mode-B N1 fix: docker family (`docker`, `dockerd`,
+    `containerd`, `containerd-shim*`) classifies as ``godo`` since
+    docker is only used for the godo-mapping container in this project.
+    Container children inside the PID namespace are NOT detected (they
+    show as `python3`, `ros2`, etc. in /proc — untracked).
     """
     if name in MANAGED_PROCESS_NAMES:
         return "managed"
     if name in GODO_PROCESS_NAMES:
+        return "godo"
+    if name in DOCKER_MAPPING_PROCESS_NAMES or name.startswith("containerd-shim"):
         return "godo"
     return "general"
 

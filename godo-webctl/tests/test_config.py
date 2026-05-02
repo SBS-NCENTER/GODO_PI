@@ -35,6 +35,13 @@ def test_empty_env_uses_defaults() -> None:
     assert s.pidfile_path == Path("/run/godo/godo-webctl.pid")
     # issue#12 — webctl reads /var/lib/godo/tracker.toml by default.
     assert s.tracker_toml_path == Path("/var/lib/godo/tracker.toml")
+    # issue#14 — mapping pipeline defaults.
+    assert s.mapping_runtime_dir == Path("/run/godo/mapping")
+    assert s.mapping_image_tag == "godo-mapping:dev"
+    assert s.docker_bin == Path("/usr/bin/docker")
+    # issue#14 Maj-1 — Settings fallback default for the webctl-side
+    # stop deadline (constants.MAPPING_CONTAINER_STOP_TIMEOUT_S = 35.0).
+    assert s.mapping_webctl_stop_timeout_s == 35.0
 
 
 def test_defaults_match_settings() -> None:
@@ -65,6 +72,10 @@ def test_each_env_var_overrides_default() -> None:
         "GODO_WEBCTL_DISK_CHECK_PATH": "/var/lib/godo",
         "GODO_WEBCTL_PIDFILE": "/tmp/webctl.pid",
         "GODO_WEBCTL_TRACKER_TOML_PATH": "/tmp/tracker.toml",
+        "GODO_WEBCTL_MAPPING_RUNTIME_DIR": "/tmp/mapping",
+        "GODO_WEBCTL_MAPPING_IMAGE_TAG": "godo-mapping:custom",
+        "GODO_WEBCTL_DOCKER_BIN": "/usr/local/bin/docker",
+        "GODO_WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S": "60.0",
     }
     s = load_settings(overrides)
     assert s.host == "0.0.0.0"
@@ -82,6 +93,10 @@ def test_each_env_var_overrides_default() -> None:
     assert s.disk_check_path == Path("/var/lib/godo")
     assert s.pidfile_path == Path("/tmp/webctl.pid")
     assert s.tracker_toml_path == Path("/tmp/tracker.toml")
+    assert s.mapping_runtime_dir == Path("/tmp/mapping")
+    assert s.mapping_image_tag == "godo-mapping:custom"
+    assert s.docker_bin == Path("/usr/local/bin/docker")
+    assert s.mapping_webctl_stop_timeout_s == 60.0
 
 
 def test_spa_dist_empty_string_is_none() -> None:

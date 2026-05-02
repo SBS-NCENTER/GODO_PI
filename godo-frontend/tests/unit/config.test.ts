@@ -773,6 +773,59 @@ describe('Config.svelte — input clearing UX (Bug C 2026-05-01 hotfix)', () => 
     expect(target.querySelector('[data-testid="config-apply-summary"]')).toBeNull();
   });
 
+  it('special-hint callout shows for webctl.mapping_systemd_stop_timeout_s row', async () => {
+    // issue#14 Mode-B N2 fix (2026-05-02 KST): the operator who bumps
+    // webctl.mapping_systemd_stop_timeout_s via Config tab + clicks
+    // Restart will NOT see the new value take effect, because the value
+    // lives in the systemd unit file (TimeoutStopSec=) which only
+    // install.sh re-renders. The special-hint warns about this.
+    //
+    // Use a minimal schema that includes the special row + one ordinary
+    // row to verify the hint is row-scoped (only shows on the special
+    // row, not on others).
+    const SCHEMA_WITH_SPECIAL = [
+      ...FAKE_SCHEMA,
+      {
+        name: 'webctl.mapping_systemd_stop_timeout_s',
+        type: 'int',
+        min: 20,
+        max: 90,
+        default: '30',
+        reload_class: 'restart',
+        description: 'systemd unit TimeoutStopSec for godo-mapping@active.',
+      },
+    ];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
+      const u = String(url);
+      if (u === '/api/config/schema') return jsonResp(SCHEMA_WITH_SPECIAL);
+      if (u === '/api/config') {
+        return jsonResp({ ...FAKE_CURRENT, 'webctl.mapping_systemd_stop_timeout_s': 30 });
+      }
+      if (u === '/api/system/restart_pending') return jsonResp({ pending: false });
+      if (u === '/api/health') return jsonResp({ webctl: 'ok', tracker: 'ok', mode: 'Idle' });
+      if (u === '/api/system/services') return jsonResp({ services: [] });
+      return jsonResp({});
+    });
+    setSession('viewer');
+    const target = mountConfig();
+    await waitFor(
+      () => target.querySelector('[data-testid="row-webctl.mapping_systemd_stop_timeout_s"]'),
+      'systemd_stop_timeout row',
+    );
+    const hint = target.querySelector<HTMLDivElement>(
+      '[data-testid="special-hint-webctl.mapping_systemd_stop_timeout_s"]',
+    );
+    expect(hint).not.toBeNull();
+    expect(hint!.textContent).toContain('install.sh 재실행 필요');
+    // Other rows have no special hint.
+    expect(
+      target.querySelector('[data-testid="special-hint-network.ue_port"]'),
+    ).toBeNull();
+    expect(
+      target.querySelector('[data-testid="special-hint-smoother.deadband_mm"]'),
+    ).toBeNull();
+  });
+
   it('modified-dot appears next to keys whose current value differs from default; absent when at default', async () => {
     // Operator UX 2026-05-02 KST: small amber dot before the key name
     // when the live value diverges from the schema default. Allows

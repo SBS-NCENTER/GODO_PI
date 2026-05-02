@@ -29,14 +29,19 @@
   import { ApiError, apiGet, apiPost, apiPostCalibrate } from '$lib/api';
   import { BACKUP_FLASH_DISMISS_MS, DASHBOARD_REFRESH_MS } from '$lib/constants';
   import {
+    MAPPING_STATE_RUNNING,
+    MAPPING_STATE_STARTING,
+    MAPPING_STATE_STOPPING,
     MODE_LIVE,
     type CalibrateBody,
     type Health,
     type LiveResponse,
+    type MappingStatus,
     type Mode,
   } from '$lib/protocol';
   import type { HintPose } from './PoseHintLayer.svelte';
   import { auth } from '$stores/auth';
+  import { subscribeMappingStatus } from '$stores/mappingStatus';
   import { setModeOptimistic, subscribeMode } from '$stores/mode';
 
   interface Props {
@@ -63,7 +68,19 @@
   let backupFlashTimer: ReturnType<typeof setTimeout> | null = null;
   let busy = $state(false);
 
+  // issue#14 — disable Calibrate / Live / Backup while mapping is in
+  // flight. SPA-side defence; webctl independently returns 409
+  // mapping_active so a power-user bypass via curl still fails.
+  let mappingStatus = $state<MappingStatus | null>(null);
+  let mappingActive = $derived(
+    mappingStatus !== null &&
+      (mappingStatus.state === MAPPING_STATE_STARTING ||
+        mappingStatus.state === MAPPING_STATE_RUNNING ||
+        mappingStatus.state === MAPPING_STATE_STOPPING),
+  );
+
   let unsubMode: (() => void) | null = null;
+  let unsubMapping: (() => void) | null = null;
   let healthTimer: ReturnType<typeof setInterval> | null = null;
 
   function showBackupFlash(kind: 'ok' | 'error', text: string): void {
@@ -151,6 +168,7 @@
 
   onMount(() => {
     unsubMode = subscribeMode((m) => (mode = m));
+    unsubMapping = subscribeMappingStatus((s) => (mappingStatus = s));
     void refreshHealth();
     // Health is polled at a slow cadence — only the binary "tracker
     // up?" question matters for this card. Faster updates come from
@@ -160,6 +178,7 @@
 
   onDestroy(() => {
     unsubMode?.();
+    unsubMapping?.();
     if (healthTimer !== null) clearInterval(healthTimer);
     if (backupFlashTimer !== null) clearTimeout(backupFlashTimer);
   });
@@ -176,23 +195,33 @@
   <div class="hstack">
     <button
       class="primary"
-      disabled={!isAdmin || busy}
+      disabled={!isAdmin || busy || mappingActive}
+      title={mappingActive ? '매핑 중에는 사용할 수 없습니다' : ''}
       onclick={doCalibrate}
       data-testid="calibrate-btn">Calibrate</button
     >
     <button
       class="primary"
-      disabled={!isAdmin || busy || hint === null}
+      disabled={!isAdmin || busy || hint === null || mappingActive}
       onclick={doCalibrateFromHint}
       data-testid="calibrate-from-hint-btn"
-      title="지도에 위치 힌트를 먼저 클릭/드래그한 뒤 누르세요"
+      title={mappingActive
+        ? '매핑 중에는 사용할 수 없습니다'
+        : '지도에 위치 힌트를 먼저 클릭/드래그한 뒤 누르세요'}
       >Calibrate from hint</button
     >
-    <button disabled={!isAdmin || busy} onclick={toggleLive} data-testid="live-btn">
+    <button
+      disabled={!isAdmin || busy || mappingActive}
+      title={mappingActive ? '매핑 중에는 사용할 수 없습니다' : ''}
+      onclick={toggleLive}
+      data-testid="live-btn">
       {mode === MODE_LIVE ? 'Stop Live' : 'Start Live'}
     </button>
-    <button disabled={!isAdmin || busy} onclick={doBackup} data-testid="backup-btn"
-      >Backup map</button
+    <button
+      disabled={!isAdmin || busy || mappingActive}
+      title={mappingActive ? '매핑 중에는 사용할 수 없습니다' : ''}
+      onclick={doBackup}
+      data-testid="backup-btn">Backup map</button
     >
   </div>
   {#if !session}

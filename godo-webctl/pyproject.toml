@@ -18,6 +18,9 @@ dev = [
     "pytest-asyncio>=0.23",
     "httpx>=0.27",
     "ruff>=0.5",
+    # issue#14 — numpy needed for the godo-mapping pgm_encoder tests
+    # which reuse this UV env via verify-no-hw.sh's --quick fallback.
+    "numpy>=1.26",
 ]
 
 [project.scripts]

@@ -41,7 +41,7 @@ if [[ ! -x "$BIN_SRC" ]]; then
     exit 1
 fi
 
-echo "[1/8] Installing /opt/godo-tracker/"
+echo "[1/11] Installing /opt/godo-tracker/"
 install -d -m 0755 -o root -g root /opt/godo-tracker
 install -d -m 0755 -o root -g root /opt/godo-tracker/share
 install -m 0755 -o root -g root "$BIN_SRC"                          /opt/godo-tracker/godo_tracker_rt
@@ -55,16 +55,92 @@ install -m 0755 -o root -g root "$SCRIPT_DIR/godo-irq-pin.sh"       /opt/godo-tr
 install -m 0644 -o root -g root "$RPI5_DIR/src/core/config_schema.hpp" \
                                 /opt/godo-tracker/share/config_schema.hpp
 
-echo "[2/8] Installing systemd units to /etc/systemd/system/"
+echo "[2/11] Installing systemd units to /etc/systemd/system/"
 install -m 0644 "$SCRIPT_DIR/godo-irq-pin.service"  /etc/systemd/system/godo-irq-pin.service
 install -m 0644 "$SCRIPT_DIR/godo-tracker.service"  /etc/systemd/system/godo-tracker.service
+# issue#14 — mapping pipeline template unit. Operator never enables
+# this; webctl drives `systemctl start godo-mapping@active.service`.
+#
+# issue#14 Maj-1 — sed-substitute the operator-tunable timing values
+# from /var/lib/godo/tracker.toml's [webctl] section:
+#   - webctl.mapping_docker_stop_grace_s   → ExecStop docker --time=<X>
+#   - webctl.mapping_systemd_stop_timeout_s → TimeoutStopSec=<Y>s
+# Defaults (20 / 30) match the as-checked-in unit file. If the operator
+# bumps either key in the Config tab, re-running install.sh updates the
+# .service file accordingly. The webctl-side ceiling
+# (webctl.mapping_webctl_stop_timeout_s, default 35) is read at webctl
+# startup directly from the TOML — no install-time substitution needed
+# for that one.
+GODO_MAPPING_DOCKER_GRACE_S=20
+GODO_MAPPING_SYSTEMD_TIMEOUT_S=30
+TRACKER_TOML=/var/lib/godo/tracker.toml
+# issue#14 Mode-B Mn1 fix (2026-05-02 KST) — use Python's stdlib tomllib
+# instead of an awk parser. The previous awk path silently fell back to
+# defaults on whitespace-noisy values (`= 25  ` with trailing spaces) or
+# leading-space lines, which would silently drift the runtime away from
+# the operator-set value. tomllib (Python 3.11+) is whitespace-resilient
+# and ships with python3 on Trixie. The fallback semantics (missing key
+# / missing file / parse error → keep default) are preserved by trapping
+# every exception and printing diagnostic lines.
+if [[ -e "$TRACKER_TOML" ]]; then
+    parsed=$(python3 - <<PYEOF "$TRACKER_TOML" 2>&1 || true
+import sys
+import tomllib
 
-echo "[3/8] Installing watchdog drop-in"
+def main(path: str) -> None:
+    try:
+        with open(path, "rb") as f:
+            doc = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        print(f"WARN: install.sh: tracker.toml parse failed ({e}); using defaults", file=sys.stderr)
+        return
+    section = doc.get("webctl", {})
+    docker = section.get("mapping_docker_stop_grace_s")
+    systemd = section.get("mapping_systemd_stop_timeout_s")
+    if isinstance(docker, int) and 1 <= docker <= 600:
+        print(f"DOCKER={docker}")
+    elif docker is not None:
+        print(
+            f"WARN: install.sh: mapping_docker_stop_grace_s value {docker!r} not int in range; using default",
+            file=sys.stderr,
+        )
+    if isinstance(systemd, int) and 1 <= systemd <= 600:
+        print(f"SYSTEMD={systemd}")
+    elif systemd is not None:
+        print(
+            f"WARN: install.sh: mapping_systemd_stop_timeout_s value {systemd!r} not int in range; using default",
+            file=sys.stderr,
+        )
+
+main(sys.argv[1])
+PYEOF
+)
+    while IFS='=' read -r key val; do
+        case "$key" in
+            DOCKER)  GODO_MAPPING_DOCKER_GRACE_S="$val"      ;;
+            SYSTEMD) GODO_MAPPING_SYSTEMD_TIMEOUT_S="$val"   ;;
+            WARN*|*) [[ -n "$key" ]] && echo "  $key${val:+=$val}" >&2 ;;
+        esac
+    done <<< "$parsed"
+fi
+# Render the substituted unit to a temp file then `install` it. The sed
+# uses `#` as the delimiter so it does not collide with the path slashes
+# in the ExecStop line.
+MAPPING_UNIT_TMP=$(mktemp /tmp/godo-mapping@.service.XXXXXX)
+trap 'rm -f "$MAPPING_UNIT_TMP"' EXIT
+sed \
+    -e "s#docker stop --time=[0-9]\+ godo-mapping#docker stop --time=${GODO_MAPPING_DOCKER_GRACE_S} godo-mapping#g" \
+    -e "s#^TimeoutStopSec=[0-9]\+s#TimeoutStopSec=${GODO_MAPPING_SYSTEMD_TIMEOUT_S}s#g" \
+    "$SCRIPT_DIR/godo-mapping@.service" > "$MAPPING_UNIT_TMP"
+install -m 0644 "$MAPPING_UNIT_TMP" /etc/systemd/system/godo-mapping@.service
+echo "  godo-mapping unit timing: docker_stop_grace=${GODO_MAPPING_DOCKER_GRACE_S}s, TimeoutStopSec=${GODO_MAPPING_SYSTEMD_TIMEOUT_S}s (operator-tunable via Config tab → webctl.mapping_*)"
+
+echo "[3/11] Installing watchdog drop-in"
 install -d -m 0755 /etc/systemd/system.conf.d
 install -m 0644 "$SCRIPT_DIR/system.conf.d/godo-watchdog.conf" \
                 /etc/systemd/system.conf.d/godo-watchdog.conf
 
-echo "[4/8] Installing polkit rule for ncenter-group systemctl + login1 access"
+echo "[4/11] Installing polkit rule for ncenter-group systemctl + login1 access"
 install -d -m 0755 /etc/polkit-1/rules.d
 install -m 0644 "$SCRIPT_DIR/49-godo-systemctl.rules" \
                 /etc/polkit-1/rules.d/49-godo-systemctl.rules
@@ -76,7 +152,7 @@ if ! systemctl is-active --quiet polkit; then
     echo "install: warning — polkit unit is not active; rule will load when polkit starts" >&2
 fi
 
-echo "[5/8] Seeding /etc/godo/tracker.env (preserves existing real .env)"
+echo "[5/11] Seeding /etc/godo/tracker.env (preserves existing real .env)"
 install -d -m 0755 -o root -g root /etc/godo
 if [[ ! -e /etc/godo/tracker.env ]]; then
     install -m 0644 -o root -g root "$SCRIPT_DIR/godo-tracker.env.example" /etc/godo/tracker.env
@@ -87,7 +163,7 @@ else
     echo "    Compare with $SCRIPT_DIR/godo-tracker.env.example for new keys."
 fi
 
-echo "[6/8] Seeding /var/lib/godo/tracker.toml (empty, ncenter-owned)"
+echo "[6/11] Seeding /var/lib/godo/tracker.toml (empty, ncenter-owned)"
 # /var/lib/godo itself is created by the unit's StateDirectory=godo, but
 # the install path is also valid before the unit ever runs (the directory
 # tree is harmless if /var/lib/godo/maps/ etc. arrive later).
@@ -116,14 +192,57 @@ if [[ -e /etc/godo/tracker.toml ]]; then
     fi
 fi
 
-echo "[7/8] systemctl daemon-reload"
+echo "[7/11] Installing godo-mapping@.env.example reference (issue#14)"
+# Documentation only — webctl writes the real envfile at runtime to
+# /run/godo/mapping/active.env. This reference copy lives in /etc/godo
+# so an operator inspecting the system can see the expected shape.
+install -m 0644 -o root -g root "$SCRIPT_DIR/godo-mapping@.env.example" \
+                                 /etc/godo/godo-mapping@.env.example
+
+echo "[8/11] Ensuring /var/lib/godo/maps/.preview/ exists (issue#14 mapping previews)"
+# Bind-mount target inside the container at /maps/.preview. webctl reads
+# the PGM via realpath-contained `mapping.preview_path`. Belt-and-
+# suspenders: the entrypoint also `mkdir -p /maps/.preview` at
+# container-start.
+install -d -m 0750 -o ncenter -g ncenter /var/lib/godo/maps/.preview
+
+echo "[9/11] Ensuring docker group membership for ncenter (issue#14)"
+# webctl shells out to `docker inspect` / `docker stats` etc. without
+# sudo; ncenter must be in the docker group. First-time-after-install
+# requires log out + back in (or reboot) for the group membership to
+# take effect on existing sessions. Idempotent: re-runs print a no-op.
+if id -nG ncenter | grep -qw docker; then
+    echo "  → ncenter already in docker group."
+else
+    if getent group docker >/dev/null 2>&1; then
+        usermod -aG docker ncenter
+        echo "  → ncenter added to docker group."
+        echo "  → IMPORTANT: operator must log out + log back in (or reboot)"
+        echo "    for this membership to take effect on existing sessions."
+        echo "  → Verify with: groups ncenter | grep -w docker && docker ps"
+    else
+        echo "  → docker group not present — install Docker first, then re-run install.sh." >&2
+    fi
+fi
+
+# (M2 fix — no /run/godo/mapping/ install-time seed. /run is tmpfs and
+# any install-time mkdir is wiped on reboot. webctl's
+# `_write_run_envfile` performs `Path(...).mkdir(parents=True,
+# exist_ok=True, mode=0o750)` at runtime before its atomic write — this
+# is the only correct creator. /run/godo itself comes from
+# godo-tracker.service's RuntimeDirectory=godo + RuntimeDirectoryPreserve=yes,
+# and webctl already has ReadWritePaths=/run/godo so the runtime mkdir
+# of the `mapping` subdir succeeds without elevation.)
+
+echo "[10/11] systemctl daemon-reload"
 systemctl daemon-reload
 
 echo
-echo "Install complete. Auto-start policy (operator decision):"
-echo "  - godo-irq-pin.service    AUTO    (IRQ pinning, oneshot, no runtime risk)"
-echo "  - godo-webctl.service     AUTO    (operator UI; must reach at boot)"
-echo "  - godo-tracker.service    MANUAL  (start via SPA System tab Start button)"
+echo "[11/11] Install complete. Auto-start policy (operator decision):"
+echo "  - godo-irq-pin.service                AUTO    (IRQ pinning, oneshot, no runtime risk)"
+echo "  - godo-webctl.service                 AUTO    (operator UI; must reach at boot)"
+echo "  - godo-tracker.service                MANUAL  (start via SPA System tab Start button)"
+echo "  - godo-mapping@active.service         MANUAL  (issue#14 — driven by webctl /api/mapping/start)"
 echo
 echo "Enable the auto-start units:"
 echo "  sudo systemctl enable --now godo-irq-pin.service"

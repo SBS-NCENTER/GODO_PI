@@ -134,6 +134,14 @@ MAPS_ACTIVATE_LOCK_BASENAME: Final[str] = ".activate.lock"
 # PGM files (e.g. a 1 GB sparse file — we never stream pixel data).
 PGM_HEADER_MAX_BYTES: Final[int] = 64
 
+# Maximum bytes to read from a slam_toolbox / map_saver YAML companion
+# when the only fact we want is `resolution:`. Any practical YAML header
+# fits in well under 256 bytes (image, mode, resolution, origin,
+# negate, occupied_thresh, free_thresh = 7 short lines ~150 bytes).
+# Bounded so `read_yaml_resolution` is safe against a 1 MB pathological
+# file — we never need the full body.
+YAML_HEADER_MAX_BYTES: Final[int] = 512
+
 # --- PR-DIAG (Track B-DIAG) — diagnostics page constants -----------------
 # Resources sub-payload cache TTL — `/sys/class/thermal/...` and
 # `/proc/meminfo` reads cost ~10 µs each. With 5 Hz × 4 reads/tick =
@@ -279,4 +287,107 @@ SERVICE_TRANSITION_MESSAGES_KO: Final[dict[tuple[str, str], str]] = {
     ("godo-webctl", "stopping"): "godo-webctl이 종료 중입니다. 잠시 후 다시 시도해주세요.",
     ("godo-irq-pin", "starting"): "godo-irq-pin이 시동 중입니다. 잠시 후 다시 시도해주세요.",
     ("godo-irq-pin", "stopping"): "godo-irq-pin이 종료 중입니다. 잠시 후 다시 시도해주세요.",
+    # issue#14 Patch C2 — godo-mapping@active in System-tab services
+    # overview. Korean particle: "맵핑" → 핑 (no 받침) → 이.
+    ("godo-mapping@active", "starting"): "godo-mapping이 시동 중입니다. 잠시 후 다시 시도해주세요.",
+    ("godo-mapping@active", "stopping"): "godo-mapping이 종료 중입니다. 잠시 후 다시 시도해주세요.",
 }
+
+# --- issue#14 — mapping pipeline ----------------------------------------
+# Mapping mode coordinator's runtime directory (single-writer = webctl).
+# /run is tmpfs; webctl creates the dir at runtime via
+# mapping._write_run_envfile, NOT at install-time (M2 fix).
+MAPPING_RUNTIME_DIR_DEFAULT: Final[str] = "/run/godo/mapping"
+
+# Subdirectory inside cfg.maps_dir where the preview PGM lands. Hidden
+# (dot-prefixed) so the multi-map enumerator (`maps.list_pairs`) skips it
+# (already does — MAPS_NAME_REGEX requires non-dot first char).
+MAPPING_PREVIEW_SUBDIR: Final[str] = ".preview"
+
+# Container name (fixed; see decision D4 — single instance only).
+MAPPING_CONTAINER_NAME: Final[str] = "godo-mapping"
+
+# systemd template instance name (fixed; see decision D4).
+MAPPING_UNIT_NAME: Final[str] = "godo-mapping@active.service"
+
+# Default Docker image tag — overridable via env-var
+# GODO_WEBCTL_MAPPING_IMAGE_TAG for dev hosts that build with a different
+# tag.
+MAPPING_IMAGE_TAG_DEFAULT: Final[str] = "godo-mapping:dev"
+
+# Polling cadence for the Mapping monitor SSE producer. 1 Hz = 1.0 s; the
+# parity comment with the frontend MAPPING_STATUS_POLL_MS = 1000 (ms) is
+# load-bearing — both surfaces tick at the same rate.
+MAPPING_MONITOR_TICK_S: Final[float] = 1.0
+
+# Singleton-ticker idle-grace before stopping after the last subscriber
+# drops (M4 broadcast pattern). Avoids thrashing the ticker on rapid
+# reconnects (e.g. operator switching tabs).
+MAPPING_MONITOR_IDLE_GRACE_S: Final[float] = 5.0
+
+# Tracker-stop window before mapping-start gives up. systemctl stop +
+# kernel close-on-last-fd of /dev/ttyUSBn typically completes < 500 ms;
+# 5 s is generous.
+MAPPING_TRACKER_STOP_TIMEOUT_S: Final[float] = 5.0
+
+# Container-start polling window — `docker run` returns immediately but
+# the entrypoint takes ~3-4 s to source ROS overlays + start nodes.
+MAPPING_CONTAINER_START_TIMEOUT_S: Final[float] = 8.0
+
+# Container-stop window — *fallback* default when the webctl-owned
+# `webctl.mapping_webctl_stop_timeout_s` Tier-2 key is missing from
+# `tracker.toml`. Operator-tunable via Config tab; runtime value is
+# `cfg.mapping_webctl_stop_timeout_s` from Settings. The constant
+# pinned here is the schema's `default_repr`.
+#
+# Ordering invariant (issue#14 Maj-1 fold; was 10/20/25):
+#   docker stop --time grace (20s) < TimeoutStopSec (30s) < webctl_timeout (35s)
+# so the trap's map_saver_cli save (~2-5 s, possibly more on slow SD)
+# completes before any layer escalates to SIGKILL. The bump (was M5
+# 10/20/25) reflects the operator-locked "맵 한번 제작하면 평생 쓰는"
+# stake — torn lifetime asset is worse than a 10 s longer stop window.
+MAPPING_CONTAINER_STOP_TIMEOUT_S: Final[float] = 35.0
+
+# `docker inspect` polling cadence inside the start/stop wait loops.
+MAPPING_DOCKER_INSPECT_POLL_S: Final[float] = 0.25
+
+# issue#14 Maj-2 — cadence at which `start()`'s Phase-2 polling loop
+# re-reads `state.json` to detect a concurrent `stop()` (which writes
+# Stopping outside the flock). Set equal to the docker-inspect cadence
+# so the read is interleaved with the `docker inspect` poll without
+# adding extra latency. Lifting `_coordinator_flock` between Phase 1
+# (state-write) and Phase 2 (subprocess polling) is what lets a Stop
+# button interrupt a hung Start without blocking on a 409.
+MAPPING_STATE_REREAD_INTERVAL_S: Final[float] = 0.25
+
+# Default n for /api/mapping/journal?n=…
+MAPPING_JOURNAL_TAIL_DEFAULT_N: Final[int] = 50
+MAPPING_JOURNAL_TAIL_MAX_N: Final[int] = 500
+
+# Map name regex (L5 inner-char set verbatim — `,` allowed; C5 tightening
+# applied — leading-dot REJECTED). Operator-locked decision 2026-05-01:
+# the L5 wording would accept `.foo` but a leading-dot map name produces
+# `/var/lib/godo/maps/.foo.pgm`, which `MAPS_NAME_REGEX` (used by
+# `maps.list_pairs`) silently filters out — the operator would never see
+# the new map in Map > Overview to activate it. Operator confirmed
+# "leading dot은 거부하자. 숨김 파일같은 경우가 있을 수 있으니". Pattern
+# below: first char ∈ {A-Z, a-z, 0-9, _, (, ), -}; subsequent chars also
+# allow `.` and `,`; total 1..64 chars. Path traversal still defended in
+# depth via `MAPPING_RESERVED_NAMES` + realpath containment.
+MAPPING_NAME_REGEX: Final[re.Pattern[str]] = re.compile(
+    r"^[A-Za-z0-9_()-][A-Za-z0-9._()\-,]{0,63}$",
+)
+MAPPING_NAME_MAX_LEN: Final[int] = 64
+
+# Reserved names rejected at public-API layer regardless of regex match.
+MAPPING_RESERVED_NAMES: Final[frozenset[str]] = frozenset({".", "..", "active"})
+
+# `docker stats --no-stream` subprocess timeout. Slow when first warming
+# the cgroups; 3 s is enough.
+MAPPING_DOCKER_STATS_TIMEOUT_S: Final[float] = 3.0
+
+# `docker inspect` subprocess timeout. Always fast.
+MAPPING_DOCKER_INSPECT_TIMEOUT_S: Final[float] = 2.0
+
+# `du -sb` subprocess timeout for the in-progress preview PGM size.
+MAPPING_DU_TIMEOUT_S: Final[float] = 2.0

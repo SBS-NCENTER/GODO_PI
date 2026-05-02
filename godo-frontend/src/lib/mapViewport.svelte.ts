@@ -344,7 +344,12 @@ export function createMapViewport(): MapViewport {
       _panX = panX;
       _panY = panY;
     },
-    setMapDims(width: number, height: number): void {
+    setMapDims(
+      width: number,
+      height: number,
+      canvasW?: number,
+      canvasH?: number,
+    ): void {
       // Mode-A M5 — factory-internal idempotency. The caller cannot
       // accidentally re-trigger min-zoom recomputation by routing the
       // metadata through null → fresh-non-null.
@@ -353,22 +358,49 @@ export function createMapViewport(): MapViewport {
       _dimsCaptured = true;
       _mapW = width;
       _mapH = height;
-      // Capture window.innerHeight ONCE and compute the floor.
-      // Server-side renders (jsdom) supply a default of 768; tests
-      // override via `Object.defineProperty(window, 'innerHeight', ...)`.
-      const viewportH =
-        typeof window !== 'undefined' && Number.isFinite(window.innerHeight)
-          ? window.innerHeight
-          : 0;
-      if (viewportH > 0) {
-        // Floor zoom = ratio at which mapHeight × zoom == viewportH.
-        // Hard-clamp to [MAP_MIN_ZOOM, 1.0] so an absurdly small viewport
-        // doesn't push minZoom above the natural-size starting zoom.
-        const candidate = viewportH / height;
+      // Operator UX 2026-05-02 KST follow-up: the previous fix used
+      // window.innerHeight / innerWidth (full window) but the actual
+      // map canvas is smaller — topbar / breadcrumb / Map header /
+      // sub-tab nav take up vertical space, sidebar takes horizontal.
+      // Result: minZoom was set so the map exactly fit the *window*
+      // (e.g. 1080px tall) but the actual canvas is ~800px → 280px
+      // overflow at the bottom; operator saw the map with the bottom
+      // asymmetrically clipped.
+      //
+      // Fix: the caller (MapUnderlay.svelte onMount + ResizeObserver
+      // bootstrap) measures the real canvas via getBoundingClientRect
+      // and passes it through. Falls back to window.* only when the
+      // caller hasn't provided concrete canvas dims (e.g. a unit test
+      // that doesn't render a real DOM).
+      //
+      // Issue#13-cand context: post the SLAM default 0.05 → 0.025 m/cell
+      // bump, mapping containers emit 4× larger PGMs, making the
+      // overflow obvious for the first time.
+      const fitW =
+        canvasW !== undefined && Number.isFinite(canvasW) && canvasW > 0
+          ? canvasW
+          : typeof window !== 'undefined' && Number.isFinite(window.innerWidth)
+            ? window.innerWidth
+            : 0;
+      const fitH =
+        canvasH !== undefined && Number.isFinite(canvasH) && canvasH > 0
+          ? canvasH
+          : typeof window !== 'undefined' && Number.isFinite(window.innerHeight)
+            ? window.innerHeight
+            : 0;
+      if (fitH > 0 && fitW > 0) {
+        const candidateH = fitH / height;
+        const candidateW = fitW / width;
+        // Floor = min(width-fit, height-fit) so the rendered map fits
+        // both axes at minZoom. Hard-clamp to [MAP_MIN_ZOOM, 1.0] so an
+        // absurdly small viewport doesn't push minZoom above native.
+        const candidate = Math.min(candidateH, candidateW);
         _minZoom = clampZoom(candidate, MAP_MIN_ZOOM, 1.0);
       }
-      // Re-clamp the current zoom now that the floor may have moved.
-      _zoom = clampZoom(_zoom, _minZoom, MAP_MAX_ZOOM);
+      // Auto-fit on first load: start at the floor zoom (NOT 1.0).
+      // Operator's "기본값 100%일 때 전체적으로 봤으면 좋겠어" intent:
+      // first presentation must fit the canvas without requiring a drag.
+      _zoom = clampZoom(_minZoom, _minZoom, MAP_MAX_ZOOM);
     },
 
     worldToCanvas(wx, wy, canvasW, canvasH, meta) {

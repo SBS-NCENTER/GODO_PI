@@ -79,6 +79,24 @@
     onPreviewSelect(isActive ? '/api/map/image' : `/api/maps/${encodeURIComponent(name)}/image`);
   }
 
+  // Operator UX 2026-05-02 KST: render the map dimensions cell as
+  // ``W×H px (X.X×Y.Y m)`` when both pixel dims AND resolution are known;
+  // fall back to ``W×H px`` when only pixel dims are available, or '—'
+  // when both are missing (graceful degradation per maps.list_pairs).
+  function fmtDimensions(entry: MapEntry): string {
+    if (entry.width_px == null || entry.height_px == null) {
+      return '—';
+    }
+    const px = `${entry.width_px}×${entry.height_px} px`;
+    if (entry.resolution_m == null || !(entry.resolution_m > 0)) {
+      return px;
+    }
+    const w_m = entry.width_px * entry.resolution_m;
+    const h_m = entry.height_px * entry.resolution_m;
+    // 1 decimal place is enough for studio-scale maps (~10–100 m).
+    return `${px} (${w_m.toFixed(1)}×${h_m.toFixed(1)} m)`;
+  }
+
   function openActivate(name: string): void {
     activateTarget = name;
     activateOpen = true;
@@ -188,6 +206,7 @@
         <tr>
           <th>이름</th>
           <th>크기 (B)</th>
+          <th>해상도</th>
           <th>최종 수정</th>
           <th>상태</th>
           <th>작업</th>
@@ -207,6 +226,9 @@
               </button>
             </td>
             <td>{entry.size_bytes}</td>
+            <td data-testid={`map-dims-${entry.name}`}>
+              {fmtDimensions(entry)}
+            </td>
             <td>{formatDateTime(entry.mtime_unix)}</td>
             <td>
               {#if entry.is_active}

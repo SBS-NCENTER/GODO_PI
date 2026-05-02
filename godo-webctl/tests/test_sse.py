@@ -51,6 +51,10 @@ def _settings(tracker_toml_path: Path | None = None) -> Settings:
         tracker_toml_path=tracker_toml_path
         if tracker_toml_path is not None
         else Path("/tmp/no_such_tracker.toml"),
+        mapping_runtime_dir=Path("/tmp/mapping_rt"),
+        mapping_image_tag="godo-mapping:dev",
+        docker_bin=Path("/usr/bin/docker"),
+        mapping_webctl_stop_timeout_s=35.0,
     )
 
 

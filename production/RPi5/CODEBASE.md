@@ -4397,6 +4397,29 @@ HIL findings can adjust without a code change.
   grace. No `signal: killed` in the container's exit log — the
   rename completed before any layer escalated.
 
+## 2026-05-02 20:15 KST — issue#16 HIL hot-fix v4: helper accepts INTERFACE notation + udevadm settle
+
+Operator HIL on v3 deploy surfaced that the helper script's regex
+`^[0-9]+-[0-9.]+$` accepted bare USB device notation
+(`<bus>-<port-chain>`, e.g. `3-2`), but the cp210x driver's
+`/sys/bus/usb/drivers/cp210x/{bind,unbind}` sysfs files require
+USB INTERFACE notation (`<bus>-<port-chain>:<config>.<intf>`,
+e.g. `3-2:1.0`). v1/v2/v3 always rejected with
+`write error: No such device`.
+
+### Changed
+
+- `share/godo-cp210x-recover.sh`:
+  - Regex tightened to `^[0-9]+-[0-9.]+:[0-9]+\.[0-9]+$` (interface
+    notation only — bare device notation is now rejected).
+  - Added `udevadm settle --timeout=3` after bind so /dev/ttyUSB*
+    is recreated (and udev rules processed) before mapping.start()
+    proceeds to the systemctl-start of the mapping container.
+
+This file is the SSOT for the regex & helper layout; webctl's
+`mapping._USB_PATH_REGEX` mirrors with the identical pattern
+(lock-step defence-in-depth).
+
 ## 2026-05-02 17:51 KST — issue#16: CP2102N driver unbind/rebind oneshot unit + helper script + polkit rule (d)
 
 Spec memory: `.claude/memory/project_mapping_precheck_and_cp210x_recovery.md`.

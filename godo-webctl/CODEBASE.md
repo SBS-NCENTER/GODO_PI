@@ -2878,6 +2878,53 @@ CODEBASE.md (r) extended); webctl is the runtime consumer.
      tunable; the SPA Config tab is schema-driven so the rows
      surface automatically (no frontend change).
 
+## 2026-05-02 20:15 KST — issue#16 HIL hot-fix v4: cp210x interface notation
+
+v3 visibility logs surfaced the real bug:
+
+```
+mapping.recover_cp210x: firing for lidar_port=/dev/ttyUSB0 usb_path=3-2
+godo-cp210x-recover.sh: line 19: echo: write error: No such device
+```
+
+The cp210x driver is a USB *interface* driver — its
+`/sys/bus/usb/drivers/cp210x/{bind,unbind}` sysfs files require USB
+INTERFACE notation (`<bus>-<port-chain>:<config>.<intf>`, e.g.
+`3-2:1.0`), NOT bare device notation (`<bus>-<port-chain>` like
+`3-2`). v1/v2/v3 wrote bare device notation and the kernel rejected
+every write with ENODEV → recovery never actually fixed any wedged
+state.
+
+### Changed
+
+- `_USB_PATH_REGEX` tightened from
+  `^[0-9]+-[0-9.]+$` → `^[0-9]+-[0-9.]+:[0-9]+\.[0-9]+$`. Bare
+  device notation is now rejected; only full interface notation
+  passes.
+- `_resolve_usb_sysfs_path` no longer strips the `:<config>.<intf>`
+  suffix — returns the whole interface segment (`1-1.4:1.0`,
+  `3-2:1.0`, `2-1:2.3`).
+- `production/RPi5/share/godo-cp210x-recover.sh` regex tightened
+  to match. Helper now also runs `udevadm settle --timeout=3` after
+  bind so /dev/ttyUSB* is recreated before mapping.start() proceeds
+  to systemctl-start of the mapping container.
+
+### Tests
+
+- `test_resolve_usb_sysfs_path_returns_full_interface_notation` —
+  confirms `:1.0` suffix preserved.
+- `test_resolve_usb_sysfs_path_news_pi01_layout` — pins the
+  operator HIL case (`3-2:1.0` from `/sys/.../usb3/3-2/3-2:1.0/...`).
+- `test_resolve_usb_sysfs_path_handles_complex_port_chain` —
+  multi-hop hub chain returns the leaf interface.
+- `test_resolve_usb_sysfs_path_handles_multi_interface_index` —
+  arbitrary `:<cfg>.<intf>` integers (e.g. `2-1:2.3`).
+- `test_resolve_usb_sysfs_path_no_interface_segment_raises` (NEW)
+  — bare device segment without interface = raise.
+- Malformed-payload parametrize set extended to include bare device
+  segments (`1-1.4` alone, `1-1.4:1` incomplete).
+- `_write_cp210x_envfile` test data updated to interface notation.
+
 ## 2026-05-02 19:50 KST — issue#16 HIL hot-fix v3: robust USB sysfs resolver + visibility logs
 
 Operator HIL on hot-fix v2 surfaced that auto-recovery was silently

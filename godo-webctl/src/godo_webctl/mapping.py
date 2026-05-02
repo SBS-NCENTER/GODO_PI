@@ -82,10 +82,15 @@ from .protocol import (
 )
 
 # issue#16 — sysfs USB path validator. Format `<bus>-<port[.port]*>` per
-# Linux USB sysfs naming (e.g. "1-1.4", "2-1", "3-2.1.4"). Used to reject
-# any resolver output that looks like an injection attempt before we
-# write it into the envfile + hand it to the bash helper.
-_USB_PATH_REGEX: re.Pattern[str] = re.compile(r"^[0-9]+-[0-9.]+$")
+# Linux USB sysfs INTERFACE notation: `<bus>-<port-chain>:<config>.<intf>`
+# (e.g. "1-1.4:1.0", "3-2:1.0", "2-1.4.1:2.3"). The cp210x driver is a
+# USB interface driver — its `/sys/bus/usb/drivers/cp210x/{bind,unbind}`
+# files require interface notation, NOT bare device notation
+# (`<bus>-<port-chain>` like `1-1.4`). Issue#16 HIL hot-fix v4
+# (2026-05-02 KST): v1/v2/v3 stripped the `:<config>.<intf>` suffix and
+# the kernel rejected the resulting bare device name with `write error:
+# No such device`. Fix: keep the whole interface segment.
+_USB_PATH_REGEX: re.Pattern[str] = re.compile(r"^[0-9]+-[0-9.]+:[0-9]+\.[0-9]+$")
 
 # issue#16 — name of the systemd oneshot unit that runs the cp210x
 # unbind/rebind helper script. Mirrors the polkit rule (d) in
@@ -1392,25 +1397,26 @@ def precheck(cfg: Settings, name: str | None = None) -> PrecheckResult:
 
 
 def _resolve_usb_sysfs_path(lidar_port: str) -> str:
-    """Resolve `/dev/ttyUSBn` → sysfs USB port path (e.g. "1-1.4").
+    """Resolve `/dev/ttyUSBn` → sysfs USB INTERFACE notation
+    (e.g. "1-1.4:1.0", "3-2:1.0").
 
-    The kernel exposes `/sys/class/tty/<basename>/device` as a symlink
-    pointing AT or NEAR the USB interface node. Two sysfs layouts have
-    been observed in production / HIL:
+    The cp210x driver's `/sys/bus/usb/drivers/cp210x/{bind,unbind}`
+    sysfs files expect USB interface notation
+    (`<bus>-<port-chain>:<config>.<intf>`), NOT the bare USB device
+    notation (`<bus>-<port-chain>`). Writing a bare device path
+    yields `write error: No such device` — the kernel reports it
+    because no cp210x driver is bound to that path level.
 
-      (a) tail-segment is the interface, e.g. ``.../1-1.4:1.0``
-          (basename `1-1.4:1.0`, split on `:` → `1-1.4`)
-      (b) tail-segment is the tty device, e.g. ``.../1-1.4/ttyUSB0``
-          (basename `ttyUSB0`, no `:` suffix; the USB port lives one
-          level UP)
+    issue#16 HIL hot-fix v4 (2026-05-02 KST): v1/v2/v3 stripped the
+    `:<config>.<intf>` suffix and the recovery oneshot failed at
+    every actual invocation. Diagnostic: operator HIL on v3 deploy
+    surfaced `firing for lidar_port=/dev/ttyUSB0 usb_path=3-2` ⇒
+    helper ran ⇒ kernel rejected `3-2`. Fix: keep the whole
+    interface segment.
 
-    issue#16 HIL hot-fix v3 (2026-05-02 KST): the original resolver
-    only handled (a) and raised `LidarPortNotResolvable` on (b),
-    silently bypassing auto-recovery on RPi 5 hardware where layout
-    (b) was observed. The fix walks `realpath(symlink)` from tail to
-    root and returns the first segment matching the USB port regex —
-    works for both layouts without a per-host probe.
-
+    Algorithm: `realpath()` the kernel symlink to absolute, walk
+    segments tail-to-root, return the first segment matching
+    `_USB_PATH_REGEX` (interface notation with `:<config>.<intf>`).
     Raises `LidarPortNotResolvable` if no segment matches.
     """
     tty_basename = os.path.basename(lidar_port)
@@ -1419,24 +1425,20 @@ def _resolve_usb_sysfs_path(lidar_port: str) -> str:
     sysfs_link = f"/sys/class/tty/{tty_basename}/device"
     try:
         # `realpath` resolves the symlink fully into an absolute path
-        # rooted at /sys, even when the link is relative
-        # (`../../../...`). Walking the absolute path's segments gives
-        # the same answer regardless of which layout the kernel emitted.
+        # rooted at /sys, even when the link is relative.
         real_path = os.path.realpath(sysfs_link)
     except OSError as e:
         raise LidarPortNotResolvable(f"realpath_failed: {sysfs_link}: {e}") from e
     if not real_path or not real_path.startswith("/sys/"):
         raise LidarPortNotResolvable(f"unexpected_realpath: {real_path!r}")
-    # Walk segments from tail to root; the first one matching
-    # `<bus>-<port-chain>` (with optional `:<config>.<intf>` suffix
-    # stripped) is the USB port we want.
+    # Walk segments from tail to root; first interface-notation match
+    # is the cp210x interface we want to bind/unbind.
     for segment in reversed(real_path.split(os.sep)):
         if not segment:
             continue
-        candidate = segment.split(":", 1)[0]  # strip ':1.0' style suffix if present
-        if _USB_PATH_REGEX.match(candidate):
-            return candidate
-    raise LidarPortNotResolvable(f"no_usb_port_segment_in_path: {real_path!r}")
+        if _USB_PATH_REGEX.match(segment):
+            return segment
+    raise LidarPortNotResolvable(f"no_usb_interface_segment_in_path: {real_path!r}")
 
 
 def _write_cp210x_envfile(cfg: Settings, usb_path: str) -> Path:

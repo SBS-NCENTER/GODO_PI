@@ -62,56 +62,77 @@ def _settings(tmp_path: Path) -> Settings:
 # --- _resolve_usb_sysfs_path --------------------------------------------
 
 
-def test_resolve_usb_sysfs_path_layout_a_interface_suffix(
+def test_resolve_usb_sysfs_path_returns_full_interface_notation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Layout (a) — tail segment is the USB interface (`:1.0` suffix).
-    Resolver strips `:1.0` and returns `1-1.4`."""
+    """issue#16 HIL hot-fix v4: cp210x driver's bind/unbind sysfs files
+    require USB INTERFACE notation (`<bus>-<port>:<cfg>.<intf>`), NOT
+    bare device notation. Resolver returns the WHOLE interface segment
+    including the `:1.0` suffix."""
     monkeypatch.setattr(
         M.os.path,
         "realpath",
         lambda p: "/sys/devices/platform/scb/fd500000.pcie/pci0000:00/0000:01:00.0/usb1/1-1/1-1.4/1-1.4:1.0/ttyUSB1/tty/ttyUSB1",
     )
-    assert M._resolve_usb_sysfs_path("/dev/ttyUSB1") == "1-1.4"
+    assert M._resolve_usb_sysfs_path("/dev/ttyUSB1") == "1-1.4:1.0"
 
 
-def test_resolve_usb_sysfs_path_layout_b_no_interface_suffix(
+def test_resolve_usb_sysfs_path_news_pi01_layout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Layout (b) — tail segment is the tty device, USB port is one
-    level UP. issue#16 HIL hot-fix v3: walk-up resolver returns
-    `1-1.4` (parent) instead of raising on absence of `:` suffix.
-    Operator's news-pi01 RPi 5 hardware exhibits this layout."""
+    """Operator HIL on news-pi01 deploy of v3: visibility log captured
+    `usb_path=3-2` and helper failed with `No such device`. Real
+    realpath had `3-2:1.0` interface segment under `usb3/3-2/`. v4
+    resolver returns the full interface segment."""
     monkeypatch.setattr(
         M.os.path,
         "realpath",
-        lambda p: "/sys/devices/platform/scb/fd500000.pcie/pci0000:00/0000:01:00.0/usb1/1-1/1-1.4/ttyUSB0",
+        lambda p: "/sys/devices/platform/scb/fd500000.pcie/pci0000:00/0000:01:00.0/usb3/3-2/3-2:1.0/ttyUSB0/tty/ttyUSB0",
     )
-    assert M._resolve_usb_sysfs_path("/dev/ttyUSB0") == "1-1.4"
+    assert M._resolve_usb_sysfs_path("/dev/ttyUSB0") == "3-2:1.0"
 
 
 def test_resolve_usb_sysfs_path_handles_complex_port_chain(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Multi-hop port chains (e.g. through a hub) — first non-prefix
-    match wins. `3-2.1.4` is the leaf, not `3-2.1` or `3-2`."""
+    """Multi-hop port chains (e.g. through a hub) — first interface
+    segment from the tail wins. `3-2.1.4:1.0` is the leaf interface,
+    not the upstream hub `3-2:1.0`."""
     monkeypatch.setattr(
         M.os.path,
         "realpath",
-        lambda p: "/sys/devices/.../usb3/3-2/3-2.1/3-2.1.4/3-2.1.4:1.0/ttyUSB0",
+        lambda p: "/sys/devices/.../usb3/3-2/3-2:1.0/3-2.1/3-2.1.4/3-2.1.4:1.0/ttyUSB0",
     )
-    assert M._resolve_usb_sysfs_path("/dev/ttyUSB0") == "3-2.1.4"
+    assert M._resolve_usb_sysfs_path("/dev/ttyUSB0") == "3-2.1.4:1.0"
 
 
-def test_resolve_usb_sysfs_path_no_usb_segment_raises(
+def test_resolve_usb_sysfs_path_handles_multi_interface_index(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A realpath with no USB-port-shaped segment anywhere → raise.
-    Reaches the helper would mean a malformed unbind/bind write; the
-    regex gate is defence-in-depth (helper script also validates)."""
-    monkeypatch.setattr(M.os.path, "realpath", lambda p: "/sys/class/tty/ttyUSB1")
+    """Some USB devices expose multiple interfaces; cp210x can be on
+    intf 2 (or whatever) on a multi-function chip. Regex must accept
+    arbitrary `:<config>.<intf>` integers."""
+    monkeypatch.setattr(
+        M.os.path,
+        "realpath",
+        lambda p: "/sys/devices/.../usb2/2-1/2-1:2.3/ttyUSB0",
+    )
+    assert M._resolve_usb_sysfs_path("/dev/ttyUSB0") == "2-1:2.3"
+
+
+def test_resolve_usb_sysfs_path_no_interface_segment_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A realpath with USB device segments but no interface segment →
+    raise. cp210x bind/unbind would fail with ENODEV downstream so
+    catching it here surfaces a cleaner error."""
+    monkeypatch.setattr(
+        M.os.path,
+        "realpath",
+        lambda p: "/sys/devices/.../usb1/1-1/1-1.4/ttyUSB0",  # no `:1.0`
+    )
     with pytest.raises(M.LidarPortNotResolvable):
-        M._resolve_usb_sysfs_path("/dev/ttyUSB1")
+        M._resolve_usb_sysfs_path("/dev/ttyUSB0")
 
 
 def test_resolve_usb_sysfs_path_realpath_failure_raises(
@@ -139,13 +160,13 @@ def test_resolve_usb_sysfs_path_unexpected_root_raises(
 @pytest.mark.parametrize(
     "evil_realpath",
     [
-        # Even with `/sys` prefix, malformed segments must be rejected.
-        # The walk-up looks for a USB-port-shaped segment; injection
-        # attempts produce no such segment.
+        # Injection attempts in segments — none match interface notation.
         "/sys/devices/.../evil; rm -rf //ttyUSB0",
         "/sys/devices/.../$(curl evil)/ttyUSB0",
         "/sys/devices/.../abc/ttyUSB0",  # bare alphabet, no digits
-        "/sys/devices/.../usb1/ttyUSB0",  # `usb1` is the controller, not a port
+        "/sys/devices/.../usb1/ttyUSB0",  # `usb1` is the controller
+        "/sys/devices/.../1-1.4/ttyUSB0",  # bare device, no interface
+        "/sys/devices/.../1-1.4:1/ttyUSB0",  # incomplete interface
     ],
 )
 def test_resolve_usb_sysfs_path_rejects_malformed_payloads(
@@ -153,7 +174,7 @@ def test_resolve_usb_sysfs_path_rejects_malformed_payloads(
     evil_realpath: str,
 ) -> None:
     """Defence-in-depth: the regex anchor rejects any non-canonical USB
-    bus-port form before the value reaches the bash helper. (The helper
+    interface form before the value reaches the bash helper. (The helper
     itself ALSO validates with the same regex — belt and suspenders.)"""
     monkeypatch.setattr(M.os.path, "realpath", lambda p: evil_realpath)
     with pytest.raises(M.LidarPortNotResolvable):
@@ -170,23 +191,23 @@ def test_resolve_usb_sysfs_path_empty_basename_raises() -> None:
 
 def test_write_cp210x_envfile_writes_atomically(tmp_path: Path) -> None:
     cfg = _settings(tmp_path)
-    target = M._write_cp210x_envfile(cfg, "1-1.4")
+    target = M._write_cp210x_envfile(cfg, "1-1.4:1.0")
     expected = cfg.mapping_runtime_dir.parent / MAPPING_CP210X_RECOVER_ENV_FILENAME
     assert target == expected
-    assert target.read_text("utf-8") == "USB_PATH=1-1.4\n"
+    assert target.read_text("utf-8") == "USB_PATH=1-1.4:1.0\n"
 
 
 def test_write_cp210x_envfile_overwrites_previous_atomic(tmp_path: Path) -> None:
     cfg = _settings(tmp_path)
-    M._write_cp210x_envfile(cfg, "1-1.4")
-    target = M._write_cp210x_envfile(cfg, "2-3.5")
-    assert target.read_text("utf-8") == "USB_PATH=2-3.5\n"
+    M._write_cp210x_envfile(cfg, "1-1.4:1.0")
+    target = M._write_cp210x_envfile(cfg, "2-3.5:1.0")
+    assert target.read_text("utf-8") == "USB_PATH=2-3.5:1.0\n"
 
 
 def test_write_cp210x_envfile_no_lingering_temp_files(tmp_path: Path) -> None:
     """Atomic-rename pattern: no `.cp210x.*.env.tmp` siblings after success."""
     cfg = _settings(tmp_path)
-    M._write_cp210x_envfile(cfg, "1-1.4")
+    M._write_cp210x_envfile(cfg, "1-1.4:1.0")
     parent = cfg.mapping_runtime_dir.parent
     leftover = list(parent.glob(".cp210x.*.env.tmp"))
     assert leftover == []
@@ -237,7 +258,7 @@ def test_recover_cp210x_writes_envfile_before_systemctl(
     M.recover_cp210x(cfg)
     envfile = cfg.mapping_runtime_dir.parent / MAPPING_CP210X_RECOVER_ENV_FILENAME
     assert envfile.exists()
-    assert envfile.read_text("utf-8") == "USB_PATH=1-1.4\n"
+    assert envfile.read_text("utf-8") == "USB_PATH=1-1.4:1.0\n"
 
 
 def test_recover_cp210x_systemctl_failure_raises(

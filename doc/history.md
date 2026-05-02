@@ -10,6 +10,76 @@
 
 ---
 
+## 2026-05-02 (cross-day — 21:30 KST 2026-05-01 → 16:00 KST 2026-05-02, 열여섯 번째 세션 — issue#14 SPA mapping pipeline ships + System tab 통합 + map UX 다듬기 + PR #66 backup hotfix bundle + issue#16/#17 후보 surfaced)
+
+### 한 줄 요약
+
+issue#14 (~2000 LOC × 4 stack의 SPA-driven SLAM mapping pipeline)이 두 번의 Mode-B fold + 운영자 HIL 4 매핑 사이클 + 다수의 hot-fix 끝에 정식 ship. 동시에 PR #66 hotfix bundle (backup phantom failure + Config 입력 UX + UX polish 4건) 머지. Operator HIL에서 **CP2102N USB CDC stale state 하드웨어-소프트웨어 race**가 표면화돼 issue#16 (단기 cp210x recovery) + issue#17 (장기 GPIO UART 직결) 두 후보를 잠금.
+
+### 3개 PR
+
+| PR | issue# | 제목 | 결과 |
+|---|---|---|---|
+| #65 | docs | NEXT_SESSION cold-start cache rewrite for sixteenth | merged 23:37 KST 2026-05-01 |
+| #66 | hotfix | backup uses active.pgm + Config input preserves empty + UX bundle | merged 23:37 KST 2026-05-01 |
+| #67 | issue#14 | SPA mapping pipeline + monitor SSE + Map > Mapping sub-tab + System tab integration + Maj-1/2 + Mode-B C1+M1+M2 + UX polish | merged ~17:00 KST 2026-05-02 |
+
+### 핵심 발견 #1 — CP2102N stale state hardware-software race
+
+운영자 HIL에서 godo-tracker stop 직후 mapping container 시작 시 RPLIDAR SDK가 `code 80008004 (RESULT_OPERATION_TIMEOUT)`로 일관 실패하는 현상 발견. dmesg는 `cp210x ttyUSB1: failed set request 0x12 status: -110` (USB CDC `SET_LINE_CODING` ETIMEDOUT). godo_tracker_rt의 cleanup은 정상 (SDK `stop()` + 200 ms wait + `setMotorSpeed(0)` + close — 코드 검증 완료) 임에도, cp210x driver 내부 USB CDC handle이 즉시 release 안 됨. 운영자가 **약 10초 대기** 후 시도하면 정상 동작.
+
+운영자 결정: 두 갈래로 나눠 추적.
+- **issue#16 (단기, 다음 PR)**: webctl이 mapping start 전 cp210x readable 검증 + 필요시 driver unbind/rebind via sysfs. + Pre-check gate (Start 버튼 활성화 조건 명시 + SPA 표시).
+- **issue#17 (장기, on-demand)**: RPLIDAR C1 4-pin native connector를 Pi 5 PL011 UART4 (GPIO 12/13)에 직결. USB CDC layer 자체 제거. ttyAMA0은 이미 FreeD 사용 중이라 UART4 신규 활성화 필요. C1 cold-start 800 mA peak는 27W PSU에서 충분 + external 1000 µF decoupling cap 권장. 풀 spec은 `doc/RPLIDAR/RPi5_GPIO_UART_migration.md` (305줄).
+
+운영자 인용: "자주 안 빼고 한번 설치하면 라이다와 연결 해제는 거의 안할거야" — fixed mount 운영 시나리오라 GPIO 직결 trade-off (hot-plug 불가)가 cost가 아님.
+
+### 핵심 발견 #2 — Mode-B C1: 환경변수만 읽는 Settings 필드는 silent feature disablement
+
+PR #67 round 2 가 새로 도입한 3개 webctl-owned schema 행 (`webctl.mapping_*_s` for Maj-1 stop-timing ladder)이 사실상 **운영자에게 노출만 되고 실제로는 무시되고 있었음**. `Settings.mapping_webctl_stop_timeout_s` 가 env / default 만 읽었기 때문 — 운영자가 Config 탭에서 값을 바꿔도 tracker는 `render_toml`로 저장하지만 webctl이 다시 읽지 않음. Mode-B reviewer가 catch했고 (C1 finding) 곧바로 fold.
+
+Fix: `__main__._augment_with_webctl_section()` 신규 함수로 `load_settings()` 후 [webctl] TOML 값을 `Settings`에 bind (env 우선순위 보존). 일반화된 lesson: **운영자-tunable schema 행이 runtime에 `Settings` 필드로 사용된다면 `__main__` augmenter coverage가 필수**.
+
+테스트 pin 6건 (`tests/test_main_settings_augmenter.py`): TOML override / env preservation / 누락 파일 / malformed / [webctl] 누락 / torn-ladder 거부.
+
+### 핵심 발견 #3 — Mode-B M1: schema range overlap 시 cross-trio 검증은 apply + load 양쪽 다
+
+3개 timing 행의 schema range는 `[10,60][20,90][25,120]`로 의도적으로 overlap (각 행 독립 nudge 가능하도록). 그러나 ordering invariant `docker < systemd < webctl`은 globally 유지되어야 함. 검증 없이는 `docker=60, systemd=20` 같은 torn ladder 저장 가능 → tracker가 torn trio를 tracker.toml에 기록 → 다음 webctl 부팅 시 `WebctlTomlError` → crash loop, SSH로만 복구 가능.
+
+Fix: belt-and-suspenders. **`apply.cpp::apply_set`에서 한 번** (`amcl.sigma_hit_schedule_m` cross-field 검증과 동일 패턴) **+ `core/config.cpp::Config::load`에서 한 번** (`validate_amcl` / `validate_gpio` 패턴). 일반화된 lesson: schema description에 명시된 cross-field invariant는 operator-edit 경로 (apply) AND boot-load 경로 (Config::load) 양쪽 모두에서 enforce 필요.
+
+### 핵심 발견 #4 — Map viewport는 `window.innerHeight`가 아니라 actual canvas 기준
+
+issue#13-cand로 SLAM default resolution 0.05 → 0.025 m/cell가 적용되면서 mapping container가 4배 큰 PGM (예: 200×200 → 400×400) 발행. 운영자 HIL: "100% 기준 css 박스에서 아래 쪽이 애매하게 잘려. 위쪽은 아예 안잘리는데."
+
+Root cause: `_minZoom` 이 `window.innerHeight` (전체 윈도우, 예: 1080 px) 기준으로 계산됐지만 actual map canvas는 더 작음 (topbar / breadcrumb / Map 헤더 / sub-tab nav 가 세로 공간 차지). Auto-fit zoom이 1080 px window 기준으로 sized → actual canvas ~800 px → ~280 px 아래쪽 overflow. 비대칭 잘림 (위 OK, 아래 잘림)은 map이 canvas 중심 정렬 (`canvasH/2 ± mh/2`) 이기 때문.
+
+Fix: `setMapDims`에 optional `canvasW` / `canvasH` 파라미터 추가; `MapUnderlay.svelte`가 `meta` (mapMetadata 도착) + `canvas` (`bind:this` binding) 둘 다 ready인 시점을 `$effect`로 watch해서 `getBoundingClientRect()`로 측정 후 전달. `project_map_viewport_zoom_rules.md` Rule 2 (first-load only, NOT resize-tracking) 정신은 그대로 유지 — candidate computation만 확장.
+
+### 운영자 lesson + 잠금 (memory entries)
+
+- `feedback_ssot_following_discipline.md` (PR #67 commit 9c44906에 포함) — 같은 개념에 여러 naming scheme이 존재할 때 원본/upstream SSOT를 verbatim 따르기. paraphrase / alias / parallel name 발명 금지. issue#14 Mode-A C1 fix (`[main] serial_lidar_port` → `[serial] lidar_port`)에서 강화.
+
+- 새 frontend constant `MAPPING_OPERATION_TIMEOUT_MS = 60000` — 장시간 endpoint (`/api/mapping/start`, `/api/mapping/stop`)는 명시적 `apiPost.timeoutMs` override 필수. Default 3 s가 mid-flight에서 abort → backend는 계속 진행 → 운영자에게 "맵은 저장됐는데 request_aborted" 라는 혼란 UX.
+
+- Map zoom rule 확장: actual canvas dims 기준으로 `_minZoom = min(viewportH/h, viewportW/w)`; first-load `_zoom = _minZoom` (auto-fit). `project_map_viewport_zoom_rules.md` Rule 2의 first-load-only spirit 보존.
+
+### 다음 세션 큐 (운영자-locked priority)
+
+1. **issue#16** — Mapping pre-check gate + cp210x auto-recovery + dockerd/containerd ProcessTable 분류 정책 (운영자 HIL 발견; tracker→mapping handover race + process classification 다듬기).
+2. **issue#15** — Config tab domain grouping (collapsible sections by dotted-name prefix; frontend-only ~80 LOC).
+3. **issue#10** — udev `/dev/rplidar` symlink (작은 standalone; issue#17 ship되면 deprecate).
+4. **issue#11** — Live pipelined-parallel multi-thread (architectural; issue#5 sibling).
+5. **issue#13 cont.** — distance-weighted AMCL likelihood (`r_cutoff` 근거리 down-weight; algorithmic 실험).
+6. **issue#4** — AMCL silent-converge diagnostic (fifteenth's HIL 데이터를 baseline으로).
+7. **issue#6** — B-MAPEDIT-3 yaw rotation (frame redefinition; deferred).
+8. **issue#17** — GPIO UART 직결 migration (on-demand; issue#16 후 cp210x stale state가 운영에 여전히 영향이면).
+9. **Bug B** — Live mode standstill jitter ~5 cm 확장 (운영자 측정 데이터 필요; 코드 변경 미정).
+
+**다음 free issue 정수: `issue#18`**.
+
+---
+
 ## 2026-05-01 (오후 ~ 저녁 — 14:30 KST → 20:30 KST, 열다섯 번째 세션 — issue#5 Live pipelined-hint kernel ships + HIL 압도적 + issue#12 latency defaults + issue#13-cand mapping 해상도 + 프론트엔드 timestamps + issue#14 SPA mapping pipeline plan)
 
 ### 한 줄 요약

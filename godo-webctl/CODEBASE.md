@@ -1025,6 +1025,95 @@ Pinned by:
 
 ## Change log
 
+### 2026-05-02 16:30 KST — issue#14 round 2 + Mode-B fold + PR #66 hotfix bundle
+
+#### Why
+
+Round 1 (commit `9c44906`) shipped the mapping coordinator + endpoints
++ singleton-ticker SSE producer. Mode-B then surfaced 3 findings (C1
+Settings/[webctl] wire dead, M1 cross-trio invariant missing, M2
+System tab admin endpoint bypassed coordinator) + operator UX
+follow-ups (state badge, frontend timeout for long-running endpoints,
+Map zoom auto-fit must use actual canvas dims). PR #66 hotfix bundle
+shipped in parallel: backup endpoint phantom failure (deprecated
+`cfg.map_path` Track-E fallthrough), Config input clearing UX bug,
+backup-flash banner, Apply no-op suppression, modified-key amber dot.
+
+#### Added
+
+- `src/godo_webctl/__main__.py::_augment_with_webctl_section()` (Mode-B
+  C1 fix) — after `load_settings()`, binds the [webctl] TOML value
+  for `mapping_webctl_stop_timeout_s` to the live `Settings` instance.
+  Env precedence preserved (only overwrites when current value matches
+  the bare module default = env did not fire). Pre-fix
+  `cfg.mapping_webctl_stop_timeout_s` was env+default-only — operator
+  edits via Config tab → tracker writes via `render_toml` → webctl
+  never re-read it.
+- `tests/test_main_settings_augmenter.py` (6 cases) — TOML override /
+  env preservation / missing file / malformed / [webctl] missing /
+  torn-ladder rejection.
+- `src/godo_webctl/app.py::system_service_action` Mode-B M2(a) gate —
+  when `name == MAPPING_UNIT_NAME.removesuffix(".service")` AND
+  `mapping.status(cfg).state ∈ {Starting, Running, Stopping}`, return
+  409 `mapping_pipeline_active` with Korean detail. Stops curl /
+  second-tab admin from corrupting state.json mid-mapping.
+- `tests/test_app_integration.py::test_post_system_service_godo_mapping_active_blocked_when_mapping_running`
+  (3 actions × 409) + `..._allowed_when_mapping_idle`.
+- `tests/test_config_schema_parity.py::test_constants_mapping_stop_timeout_matches_schema_default_repr`
+  (Mode-B Mn2) — pins `MAPPING_CONTAINER_STOP_TIMEOUT_S` against the
+  C++ schema row's `default_repr` so a drift fails CI rather than
+  silently appearing at first install.
+- `src/godo_webctl/protocol.py::DOCKER_MAPPING_PROCESS_NAMES` (Mode-B
+  N1) — `frozenset({"docker", "dockerd", "containerd"})` + prefix
+  match for `containerd-shim*`. `processes.classify_pid` now returns
+  `"godo"` for these so the SPA ProcessTable bolds + accent-colors
+  them (operator-confirmed: docker is only used for godo-mapping).
+- `tests/test_processes.py::test_classify_pid_docker_family` (5 cases
+  + negative no-false-positives).
+- `src/godo_webctl/maps.py::MapEntry.{width_px,height_px,resolution_m}`
+  (operator UX 2026-05-02) — added so SPA Map list can render
+  `WxH px (X.X×Y.Y m)`. New helper `read_yaml_resolution` does a
+  bounded read (`YAML_HEADER_MAX_BYTES = 512`) of the `resolution:`
+  line. Either field `None` on malformed → graceful degradation
+  (list_pairs still returns the entry).
+- `tests/test_maps.py` (7 new cases) — typical / legacy / inline-comment
+  / missing / non-numeric / missing-file / list_pairs end-to-end carry.
+
+#### Changed
+
+- `src/godo_webctl/mapping.py::start()` Phase 3 (Mode-B Mn3) — mirrors
+  the Phase 2 defensive `try/except StateFileCorrupt` fallback. If
+  state.json is briefly corrupt during the under-flock commit, log
+  WARNING and YIELD (return `starting_status`) instead of raising
+  through the FastAPI handler as a 500. Symmetric error handling
+  with the Phase 2 polling loop.
+- `src/godo_webctl/app.py::map_backup` (PR #66 Bug A) — was passing
+  `cfg.map_path` (deprecated Track-E pre-symlink hook, default
+  `/etc/godo/maps/studio_v1.pgm` which doesn't exist on hosts that
+  never set `GODO_WEBCTL_MAP_PATH`). Migrated to the same
+  `maps_dir/active.pgm` resolution as `/api/map/edit` and
+  `/api/map/origin` (`maps.read_active_name` → `maps.pgm_for`). Pre-fix
+  404 `map_path_not_found` semantics replaced with 503
+  `active_map_missing` (matches sibling endpoints).
+- `tests/test_app_integration.py::test_backup_uses_active_symlink_not_cfg_map_path_regression`
+  pins the fix: decoy `cfg.map_path` set to a real file under a
+  different name, the test asserts the backup still picks up the
+  active symlink target.
+- `src/godo_webctl/services.py::ALLOWED_SERVICES` extended with
+  `godo-mapping@active` so System tab can READ its status (frontend
+  disables the action buttons via UX, but the endpoint is reachable
+  for the M2(a) escape-hatch curl path — also gated by the
+  `system_service_action` 409 above).
+
+#### Tests
+
+- pytest 879 pass (excluding pre-existing `test_app_hardware_tracker.py`
+  PR-A admin-gate breakage). 21 new cases this block (6 augmenter +
+  2 hard-block + 1 schema-parity + 5 docker-family + 7 map-dimensions).
+- ruff clean on touched files.
+
+---
+
 ### 2026-05-01 23:21 KST — issue#14: SPA Mapping pipeline + monitor
 
 Webctl now owns the full mode-coordinator state machine for the

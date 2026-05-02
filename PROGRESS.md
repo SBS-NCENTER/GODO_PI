@@ -174,6 +174,44 @@ All host-side bring-up steps complete. See per-step session log entry below. The
 
 ## Session log
 
+### 2026-05-02 (cross-day — 21:30 KST 2026-05-01 → 16:00 KST 2026-05-02, sixteenth-session — issue#14 SPA mapping pipeline ships + System tab integration + map UX polish + PR #66 backup hotfix bundle + issue#16/#17 candidates surfaced)
+
+Sixteenth-session followed directly from fifteenth's plan-authoring close. The 1393-line issue#14 plan went through Mode-A → REWORK (5 Critical + 8 Major findings, all mechanical) → in-place fold by Parent (no Planner re-spawn) → Writer round 1 → Mode-B → REWORK (Maj-1 stop-timing chain too tight against nav2 `map_saver_cli` non-atomic write + Maj-2 flock too wide) → Writer round 2 + System tab integration (operator UX request) → Mode-B C1 (Settings → TOML wire dead) + M1 (cross-trio invariant missing) + M2 (System tab admin endpoint bypassed mapping coordinator) → all folded → operator HIL through 4 mapping cycles (test_v1 → v4) → multiple post-HIL hot-fixes → PR #67 merge. PR #66 backup-endpoint phantom failure (deprecated `cfg.map_path` Track-E fallthrough) + Config tab numeric-input clearing UX bug were field-reported mid-session; bundled into a parallel hotfix PR with 4 cumulative commits (backup-flash banner, Apply no-op suppression, modified-key amber dot).
+
+**Notable structural revelation #1 — CP2102N USB CDC stale state on tracker→mapping device handover**: HIL surfaced a hardware-level race that the Maj-2 flock narrowing alone could not resolve. After `godo_tracker_rt` cleanup (`drv->stop()` + 200 ms wait + `setMotorSpeed(0)` + close — verified clean), the cp210x USB CDC driver internal handle does NOT immediately release. The next `rplidar_node` (inside the mapping container) calling `SET_LINE_CODING` gets `-110 ETIMEDOUT` (`dmesg: cp210x ttyUSB1: failed set request 0x12 status: -110`); SDK reports `code 80008004` (RESULT_OPERATION_TIMEOUT). Empirical workaround: ~10 s wait between tracker stop and mapping start. Operator decision: **issue#16 (단기) — webctl pre-check gate + cp210x driver unbind/rebind**. **issue#17 (장기) — RPLIDAR C1 4-pin GPIO direct connection** (Pi 5 PL011 UART4, replaces USB CDC layer entirely). Documented in `doc/RPLIDAR/RPi5_GPIO_UART_migration.md` + memory `project_gpio_uart_migration.md`.
+
+**Notable structural revelation #2 — Mode-B C1: env-only Settings field silently disables operator-tunable surface**: PR #67 round 2 added 3 new webctl-owned schema rows (`webctl.mapping_*_s` for Maj-1 stop-timing ladder). Mode-B caught that `Settings.mapping_webctl_stop_timeout_s` was loaded ONLY from env / defaults — operator could edit the value via Config tab → tracker writes via `render_toml` → webctl never re-reads it. Maj-1's "torn lifetime asset" guard would have reverted to 35 s deadline regardless of operator intent. Fix: new `_augment_with_webctl_section()` in `__main__.py` binds the TOML value to the live `Settings` instance (env precedence preserved). General lesson: any operator-tunable schema row whose runtime path uses a `Settings` field MUST have explicit `__main__` augmenter coverage. Unit pin: `tests/test_main_settings_augmenter.py` (6 cases: TOML override, env preservation, missing file, malformed, missing section, torn-ladder rejection).
+
+**Notable structural revelation #3 — Mode-B M1: schema range overlap requires apply-time + load-time cross-trio enforcement**: Schema ranges `[10,60][20,90][25,120]` overlap by design (allow operator to nudge each row independently) but the ordering invariant `docker < systemd < webctl` must hold globally. Without enforcement, operator can save `docker=60, systemd=20` (each individually in range) → tracker writes torn trio → next webctl boot raises `WebctlTomlError` → crash loop, recoverable only via SSH + manual file edit. Fix: belt-and-suspenders enforcement at BOTH `apply.cpp::apply_set` (mirrors existing `amcl.sigma_hit_schedule_m` cross-field check pattern) AND `core/config.cpp::Config::load` (`validate_webctl_mapping_ladder` mirrors `validate_amcl` / `validate_gpio` pattern). Lesson: any cross-field invariant declared in schema description MUST be enforced at BOTH the operator-edit path (apply) and the boot-load path (Config::load).
+
+**Notable structural revelation #4 — Map viewport must reference actual canvas, not `window.innerHeight`**: post-issue#13-cand (default SLAM resolution 0.05 → 0.025 m/cell) mapping containers emit 4× larger PGMs (e.g. 200×200 → 400×400). Operator HIL: "100% 기준 css 박스에서 아래 쪽이 애매하게 잘려. 위쪽은 아예 안잘리는데." Root cause: `_minZoom` was computed against `window.innerHeight` (full window) but actual map canvas is smaller (topbar / breadcrumb / Map header / sub-tab nav steal vertical). Auto-fit zoom sized for 1080 px window → actual canvas ~800 px → ~280 px overflow at the bottom; asymmetric clipping (top OK, bottom clipped) because map is center-anchored. Fix: `setMapDims` accepts optional `canvasW` / `canvasH` params; `MapUnderlay.svelte` defers the call into a `$effect` watching both `meta` (mapMetadata arrival) and `canvas` (`bind:this` binding), measures via `getBoundingClientRect`, passes through. Preserves `project_map_viewport_zoom_rules.md` Rule 2 spirit — only the candidate computation changed.
+
+**3 PRs landed/queued this session**:
+
+| PR | Issue | Title | State |
+|---|---|---|---|
+| #65 | docs | NEXT_SESSION cold-start cache rewrite for sixteenth | merged 23:37 KST 2026-05-01 |
+| #66 | hotfix | backup uses active.pgm + Config input preserves empty + UX bundle (backup-flash, no-op suppression, amber dot) | merged 23:37 KST 2026-05-01 |
+| #67 | issue#14 | SPA mapping pipeline + monitor SSE + Map > Mapping sub-tab + System tab integration + Maj-1/2 + Mode-B C1+M1+M2 + UX polish | merged ~17:00 KST 2026-05-02 |
+
+**Cross-cutting lessons locked this session**:
+- `feedback_ssot_following_discipline.md` (memory entry, in PR #67) — when multiple naming schemes exist for the same concept, follow the original/upstream SSOT verbatim. Don't paraphrase, alias, or invent parallel names. Reinforced via Mode-A C1 fix on issue#14 plan (`[main] serial_lidar_port` → `[serial] lidar_port`).
+- `MAPPING_OPERATION_TIMEOUT_MS = 60000` constant (frontend) — long-running endpoints (`/api/mapping/start`, `/api/mapping/stop`) need explicit `apiPost` `timeoutMs` override; default 3 s aborts mid-flight while backend continues, producing the confusing UX "맵은 저장됐는데 request_aborted 떠".
+- Map zoom rule extension: `_minZoom = min(viewportH/h, viewportW/w)` using actual canvas dims; first-load `_zoom = _minZoom` (auto-fit). Preserves `project_map_viewport_zoom_rules.md` Rule 2 (first-load only, NOT resize-tracking).
+
+**Open queue for next session** (priority order, operator-locked):
+1. **issue#16** — Mapping pre-check gate + cp210x auto-recovery + dockerd/containerd ProcessTable classification (operator HIL surfaced — tracker→mapping handover race + process classification refinement).
+2. **issue#15** — Config tab domain grouping (collapsible sections by dotted-name prefix, frontend-only, ~80 LOC).
+3. **issue#10** — udev `/dev/rplidar` symlink (small standalone; deprecated by issue#17 if ever shipped).
+4. **issue#11** — Live pipelined-parallel multi-thread (architectural, sibling to issue#5 Live carry-hint).
+5. **issue#13 cont.** — distance-weighted AMCL likelihood (`r_cutoff` near-LiDAR down-weight; algorithmic experiment).
+6. **issue#4** — AMCL silent-converge diagnostic (now has fifteenth's HIL data as baseline).
+7. **issue#6** — B-MAPEDIT-3 yaw rotation (frame redefinition, deferred).
+8. **issue#17** — GPIO UART direct connection migration (on-demand, only if cp210x stale state still hurts ops post issue#16).
+9. **Bug B** — Live mode standstill jitter ~5 cm widening (operator measurement data needed; not yet coded).
+
+**Next free issue integer: `issue#18`**.
+
 ### 2026-05-01 (afternoon → evening — 14:30 KST → 20:30 KST, fifteenth-session — issue#5 Live pipelined-hint kernel ships + HIL spectacular + issue#12 latency defaults + issue#13-cand mapping resolution + frontend timestamps + issue#14 SPA mapping pipeline plan authored)
 
 Fifteenth-session was a marathon afternoon-evening following directly from fourteenth's cold-start handoff (TL;DR #1: `issue#5 Live mode pipelined hint`). Operator drove two full-pipeline PRs to merge plus a 1393-line Plan for the next major feature (issue#14 SPA mapping pipeline). Two Mode-A REWORK cycles were triggered (planner overestimated architectural simplicity each time); both were resolved by Parent decisions during the same session without re-Planner spawn. HIL outcomes on PR #62 were the most spectacular this project has seen — Live drift collapsed from ~4 m to ±5 cm stationary / ±10 cm in motion; yaw drift from ~90° to ±1°. A σ tighten experiment (σ_xy 0.05 → 0.02) was empirically rejected mid-session, locking σ semantics in both directions (do not widen for AMCL search comfort, do not tighten beyond physical drift bounds).

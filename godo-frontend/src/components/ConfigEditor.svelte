@@ -136,24 +136,73 @@
     'webctl.mapping_systemd_stop_timeout_s':
       '값 변경 후 install.sh 재실행 필요 (sudo bash production/RPi5/systemd/install.sh && sudo systemctl daemon-reload).',
   };
+
+  // issue#15 (2026-05-03 KST) — domain grouping. Each schema row's name
+  // is dotted (e.g. "amcl.particles_max", "webctl.mapping_image_tag");
+  // the first segment is the domain. We render rows clustered by
+  // domain inside collapsible <details open> blocks. Default = open
+  // (operator-locked: "기본적으로 group은 펼쳐진 상태").
+  const GROUP_LABEL_KO: Record<string, string> = {
+    amcl: 'AMCL (몬테카를로 위치추정)',
+    smoother: '스무더 (Smoother)',
+    serial: '시리얼 / LiDAR',
+    network: '네트워크',
+    rt: '실시간 (RT)',
+    gpio: 'GPIO',
+    ipc: 'IPC (UDS)',
+    webctl: 'webctl / 매핑',
+  };
+
+  function groupLabel(prefix: string): string {
+    return GROUP_LABEL_KO[prefix] ?? prefix;
+  }
+
+  // Preserve the schema's emit order WITHIN each group; group order
+  // follows first-seen-prefix order in `schema`. Map keeps insertion
+  // order in modern JS, so this is stable.
+  let groups = $derived.by(() => {
+    const map = new Map<string, ConfigSchemaRow[]>();
+    for (const row of schema) {
+      const prefix = row.name.split('.', 1)[0];
+      const list = map.get(prefix) ?? [];
+      list.push(row);
+      map.set(prefix, list);
+    }
+    return Array.from(map.entries()).map(([prefix, rows]) => ({
+      prefix,
+      label: groupLabel(prefix),
+      rows,
+    }));
+  });
 </script>
 
-<table class="config-table" data-testid="config-table">
-  <thead>
-    <tr>
-      <th class="col-glyph"></th>
-      <th class="col-key">Key</th>
-      <th class="col-desc">Description</th>
-      <th class="col-current">Current</th>
-      <th class="col-edit">Edit</th>
-    </tr>
-  </thead>
-  <tbody>
-    {#each schema as row (row.name)}
-      {@const glyph = reloadGlyph(row.reload_class)}
-      {@const inputValue = pending[row.name] ?? fmtCurrent(current[row.name])}
-      {@const result = applyResults[row.name]}
-      <tr data-testid="row-{row.name}">
+<div class="config-groups" data-testid="config-table">
+  {#each groups as group (group.prefix)}
+    <details
+      class="config-group"
+      data-testid="config-group-{group.prefix}"
+      open
+    >
+      <summary>
+        <span class="group-label">{group.label}</span>
+        <span class="group-count">({group.rows.length})</span>
+      </summary>
+      <table class="config-table">
+        <thead>
+          <tr>
+            <th class="col-glyph"></th>
+            <th class="col-key">Key</th>
+            <th class="col-desc">Description</th>
+            <th class="col-current">Current</th>
+            <th class="col-edit">Edit</th>
+          </tr>
+        </thead>
+        <tbody>
+          {#each group.rows as row (row.name)}
+            {@const glyph = reloadGlyph(row.reload_class)}
+            {@const inputValue = pending[row.name] ?? fmtCurrent(current[row.name])}
+            {@const result = applyResults[row.name]}
+            <tr data-testid="row-{row.name}">
         <td class="col-glyph">
           <span class="glyph {glyph.cls}" title={glyph.tooltip}>{glyph.text}</span>
         </td>
@@ -230,9 +279,61 @@
       </tr>
     {/each}
   </tbody>
-</table>
+      </table>
+    </details>
+  {/each}
+</div>
 
 <style>
+  /* issue#15 (2026-05-03 KST) — collapsible domain group. Default open
+     per operator request; clickable summary toggles. Visual nesting
+     light-touch so the existing table styles dominate. */
+  .config-groups {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+  .config-group {
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm, 4px);
+    background: var(--color-bg-elev);
+    overflow: hidden;
+  }
+  .config-group > summary {
+    padding: var(--space-2) var(--space-3);
+    cursor: pointer;
+    user-select: none;
+    background: var(--color-bg);
+    border-bottom: 1px solid var(--color-border);
+    font-weight: 600;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+  .config-group > summary::-webkit-details-marker {
+    display: none;
+  }
+  .config-group > summary::before {
+    content: '▾';
+    display: inline-block;
+    width: 1em;
+    transition: transform 0.15s ease;
+  }
+  .config-group:not([open]) > summary::before {
+    transform: rotate(-90deg);
+  }
+  .config-group:not([open]) > summary {
+    border-bottom: none;
+  }
+  .group-label {
+    color: var(--color-text);
+  }
+  .group-count {
+    color: var(--color-text-muted);
+    font-weight: 400;
+    font-size: 0.9em;
+  }
   .config-table {
     width: 100%;
     border-collapse: collapse;
@@ -283,18 +384,26 @@
     word-break: break-all;
     max-width: 100%;
   }
+  /* issue#15 (2026-05-03 KST) — input bg swap. Operator-locked: 평상시
+     회색 칸 (view 모드 = disabled), edit 진입 시 흰색 칸 (edit = enabled).
+     Light theme: --color-bg=#f5f5f7 (회색), --color-bg-elev=#ffffff (흰).
+     Pre-issue#15 used --color-bg for enabled and --color-bg-elev for
+     disabled, which inverted the operator's mental model on light
+     theme (edit looked dimmer than view). Now enabled = elev (흰),
+     disabled = bg (회색). Dark theme inherits the same intent — edit
+     state is brighter than view state. */
   .col-edit input {
     width: 100%;
     box-sizing: border-box;
     padding: var(--space-1) var(--space-2);
-    background: var(--color-bg);
+    background: var(--color-bg-elev);
     color: var(--color-text);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-sm, 4px);
   }
   .col-edit input:disabled {
     color: var(--color-text-muted);
-    background: var(--color-bg-elev);
+    background: var(--color-bg);
     cursor: not-allowed;
   }
   .modified-dot {

@@ -2479,14 +2479,14 @@ async def test_get_config_returns_projected_dict(
     assert body["network.ue_port"] == 6666
 
 
-async def test_get_config_schema_returns_52_rows(
+async def test_get_config_schema_returns_53_rows(
     tmp_path: Path,
     tmp_map_pair: Path,
 ) -> None:
     """The schema is mirrored from C++; the endpoint serves the local
-    parse cache, not a UDS round-trip. issue#16.1 added the 4th
-    webctl.mapping_*_s row (webctl.mapping_systemctl_subprocess_timeout_s)
-    on top of issue#14 Maj-1's three — count 48 → 52."""
+    parse cache, not a UDS round-trip. issue#10.1 added the
+    serial.lidar_udev_serial row on top of issue#16.1's 52 —
+    count 52 → 53."""
     s = _settings_for(
         uds_socket=tmp_path / "u.sock",
         map_path=tmp_map_pair,
@@ -2497,7 +2497,7 @@ async def test_get_config_schema_returns_52_rows(
     assert r.status_code == HTTPStatus.OK
     rows = r.json()
     assert isinstance(rows, list)
-    assert len(rows) == 52
+    assert len(rows) == 53
     # Each row has the documented keys.
     for row in rows:
         assert {

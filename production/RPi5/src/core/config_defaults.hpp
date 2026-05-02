@@ -19,6 +19,15 @@ inline constexpr int              UE_PORT      = 6666;
 // path. Dev hosts without the studio's specific cp210x serial must
 // override `[serial] lidar_port = /dev/ttyUSB0` in their tracker.toml.
 inline constexpr std::string_view LIDAR_PORT   = "/dev/rplidar";
+// issue#10.1 — cp210x USB factory serial baked into 99-rplidar.rules.
+// install.sh sed-substitutes this value (or the operator's TOML
+// override) into 99-rplidar.rules.template at install time. Dev hosts
+// must override via tracker.toml `[serial] lidar_udev_serial =
+// "<dev-host-cp210x-serial>"` — the studio default below will not
+// match a different LiDAR's factory serial. Same override pattern as
+// LIDAR_PORT above.
+inline constexpr std::string_view LIDAR_UDEV_SERIAL =
+    "2eca2bbb4d6eef1182aae9c2c169b110";
 inline constexpr int              LIDAR_BAUD   = 460'800;
 inline constexpr std::string_view FREED_PORT   = "/dev/ttyAMA0";  // PL011 UART0 via YL-128
 inline constexpr int              FREED_BAUD   = 38'400;

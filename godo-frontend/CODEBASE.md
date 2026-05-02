@@ -3055,3 +3055,25 @@ single follow-up commit on the same branch.
   both views in one pane during a long mapping run so they can
   triage CPU/memory pressure on either side without tab-switching.
   Single-column fallback below 900 px viewport.
+
+---
+
+## 2026-05-03 (afternoon — KST) — issue#10.1: System tab 도움말 라이다 시리얼 카드
+
+### Changed
+
+- `src/routes/System.svelte` — `SYSTEM_SUBTAB_HELP` branch's
+  `.help-stack` gains a second `<aside class="help-section">` card
+  ("라이다 시리얼 번호 확인 방법 (issue#10.1)") below the existing
+  tracker.toml backup-help card. 3 command groups + workflow note;
+  reuses the existing `.help-section / .help-intro / .help-steps /
+  .help-note / .step-label` classes — no new CSS. Operator workflow:
+  새 라이다 USB 연결 → `udevadm info` 로 32자리 hex serial 추출 →
+  Config 탭에서 `serial.lidar_udev_serial` 갱신 → install.sh 재실행.
+
+### Notes
+
+- 새 schema row 자체는 Config 탭의 schema-driven editor가 자동으로
+  렌더링하므로 별도 컴포넌트 추가는 없습니다. 도움말 카드는 SSH
+  접근이 필요한 단계(udevadm + install.sh)를 운영자에게 안내하기
+  위한 단방향 정보 표시만 수행합니다 (no Apply 버튼, no fetch).

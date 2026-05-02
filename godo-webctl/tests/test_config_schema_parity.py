@@ -4,7 +4,7 @@ Track B-CONFIG (PR-CONFIG-β, TB1 fold) — cross-language schema parity.
 Loads `production/RPi5/src/core/config_schema.hpp` BY REAL PATH (mirrors
 `tests/test_protocol.py`'s LAST_POSE_FIELDS pattern) and asserts:
 
-  - row count == 52 (issue#16.1 pin: 48 + 4 webctl.mapping_* rows),
+  - row count == 53 (issue#10.1 pin: 52 + 1 serial.lidar_udev_serial row),
   - every row's `reload_class` is one of the 3 known strings,
   - every row's `type` is one of the 3 known strings,
   - the default_repr is non-empty.
@@ -33,16 +33,36 @@ def test_real_source_exists() -> None:
     assert _CPP_SCHEMA_HPP.exists(), f"C++ schema source missing: {_CPP_SCHEMA_HPP}"
 
 
-def test_row_count_pinned_at_52() -> None:
-    """issue#16.1 pin: schema row count is 52 (48 + 4 webctl.mapping_* rows)."""
+def test_row_count_pinned_at_53() -> None:
+    """issue#10.1 pin: schema row count is 53 (52 + 1 serial.lidar_udev_serial row)."""
     rows = schema_mod.load_schema()
-    assert len(rows) == 52
+    assert len(rows) == 53
 
 
-def test_static_assert_in_cpp_says_52_too() -> None:
+def test_static_assert_in_cpp_says_53_too() -> None:
     """Cross-pin: the C++ static_assert text contains the count."""
     text = _CPP_SCHEMA_HPP.read_text(encoding="utf-8")
-    assert "CONFIG_SCHEMA.size() == 52" in text
+    assert "CONFIG_SCHEMA.size() == 53" in text
+
+
+def test_lidar_udev_serial_row_present() -> None:
+    """issue#10.1 — serial.lidar_udev_serial row exposes the cp210x
+    factory serial used by 99-rplidar.rules.template. install.sh is
+    the sole consumer (sed-substitutes into the rendered rule);
+    tracker stores verbatim through apply / render_toml round-trip.
+    Default pins the studio's specific serial so an out-of-the-box
+    install on the production host matches the existing /dev/rplidar
+    udev contract."""
+    rows = schema_mod.load_schema()
+    by_name = {r.name: r for r in rows}
+    row = by_name.get("serial.lidar_udev_serial")
+    assert row is not None
+    assert row.type == "string"
+    assert row.reload_class == "restart"
+    assert row.default_repr == "2eca2bbb4d6eef1182aae9c2c169b110"
+    # Description must mention install.sh consumer so an operator
+    # reading the Config tab tooltip understands the round-trip path.
+    assert "install.sh" in row.description
 
 
 def test_webctl_rows_present() -> None:

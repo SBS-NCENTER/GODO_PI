@@ -28,7 +28,9 @@
 
 10. **issue#7 — boom-arm angle masking (optional)** — Contingent on issue#4 diagnostic confirming pan-correlated cluster pattern.
 
-**Next free issue integer: `issue#18`**.
+11. **issue#18 (NEW, surfaced 2026-05-03 KST during issue#10.1 HIL) — UDS bootstrap audit**. During issue#10.1 PR HIL, `/run/godo/ctl.sock` was observed lingering as a 0-byte regular file alongside the live listening socket at `ctl.sock.<pid>.tmp` — atomic-rename never completed. Root cause unconfirmed (could be webctl ENOENT placeholder, half-failed prior rename under deploy race, or systemd-tmpfiles interaction). issue#10.1 PR ships a quick belt-and-braces guard (lstat → unlink-if-non-socket before rename in `uds_server.cpp:163`) but the broader audit remains: stale-state detection at boot, error logging on rename failure, optional pidfile-style stale recovery, atexit/destructor unlink semantics, mapping@active socket lifecycle parallel review. Spec to be drafted at session-close. ~50-100 LOC across uds_server / mapping / webctl client paths.
+
+**Next free issue integer: `issue#19`**.
 
 ## Where we are (2026-05-03 00:50 KST — seventeenth-session close)
 

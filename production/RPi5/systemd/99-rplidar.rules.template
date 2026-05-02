@@ -1,0 +1,26 @@
+# issue#10 / issue#10.1 — stable /dev/rplidar symlink for the studio's
+# RPLIDAR C1.
+#
+# This file is a TEMPLATE rendered by `production/RPi5/systemd/install.sh`.
+# install.sh reads `serial.lidar_udev_serial` from
+# `/var/lib/godo/tracker.toml` (or falls back to the studio default
+# baked into config_defaults.hpp::LIDAR_UDEV_SERIAL), validates the
+# 32-char lowercase-hex format, then sed-substitutes `__LIDAR_SERIAL__`
+# below before writing the rendered file to
+# `/etc/udev/rules.d/99-rplidar.rules`. The operator never edits the
+# rendered file directly — re-run install.sh after a serial change.
+#
+# Without this rule, the cp210x driver assigns ttyUSB0 / ttyUSB1 in
+# enumeration order, which has caused two operator-side port swaps
+# during HIL when an unrelated USB device was plugged at boot.
+#
+# Match by USB serial number (cp210x factory-stamped, unique per LiDAR
+# unit). Replacing the LiDAR requires updating tracker.toml's
+# `serial.lidar_udev_serial` (Config tab) and re-running install.sh.
+#
+# SYMLINK+= leaves the original /dev/ttyUSBN node intact (so existing
+# tracker.toml entries that reference ttyUSB0 keep working as a
+# fallback until the operator flips the runtime override). Tag is
+# harmless: "systemd" lets udev annotations propagate cleanly.
+
+ACTION=="add", SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", ATTRS{serial}=="__LIDAR_SERIAL__", SYMLINK+="rplidar", TAG+="systemd"

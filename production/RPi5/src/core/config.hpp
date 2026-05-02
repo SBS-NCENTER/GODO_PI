@@ -24,6 +24,7 @@ struct Config {
 
     // Serial.
     std::string lidar_port;
+    std::string lidar_udev_serial;  // issue#10.1: install.sh consumer.
     int         lidar_baud{};
     std::string freed_port;
     int         freed_baud{};

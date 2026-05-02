@@ -357,8 +357,8 @@
       </div>
     </div>
     <p class="hint">
-      Tier-2 키 (~37). 즉시 반영(✓), 재시작 필요(!), 재시작+재캘리브레이션 필요(!!) 가 각 행에
-      표시됩니다.
+      Tier-2 키 (총 {schema.length}개). 즉시 반영(✓), 재시작 필요(!), 재시작+재캘리브레이션
+      필요(!!) 가 각 행에 표시됩니다.
     </p>
     {#if trackerActive === false}
       <div class="banner banner-warn" data-testid="config-tracker-banner">

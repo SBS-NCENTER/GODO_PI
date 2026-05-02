@@ -20,8 +20,8 @@ using godo::core::config_schema::reload_class_to_string;
 using godo::core::config_schema::ValueType;
 using godo::core::config_schema::value_type_to_string;
 
-TEST_CASE("CONFIG_SCHEMA has exactly 52 rows (issue#16.1 added webctl.mapping_systemctl_subprocess_timeout_s)") {
-    CHECK(CONFIG_SCHEMA.size() == 52);
+TEST_CASE("CONFIG_SCHEMA has exactly 53 rows (issue#10.1 added serial.lidar_udev_serial)") {
+    CHECK(CONFIG_SCHEMA.size() == 53);
 }
 
 TEST_CASE("CONFIG_SCHEMA rows are alphabetically ordered by name") {
@@ -130,6 +130,21 @@ TEST_CASE("issue#10: serial.lidar_port default flipped /dev/ttyUSB0 → /dev/rpl
     const auto* row = find("serial.lidar_port");
     REQUIRE(row != nullptr);
     CHECK(row->default_repr == "/dev/rplidar");
+}
+
+TEST_CASE("issue#10.1: serial.lidar_udev_serial row present, string + restart class") {
+    // The new row exposes the cp210x factory serial to operators so a
+    // LiDAR swap does not require editing source. install.sh is the
+    // sole consumer (sed-substitutes into 99-rplidar.rules.template).
+    const auto* row = find("serial.lidar_udev_serial");
+    REQUIRE(row != nullptr);
+    CHECK(row->type == ValueType::String);
+    CHECK(row->reload_class == ReloadClass::Restart);
+    CHECK(row->default_repr == "2eca2bbb4d6eef1182aae9c2c169b110");
+    // Schema description must mention install.sh consumer + format check
+    // so an operator reading the Config tab tooltip understands the
+    // round-trip and the strict 32-hex format gate.
+    CHECK(std::string_view(row->description).find("install.sh") != std::string_view::npos);
 }
 
 TEST_CASE("issue#12: webctl.pose_stream_hz + webctl.scan_stream_hz rows present (count went 46 → 48)") {

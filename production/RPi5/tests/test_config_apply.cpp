@@ -228,7 +228,7 @@ TEST_CASE("apply_set: write to non-existent parent → write_failed; live_cfg un
     CHECK_FALSE(fs::exists(toml));
 }
 
-TEST_CASE("apply_get_all returns 52 keys, alphabetical, valid JSON-ish") {
+TEST_CASE("apply_get_all returns 53 keys, alphabetical, valid JSON-ish") {
     Config live_cfg = Config::make_default();
     std::mutex mtx;
     const std::string body = apply_get_all(live_cfg, mtx);
@@ -236,9 +236,8 @@ TEST_CASE("apply_get_all returns 52 keys, alphabetical, valid JSON-ish") {
     CHECK_FALSE(body.empty());
     CHECK(body.front() == '{');
     CHECK(body.back()  == '}');
-    // Count commas as "key separators" — exactly 51 between 52 items
-    // (issue#16.1 added webctl.mapping_systemctl_subprocess_timeout_s
-    // on top of issue#14 Maj-1's 51).
+    // Count commas as "key separators" — exactly 52 between 53 items
+    // (issue#10.1 added serial.lidar_udev_serial on top of issue#16.1's 52).
     int commas = 0;
     int depth = 0;
     bool in_str = false;
@@ -250,7 +249,7 @@ TEST_CASE("apply_get_all returns 52 keys, alphabetical, valid JSON-ish") {
             else if (c == ',' && depth == 1) ++commas;
         }
     }
-    CHECK(commas == 51);
+    CHECK(commas == 52);
     // First key (alphabetical): "amcl.anneal_iters_per_phase" (Track D-5).
     CHECK(body.find("\"amcl.anneal_iters_per_phase\":") != std::string::npos);
     // issue#3 — hint default rows.
@@ -277,7 +276,7 @@ TEST_CASE("apply_get_all returns 52 keys, alphabetical, valid JSON-ish") {
     CHECK(body.find("\"webctl.scan_stream_hz\":") != std::string::npos);
 }
 
-TEST_CASE("apply_get_schema returns 52-element JSON array") {
+TEST_CASE("apply_get_schema returns 53-element JSON array") {
     const std::string body = apply_get_schema();
     CHECK(body.front() == '[');
     CHECK(body.back()  == ']');
@@ -292,7 +291,7 @@ TEST_CASE("apply_get_schema returns 52-element JSON array") {
             else if (c == ',' && depth == 1) ++commas;
         }
     }
-    CHECK(commas == 51);
+    CHECK(commas == 52);
     // Spot-check schema field names.
     CHECK(body.find("\"reload_class\":\"hot\"")         != std::string::npos);
     CHECK(body.find("\"reload_class\":\"restart\"")     != std::string::npos);
@@ -511,6 +510,56 @@ TEST_CASE("apply_set preserves restart-pending after consecutive restart-class e
     CHECK(is_pending(flag));
     CHECK(live_cfg.ue_port == 7777);
     CHECK(live_cfg.rt_priority == 60);
+}
+
+TEST_CASE("apply_set serial.lidar_udev_serial round-trips through render_toml") {
+    // issue#10.1 — string-class row, install.sh sole consumer. The
+    // C++ validator only enforces non-empty + ASCII printable + ≤256
+    // chars; install.sh enforces strict 32-hex format. A 32-hex value
+    // must round-trip cleanly.
+    TempDir td("udev_serial_rt");
+    Config live_cfg = Config::make_default();
+    std::mutex mtx;
+    Seqlock<HotConfig> hot_seq;
+    hot_seq.store(godo::core::snapshot_hot(live_cfg));
+    const auto toml = td.path / "tracker.toml";
+    const auto flag = td.path / "restart_pending";
+
+    const std::string new_serial = "abcdef0123456789abcdef0123456789";
+    const auto r = apply_set("serial.lidar_udev_serial", new_serial,
+                             live_cfg, mtx, hot_seq, toml, flag);
+    CHECK(r.ok);
+    CHECK(r.reload_class == ReloadClass::Restart);
+    CHECK(live_cfg.lidar_udev_serial == new_serial);
+    CHECK(is_pending(flag));
+    const auto body = read_file(toml);
+    CHECK(body.find("[serial]") != std::string::npos);
+    CHECK(body.find("lidar_udev_serial = \"" + new_serial + "\"") != std::string::npos);
+
+    // apply_get_all reflects the post-edit value.
+    const std::string snap = apply_get_all(live_cfg, mtx);
+    CHECK(snap.find("\"serial.lidar_udev_serial\":\"" + new_serial + "\"") != std::string::npos);
+}
+
+TEST_CASE("apply_set serial.lidar_udev_serial empty value rejected with bad_value") {
+    // String validator rejects empty (validate.cpp non-empty rule).
+    // live_cfg + TOML must stay untouched on rejection.
+    TempDir td("udev_serial_empty");
+    Config live_cfg = Config::make_default();
+    std::mutex mtx;
+    Seqlock<HotConfig> hot_seq;
+    hot_seq.store(godo::core::snapshot_hot(live_cfg));
+    const auto toml = td.path / "tracker.toml";
+    const auto flag = td.path / "restart_pending";
+
+    const auto pre = live_cfg.lidar_udev_serial;
+    const auto r = apply_set("serial.lidar_udev_serial", "",
+                             live_cfg, mtx, hot_seq, toml, flag);
+    CHECK_FALSE(r.ok);
+    CHECK(r.err == "bad_value");
+    CHECK(live_cfg.lidar_udev_serial == pre);
+    CHECK_FALSE(fs::exists(toml));
+    CHECK_FALSE(is_pending(flag));
 }
 
 TEST_CASE("apply_set then apply_get_all reflects post-edit value") {

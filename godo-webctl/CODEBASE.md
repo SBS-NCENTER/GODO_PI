@@ -3434,3 +3434,34 @@ for the CP2102N USB CDC stale-state race observed during issue#14 HIL):
   godo → docker → general fallback. tests/test_processes.py pins the
   new four-value category set + the disjoint-set invariant against
   godo/managed.
+
+---
+
+## 2026-05-03 (afternoon — KST) — issue#10.1: schema parity bump (52 → 53)
+
+### Changed
+
+- `src/godo_webctl/config_schema.py::EXPECTED_ROW_COUNT` 52 → 53.
+  Module docstring example bumped accordingly.
+- `tests/test_config_schema_parity.py` — count assertion 52 → 53;
+  cross-pin string check `CONFIG_SCHEMA.size() == 52` → `== 53`.
+- `tests/test_config_schema.py` — count assertion + helper test
+  (`test_load_schema_real_source_returns_53_rows`,
+  `test_parse_rejects_short_row_count`).
+- `tests/test_config_view.py::test_project_schema_view_real_source`
+  — count assertion 52 → 53.
+- `tests/test_app_integration.py::test_get_config_schema_returns_53_rows`
+  — renamed + count assertion.
+
+### Tests
+
+- New: `tests/test_config_schema_parity.py::test_lidar_udev_serial_row_present`
+  (1 case) — pins the new row's type=string + reload_class=restart +
+  default_repr matches the studio cp210x factory serial + description
+  mentions install.sh consumer.
+
+### Notes
+
+- godo-webctl runtime code is unmodified — the new schema row reaches
+  operators through the existing `/api/config/*` schema-driven pipeline
+  (the SPA renders the row from the `/api/config/schema` payload).

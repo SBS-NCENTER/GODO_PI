@@ -4,7 +4,7 @@ Track B-CONFIG (PR-CONFIG-β, TB1 fold) — cross-language schema parity.
 Loads `production/RPi5/src/core/config_schema.hpp` BY REAL PATH (mirrors
 `tests/test_protocol.py`'s LAST_POSE_FIELDS pattern) and asserts:
 
-  - row count == 51 (issue#14 Maj-1 fold pin: 48 + 3 webctl.mapping_* rows),
+  - row count == 52 (issue#16.1 pin: 48 + 4 webctl.mapping_* rows),
   - every row's `reload_class` is one of the 3 known strings,
   - every row's `type` is one of the 3 known strings,
   - the default_repr is non-empty.
@@ -33,16 +33,16 @@ def test_real_source_exists() -> None:
     assert _CPP_SCHEMA_HPP.exists(), f"C++ schema source missing: {_CPP_SCHEMA_HPP}"
 
 
-def test_row_count_pinned_at_51() -> None:
-    """issue#14 Maj-1 fold pin: schema row count is 51 (48 + 3 webctl.mapping_* rows)."""
+def test_row_count_pinned_at_52() -> None:
+    """issue#16.1 pin: schema row count is 52 (48 + 4 webctl.mapping_* rows)."""
     rows = schema_mod.load_schema()
-    assert len(rows) == 51
+    assert len(rows) == 52
 
 
-def test_static_assert_in_cpp_says_51_too() -> None:
+def test_static_assert_in_cpp_says_52_too() -> None:
     """Cross-pin: the C++ static_assert text contains the count."""
     text = _CPP_SCHEMA_HPP.read_text(encoding="utf-8")
-    assert "CONFIG_SCHEMA.size() == 51" in text
+    assert "CONFIG_SCHEMA.size() == 52" in text
 
 
 def test_webctl_rows_present() -> None:
@@ -65,39 +65,47 @@ def test_webctl_rows_present() -> None:
 
 
 def test_webctl_mapping_timing_rows_present() -> None:
-    """issue#14 Maj-1 — three webctl-owned mapping-stop timing rows.
-    All three are Restart-class; defaults pin the SIGTERM→SIGKILL
-    grace ladder (docker=20 < systemd=30 < webctl=35)."""
+    """issue#14 Maj-1 / issue#16.1 — four webctl-owned mapping-stop
+    timing rows. All Restart-class; defaults pin the SIGTERM→SIGKILL
+    grace ladder (docker=30 < systemd=45 < webctl=50; systemctl=45
+    nested under webctl)."""
     rows = schema_mod.load_schema()
     by_name = {r.name: r for r in rows}
-    docker  = by_name.get("webctl.mapping_docker_stop_grace_s")
-    systemd = by_name.get("webctl.mapping_systemd_stop_timeout_s")
-    webctl  = by_name.get("webctl.mapping_webctl_stop_timeout_s")
-    assert docker  is not None
-    assert systemd is not None
-    assert webctl  is not None
-    assert docker.type  == "int"
-    assert systemd.type == "int"
-    assert webctl.type  == "int"
-    assert docker.min_d  == 10.0
-    assert docker.max_d  == 60.0
-    assert systemd.min_d == 20.0
-    assert systemd.max_d == 90.0
-    assert webctl.min_d  == 25.0
-    assert webctl.max_d  == 120.0
-    assert docker.default_repr  == "20"
-    assert systemd.default_repr == "30"
-    assert webctl.default_repr  == "35"
-    assert docker.reload_class  == "restart"
-    assert systemd.reload_class == "restart"
-    assert webctl.reload_class  == "restart"
+    docker    = by_name.get("webctl.mapping_docker_stop_grace_s")
+    systemctl = by_name.get("webctl.mapping_systemctl_subprocess_timeout_s")
+    systemd   = by_name.get("webctl.mapping_systemd_stop_timeout_s")
+    webctl    = by_name.get("webctl.mapping_webctl_stop_timeout_s")
+    assert docker    is not None
+    assert systemctl is not None
+    assert systemd   is not None
+    assert webctl    is not None
+    assert docker.type    == "int"
+    assert systemctl.type == "int"
+    assert systemd.type   == "int"
+    assert webctl.type    == "int"
+    assert docker.min_d    == 10.0
+    assert docker.max_d    == 60.0
+    assert systemctl.min_d == 10.0
+    assert systemctl.max_d == 90.0
+    assert systemd.min_d   == 20.0
+    assert systemd.max_d   == 90.0
+    assert webctl.min_d    == 25.0
+    assert webctl.max_d    == 120.0
+    assert docker.default_repr    == "30"
+    assert systemctl.default_repr == "45"
+    assert systemd.default_repr   == "45"
+    assert webctl.default_repr    == "50"
+    assert docker.reload_class    == "restart"
+    assert systemctl.reload_class == "restart"
+    assert systemd.reload_class   == "restart"
+    assert webctl.reload_class    == "restart"
 
 
 def test_constants_mapping_stop_timeout_matches_schema_default_repr() -> None:
-    """issue#14 Mode-B Mn2 fix (2026-05-02 KST): pin
+    """issue#14 Mode-B Mn2 fix (2026-05-02 KST) / issue#16.1: pin
     `MAPPING_CONTAINER_STOP_TIMEOUT_S` (the Settings fallback default)
     against the schema's `webctl.mapping_webctl_stop_timeout_s`
-    `default_repr`. Three layers carry "35" today (constants.py,
+    `default_repr`. Three layers carry "50" today (constants.py,
     config_defaults.hpp, schema row); without this parity test, a
     drift between Python constant and C++ schema row would silently
     pass CI and only surface at the operator's first install."""

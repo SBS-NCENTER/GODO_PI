@@ -321,34 +321,44 @@ def test_mapping_container_start_timeout_s_pinned() -> None:
 
 
 def test_mapping_container_stop_timeout_ordering_invariant() -> None:
-    """issue#14 Maj-1 — the timeout ordering invariant is the load-bearing pin:
+    """issue#14 Maj-1 / issue#16.1 — the timeout ordering invariant is
+    the load-bearing pin:
 
-        docker stop --time grace (20s) < TimeoutStopSec (30s) < webctl_timeout (35s)
+        docker stop --time grace (30s) < TimeoutStopSec (45s) < webctl_timeout (50s)
+        AND systemctl_subprocess_timeout (45s) < webctl_timeout (50s)
 
-    The systemd unit's `TimeoutStopSec=30s` and the docker `--time=20`
-    grace inside `ExecStop=` must satisfy this ordering. Webctl's 35 s
+    The systemd unit's `TimeoutStopSec=45s` and the docker `--time=30`
+    grace inside `ExecStop=` must satisfy this ordering. Webctl's 50 s
     is the outermost ceiling — the systemd unit kills before webctl's
-    poll loop loses patience. Bumped from M5's 10/20/25 ladder after the
-    operator-locked "맵 한번 제작하면 평생 쓰는" stake — torn lifetime
-    asset is worse than a longer stop window."""
-    assert C.MAPPING_CONTAINER_STOP_TIMEOUT_S == 35.0
+    poll loop loses patience. Bumped from issue#14 Maj-1's 20/30/35
+    ladder after the t5 trap-timeout regression: the 10 s wrapper
+    `services.SUBPROCESS_TIMEOUT_S` was cutting `systemctl stop` short
+    before systemd's TimeoutStopSec elapsed. Operator-locked
+    "맵 한번 제작하면 평생 쓰는" stake — torn lifetime asset is worse
+    than a longer stop window."""
+    assert C.MAPPING_CONTAINER_STOP_TIMEOUT_S == 50.0
     # Sanity: must be strictly greater than the systemd TimeoutStopSec
-    # value pinned in the unit file (30).
+    # value pinned in the unit file (45).
+    assert C.MAPPING_CONTAINER_STOP_TIMEOUT_S > 45.0
+    # And greater than the docker stop --time grace (30).
     assert C.MAPPING_CONTAINER_STOP_TIMEOUT_S > 30.0
-    # And greater than the docker stop --time grace (20).
-    assert C.MAPPING_CONTAINER_STOP_TIMEOUT_S > 20.0
+    # issue#16.1 — systemctl_subprocess fallback (45) must be < webctl (50).
+    assert (
+        C.MAPPING_SYSTEMCTL_SUBPROCESS_TIMEOUT_S_FALLBACK
+        < C.MAPPING_CONTAINER_STOP_TIMEOUT_S
+    )
 
 
 def test_mapping_unit_file_timing_values_match_constant() -> None:
-    """issue#14 Maj-1 invariant pin — the unit file's `--time=<X>` and
-    `TimeoutStopSec=<Y>s` literals MUST satisfy the ordering ladder
-    pinned by `MAPPING_CONTAINER_STOP_TIMEOUT_S`. Drift between the
-    unit file's defaults and the webctl-side constant means the
-    operator who never edits `[webctl]` keys gets a misordered ladder
-    that can SIGKILL mid-rename. install.sh sed-substitutes from the
-    [webctl] section at install time, but the AS-CHECKED-IN file MUST
-    match the documented defaults so a bare `install -m 0644` copy is
-    safe.
+    """issue#14 Maj-1 / issue#16.1 invariant pin — the unit file's
+    `--time=<X>` and `TimeoutStopSec=<Y>s` literals MUST satisfy the
+    ordering ladder pinned by `MAPPING_CONTAINER_STOP_TIMEOUT_S`.
+    Drift between the unit file's defaults and the webctl-side
+    constant means the operator who never edits `[webctl]` keys gets
+    a misordered ladder that can SIGKILL mid-rename. install.sh
+    sed-substitutes from the [webctl] section at install time, but
+    the AS-CHECKED-IN file MUST match the documented defaults so a
+    bare `install -m 0644` copy is safe.
 
     Reads the as-checked-in unit file (NOT the production /etc/...
     install) so the test catches a drift between repo and constants."""
@@ -360,18 +370,23 @@ def test_mapping_unit_file_timing_values_match_constant() -> None:
     unit_path = repo_root / "production" / "RPi5" / "systemd" / "godo-mapping@.service"
     text = unit_path.read_text(encoding="utf-8")
 
-    # Defaults pinned: docker_stop_grace = 20, systemd_stop_timeout = 30.
-    assert "docker stop --time=20 godo-mapping" in text
-    assert "TimeoutStopSec=30s" in text
+    # issue#16.1 — defaults pinned: docker_stop_grace = 30, systemd_stop_timeout = 45.
+    assert "docker stop --time=30 godo-mapping" in text
+    assert "TimeoutStopSec=45s" in text
 
-    # Strict ordering: docker_grace (20) < systemd_timeout (30) < webctl_timeout (35).
-    docker_grace_s = 20
-    systemd_timeout_s = 30
+    # Strict ordering: docker_grace (30) < systemd_timeout (45) < webctl_timeout (50).
+    docker_grace_s = 30
+    systemd_timeout_s = 45
     webctl_timeout_s = int(C.MAPPING_CONTAINER_STOP_TIMEOUT_S)
     assert docker_grace_s < systemd_timeout_s < webctl_timeout_s, (
         f"timing ladder broken: docker={docker_grace_s} systemd="
         f"{systemd_timeout_s} webctl={webctl_timeout_s}"
     )
+
+
+def test_mapping_systemctl_subprocess_timeout_fallback_pinned() -> None:
+    """issue#16.1 — fallback constant pinned at 45 s, matches schema."""
+    assert C.MAPPING_SYSTEMCTL_SUBPROCESS_TIMEOUT_S_FALLBACK == 45.0
 
 
 def test_mapping_docker_inspect_poll_s_pinned() -> None:

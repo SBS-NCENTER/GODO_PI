@@ -129,23 +129,31 @@ struct Config {
     int                 webctl_pose_stream_hz{};
     int                 webctl_scan_stream_hz{};
 
-    // issue#14 Maj-1 — webctl-owned mapping-stop timing ladder.
-    // Operator-tunable SIGTERM→SIGKILL grace ladder for the mapping
-    // pipeline. Tracker stores the values verbatim through the apply /
-    // render_toml round-trip; no tracker logic path reads them.
+    // issue#14 Maj-1 / issue#16.1 — webctl-owned mapping-stop timing
+    // ladder. Operator-tunable SIGTERM→SIGKILL grace ladder for the
+    // mapping pipeline. Tracker stores the values verbatim through
+    // the apply / render_toml round-trip; no tracker logic path
+    // reads them.
     // Consumers:
     //   - `webctl.mapping_docker_stop_grace_s` → install.sh sed-substitutes
     //      into godo-mapping@.service `ExecStop=docker stop --time=<X>`.
+    //   - `webctl.mapping_systemctl_subprocess_timeout_s` (issue#16.1) →
+    //      mapping coordinator's `systemctl start|stop` subprocess
+    //      timeout (godo-webctl Settings field
+    //      `mapping_systemctl_subprocess_timeout_s`).
     //   - `webctl.mapping_systemd_stop_timeout_s` → install.sh sed-substitutes
     //      into godo-mapping@.service `TimeoutStopSec=<Y>s`.
     //   - `webctl.mapping_webctl_stop_timeout_s` → mapping.stop()'s
     //      polling deadline (godo-webctl Settings field
     //      `mapping_webctl_stop_timeout_s`).
-    // Ordering invariant `docker_stop_grace < systemd_stop_timeout <
-    // webctl_stop_timeout` is enforced by webctl's
-    // `webctl_toml.read_webctl_section` (single drift-catch site;
-    // tracker stores any in-range trio without cross-checking).
+    // Cross-quartet invariant `docker_stop_grace < systemd_stop_timeout
+    // < webctl_stop_timeout` AND `systemctl_subprocess_timeout
+    // < webctl_stop_timeout` is enforced by webctl's
+    // `webctl_toml.read_webctl_section` + the tracker's
+    // `validate_webctl_mapping_ladder` (Config::load) +
+    // apply.cpp's `apply_set` ladder gate.
     int                 webctl_mapping_docker_stop_grace_s{};
+    int                 webctl_mapping_systemctl_subprocess_timeout_s{};
     int                 webctl_mapping_systemd_stop_timeout_s{};
     int                 webctl_mapping_webctl_stop_timeout_s{};
 

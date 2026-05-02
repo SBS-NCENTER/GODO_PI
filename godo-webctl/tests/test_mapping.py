@@ -53,9 +53,11 @@ def _settings(tmp_path: Path) -> Settings:
         mapping_runtime_dir=tmp_path / "runtime",
         mapping_image_tag="godo-mapping:dev",
         docker_bin=Path("/usr/bin/docker"),
-        # issue#14 Maj-1: tests pin the schema default so the stop-poll
-        # deadline matches the production ladder (35 s).
-        mapping_webctl_stop_timeout_s=35.0,
+        # issue#14 Maj-1 / issue#16.1: tests pin the schema defaults
+        # so the stop-poll deadline matches the production quartet
+        # (docker=30 / systemctl=45 / systemd=45 / webctl=50).
+        mapping_webctl_stop_timeout_s=50.0,
+        mapping_systemctl_subprocess_timeout_s=45.0,
         mapping_auto_recover_lidar=True,
     )
 
@@ -199,14 +201,14 @@ def test_resolve_lidar_port_falls_back_to_default_when_toml_silent(
     tmp_path: Path,
 ) -> None:
     cfg = _settings(tmp_path)
-    # No tracker.toml at all.
-    assert M._resolve_lidar_port(cfg) == "/dev/ttyUSB0"
+    # issue#10 — default flipped /dev/ttyUSB0 → /dev/rplidar.
+    assert M._resolve_lidar_port(cfg) == "/dev/rplidar"
 
 
 def test_resolve_lidar_port_falls_back_when_section_missing(tmp_path: Path) -> None:
     cfg = _settings(tmp_path)
     cfg.tracker_toml_path.write_text('[network]\nue_host = "127.0.0.1"\n')
-    assert M._resolve_lidar_port(cfg) == "/dev/ttyUSB0"
+    assert M._resolve_lidar_port(cfg) == "/dev/rplidar"
 
 
 # --- envfile writer -------------------------------------------------------
@@ -891,6 +893,90 @@ def test_stop_polling_deadline_uses_cfg_field_not_constant(
     s = M._load_state(cfg)
     assert s.state == M.MappingState.FAILED
     assert s.error_detail == "container_stop_timeout"
+
+
+# --- issue#16.1 — systemctl-subprocess deadline contract ----------------
+
+
+def test_run_systemctl_stop_uses_settings_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """issue#16.1 contract test (Mode-A Major #8 strengthening): the
+    systemctl-stop wrapper MUST honour
+    `cfg.mapping_systemctl_subprocess_timeout_s` and surface the
+    timeout via the wrapper's `DockerUnavailable("timeout: ...")`
+    translation. Drive a real `subprocess.run(["sleep", "1"],
+    timeout=...)` call so the assertion validates the contract (a
+    timeout actually fires) rather than the implementation (kwarg
+    name match). Wall-clock budget < 0.5 s.
+
+    This is the t5 trap-timeout regression test: before issue#16.1
+    the wrapper used 10 s services.SUBPROCESS_TIMEOUT_S and SIGKILLed
+    the unit before systemd's TimeoutStopSec elapsed; now the
+    wrapper deadline is the cfg field."""
+    import subprocess
+    import time
+
+    cfg = _settings(tmp_path)
+    from dataclasses import replace as _replace
+    cfg = _replace(cfg, mapping_systemctl_subprocess_timeout_s=0.05)
+
+    real_run = subprocess.run
+
+    def slow_run(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        # Honour the supplied timeout by invoking real subprocess.run on
+        # `sleep 1`; the timeout fires inside subprocess.run itself.
+        return real_run(
+            ["sleep", "1"],
+            capture_output=True,
+            text=True,
+            timeout=cfg.mapping_systemctl_subprocess_timeout_s,
+            check=False,
+        )
+
+    monkeypatch.setattr(M.subprocess, "run", slow_run)
+
+    t0 = time.monotonic()
+    with pytest.raises(M.DockerUnavailable) as exc_info:
+        M._run_systemctl_stop_mapping(cfg)
+    elapsed = time.monotonic() - t0
+    assert "timeout" in str(exc_info.value)
+    assert elapsed < 0.5, f"timeout fired too late: {elapsed:.3f}s"
+
+
+def test_run_systemctl_start_uses_settings_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """issue#16.1 — mirror of the stop test for the start path. Both
+    callsites read the same cfg field; symmetry pin."""
+    import subprocess
+    import time
+
+    cfg = _settings(tmp_path)
+    from dataclasses import replace as _replace
+    cfg = _replace(cfg, mapping_systemctl_subprocess_timeout_s=0.05)
+
+    real_run = subprocess.run
+
+    def slow_run(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        return real_run(
+            ["sleep", "1"],
+            capture_output=True,
+            text=True,
+            timeout=cfg.mapping_systemctl_subprocess_timeout_s,
+            check=False,
+        )
+
+    monkeypatch.setattr(M.subprocess, "run", slow_run)
+
+    t0 = time.monotonic()
+    with pytest.raises(M.DockerUnavailable) as exc_info:
+        M._run_systemctl_start_mapping(cfg)
+    elapsed = time.monotonic() - t0
+    assert "timeout" in str(exc_info.value)
+    assert elapsed < 0.5, f"timeout fired too late: {elapsed:.3f}s"
 
 
 # --- issue#14 Maj-2 — flock-narrowing concurrency tests ------------------

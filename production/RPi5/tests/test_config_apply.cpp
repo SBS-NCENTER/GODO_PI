@@ -228,7 +228,7 @@ TEST_CASE("apply_set: write to non-existent parent → write_failed; live_cfg un
     CHECK_FALSE(fs::exists(toml));
 }
 
-TEST_CASE("apply_get_all returns 51 keys, alphabetical, valid JSON-ish") {
+TEST_CASE("apply_get_all returns 52 keys, alphabetical, valid JSON-ish") {
     Config live_cfg = Config::make_default();
     std::mutex mtx;
     const std::string body = apply_get_all(live_cfg, mtx);
@@ -236,9 +236,9 @@ TEST_CASE("apply_get_all returns 51 keys, alphabetical, valid JSON-ish") {
     CHECK_FALSE(body.empty());
     CHECK(body.front() == '{');
     CHECK(body.back()  == '}');
-    // Count commas as "key separators" — exactly 50 between 51 items
-    // (issue#14 Maj-1 fold added 3 webctl.mapping_*_s rows on top of
-    // issue#12's 48; issue#5 had added 4 Live-carry on top of 42).
+    // Count commas as "key separators" — exactly 51 between 52 items
+    // (issue#16.1 added webctl.mapping_systemctl_subprocess_timeout_s
+    // on top of issue#14 Maj-1's 51).
     int commas = 0;
     int depth = 0;
     bool in_str = false;
@@ -250,7 +250,7 @@ TEST_CASE("apply_get_all returns 51 keys, alphabetical, valid JSON-ish") {
             else if (c == ',' && depth == 1) ++commas;
         }
     }
-    CHECK(commas == 50);
+    CHECK(commas == 51);
     // First key (alphabetical): "amcl.anneal_iters_per_phase" (Track D-5).
     CHECK(body.find("\"amcl.anneal_iters_per_phase\":") != std::string::npos);
     // issue#3 — hint default rows.
@@ -265,16 +265,19 @@ TEST_CASE("apply_get_all returns 51 keys, alphabetical, valid JSON-ish") {
     // (Config::make_default wires WEBCTL_*_STREAM_HZ_DEFAULT).
     CHECK(body.find("\"webctl.pose_stream_hz\":30") != std::string::npos);
     CHECK(body.find("\"webctl.scan_stream_hz\":30") != std::string::npos);
-    // issue#14 Maj-1 — webctl-owned mapping-stop timing ladder rows.
-    // Defaults: docker_stop_grace=20, systemd_stop_timeout=30, webctl_stop_timeout=35.
-    CHECK(body.find("\"webctl.mapping_docker_stop_grace_s\":20") != std::string::npos);
-    CHECK(body.find("\"webctl.mapping_systemd_stop_timeout_s\":30") != std::string::npos);
-    CHECK(body.find("\"webctl.mapping_webctl_stop_timeout_s\":35") != std::string::npos);
+    // issue#14 Maj-1 / issue#16.1 — webctl-owned mapping-stop timing
+    // ladder rows. Defaults: docker_stop_grace=30,
+    // systemctl_subprocess_timeout=45, systemd_stop_timeout=45,
+    // webctl_stop_timeout=50.
+    CHECK(body.find("\"webctl.mapping_docker_stop_grace_s\":30") != std::string::npos);
+    CHECK(body.find("\"webctl.mapping_systemctl_subprocess_timeout_s\":45") != std::string::npos);
+    CHECK(body.find("\"webctl.mapping_systemd_stop_timeout_s\":45") != std::string::npos);
+    CHECK(body.find("\"webctl.mapping_webctl_stop_timeout_s\":50") != std::string::npos);
     // Last key (alphabetical): "webctl.scan_stream_hz".
     CHECK(body.find("\"webctl.scan_stream_hz\":") != std::string::npos);
 }
 
-TEST_CASE("apply_get_schema returns 51-element JSON array") {
+TEST_CASE("apply_get_schema returns 52-element JSON array") {
     const std::string body = apply_get_schema();
     CHECK(body.front() == '[');
     CHECK(body.back()  == ']');
@@ -289,7 +292,7 @@ TEST_CASE("apply_get_schema returns 51-element JSON array") {
             else if (c == ',' && depth == 1) ++commas;
         }
     }
-    CHECK(commas == 50);
+    CHECK(commas == 51);
     // Spot-check schema field names.
     CHECK(body.find("\"reload_class\":\"hot\"")         != std::string::npos);
     CHECK(body.find("\"reload_class\":\"restart\"")     != std::string::npos);
@@ -300,8 +303,9 @@ TEST_CASE("apply_get_schema returns 51-element JSON array") {
     // issue#12 — webctl-owned rows surface in the schema endpoint.
     CHECK(body.find("\"name\":\"webctl.pose_stream_hz\"") != std::string::npos);
     CHECK(body.find("\"name\":\"webctl.scan_stream_hz\"") != std::string::npos);
-    // issue#14 Maj-1 — webctl-owned mapping timing rows surface too.
+    // issue#14 Maj-1 / issue#16.1 — webctl-owned mapping timing rows surface too.
     CHECK(body.find("\"name\":\"webctl.mapping_docker_stop_grace_s\"") != std::string::npos);
+    CHECK(body.find("\"name\":\"webctl.mapping_systemctl_subprocess_timeout_s\"") != std::string::npos);
     CHECK(body.find("\"name\":\"webctl.mapping_systemd_stop_timeout_s\"") != std::string::npos);
     CHECK(body.find("\"name\":\"webctl.mapping_webctl_stop_timeout_s\"") != std::string::npos);
 }
@@ -335,14 +339,17 @@ TEST_CASE("apply_set webctl.pose_stream_hz: round-trips through render_toml") {
 }
 
 TEST_CASE("apply_set webctl.mapping ladder: torn ordering rejected with bad_value") {
-    // issue#14 Mode-B M1 fix (2026-05-02 KST): the cross-trio ordering
-    // invariant `docker_stop_grace < systemd_stop_timeout < webctl_stop_timeout`
-    // must be enforced at apply time. Without this check the operator can
-    // save `docker=60, systemd=20` (each individually in range) via the
-    // Config tab → tracker writes torn trio → next webctl boot raises
-    // WebctlTomlError → crash loop, recoverable only via SSH.
+    // issue#14 Mode-B M1 fix (2026-05-02 KST) + issue#16.1 (2026-05-03):
+    // the cross-quartet ordering invariant
+    //   docker_stop_grace < systemd_stop_timeout < webctl_stop_timeout
+    //   AND systemctl_subprocess_timeout < webctl_stop_timeout
+    // must be enforced at apply time. Without this check the operator
+    // can save inverted trios via the Config tab → tracker writes
+    // torn payload → next webctl boot raises WebctlTomlError → crash
+    // loop, recoverable only via SSH.
 
     // Case A: docker >= systemd → reject.
+    // Defaults are docker=30, systemd=45. Push docker to 45 (==systemd).
     {
         TempDir td("ladder_a");
         Config live_cfg = Config::make_default();
@@ -351,20 +358,18 @@ TEST_CASE("apply_set webctl.mapping ladder: torn ordering rejected with bad_valu
         hot_seq.store(godo::core::snapshot_hot(live_cfg));
         const auto toml = td.path / "tracker.toml";
         const auto flag = td.path / "restart_pending";
-        // First push systemd to 20 (default 30, both in range).
-        // Actually default is docker=20, systemd=30, webctl=35. Push docker
-        // up so docker >= systemd.
-        const auto r = apply_set("webctl.mapping_docker_stop_grace_s", "30",
+        const auto r = apply_set("webctl.mapping_docker_stop_grace_s", "45",
                                  live_cfg, mtx, hot_seq, toml, flag);
         CHECK_FALSE(r.ok);
         CHECK(r.err == "bad_value");
         CHECK(r.err_detail.find("docker_stop_grace_s") != std::string::npos);
         CHECK(r.err_detail.find("systemd_stop_timeout_s") != std::string::npos);
-        CHECK(live_cfg.webctl_mapping_docker_stop_grace_s == 20);  // unchanged
+        CHECK(live_cfg.webctl_mapping_docker_stop_grace_s == 30);  // unchanged
         CHECK_FALSE(fs::exists(toml));
     }
 
     // Case B: systemd >= webctl → reject.
+    // Default systemd=45, webctl=50. Push systemd to 50 (==).
     {
         TempDir td("ladder_b");
         Config live_cfg = Config::make_default();
@@ -373,18 +378,18 @@ TEST_CASE("apply_set webctl.mapping ladder: torn ordering rejected with bad_valu
         hot_seq.store(godo::core::snapshot_hot(live_cfg));
         const auto toml = td.path / "tracker.toml";
         const auto flag = td.path / "restart_pending";
-        // Default systemd=30, webctl=35. Push systemd to 35 (==).
-        const auto r = apply_set("webctl.mapping_systemd_stop_timeout_s", "35",
+        const auto r = apply_set("webctl.mapping_systemd_stop_timeout_s", "50",
                                  live_cfg, mtx, hot_seq, toml, flag);
         CHECK_FALSE(r.ok);
         CHECK(r.err == "bad_value");
         CHECK(r.err_detail.find("systemd_stop_timeout_s") != std::string::npos);
         CHECK(r.err_detail.find("webctl_stop_timeout_s") != std::string::npos);
-        CHECK(live_cfg.webctl_mapping_systemd_stop_timeout_s == 30);  // unchanged
+        CHECK(live_cfg.webctl_mapping_systemd_stop_timeout_s == 45);  // unchanged
         CHECK_FALSE(fs::exists(toml));
     }
 
     // Case C: valid bump (preserves ordering) succeeds.
+    // Bump webctl 50 → 60 to preserve all relations.
     {
         TempDir td("ladder_c");
         Config live_cfg = Config::make_default();
@@ -393,12 +398,57 @@ TEST_CASE("apply_set webctl.mapping ladder: torn ordering rejected with bad_valu
         hot_seq.store(godo::core::snapshot_hot(live_cfg));
         const auto toml = td.path / "tracker.toml";
         const auto flag = td.path / "restart_pending";
-        // Bump webctl 35 → 50 (preserves docker(20) < systemd(30) < 50).
-        const auto r = apply_set("webctl.mapping_webctl_stop_timeout_s", "50",
+        const auto r = apply_set("webctl.mapping_webctl_stop_timeout_s", "60",
                                  live_cfg, mtx, hot_seq, toml, flag);
         CHECK(r.ok);
-        CHECK(live_cfg.webctl_mapping_webctl_stop_timeout_s == 50);
+        CHECK(live_cfg.webctl_mapping_webctl_stop_timeout_s == 60);
     }
+}
+
+TEST_CASE("apply_set webctl.mapping_systemctl_subprocess_timeout_s round-trips through render_toml") {
+    // issue#16.1 — new schema row must round-trip through render_toml +
+    // apply_get_all without internal_error. Range [10, 90]; default 45.
+    TempDir td("systemctl_rt");
+    Config live_cfg = Config::make_default();
+    std::mutex mtx;
+    Seqlock<HotConfig> hot_seq;
+    hot_seq.store(godo::core::snapshot_hot(live_cfg));
+    const auto toml = td.path / "tracker.toml";
+    const auto flag = td.path / "restart_pending";
+
+    const auto r = apply_set("webctl.mapping_systemctl_subprocess_timeout_s", "40",
+                             live_cfg, mtx, hot_seq, toml, flag);
+    CHECK(r.ok);
+    CHECK(r.reload_class == ReloadClass::Restart);
+    CHECK(live_cfg.webctl_mapping_systemctl_subprocess_timeout_s == 40);
+    CHECK(is_pending(flag));
+    const auto body = read_file(toml);
+    CHECK(body.find("[webctl]") != std::string::npos);
+    CHECK(body.find("mapping_systemctl_subprocess_timeout_s = 40") != std::string::npos);
+
+    const std::string snap = apply_get_all(live_cfg, mtx);
+    CHECK(snap.find("\"webctl.mapping_systemctl_subprocess_timeout_s\":40") != std::string::npos);
+}
+
+TEST_CASE("apply_set webctl.mapping_systemctl_subprocess_timeout_s exceeds webctl_stop_timeout → bad_value") {
+    // issue#16.1 — operator pushes systemctl_s past webctl_s; apply_set
+    // ladder gate must reject with both key names in err_detail.
+    TempDir td("systemctl_over");
+    Config live_cfg = Config::make_default();
+    std::mutex mtx;
+    Seqlock<HotConfig> hot_seq;
+    hot_seq.store(godo::core::snapshot_hot(live_cfg));
+    const auto toml = td.path / "tracker.toml";
+    const auto flag = td.path / "restart_pending";
+    // Default systemctl=45, webctl=50. Push systemctl to 60.
+    const auto r = apply_set("webctl.mapping_systemctl_subprocess_timeout_s", "60",
+                             live_cfg, mtx, hot_seq, toml, flag);
+    CHECK_FALSE(r.ok);
+    CHECK(r.err == "bad_value");
+    CHECK(r.err_detail.find("systemctl_subprocess_timeout_s") != std::string::npos);
+    CHECK(r.err_detail.find("webctl_stop_timeout_s") != std::string::npos);
+    CHECK(live_cfg.webctl_mapping_systemctl_subprocess_timeout_s == 45);  // unchanged
+    CHECK_FALSE(fs::exists(toml));
 }
 
 TEST_CASE("apply_set webctl.scan_stream_hz: out-of-range rejected at validate") {

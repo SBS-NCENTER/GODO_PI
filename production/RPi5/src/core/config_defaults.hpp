@@ -14,7 +14,11 @@ inline constexpr std::string_view UE_HOST      = "192.168.0.0";  // TBD
 inline constexpr int              UE_PORT      = 6666;
 
 // Serial devices.
-inline constexpr std::string_view LIDAR_PORT   = "/dev/ttyUSB0";
+// issue#10 — default flipped /dev/ttyUSB0 → /dev/rplidar so the udev
+// rule `99-rplidar.rules` (matched by cp210x serial) is the canonical
+// path. Dev hosts without the studio's specific cp210x serial must
+// override `[serial] lidar_port = /dev/ttyUSB0` in their tracker.toml.
+inline constexpr std::string_view LIDAR_PORT   = "/dev/rplidar";
 inline constexpr int              LIDAR_BAUD   = 460'800;
 inline constexpr std::string_view FREED_PORT   = "/dev/ttyAMA0";  // PL011 UART0 via YL-128
 inline constexpr int              FREED_BAUD   = 38'400;
@@ -158,20 +162,29 @@ inline constexpr std::string_view AMCL_LIVE_CARRY_SCHEDULE_M       =
 inline constexpr int              WEBCTL_POSE_STREAM_HZ_DEFAULT    = 30;
 inline constexpr int              WEBCTL_SCAN_STREAM_HZ_DEFAULT    = 30;
 
-// issue#14 Maj-1 — webctl-owned mapping-stop timing ladder defaults.
-// Defaults pin the SIGTERM→SIGKILL grace ladder. The ordering invariant
-//   docker_stop_grace (20) < systemd_stop_timeout (30) < webctl_stop_timeout (35)
+// issue#14 Maj-1 / issue#16.1 — webctl-owned mapping-stop timing
+// ladder defaults. Defaults pin the SIGTERM→SIGKILL grace ladder.
+// The cross-quartet invariant
+//   docker_stop_grace (30) < systemd_stop_timeout (45) < webctl_stop_timeout (50)
+//   AND  systemctl_subprocess_timeout (45) < webctl_stop_timeout (50)
 // is what gives nav2 `map_saver_cli` enough time to atomic-rename the
-// PGM/YAML pair before any layer escalates to SIGKILL — the difference
-// between a complete lifetime asset and a torn write. install.sh
-// sed-substitutes the docker grace + systemd timeout into the unit file;
-// webctl's `mapping.stop()` reads `webctl_stop_timeout` from
-// `cfg.mapping_webctl_stop_timeout_s` (Settings, mirrored from the
-// `[webctl]` section of `tracker.toml` via `webctl_toml.py`). See
-// production/RPi5/CODEBASE.md invariant (r) and godo-webctl/CODEBASE.md
-// `mapping-timing-ladder` invariant.
-inline constexpr int              WEBCTL_MAPPING_DOCKER_STOP_GRACE_S_DEFAULT   = 20;
-inline constexpr int              WEBCTL_MAPPING_SYSTEMD_STOP_TIMEOUT_S_DEFAULT = 30;
-inline constexpr int              WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S_DEFAULT = 35;
+// PGM/YAML pair before any layer escalates to SIGKILL — the
+// difference between a complete lifetime asset and a torn write.
+// systemctl_subprocess_timeout (issue#16.1, default 45) replaces the
+// generic 10 s `services.SUBPROCESS_TIMEOUT_S` for the mapping
+// coordinator's `systemctl start|stop godo-mapping@active.service`
+// calls; sized to systemd's TimeoutStopSec so the wrapper is not the
+// limiting deadline. install.sh sed-substitutes the docker grace +
+// systemd timeout into the unit file; webctl's `mapping.stop()`
+// reads `webctl_stop_timeout` from `cfg.mapping_webctl_stop_timeout_s`
+// and the systemctl subprocess deadline from
+// `cfg.mapping_systemctl_subprocess_timeout_s` (both Settings,
+// mirrored from the `[webctl]` section of `tracker.toml` via
+// `webctl_toml.py`). See production/RPi5/CODEBASE.md invariant (r)
+// and godo-webctl/CODEBASE.md `mapping-timing-ladder` invariant.
+inline constexpr int              WEBCTL_MAPPING_DOCKER_STOP_GRACE_S_DEFAULT          = 30;
+inline constexpr int              WEBCTL_MAPPING_SYSTEMCTL_SUBPROCESS_TIMEOUT_S_DEFAULT = 45;
+inline constexpr int              WEBCTL_MAPPING_SYSTEMD_STOP_TIMEOUT_S_DEFAULT       = 45;
+inline constexpr int              WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S_DEFAULT        = 50;
 
 }  // namespace godo::config::defaults

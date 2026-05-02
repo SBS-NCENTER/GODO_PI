@@ -750,6 +750,92 @@ has been synced (`uv sync`).
 
 ---
 
+## 2026-05-03 02:30 KST — issue#16.1 + issue#10 bundle — t5 trap-timeout fix + /dev/rplidar udev symlink
+
+### Why
+
+issue#16.1 — t5 trap-timeout regression: the mapping coordinator's
+`systemctl stop godo-mapping@active.service` was bounded by the
+generic 10 s `services.SUBPROCESS_TIMEOUT_S`, but the unit's
+`TimeoutStopSec` was 30 s, so on long mapping sessions the systemctl
+wrapper SIGKILLed before the entrypoint trap's `map_saver_cli`
+finished. Operator t5 incident (22:27:16 KST 2026-05-02) lost a
+2h 5min mapping. Fix: add a 4th webctl-owned schema row
+`webctl.mapping_systemctl_subprocess_timeout_s` (default 45 s) so the
+systemctl-stop subprocess deadline nests inside the webctl coordinator
+poll deadline AND comfortably exceeds systemd's TimeoutStopSec. Bump
+the existing trio defaults (docker_grace 20→30, systemd_timeout 30→45,
+webctl_timeout 35→50) so the absolute floor is also wider.
+
+issue#10 — `/dev/rplidar` udev SYMLINK rule. Two operator port-swap
+incidents during HIL where the cp210x landed on ttyUSB1 instead of
+ttyUSB0 after an unrelated USB device was plugged at boot. Fix: match
+by cp210x serial number (verified `2eca2bbb4d6eef1182aae9c2c169b110`)
+and SYMLINK to `/dev/rplidar`. Schema default `serial.lidar_port`
+flips from `/dev/ttyUSB0` to `/dev/rplidar` so the production tracker
+reads the symlink path; dev hosts override in their own tracker.toml.
+
+### Added
+
+- `production/RPi5/systemd/99-rplidar.rules` — single ACTION=="add"
+  rule SYMLINKing the cp210x-by-serial to `/dev/rplidar`.
+- Schema row `webctl.mapping_systemctl_subprocess_timeout_s`
+  (Int [10, 90], default 45, Restart). Validator extends the
+  cross-quartet invariant with the new pairwise pin
+  `systemctl_subprocess_timeout < webctl_stop_timeout` at all 3
+  enforcement sites (`config.cpp::validate_webctl_mapping_ladder`,
+  `apply.cpp::apply_set` ladder gate, `webctl_toml.read_webctl_section`).
+- `Config::webctl_mapping_systemctl_subprocess_timeout_s` field +
+  TOML/env/CLI/make_default plumbing.
+- `apply.cpp::read_effective` + `::apply_one` dispatch entries for
+  the new key.
+- install.sh pre-deploy gate: detects the legacy
+  `(20/30/35)` default trio in live `/var/lib/godo/tracker.toml` and
+  auto-rewrites to `(30/45/50 + 45-systemctl)` with a timestamped
+  backup. Non-default overrides that violate the new invariant
+  trigger refuse-with-instructions (exit 1).
+- install.sh new step `[5/12]` installing the udev rule + reloading +
+  triggering tty add events.
+
+### Changed
+
+- `serial.lidar_port` schema default `/dev/ttyUSB0` → `/dev/rplidar`.
+- `webctl.mapping_*_s` defaults bumped 20/30/35 → 30/45/50 in
+  `config_schema.hpp` + `config_defaults.hpp`.
+- `godo-mapping@.service` defaults bumped: `docker stop --time=20` →
+  `--time=30`; `TimeoutStopSec=30s` → `TimeoutStopSec=45s`. install.sh
+  install-script defaults `GODO_MAPPING_DOCKER_GRACE_S` 20→30 and
+  `GODO_MAPPING_SYSTEMD_TIMEOUT_S` 30→45.
+- `static_assert(CONFIG_SCHEMA.size() == 51)` → `52`.
+- Install-step numbers `[N/11]` → `[N/12]` to accommodate the udev
+  step inserted after polkit (`[5/12]`).
+
+### Tests
+
+- `tests/test_config_schema.cpp` — count 51→52, ladder default_repr
+  bumps, new row presence + range/type/reload, `serial.lidar_port`
+  default flip pin.
+- `tests/test_config_apply.cpp` — `apply_get_all` count 51→52 +
+  default value bumps; 3 ladder cases re-tuned for new defaults; 2
+  new test cases (`apply_set` round-trip + ladder violation
+  rejection for the systemctl-subprocess key).
+- `tests/test_config.cpp` — new test pinning Config::load round-trip
+  + ladder rejection for systemctl >= webctl.
+
+### Removed
+
+- (none)
+
+### Invariants
+
+- Existing `(r)` (webctl-owned schema rows) — count bumped 5 → 6.
+- Existing webctl `mapping-timing-ladder` — extended into a
+  cross-quartet invariant (gain `systemctl_subprocess <
+  webctl_stop_timeout`). Three enforcement sites unchanged in count
+  but each got the new pairwise pin.
+
+---
+
 ## 2026-05-02 16:30 KST — issue#14 round 2 + Mode-B fold — Maj-1 timing ladder operator-tunable + cross-trio invariant
 
 ### Why

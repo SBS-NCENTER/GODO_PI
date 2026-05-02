@@ -53,18 +53,23 @@ WEBCTL_SCAN_STREAM_HZ_DEFAULT: Final[int] = 30
 WEBCTL_STREAM_HZ_MIN: Final[int] = 1
 WEBCTL_STREAM_HZ_MAX: Final[int] = 60
 
-# issue#14 Maj-1 — webctl-owned mapping-stop timing ladder defaults +
-# range bounds. The defaults pin the "20 < 30 < 35" ladder that gives
-# nav2 `map_saver_cli` enough time to atomic-rename the PGM/YAML pair
-# before any layer escalates to SIGKILL — see config_defaults.hpp +
-# CODEBASE.md mapping-timing-ladder invariant.
-WEBCTL_MAPPING_DOCKER_STOP_GRACE_S_DEFAULT: Final[int] = 20
-WEBCTL_MAPPING_SYSTEMD_STOP_TIMEOUT_S_DEFAULT: Final[int] = 30
-WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S_DEFAULT: Final[int] = 35
+# issue#14 Maj-1 / issue#16.1 — webctl-owned mapping-stop timing
+# ladder defaults + range bounds. The defaults pin the
+# "30 < 45 < 50" ladder (with systemctl_subprocess_timeout=45 nested
+# at the same tier as systemd_timeout) that gives nav2 `map_saver_cli`
+# enough time to atomic-rename the PGM/YAML pair before any layer
+# escalates to SIGKILL — see config_defaults.hpp + CODEBASE.md
+# mapping-timing-ladder invariant.
+WEBCTL_MAPPING_DOCKER_STOP_GRACE_S_DEFAULT: Final[int] = 30
+WEBCTL_MAPPING_SYSTEMCTL_SUBPROCESS_TIMEOUT_S_DEFAULT: Final[int] = 45
+WEBCTL_MAPPING_SYSTEMD_STOP_TIMEOUT_S_DEFAULT: Final[int] = 45
+WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S_DEFAULT: Final[int] = 50
 
 # Range bounds mirror the C++ schema row (min_d, max_d) for each key.
 WEBCTL_MAPPING_DOCKER_STOP_GRACE_S_MIN: Final[int] = 10
 WEBCTL_MAPPING_DOCKER_STOP_GRACE_S_MAX: Final[int] = 60
+WEBCTL_MAPPING_SYSTEMCTL_SUBPROCESS_TIMEOUT_S_MIN: Final[int] = 10
+WEBCTL_MAPPING_SYSTEMCTL_SUBPROCESS_TIMEOUT_S_MAX: Final[int] = 90
 WEBCTL_MAPPING_SYSTEMD_STOP_TIMEOUT_S_MIN: Final[int] = 20
 WEBCTL_MAPPING_SYSTEMD_STOP_TIMEOUT_S_MAX: Final[int] = 90
 WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S_MIN: Final[int] = 25
@@ -76,6 +81,9 @@ _ENV_POSE_KEY: Final[str] = "GODO_WEBCTL_POSE_STREAM_HZ"
 _ENV_SCAN_KEY: Final[str] = "GODO_WEBCTL_SCAN_STREAM_HZ"
 _ENV_MAPPING_DOCKER_STOP_GRACE_S_KEY: Final[str] = (
     "GODO_WEBCTL_MAPPING_DOCKER_STOP_GRACE_S"
+)
+_ENV_MAPPING_SYSTEMCTL_SUBPROCESS_TIMEOUT_S_KEY: Final[str] = (
+    "GODO_WEBCTL_MAPPING_SYSTEMCTL_SUBPROCESS_TIMEOUT_S"
 )
 _ENV_MAPPING_SYSTEMD_STOP_TIMEOUT_S_KEY: Final[str] = (
     "GODO_WEBCTL_MAPPING_SYSTEMD_STOP_TIMEOUT_S"
@@ -97,11 +105,13 @@ class WebctlSection(NamedTuple):
     """Resolved webctl-owned config values, ready for SSE producers
     + the mapping-stop timing ladder (issue#14 Maj-1).
 
-    Ordering invariant on the timing trio (enforced by
+    Cross-quartet ordering invariant on the timing keys (enforced by
     ``read_webctl_section`` at parse time):
 
         mapping_docker_stop_grace_s
             < mapping_systemd_stop_timeout_s
+            < mapping_webctl_stop_timeout_s
+        AND mapping_systemctl_subprocess_timeout_s
             < mapping_webctl_stop_timeout_s
 
     A misordered TOML payload raises ``WebctlTomlError`` naming the
@@ -111,6 +121,7 @@ class WebctlSection(NamedTuple):
     pose_stream_hz: int
     scan_stream_hz: int
     mapping_docker_stop_grace_s: int
+    mapping_systemctl_subprocess_timeout_s: int
     mapping_systemd_stop_timeout_s: int
     mapping_webctl_stop_timeout_s: int
 
@@ -202,7 +213,7 @@ def _resolve_one(
 # does NOT own the keys — the SSOT is
 # `production/RPi5/src/core/config_schema.hpp:120` (`serial.lidar_port`).
 # DO NOT add `serial_lidar_port` to `WebctlSection` (PR #63 lock-in).
-TRACKER_SERIAL_LIDAR_PORT_DEFAULT: Final[str] = "/dev/ttyUSB0"
+TRACKER_SERIAL_LIDAR_PORT_DEFAULT: Final[str] = "/dev/rplidar"
 
 
 class TrackerSerialSection(NamedTuple):
@@ -210,9 +221,10 @@ class TrackerSerialSection(NamedTuple):
 
     Fields:
         lidar_port: TOML `[serial] lidar_port` (canonical dotted name
-            `serial.lidar_port`). Default ``/dev/ttyUSB0`` matches the
-            tracker schema row default at
-            `production/RPi5/src/core/config_schema.hpp:120`.
+            `serial.lidar_port`). Default ``/dev/rplidar`` (issue#10
+            flip from ``/dev/ttyUSB0``) matches the tracker schema
+            row default — see `production/RPi5/systemd/99-rplidar.rules`
+            for the matching udev SYMLINK rule.
     """
 
     lidar_port: str
@@ -294,7 +306,7 @@ def read_webctl_section(
         toml_key="webctl.scan_stream_hz",
         env_key=_ENV_SCAN_KEY,
     )
-    # issue#14 Maj-1 — mapping-stop timing trio.
+    # issue#14 Maj-1 / issue#16.1 — mapping-stop timing quartet.
     docker_grace = _resolve_one(
         toml_value=section.get("mapping_docker_stop_grace_s"),
         env_value=src.get(_ENV_MAPPING_DOCKER_STOP_GRACE_S_KEY),
@@ -303,6 +315,15 @@ def read_webctl_section(
         env_key=_ENV_MAPPING_DOCKER_STOP_GRACE_S_KEY,
         min_v=WEBCTL_MAPPING_DOCKER_STOP_GRACE_S_MIN,
         max_v=WEBCTL_MAPPING_DOCKER_STOP_GRACE_S_MAX,
+    )
+    systemctl_subprocess = _resolve_one(
+        toml_value=section.get("mapping_systemctl_subprocess_timeout_s"),
+        env_value=src.get(_ENV_MAPPING_SYSTEMCTL_SUBPROCESS_TIMEOUT_S_KEY),
+        default=WEBCTL_MAPPING_SYSTEMCTL_SUBPROCESS_TIMEOUT_S_DEFAULT,
+        toml_key="webctl.mapping_systemctl_subprocess_timeout_s",
+        env_key=_ENV_MAPPING_SYSTEMCTL_SUBPROCESS_TIMEOUT_S_KEY,
+        min_v=WEBCTL_MAPPING_SYSTEMCTL_SUBPROCESS_TIMEOUT_S_MIN,
+        max_v=WEBCTL_MAPPING_SYSTEMCTL_SUBPROCESS_TIMEOUT_S_MAX,
     )
     systemd_timeout = _resolve_one(
         toml_value=section.get("mapping_systemd_stop_timeout_s"),
@@ -322,11 +343,13 @@ def read_webctl_section(
         min_v=WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S_MIN,
         max_v=WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S_MAX,
     )
-    # Ordering invariant: docker_grace < systemd_timeout < webctl_timeout.
-    # A torn ladder means SIGKILL can fire mid-rename. Reject before any
-    # SSE / mapping consumer sees the misordered triple. Error message
-    # names the SECOND key in the broken pair so the operator sees the
-    # row to bump.
+    # Cross-quartet ordering invariant: docker_grace < systemd_timeout
+    # < webctl_timeout AND systemctl_subprocess < webctl_timeout. A
+    # torn ladder means SIGKILL can fire mid-rename, OR the
+    # systemctl-subprocess deadline fires after the webctl coordinator
+    # has already given up. Reject before any SSE / mapping consumer
+    # sees the misordered payload. Error messages name the OFFENDING
+    # key so the operator sees the row to bump.
     if not (docker_grace < systemd_timeout):
         raise WebctlTomlError(
             f"webctl.mapping_systemd_stop_timeout_s: must be > "
@@ -339,10 +362,18 @@ def read_webctl_section(
             f"webctl.mapping_systemd_stop_timeout_s "
             f"(got webctl={webctl_timeout}, systemd={systemd_timeout})",
         )
+    if not (systemctl_subprocess < webctl_timeout):
+        raise WebctlTomlError(
+            f"webctl.mapping_systemctl_subprocess_timeout_s: must be < "
+            f"webctl.mapping_webctl_stop_timeout_s "
+            f"(got systemctl={systemctl_subprocess}, "
+            f"webctl={webctl_timeout})",
+        )
     return WebctlSection(
         pose_stream_hz=pose,
         scan_stream_hz=scan,
         mapping_docker_stop_grace_s=docker_grace,
+        mapping_systemctl_subprocess_timeout_s=systemctl_subprocess,
         mapping_systemd_stop_timeout_s=systemd_timeout,
         mapping_webctl_stop_timeout_s=webctl_timeout,
     )

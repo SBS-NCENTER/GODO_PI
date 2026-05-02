@@ -1008,16 +1008,24 @@ def stop(cfg: Settings) -> MappingStatus:
 def _run_systemctl_start_mapping(cfg: Settings) -> None:
     """systemctl start godo-mapping@active.service — wraps the timeout +
     permission paths uniformly. Caller maps to TrackerStopFailed-style
-    Failed transitions if non-zero."""
+    Failed transitions if non-zero. issue#16.1: deadline pulled from
+    `cfg.mapping_systemctl_subprocess_timeout_s` (default 45 s) so the
+    systemctl wrapper does not cap the unit's TimeoutStopSec."""
     argv = ["systemctl", "start", "--no-pager", MAPPING_UNIT_NAME]
-    proc = _run_subprocess(argv, services_mod.SUBPROCESS_TIMEOUT_S)
+    proc = _run_subprocess(argv, cfg.mapping_systemctl_subprocess_timeout_s)
     if proc.returncode != 0:
         raise services_mod.CommandFailed(proc.returncode, proc.stderr)
 
 
 def _run_systemctl_stop_mapping(cfg: Settings) -> None:
+    """issue#16.1 t5 trap-timeout fix: was generic 10 s
+    services.SUBPROCESS_TIMEOUT_S which cut the wrapper before
+    systemd's TimeoutStopSec elapsed; now bounded by
+    `cfg.mapping_systemctl_subprocess_timeout_s` (default 45 s,
+    operator-tunable via webctl.mapping_systemctl_subprocess_timeout_s
+    in tracker.toml)."""
     argv = ["systemctl", "stop", "--no-pager", MAPPING_UNIT_NAME]
-    proc = _run_subprocess(argv, services_mod.SUBPROCESS_TIMEOUT_S)
+    proc = _run_subprocess(argv, cfg.mapping_systemctl_subprocess_timeout_s)
     if proc.returncode != 0:
         raise services_mod.CommandFailed(proc.returncode, proc.stderr)
 

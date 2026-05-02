@@ -316,7 +316,7 @@
         </details>
       {/if}
       <button type="button" onclick={onStop} data-testid="mapping-acknowledge-button">
-        Acknowledge
+        확인
       </button>
     </div>
   {/if}

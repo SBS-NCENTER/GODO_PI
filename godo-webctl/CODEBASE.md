@@ -2878,6 +2878,78 @@ CODEBASE.md (r) extended); webctl is the runtime consumer.
      tunable; the SPA Config tab is schema-driven so the rows
      surface automatically (no frontend change).
 
+## 2026-05-02 23:30 KST — issue#16 HIL hot-fix v6: status() reconcile transient docker states
+
+Operator HIL on v5 surfaced a separate race: a healthy mapping container
+was marked `webctl_lost_view_post_crash` ~1 second into start, even
+though the container ran for >5 minutes producing valid scan/odom data.
+Confirmed via `docker ps` showing `Up 4 minutes` while
+`/api/mapping/status` returned `Failed`.
+
+### Root cause
+
+`status()` reconcile collapsed any non-`"running"` `_docker_inspect_state`
+return to the gone-branch:
+
+```python
+if inspect == "running":
+    # in-flight handling
+# else: container gone → Failed("webctl_lost_view_post_crash")
+```
+
+But Docker reports `"created"` between `docker run` and the entrypoint
+process actually executing (typically <500 ms but observable from a
+1 Hz polling loop on a cold container boot), and `"restarting"` during
+a `Restart=` cycle. Both are in-flight transient states, NOT "container
+gone". The 1 Hz `/api/mapping/status` polling from the SPA caught the
+`"created"` window and wrote `Failed` to `state.json` before start()'s
+own Phase-2 polling reconciled to `"running"`.
+
+The downstream cost was severe: once `state.json` was Failed, the SPA
+showed only an "Acknowledge" button whose handler (`mapping.stop()`'s
+Failed branch) runs `docker rm -f` — a SIGKILL, no SIGTERM grace, no
+trap, no `map_saver_cli`. Operator clicked Acknowledge to clear the
+phantom Failed banner; the still-healthy 5-min mapping container was
+killed mid-flight and `t6.{pgm,yaml}` never reached disk.
+
+### Changed
+
+- `mapping.py` `status()` reconcile (around L549) — added explicit
+  transient branch BEFORE the gone-branch:
+  ```python
+  if inspect in ("created", "restarting"):
+      return s   # keep persisted state; next tick re-reconciles
+  ```
+  Comment block expands the rationale and pins the operator t6
+  incident timestamp (22:54:47 KST 2026-05-02).
+- `tests/test_mapping.py` — two new parametrized test cases pinning the
+  v6 contract:
+  - `test_status_reconcile_starting_keeps_state_when_inspect_transient`
+    — Starting + inspect=`"created"`/`"restarting"` → state stays
+    Starting; `state.json` not overwritten.
+  - `test_status_reconcile_running_keeps_state_when_inspect_transient`
+    — Running + inspect=`"created"`/`"restarting"` → state stays Running.
+
+### Untouched
+
+- `mapping.start()` Phase-2 polling — already correctly loops on any
+  non-"running" inspect; transient `"created"` is handled by the existing
+  `time.sleep(MAPPING_STATE_REREAD_INTERVAL_S)` step. No change needed.
+- `Failed → Acknowledge` UX path — still does `docker rm -f` (correct
+  for genuine Failed; the bug was that v5/earlier wrote false Failed,
+  not that Acknowledge is wrong). v6 stops false Failed at the source;
+  Acknowledge stays as-is.
+- ProcessTable classification, cp210x recovery, precheck — all
+  unchanged from v5.
+
+### UI text bundle
+
+- `godo-frontend/src/routes/MapMapping.svelte` L319 — Failed-state
+  recovery button label `Acknowledge` → `확인`. `data-testid` (and the
+  associated `onStop` handler, which is `mapping.stop()`) unchanged.
+  Operator request 2026-05-02 evening: "Acknowledge보다는 한국어가
+  더 자연스러워" — also matches the surrounding 시작/정지/저장 vocabulary.
+
 ## 2026-05-02 22:50 KST — issue#16 HIL hot-fix v5: gate cp210x recovery on lidar_readable
 
 v4 made auto-recovery work correctly (interface notation), but operator

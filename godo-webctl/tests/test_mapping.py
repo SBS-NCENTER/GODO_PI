@@ -536,6 +536,74 @@ def test_status_reconcile_running_to_failed_when_container_gone(
     assert out.journal_tail_available is True
 
 
+# --- issue#16 v6 — transient docker states stay in-flight ---------------
+
+
+@pytest.mark.parametrize("transient_state", ["created", "restarting"])
+def test_status_reconcile_starting_keeps_state_when_inspect_transient(
+    tmp_path: Path,
+    fake_subprocess: _FakeSubprocess,
+    transient_state: str,
+) -> None:
+    """v6 fix — `created` and `restarting` are in-flight transient docker
+    states between `docker run` and the entrypoint reaching "running".
+    Pre-v6 the reconcile collapsed them to webctl_lost_view_post_crash,
+    which raced with start()'s Phase-2 polling on a cold container boot
+    (operator t6 incident, 2026-05-02 22:54:47 KST). v6 keeps the
+    persisted Starting state untouched so the next status() tick (or
+    start()'s polling) reconciles to Running once the entrypoint
+    executes."""
+    cfg = _settings(tmp_path)
+    cfg.mapping_runtime_dir.mkdir(parents=True, exist_ok=True, mode=0o750)
+    starting = M.MappingStatus(
+        state=M.MappingState.STARTING,
+        map_name="t7",
+        container_id_short=None,
+        started_at="2026-05-02T13:54:46Z",
+        error_detail=None,
+        journal_tail_available=False,
+    )
+    M._save_state(cfg, starting)
+    fake_subprocess.sticky = (0, f"{transient_state}\n", "")
+
+    out = M.status(cfg)
+
+    assert out.state == M.MappingState.STARTING
+    assert out.started_at == "2026-05-02T13:54:46Z"
+    assert out.error_detail is None
+    # state.json must remain Starting on disk (no spurious overwrite).
+    persisted = M._load_state(cfg)
+    assert persisted.state == M.MappingState.STARTING
+
+
+@pytest.mark.parametrize("transient_state", ["created", "restarting"])
+def test_status_reconcile_running_keeps_state_when_inspect_transient(
+    tmp_path: Path,
+    fake_subprocess: _FakeSubprocess,
+    transient_state: str,
+) -> None:
+    """A persisted Running view must not flip to Failed when an inspect
+    happens to land mid-restart. The recovery is best-effort and the
+    next tick will see "running" again."""
+    cfg = _settings(tmp_path)
+    cfg.mapping_runtime_dir.mkdir(parents=True, exist_ok=True, mode=0o750)
+    running = M.MappingStatus(
+        state=M.MappingState.RUNNING,
+        map_name="t7",
+        container_id_short="abc123def456",
+        started_at="2026-05-02T13:54:46Z",
+        error_detail=None,
+        journal_tail_available=False,
+    )
+    M._save_state(cfg, running)
+    fake_subprocess.sticky = (0, f"{transient_state}\n", "")
+
+    out = M.status(cfg)
+
+    assert out.state == M.MappingState.RUNNING
+    assert out.error_detail is None
+
+
 # --- monitor_snapshot composition -----------------------------------------
 
 

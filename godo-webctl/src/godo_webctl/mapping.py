@@ -551,8 +551,26 @@ def status(cfg: Settings) -> MappingStatus:
                 _save_state(cfg, new_status)
                 return new_status
             return s
-        # Container gone — was Running/Starting/Stopping but inspect
-        # returns None or "exited". Transition to Failed for Running
+        # issue#16 HIL hot-fix v6 (2026-05-02 KST) — Docker reports
+        # "created" briefly between `docker run` and the entrypoint
+        # actually executing, and "restarting" during a Restart= cycle.
+        # Both are in-flight transient states, NOT "container gone".
+        # Pre-v6 the reconcile collapsed any non-"running" inspect to
+        # the gone-branch and wrote Failed("webctl_lost_view_post_crash"),
+        # which races with Phase-2 polling on a cold start (operator t6
+        # 22:54:47 KST 2026-05-02: 1Hz status polling caught the
+        # "created" window before entrypoint reached "running" → false
+        # Failed even though the container ran for >5 min healthily).
+        #
+        # Fix: keep persisted state for these transient values; the next
+        # status() tick (or start()'s own Phase-2 polling) will reconcile
+        # to "running" once the entrypoint executes. We do NOT silently
+        # transition Starting→Running here, because that's start()'s job
+        # under the coordinator flock — status() is read-mostly.
+        if inspect in ("created", "restarting"):
+            return s
+        # Container gone — inspect returns None or "exited"/"dead"/
+        # "removing"/"paused". Transition to Failed for Running
         # ("crashed") OR Idle for Stopping (clean stop) — but we cannot
         # tell from inspect-None alone whether a Stopping path was clean
         # vs aborted. Conservative: Stopping → Idle (no container is the

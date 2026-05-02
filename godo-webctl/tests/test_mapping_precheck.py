@@ -58,6 +58,7 @@ def _settings(tmp_path: Path) -> Settings:
         mapping_image_tag="godo-mapping:dev",
         docker_bin=Path("/usr/bin/docker"),
         mapping_webctl_stop_timeout_s=35.0,
+        mapping_systemctl_subprocess_timeout_s=20.0,
         mapping_auto_recover_lidar=True,
     )
 

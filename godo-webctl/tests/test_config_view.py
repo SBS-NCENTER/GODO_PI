@@ -68,13 +68,14 @@ def test_project_config_view_ignores_sibling_fields() -> None:
 def test_project_schema_view_real_source() -> None:
     rows = schema_mod.load_schema()
     out = view_mod.project_schema_view(rows)
-    assert len(out) == 51
+    assert len(out) == 52
     # issue#12 — webctl.* rows surface in the projected view.
     names = [r["name"] for r in out]
     assert "webctl.pose_stream_hz" in names
     assert "webctl.scan_stream_hz" in names
-    # issue#14 Maj-1 — webctl.mapping_* rows surface too.
+    # issue#14 Maj-1 / issue#16.1 — webctl.mapping_* rows surface too.
     assert "webctl.mapping_docker_stop_grace_s" in names
+    assert "webctl.mapping_systemctl_subprocess_timeout_s" in names
     assert "webctl.mapping_systemd_stop_timeout_s" in names
     assert "webctl.mapping_webctl_stop_timeout_s" in names
     assert all(isinstance(r, dict) for r in out)

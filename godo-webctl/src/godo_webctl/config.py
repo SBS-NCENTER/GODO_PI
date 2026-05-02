@@ -22,6 +22,7 @@ from .constants import (
     MAPPING_CONTAINER_STOP_TIMEOUT_S,
     MAPPING_IMAGE_TAG_DEFAULT,
     MAPPING_RUNTIME_DIR_DEFAULT,
+    MAPPING_SYSTEMCTL_SUBPROCESS_TIMEOUT_S_FALLBACK,
 )
 
 
@@ -101,9 +102,18 @@ class Settings:
     #     docker_grace < systemd_timeout < webctl_timeout
     # is enforced inside `webctl_toml.read_webctl_section` at startup.
     # The raw constant `MAPPING_CONTAINER_STOP_TIMEOUT_S` in
-    # `constants.py` is the FALLBACK default (35 s); runtime code reads
+    # `constants.py` is the FALLBACK default (50 s); runtime code reads
     # this `Settings` field.
     mapping_webctl_stop_timeout_s: float
+    # issue#16.1: deadline (seconds) for `systemctl start|stop
+    # godo-mapping@active.service` subprocess calls inside the mapping
+    # coordinator (replaces the generic 10 s
+    # services.SUBPROCESS_TIMEOUT_S so a long TimeoutStopSec is not
+    # cut by the wrapper). Sourced from `[webctl]` of tracker.toml via
+    # webctl_toml.read_webctl_section; env override
+    # GODO_WEBCTL_MAPPING_SYSTEMCTL_SUBPROCESS_TIMEOUT_S beats TOML.
+    # Constraint enforced by webctl_toml: < mapping_webctl_stop_timeout_s.
+    mapping_systemctl_subprocess_timeout_s: float
     # issue#16 HIL hot-fix v2 (2026-05-02 KST) — auto-recover the cp210x
     # USB CDC driver before each `mapping.start()`. The first attempt
     # after a tracker stop frequently hits the cp210x stale state
@@ -143,6 +153,10 @@ _DEFAULTS: Final[dict[str, str]] = {
     # is constructed without going through the TOML reader (tests, dev
     # scripts) this default keeps the field finite.
     "GODO_WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S": str(MAPPING_CONTAINER_STOP_TIMEOUT_S),
+    # issue#16.1 — Settings fallback for the systemctl-subprocess deadline.
+    "GODO_WEBCTL_MAPPING_SYSTEMCTL_SUBPROCESS_TIMEOUT_S": str(
+        MAPPING_SYSTEMCTL_SUBPROCESS_TIMEOUT_S_FALLBACK,
+    ),
     "GODO_WEBCTL_MAPPING_AUTO_RECOVER_LIDAR": "true",
 }
 
@@ -168,6 +182,7 @@ _PARSERS: Final[dict[str, Callable[[str], Any]]] = {
     "GODO_WEBCTL_MAPPING_IMAGE_TAG": str,
     "GODO_WEBCTL_DOCKER_BIN": Path,
     "GODO_WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S": float,
+    "GODO_WEBCTL_MAPPING_SYSTEMCTL_SUBPROCESS_TIMEOUT_S": float,
     "GODO_WEBCTL_MAPPING_AUTO_RECOVER_LIDAR": _parse_bool,
 }
 
@@ -194,6 +209,7 @@ _ENV_TO_FIELD: Final[dict[str, str]] = {
     "GODO_WEBCTL_MAPPING_IMAGE_TAG": "mapping_image_tag",
     "GODO_WEBCTL_DOCKER_BIN": "docker_bin",
     "GODO_WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S": "mapping_webctl_stop_timeout_s",
+    "GODO_WEBCTL_MAPPING_SYSTEMCTL_SUBPROCESS_TIMEOUT_S": "mapping_systemctl_subprocess_timeout_s",
     "GODO_WEBCTL_MAPPING_AUTO_RECOVER_LIDAR": "mapping_auto_recover_lidar",
 }
 

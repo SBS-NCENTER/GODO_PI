@@ -209,7 +209,7 @@ Seventeenth-session followed directly from sixteenth-session's close (PR #68 doc
 
 1. **★ Tier A bundle — issue#16.1 + issue#10**:
    - **issue#16.1 (NEW)** — t5 trap-timeout: `docker stop --time=20` grace can be shorter than the entrypoint trap's `map_saver_cli` cycle on long mapping sessions (operator t5 incident lost a 2h 5min mapping). Fix path: separate `mapping_stop_systemctl_timeout_s` (≥45 s; currently uses generic `SUBPROCESS_TIMEOUT_S=10s`) + bump schema-default ladder (docker_grace 20 → 30, systemd_timeout 30 → 45, webctl_stop_timeout 35 → 50). LOC ~30. Risk: data loss on long-running mapping.
-   - **issue#10** — udev rule `/dev/rplidar` symlink (`idVendor=10c4 idProduct=ea60 serial=B5E5E18DC2E699D7C89792F44F46416F`) → tracker.toml's `serial.lidar_port` flips from `/dev/ttyUSB0` to `/dev/rplidar`. Eliminates USB-renumbering ops bugs. LOC ~20 + 1 udev file.
+   - **issue#10** — udev rule `/dev/rplidar` symlink (`idVendor=10c4 idProduct=ea60 serial=2eca2bbb4d6eef1182aae9c2c169b110`) → tracker.toml's `serial.lidar_port` flips from `/dev/ttyUSB0` to `/dev/rplidar`. Eliminates USB-renumbering ops bugs. LOC ~20 + 1 udev file.
 2. **issue#15** — PR #70 awaiting operator deploy + HIL.
 3. **issue#16.2 (NEW)** — preview `.tmp` cleanup (`v11.pgm.tmp` orphan motivated this; `preview_dumper.py:54-64` SIGTERM-during-fsync race). LOC ~10.
 4. **issue#11** — Live pipelined-parallel multi-thread (architectural).

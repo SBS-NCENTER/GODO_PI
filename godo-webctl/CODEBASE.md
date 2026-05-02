@@ -1025,6 +1025,98 @@ Pinned by:
 
 ## Change log
 
+### 2026-05-03 02:30 KST — issue#16.1 + issue#10 bundle — t5 trap-timeout fix + /dev/rplidar default
+
+#### Why
+
+t5 trap-timeout regression (operator incident 22:27:16 KST 2026-05-02
+lost a 2h 5min mapping): mapping coordinator's `systemctl stop
+godo-mapping@active.service` was bounded by `services.SUBPROCESS_TIMEOUT_S
+= 10.0`, but the unit's `TimeoutStopSec` was 30 s, so the systemctl
+wrapper SIGKILLed the unit before the entrypoint trap's `map_saver_cli`
+finished. issue#16.1 adds a dedicated row
+`webctl.mapping_systemctl_subprocess_timeout_s` (default 45 s) so the
+wrapper deadline nests inside the webctl coordinator deadline AND
+comfortably exceeds systemd's TimeoutStopSec.
+
+issue#10 ships alongside because both touch the same install pipeline.
+udev rule installed by install.sh creates a stable `/dev/rplidar`
+symlink for the studio's specific cp210x serial
+`2eca2bbb4d6eef1182aae9c2c169b110`; default `serial.lidar_port`
+flipped to `/dev/rplidar` so the production tracker reads the symlink.
+
+#### Added
+
+- `webctl_toml.WEBCTL_MAPPING_SYSTEMCTL_SUBPROCESS_TIMEOUT_S_DEFAULT`
+  (45) + `_MIN`/`_MAX` (10/90) + env key
+  `GODO_WEBCTL_MAPPING_SYSTEMCTL_SUBPROCESS_TIMEOUT_S`.
+- `WebctlSection.mapping_systemctl_subprocess_timeout_s: int` field.
+- `read_webctl_section` resolves the new key and enforces the new
+  pairwise invariant `systemctl_subprocess < webctl_timeout` (third
+  inline ladder check).
+- `Settings.mapping_systemctl_subprocess_timeout_s: float` +
+  matching `_DEFAULTS` / `_PARSERS` / `_ENV_TO_FIELD` rows.
+- `constants.MAPPING_SYSTEMCTL_SUBPROCESS_TIMEOUT_S_FALLBACK`
+  (= 45.0) — fallback used when Settings is built without the TOML
+  augmenter (tests, dev scripts).
+- `__main__._augment_with_webctl_section` extended to bind the new
+  Settings field from `[webctl]` in tracker.toml (env > TOML > default
+  precedence preserved).
+- New test surfaces:
+  - `tests/test_webctl_toml.py` — 5 new tests (default / TOML / env /
+    range / ladder-violation) for the new key + ladder defaults
+    bumped to the new 30/45/45/50 quartet.
+  - `tests/test_mapping.py::test_run_systemctl_{stop,start}_uses_settings_timeout`
+    — contract-style: real `subprocess.run(["sleep", "1"], timeout=0.05)`
+    propagation; asserts wall-clock budget < 0.5 s.
+  - `tests/test_constants.py::test_mapping_systemctl_subprocess_timeout_fallback_pinned`.
+
+#### Changed
+
+- `mapping.py:1013` (`_run_systemctl_start_mapping`) and `:1020`
+  (`_run_systemctl_stop_mapping`) now pass
+  `cfg.mapping_systemctl_subprocess_timeout_s` to `_run_subprocess`
+  in place of the generic `services_mod.SUBPROCESS_TIMEOUT_S`. The
+  `journal_tail` callsite at `:1052` keeps the generic constant
+  (read-only diagnostic, not on the stop path).
+- `webctl_toml.py` ladder defaults bumped 20/30/35 → 30/45/50.
+- `webctl_toml.TRACKER_SERIAL_LIDAR_PORT_DEFAULT`
+  `/dev/ttyUSB0` → `/dev/rplidar` (issue#10 alignment with tracker
+  schema).
+- `constants.MAPPING_CONTAINER_STOP_TIMEOUT_S` 35.0 → 50.0 (matches
+  the new `webctl.mapping_webctl_stop_timeout_s` schema default).
+- `config_schema.EXPECTED_ROW_COUNT` 51 → 52.
+- All test fixtures that construct `Settings` (test_mapping,
+  test_mapping_sse, test_main_settings_augmenter, test_sse,
+  test_app_integration, test_mapping_cp210x_recovery,
+  test_mapping_precheck) carry the new
+  `mapping_systemctl_subprocess_timeout_s` field.
+- `test_mapping_timing_partial_violating_ordering_still_rejected`
+  docstring updated from `docker=35 against systemd_default=30` to
+  `docker=46 against systemd_default=45` alongside the value bump.
+
+#### Removed
+
+- (none)
+
+#### Invariants
+
+- Existing `mapping-timing-ladder` (ad) extended into a cross-quartet
+  invariant. Strict ordering now reads
+  `docker_grace_s < systemd_timeout_s < webctl_timeout_s`
+  AND `systemctl_subprocess_timeout_s < webctl_timeout_s`; defaults
+  pin `30 < 45 < 50` with `systemctl_subprocess_timeout_s = 45`
+  nested at the same tier as `systemd_timeout_s`. Single drift-catch
+  site for the new pairwise relation: third inline check inside
+  `webctl_toml.read_webctl_section` (mirrored in tracker's
+  validate_webctl_mapping_ladder + apply_set ladder gate per
+  production/RPi5/CODEBASE.md). The constant
+  `MAPPING_CONTAINER_STOP_TIMEOUT_S = 50.0` (was 35.0) +
+  `MAPPING_SYSTEMCTL_SUBPROCESS_TIMEOUT_S_FALLBACK = 45.0` mirror
+  the new schema defaults; the parity test
+  `test_constants_mapping_stop_timeout_matches_schema_default_repr`
+  catches drift.
+
 ### 2026-05-02 16:30 KST — issue#14 round 2 + Mode-B fold + PR #66 hotfix bundle
 
 #### Why
@@ -2837,13 +2929,16 @@ CODEBASE.md (r) extended); webctl is the runtime consumer.
 
 ### Invariants
 
-- **(ad) mapping-timing-ladder** — the stop-timing trio
+- **(ad) mapping-timing-ladder** — the stop-timing quartet
   (`webctl.mapping_docker_stop_grace_s`,
+  `webctl.mapping_systemctl_subprocess_timeout_s`,
   `webctl.mapping_systemd_stop_timeout_s`,
   `webctl.mapping_webctl_stop_timeout_s`) must satisfy the
-  strict ordering
+  cross-quartet ordering
   `docker_grace_s < systemd_timeout_s < webctl_timeout_s`
-  at every layer:
+  AND `systemctl_subprocess_timeout_s < webctl_timeout_s`
+  (issue#16.1 added the 4th value + new pairwise pin) at every
+  layer:
 
   1. **Tracker schema bounds** — per-row min/max in
      `config_schema.hpp` allow ranges that overlap (docker [10, 60],
@@ -2868,7 +2963,7 @@ CODEBASE.md (r) extended); webctl is the runtime consumer.
      `MAPPING_CONTAINER_STOP_TIMEOUT_S` constant. The constant is
      the fallback default that lands in Settings via
      `_DEFAULTS["GODO_WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S"]` when
-     the env / TOML are silent — its value (35) is pinned in
+     the env / TOML are silent — its value (50) is pinned in
      `test_constants.py::test_mapping_container_stop_timeout_ordering_invariant`.
   5. **Cross-stack ownership**: tracker schema rows are the SSOT
      (production/RPi5/CODEBASE.md (r) extended for the 3 new rows).

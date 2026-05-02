@@ -340,13 +340,24 @@ MAPPING_CONTAINER_START_TIMEOUT_S: Final[float] = 8.0
 # `cfg.mapping_webctl_stop_timeout_s` from Settings. The constant
 # pinned here is the schema's `default_repr`.
 #
-# Ordering invariant (issue#14 Maj-1 fold; was 10/20/25):
-#   docker stop --time grace (20s) < TimeoutStopSec (30s) < webctl_timeout (35s)
+# Ordering invariant (issue#16.1 fold; was 20/30/35 in issue#14 Maj-1,
+# 10/20/25 in M5):
+#   docker stop --time grace (30s) < TimeoutStopSec (45s) < webctl_timeout (50s)
+#   AND systemctl_subprocess_timeout (45s) < webctl_timeout (50s)
 # so the trap's map_saver_cli save (~2-5 s, possibly more on slow SD)
-# completes before any layer escalates to SIGKILL. The bump (was M5
-# 10/20/25) reflects the operator-locked "맵 한번 제작하면 평생 쓰는"
-# stake — torn lifetime asset is worse than a 10 s longer stop window.
-MAPPING_CONTAINER_STOP_TIMEOUT_S: Final[float] = 35.0
+# completes before any layer escalates to SIGKILL AND the systemctl
+# stop wrapper does not cut systemd's TimeoutStopSec short. The bump
+# reflects the operator-locked "맵 한번 제작하면 평생 쓰는" stake —
+# torn lifetime asset is worse than a slightly longer stop window.
+MAPPING_CONTAINER_STOP_TIMEOUT_S: Final[float] = 50.0
+
+# issue#16.1 — fallback for `cfg.mapping_systemctl_subprocess_timeout_s`
+# when the Settings instance is built without going through the TOML
+# augmenter (tests, dev scripts). Mirrors the schema's `default_repr`
+# for `webctl.mapping_systemctl_subprocess_timeout_s` (45). The
+# augmenter in `__main__._augment_with_webctl_section` overrides this
+# fallback when `tracker.toml` provides a value.
+MAPPING_SYSTEMCTL_SUBPROCESS_TIMEOUT_S_FALLBACK: Final[float] = 45.0
 
 # `docker inspect` polling cadence inside the start/stop wait loops.
 MAPPING_DOCKER_INSPECT_POLL_S: Final[float] = 0.25

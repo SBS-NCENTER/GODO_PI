@@ -27,6 +27,9 @@ def _make_settings(
     *,
     tmp_path: Path,
     webctl: float = float(webctl_toml.WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S_DEFAULT),
+    systemctl: float = float(
+        webctl_toml.WEBCTL_MAPPING_SYSTEMCTL_SUBPROCESS_TIMEOUT_S_DEFAULT,
+    ),
     tracker_toml_path: Path | None = None,
 ) -> Settings:
     """Construct a minimal Settings instance — every required Path field
@@ -52,6 +55,7 @@ def _make_settings(
         mapping_image_tag="godo-mapping:dev",
         docker_bin=Path("/usr/bin/docker"),
         mapping_webctl_stop_timeout_s=webctl,
+        mapping_systemctl_subprocess_timeout_s=systemctl,
         mapping_auto_recover_lidar=True,
     )
 

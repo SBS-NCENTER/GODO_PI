@@ -987,8 +987,9 @@ TEST_CASE("Config::load — issue#12: webctl CLI overrides env + TOML") {
 }
 
 TEST_CASE("Config::load — issue#12: webctl.* unknown key rejected (positive control)") {
-    // Only pose_stream_hz / scan_stream_hz are accepted; any other
-    // [webctl] leaf must trip allowed_keys() rejection.
+    // Only pose_stream_hz / scan_stream_hz + the 4 mapping-timing keys
+    // are accepted; any other [webctl] leaf must trip allowed_keys()
+    // rejection.
     auto tmp = write_temp_toml(
         "[webctl]\n"
         "phantom_key = 1\n"
@@ -997,4 +998,33 @@ TEST_CASE("Config::load — issue#12: webctl.* unknown key rejected (positive co
     Env  env({"GODO_CONFIG_PATH=" + tmp.path.string()});
     CHECK_THROWS_AS(Config::load(argv.argc, argv.argv.data(), env.ptr()),
                     std::runtime_error);
+}
+
+TEST_CASE("Config::load — issue#16.1: 4th mapping_*_s key parses + ladder rejects systemctl >= webctl") {
+    // Positive: systemctl < webctl → load succeeds, value sticks.
+    {
+        auto tmp = write_temp_toml(
+            "[webctl]\n"
+            "mapping_systemctl_subprocess_timeout_s = 40\n"
+        );
+        Argv argv({});
+        Env  env({"GODO_CONFIG_PATH=" + tmp.path.string()});
+        Config c = Config::load(argv.argc, argv.argv.data(), env.ptr());
+        CHECK(c.webctl_mapping_systemctl_subprocess_timeout_s == 40);
+    }
+    // Negative: systemctl >= webctl → validate_webctl_mapping_ladder
+    // throws. Set systemctl=80 against webctl=60 (both in range).
+    {
+        auto tmp = write_temp_toml(
+            "[webctl]\n"
+            "mapping_docker_stop_grace_s = 30\n"
+            "mapping_systemd_stop_timeout_s = 45\n"
+            "mapping_systemctl_subprocess_timeout_s = 80\n"
+            "mapping_webctl_stop_timeout_s = 60\n"
+        );
+        Argv argv({});
+        Env  env({"GODO_CONFIG_PATH=" + tmp.path.string()});
+        CHECK_THROWS_AS(Config::load(argv.argc, argv.argv.data(), env.ptr()),
+                        std::runtime_error);
+    }
 }

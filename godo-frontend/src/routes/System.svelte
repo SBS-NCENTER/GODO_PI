@@ -37,6 +37,7 @@
     SSE_TICK_MS,
     SYSTEM_SERVICES_STALE_MS,
     SYSTEM_SUBTAB_EXTENDED,
+    SYSTEM_SUBTAB_HELP,
     SYSTEM_SUBTAB_OVERVIEW,
     SYSTEM_SUBTAB_PROCESSES,
   } from '$lib/constants';
@@ -212,6 +213,14 @@
       onclick={() => (activeSubtab = SYSTEM_SUBTAB_EXTENDED)}
       data-testid="subtab-extended">Extended resources</button
     >
+    <button
+      class="subtab"
+      class:active={activeSubtab === SYSTEM_SUBTAB_HELP}
+      role="tab"
+      aria-selected={activeSubtab === SYSTEM_SUBTAB_HELP}
+      onclick={() => (activeSubtab = SYSTEM_SUBTAB_HELP)}
+      data-testid="subtab-help">도움말</button
+    >
   </div>
 
   {#if activeSubtab === SYSTEM_SUBTAB_OVERVIEW}
@@ -351,6 +360,45 @@
     <ProcessTable snapshot={processesSnapshot} {mappingState} />
   {:else if activeSubtab === SYSTEM_SUBTAB_EXTENDED}
     <ResourceBars snapshot={extendedSnapshot} />
+  {:else if activeSubtab === SYSTEM_SUBTAB_HELP}
+    <!-- 도움말 subtab — 운영 안내문 모음. 신규 안내가 생기면 이 영역에
+         <aside class="help-section"> 한 블록 더 쌓아주면 됩니다. -->
+    <div class="help-stack" data-testid="help-stack">
+      <!-- issue#16.1 backup-help: install.sh's pre-deploy gate creates a
+           timestamped /var/lib/godo/tracker.toml.bak.<unixts> before any
+           auto-rewrite. This card surfaces the manual restore commands so
+           the operator does not have to remember the path / sequence.
+           No restore button intentionally — restoring is rare + destructive,
+           and the SSH-only flow keeps a deliberate friction layer. -->
+      <aside class="help-section" data-testid="tracker-toml-backup-help">
+        <h3>tracker.toml 백업 — 수동 복원 안내 (issue#16.1)</h3>
+        <p class="help-intro">
+          install.sh 실행 중 ladder 자동 rewrite가 일어나면
+          <code>/var/lib/godo/tracker.toml</code>의 직전 상태가
+          <code>/var/lib/godo/tracker.toml.bak.&lt;unixts&gt;</code>로 보존됩니다.
+          복원이 필요할 때 SSH로 아래 명령을 순서대로 실행해주세요.
+        </p>
+        <ol class="help-steps">
+          <li>
+            <span class="step-label">1. 백업 파일 목록 + timestamp 확인</span>
+            <pre><code>ls -la /var/lib/godo/tracker.toml.bak.*</code></pre>
+          </li>
+          <li>
+            <span class="step-label">2. 원하는 timestamp의 백업으로 덮어쓰기</span>
+            <pre><code>sudo cp /var/lib/godo/tracker.toml.bak.&lt;timestamp&gt; /var/lib/godo/tracker.toml</code></pre>
+          </li>
+          <li>
+            <span class="step-label">3. webctl 재시작 (validator 재로드)</span>
+            <pre><code>sudo systemctl restart godo-webctl</code></pre>
+          </li>
+        </ol>
+        <p class="help-note">
+          godo-tracker가 동작 중이라면 새 값 반영을 위해 Overview 탭의
+          godo-tracker 카드 <strong>Restart</strong> 버튼도 같이 눌러주세요
+          (경우에 따라).
+        </p>
+      </aside>
+    </div>
   {/if}
 </div>
 
@@ -446,5 +494,64 @@
   .subtab.active {
     color: var(--color-text);
     border-bottom-color: var(--color-accent);
+  }
+  /* 도움말 subtab — operator help notes (issue#16.1 +). Future help
+     sections reuse the same .help-section / .help-* classes so each
+     new note adds without bespoke styling. */
+  .help-stack {
+    margin-top: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .help-section {
+    padding: 12px 14px;
+    background: var(--color-bg-elev);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+  }
+  .help-section h3 {
+    margin: 0 0 6px;
+    font-size: 15px;
+  }
+  .help-intro {
+    margin: 0 0 8px;
+    font-size: 13px;
+    color: var(--color-text-muted);
+    line-height: 1.5;
+  }
+  .help-steps {
+    margin: 8px 0;
+    padding-left: 0;
+    list-style: none;
+  }
+  .help-steps li {
+    margin-bottom: 8px;
+  }
+  .help-steps .step-label {
+    font-size: 12px;
+    color: var(--color-text-muted);
+    display: block;
+    margin-bottom: 2px;
+  }
+  .help-steps pre {
+    margin: 0;
+    padding: 6px 10px;
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    overflow-x: auto;
+    font-size: 12px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .help-section code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+  }
+  .help-note {
+    margin: 6px 0 0;
+    font-size: 12px;
+    color: var(--color-text-muted);
+    line-height: 1.5;
   }
 </style>

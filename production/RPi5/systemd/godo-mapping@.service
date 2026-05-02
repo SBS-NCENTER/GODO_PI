@@ -54,31 +54,34 @@ ExecStart=/usr/bin/docker run --rm \
     ${IMAGE_TAG}
 
 # Graceful stop: SIGTERM the container (entrypoint.sh trap runs the
-# map saver), then SIGKILL after 20 s. The unit's TimeoutStopSec gives
-# systemd-side patience. issue#14 Maj-1: grace bumped 10s → 20s after
-# operator-locked "맵 한번 제작하면 평생 쓰는" stake — nav2
-# `map_saver_cli` rename can take longer than 5 s on a slow SD card,
-# and a SIGKILL mid-write is the difference between a complete asset
-# and a torn lifetime artefact.
+# map saver), then SIGKILL after 30 s. The unit's TimeoutStopSec gives
+# systemd-side patience. issue#14 Maj-1 / issue#16.1: grace bumped
+# 10s → 20s → 30s. nav2 `map_saver_cli` rename can take longer than
+# 5 s on a slow SD card, and a SIGKILL mid-write is the difference
+# between a complete asset and a torn lifetime artefact.
 #
 # install.sh sed-substitutes the `--time=<N>` value from the
 # webctl-owned `webctl.mapping_docker_stop_grace_s` Tier-2 key (default
-# 20). Operators tune via Config tab → "Docker 맵 제작" group.
-ExecStop=/usr/bin/docker stop --time=20 godo-mapping
+# 30). Operators tune via Config tab → "Docker 맵 제작" group.
+ExecStop=/usr/bin/docker stop --time=30 godo-mapping
 
 Restart=no
 TimeoutStartSec=15s
-# TimeoutStopSec must satisfy:
-#   docker stop --time grace (20s)
-#     < TimeoutStopSec (30s)
-#     < MAPPING_CONTAINER_STOP_TIMEOUT_S (35s in webctl/constants.py)
+# TimeoutStopSec must satisfy (issue#16.1):
+#   docker stop --time grace (30s)
+#     < TimeoutStopSec (45s)
+#     < MAPPING_CONTAINER_STOP_TIMEOUT_S (50s in webctl/constants.py)
+#   AND systemctl_subprocess_timeout (45s, new in issue#16.1)
+#     < MAPPING_CONTAINER_STOP_TIMEOUT_S (50s)
 # so the trap's map_saver_cli save (~2-5 s, but possibly more on slow
-# SD) completes before any layer escalates to SIGKILL. issue#14 Maj-1
-# fold (was 10/20/25; now 20/30/35).
+# SD) completes before any layer escalates to SIGKILL AND the
+# systemctl-stop subprocess wrapper does not cut the unit's
+# TimeoutStopSec short. issue#14 Maj-1 fold was 20/30/35; issue#16.1
+# bumped to 30/45/50 + the new 45 s systemctl-subprocess deadline.
 #
 # install.sh sed-substitutes the value from the webctl-owned
-# `webctl.mapping_systemd_stop_timeout_s` Tier-2 key (default 30).
-TimeoutStopSec=30s
+# `webctl.mapping_systemd_stop_timeout_s` Tier-2 key (default 45).
+TimeoutStopSec=45s
 
 # Logs: forward container stdout/stderr to journald so /api/mapping/journal
 # can `journalctl -u godo-mapping@active.service` and surface them.

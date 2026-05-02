@@ -86,8 +86,9 @@ def _settings_for(
         mapping_runtime_dir=mapping_runtime_dir or (base / "mapping_rt"),
         mapping_image_tag="godo-mapping:dev",
         docker_bin=Path("/usr/bin/docker"),
-        # issue#14 Maj-1: tests pin the schema default ladder ceiling.
+        # issue#14 Maj-1 / issue#16.1: tests pin the schema default ladder.
         mapping_webctl_stop_timeout_s=35.0,
+        mapping_systemctl_subprocess_timeout_s=20.0,
         mapping_auto_recover_lidar=True,
     )
 
@@ -232,6 +233,7 @@ async def test_calibrate_timeout_returns_504(
         mapping_image_tag=s.mapping_image_tag,
         docker_bin=s.docker_bin,
         mapping_webctl_stop_timeout_s=s.mapping_webctl_stop_timeout_s,
+        mapping_systemctl_subprocess_timeout_s=s.mapping_systemctl_subprocess_timeout_s,
         mapping_auto_recover_lidar=s.mapping_auto_recover_lidar,
     )
     async with _client(s) as cl:
@@ -2017,6 +2019,7 @@ def test_lifespan_legacy_migration_creates_active_symlink(
         mapping_image_tag="godo-mapping:dev",
         docker_bin=Path("/usr/bin/docker"),
         mapping_webctl_stop_timeout_s=35.0,
+        mapping_systemctl_subprocess_timeout_s=20.0,
         mapping_auto_recover_lidar=True,
     )
 
@@ -2084,6 +2087,7 @@ def test_lifespan_warns_every_boot_when_map_path_set(
         mapping_image_tag="godo-mapping:dev",
         docker_bin=Path("/usr/bin/docker"),
         mapping_webctl_stop_timeout_s=35.0,
+        mapping_systemctl_subprocess_timeout_s=20.0,
         mapping_auto_recover_lidar=True,
     )
 
@@ -2231,6 +2235,7 @@ async def test_system_amcl_rate_tracker_timeout_returns_504(
         mapping_image_tag=s.mapping_image_tag,
         docker_bin=s.docker_bin,
         mapping_webctl_stop_timeout_s=s.mapping_webctl_stop_timeout_s,
+        mapping_systemctl_subprocess_timeout_s=s.mapping_systemctl_subprocess_timeout_s,
         mapping_auto_recover_lidar=s.mapping_auto_recover_lidar,
     )
     async with _client(s) as cl:
@@ -2474,14 +2479,14 @@ async def test_get_config_returns_projected_dict(
     assert body["network.ue_port"] == 6666
 
 
-async def test_get_config_schema_returns_51_rows(
+async def test_get_config_schema_returns_52_rows(
     tmp_path: Path,
     tmp_map_pair: Path,
 ) -> None:
     """The schema is mirrored from C++; the endpoint serves the local
-    parse cache, not a UDS round-trip. issue#14 Maj-1 fold added 3 rows
-    (webctl.mapping_docker_stop_grace_s, webctl.mapping_systemd_stop_timeout_s,
-    webctl.mapping_webctl_stop_timeout_s) — count 48 → 51."""
+    parse cache, not a UDS round-trip. issue#16.1 added the 4th
+    webctl.mapping_*_s row (webctl.mapping_systemctl_subprocess_timeout_s)
+    on top of issue#14 Maj-1's three — count 48 → 52."""
     s = _settings_for(
         uds_socket=tmp_path / "u.sock",
         map_path=tmp_map_pair,
@@ -2492,7 +2497,7 @@ async def test_get_config_schema_returns_51_rows(
     assert r.status_code == HTTPStatus.OK
     rows = r.json()
     assert isinstance(rows, list)
-    assert len(rows) == 51
+    assert len(rows) == 52
     # Each row has the documented keys.
     for row in rows:
         assert {

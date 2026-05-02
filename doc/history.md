@@ -86,7 +86,7 @@ PR #69는 base feat + v1..v8 = 9개 commit을 ~6시간 동안 흡수해서 squas
 
 1. **★ Tier A bundle — issue#16.1 + issue#10**:
    - **issue#16.1 (NEW)** — t5 trap-timeout: `docker stop --time=20` grace가 entrypoint trap의 `map_saver_cli` cycle보다 짧을 수 있음 (긴 매핑 세션에서). 운영자 t5 사건은 2h 5min 매핑이 SIGKILL로 손실. Fix path: 별도 `mapping_stop_systemctl_timeout_s` (≥45 s; 현재 generic `SUBPROCESS_TIMEOUT_S=10s` 사용) + schema 기본값 ladder bump (docker_grace 20 → 30, systemd_timeout 30 → 45, webctl_stop_timeout 35 → 50). LOC ~30. Risk: 긴 매핑에서 데이터 손실.
-   - **issue#10** — udev rule `/dev/rplidar` symlink (`idVendor=10c4 idProduct=ea60 serial=B5E5E18DC2E699D7C89792F44F46416F`) → tracker.toml `serial.lidar_port`이 `/dev/ttyUSB0`에서 `/dev/rplidar`로 flip. USB renumbering ops bug 제거. LOC ~20 + udev rule 1개.
+   - **issue#10** — udev rule `/dev/rplidar` symlink (`idVendor=10c4 idProduct=ea60 serial=2eca2bbb4d6eef1182aae9c2c169b110`) → tracker.toml `serial.lidar_port`이 `/dev/ttyUSB0`에서 `/dev/rplidar`로 flip. USB renumbering ops bug 제거. LOC ~20 + udev rule 1개.
 2. **issue#15** — PR #70 운영자 deploy + HIL 대기.
 3. **issue#16.2 (NEW)** — preview `.tmp` cleanup (`v11.pgm.tmp` 잔여가 motivation; `preview_dumper.py:54-64` SIGTERM-during-fsync race). LOC ~10.
 4. **issue#11** — Live pipelined-parallel multi-thread.

@@ -210,10 +210,11 @@ EffectiveValue read_effective(const Config& c, const ConfigSchemaRow& row) {
     // path consumes it. See production/RPi5/CODEBASE.md invariant (r).
     else if (k == "webctl.pose_stream_hz")           v.as_int    = c.webctl_pose_stream_hz;
     else if (k == "webctl.scan_stream_hz")           v.as_int    = c.webctl_scan_stream_hz;
-    // issue#14 Maj-1 — webctl-owned mapping-stop timing ladder.
-    else if (k == "webctl.mapping_docker_stop_grace_s")    v.as_int = c.webctl_mapping_docker_stop_grace_s;
-    else if (k == "webctl.mapping_systemd_stop_timeout_s") v.as_int = c.webctl_mapping_systemd_stop_timeout_s;
-    else if (k == "webctl.mapping_webctl_stop_timeout_s")  v.as_int = c.webctl_mapping_webctl_stop_timeout_s;
+    // issue#14 Maj-1 / issue#16.1 — webctl-owned mapping-stop timing ladder.
+    else if (k == "webctl.mapping_docker_stop_grace_s")          v.as_int = c.webctl_mapping_docker_stop_grace_s;
+    else if (k == "webctl.mapping_systemctl_subprocess_timeout_s") v.as_int = c.webctl_mapping_systemctl_subprocess_timeout_s;
+    else if (k == "webctl.mapping_systemd_stop_timeout_s")        v.as_int = c.webctl_mapping_systemd_stop_timeout_s;
+    else if (k == "webctl.mapping_webctl_stop_timeout_s")         v.as_int = c.webctl_mapping_webctl_stop_timeout_s;
     return v;
 }
 
@@ -274,10 +275,11 @@ bool apply_one(Config& c,
     // issue#12 — webctl-owned schema rows.
     else if (k == "webctl.pose_stream_hz")           c.webctl_pose_stream_hz           = static_cast<int>(vr.parsed_double);
     else if (k == "webctl.scan_stream_hz")           c.webctl_scan_stream_hz           = static_cast<int>(vr.parsed_double);
-    // issue#14 Maj-1 — webctl-owned mapping-stop timing ladder.
-    else if (k == "webctl.mapping_docker_stop_grace_s")    c.webctl_mapping_docker_stop_grace_s    = static_cast<int>(vr.parsed_double);
-    else if (k == "webctl.mapping_systemd_stop_timeout_s") c.webctl_mapping_systemd_stop_timeout_s = static_cast<int>(vr.parsed_double);
-    else if (k == "webctl.mapping_webctl_stop_timeout_s")  c.webctl_mapping_webctl_stop_timeout_s  = static_cast<int>(vr.parsed_double);
+    // issue#14 Maj-1 / issue#16.1 — webctl-owned mapping-stop timing ladder.
+    else if (k == "webctl.mapping_docker_stop_grace_s")          c.webctl_mapping_docker_stop_grace_s          = static_cast<int>(vr.parsed_double);
+    else if (k == "webctl.mapping_systemctl_subprocess_timeout_s") c.webctl_mapping_systemctl_subprocess_timeout_s = static_cast<int>(vr.parsed_double);
+    else if (k == "webctl.mapping_systemd_stop_timeout_s")        c.webctl_mapping_systemd_stop_timeout_s        = static_cast<int>(vr.parsed_double);
+    else if (k == "webctl.mapping_webctl_stop_timeout_s")         c.webctl_mapping_webctl_stop_timeout_s         = static_cast<int>(vr.parsed_double);
     else                                             return false;
     return true;
 }
@@ -481,11 +483,13 @@ ApplyResult apply_set(std::string_view                              key,
     // in core/config.cpp) so a hand-edited tracker.toml catches at next
     // Config::load. Apply-time + load-time = belt-and-suspenders.
     if (vr.row->name == "webctl.mapping_docker_stop_grace_s" ||
+        vr.row->name == "webctl.mapping_systemctl_subprocess_timeout_s" ||
         vr.row->name == "webctl.mapping_systemd_stop_timeout_s" ||
         vr.row->name == "webctl.mapping_webctl_stop_timeout_s") {
-        const int docker_s  = staging.webctl_mapping_docker_stop_grace_s;
-        const int systemd_s = staging.webctl_mapping_systemd_stop_timeout_s;
-        const int webctl_s  = staging.webctl_mapping_webctl_stop_timeout_s;
+        const int docker_s    = staging.webctl_mapping_docker_stop_grace_s;
+        const int systemctl_s = staging.webctl_mapping_systemctl_subprocess_timeout_s;
+        const int systemd_s   = staging.webctl_mapping_systemd_stop_timeout_s;
+        const int webctl_s    = staging.webctl_mapping_webctl_stop_timeout_s;
         if (!(docker_s < systemd_s)) {
             ar.err        = "bad_value";
             ar.err_detail = "webctl.mapping ladder: docker_stop_grace_s ("
@@ -498,6 +502,16 @@ ApplyResult apply_set(std::string_view                              key,
             ar.err        = "bad_value";
             ar.err_detail = "webctl.mapping ladder: systemd_stop_timeout_s ("
                           + std::to_string(systemd_s)
+                          + ") must be < webctl_stop_timeout_s ("
+                          + std::to_string(webctl_s) + ")";
+            return ar;
+        }
+        // issue#16.1 — systemctl_subprocess deadline must nest inside
+        // the webctl coordinator's overall poll deadline.
+        if (!(systemctl_s < webctl_s)) {
+            ar.err        = "bad_value";
+            ar.err_detail = "webctl.mapping ladder: systemctl_subprocess_timeout_s ("
+                          + std::to_string(systemctl_s)
                           + ") must be < webctl_stop_timeout_s ("
                           + std::to_string(webctl_s) + ")";
             return ar;

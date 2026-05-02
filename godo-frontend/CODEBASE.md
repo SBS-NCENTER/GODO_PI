@@ -2535,6 +2535,64 @@ void` callback prop. In origin-pick mode pointer-down emits
   to the existing brush-edit happy-path test (strict-mode locator
   collision after PR #41 added the page-local RestartPendingBanner).
 
+## 2026-05-03 00:40 KST — issue#15: Config tab domain grouping + edit-input bg swap
+
+Operator request 2026-05-01 (carryover) + 2026-05-03 follow-up bundle:
+(a) collapse Config's flat alphabetical row list into domain-prefix
+groups; (b) invert the input-cell background so view-state reads as
+"dimmed/disabled" (gray) and edit-state reads as "active/typeable"
+(white), matching operator's mental model on light theme.
+
+### Added
+
+- `src/components/ConfigEditor.svelte` `groups` derived value —
+  splits the flat schema by the dotted-name first segment (`amcl.…`,
+  `webctl.…`, `serial.…`, etc.) while preserving the schema's emit
+  order WITHIN each group. `Map` insertion order keeps the group
+  sequence stable as a function of `schema`.
+- `GROUP_LABEL_KO` static map — Korean labels for the 8 known
+  prefixes (amcl / smoother / serial / network / rt / gpio / ipc /
+  webctl). Unknown prefixes render the raw prefix as a fallback so
+  a future schema row's group is visible even before this map is
+  updated.
+- `<details class="config-group" open>` block per group with
+  `<summary>` (group label + row count). HTML-native `<details>`
+  gives the operator click-to-collapse for free; `open` attribute
+  is set on every group so the page opens fully expanded
+  (operator-locked: "기본적으로 group은 펼쳐진 상태").
+
+### Changed
+
+- ConfigEditor's main markup wrapped in `<div class="config-groups">`
+  with one `<table class="config-table">` per group inside its
+  `<details>`. The table head + body columns and `data-testid`
+  bindings (`row-{name}`, `input-{name}`, `marker-{name}`) are
+  unchanged so the existing `tests/unit/config.test.ts` passes
+  verbatim.
+- `.col-edit input` background swapped: was `var(--color-bg)`
+  (enabled) + `var(--color-bg-elev)` (disabled), now
+  `var(--color-bg-elev)` (enabled) + `var(--color-bg)` (disabled).
+  Light theme: enabled cell is `#ffffff` (white), disabled cell is
+  `#f5f5f7` (gray). Dark theme inherits the same intent — edit cell
+  reads brighter than view cell.
+- New `.config-group` styles: thin border, rounded corners, custom
+  `▾` chevron that rotates 90° when collapsed. Native browser
+  marker hidden via `summary::-webkit-details-marker { display:
+  none; }`.
+
+### Untouched
+
+- `routes/Config.svelte` — page-level state machine + EDIT/Cancel/
+  Apply buttons unchanged. ConfigEditor is self-contained.
+- ConfigEditor row content, glyphs, modified-dot, special-hints,
+  default-value display, applyResults markers — all unchanged.
+
+### Tests
+
+- 383 frontend unit tests pass unchanged. The existing config tests
+  query rows by `data-testid="row-{name}"` / `data-testid="input-
+  {name}"`, both of which the new structure preserves.
+
 ## 2026-05-01 00:30 KST — issue#3: pose hint UI (Map Overview, blended A+B + C numeric)
 
 ### Added

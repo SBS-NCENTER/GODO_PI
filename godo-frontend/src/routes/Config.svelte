@@ -103,6 +103,17 @@
     // Explicit-drop UX (Escape key) lives in `clearPending` below; that
     // path keeps the historic key-removal semantics so Escape still
     // restores the current-value display in one keystroke.
+    //
+    // Operator UX 2026-05-02 KST: clear this row's apply-result marker
+    // immediately when the operator starts typing again (`raw` non-empty
+    // OR explicit empty for "I'm clearing to retype"). Pre-fix the ✗
+    // marker + error message stuck around for the full TTL even after
+    // operator typed a corrected value — confusing.
+    if (key in applyResults) {
+      const { [key]: _drop, ...rest } = applyResults;
+      void _drop;
+      applyResults = rest;
+    }
     pending = { ...pending, [key]: raw };
   }
 
@@ -110,6 +121,12 @@
     const { [key]: _drop, ...rest } = pending;
     void _drop;
     pending = rest;
+    // Also clear any stale apply-result marker for this row.
+    if (key in applyResults) {
+      const { [key]: _r, ...rest2 } = applyResults;
+      void _r;
+      applyResults = rest2;
+    }
   }
 
   function pendingCount(): number {

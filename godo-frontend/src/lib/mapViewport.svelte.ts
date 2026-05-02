@@ -353,22 +353,46 @@ export function createMapViewport(): MapViewport {
       _dimsCaptured = true;
       _mapW = width;
       _mapH = height;
-      // Capture window.innerHeight ONCE and compute the floor.
-      // Server-side renders (jsdom) supply a default of 768; tests
+      // Capture window.innerHeight + innerWidth ONCE and compute the floor.
+      // Server-side renders (jsdom) supply a default of 768/1024; tests
       // override via `Object.defineProperty(window, 'innerHeight', ...)`.
+      //
+      // Operator UX 2026-05-02 KST: post-issue#13-cand the new SLAM
+      // default resolution is 0.025 m/cell, so mapping containers now
+      // emit 4× larger PGMs (e.g. 200×200 → 400×400). Pre-fix `_minZoom`
+      // only considered viewport HEIGHT, so a wide-but-not-tall PGM
+      // could still overflow the viewport horizontally at the floor zoom
+      // — operator had to drag the map to find content. Now the floor
+      // is the MIN of height-fit and width-fit so the rendered map
+      // never exceeds either viewport axis at minZoom.
+      //
+      // Initial `_zoom` is set to `_minZoom` (NOT MAP_DEFAULT_ZOOM = 1.0)
+      // so the first-load presentation auto-fits the viewport. Operator
+      // can still zoom in to 100% (= native pixel size) via the +/-
+      // buttons or numeric input. Pre-fix the first load was always at
+      // 100% which exceeded the viewport for the 4× PGMs.
       const viewportH =
         typeof window !== 'undefined' && Number.isFinite(window.innerHeight)
           ? window.innerHeight
           : 0;
-      if (viewportH > 0) {
-        // Floor zoom = ratio at which mapHeight × zoom == viewportH.
-        // Hard-clamp to [MAP_MIN_ZOOM, 1.0] so an absurdly small viewport
-        // doesn't push minZoom above the natural-size starting zoom.
-        const candidate = viewportH / height;
+      const viewportW =
+        typeof window !== 'undefined' && Number.isFinite(window.innerWidth)
+          ? window.innerWidth
+          : 0;
+      if (viewportH > 0 && viewportW > 0) {
+        const candidateH = viewportH / height;
+        const candidateW = viewportW / width;
+        // Floor = min(width-fit, height-fit) so the rendered map fits
+        // both axes at minZoom. Hard-clamp to [MAP_MIN_ZOOM, 1.0] so an
+        // absurdly small viewport doesn't push minZoom above native.
+        const candidate = Math.min(candidateH, candidateW);
         _minZoom = clampZoom(candidate, MAP_MIN_ZOOM, 1.0);
       }
-      // Re-clamp the current zoom now that the floor may have moved.
-      _zoom = clampZoom(_zoom, _minZoom, MAP_MAX_ZOOM);
+      // Auto-fit on first load: start at the floor zoom (NOT 1.0).
+      // Operator's "맵이 100% 기본값 이미지일 때 css 블록보다 크지
+      // 않도록 했으면 좋겠어" intent: first presentation must fit the
+      // viewport without requiring a drag.
+      _zoom = clampZoom(_minZoom, _minZoom, MAP_MAX_ZOOM);
     },
 
     worldToCanvas(wx, wy, canvasW, canvasH, meta) {

@@ -340,7 +340,7 @@ export const ORIGIN_PICK_REDIRECT_DELAY_MS = 3000;
 // The markers auto-clear after this delay; 2 s is half the System
 // transition toast (above) because the operator is reading the row at
 // arm's length, not glancing at a top-bar toast.
-export const CONFIG_APPLY_RESULT_MARKER_TTL_MS = 2000;
+export const CONFIG_APPLY_RESULT_MARKER_TTL_MS = 5000;
 
 // --- Backup flash banner (operator UX 2026-05-02 KST) -------------------
 // /api/map/backup is a fire-and-result action — operators need a visible

@@ -3213,10 +3213,20 @@ single follow-up commit on the same branch.
   (replaced by `<LastPoseCard/>` mount); the Map / MapEdit overview
   layouts already mounted the card. Future routes wanting "show me the
   pose" SHOULD mount `<LastPoseCard/>` rather than rolling their own.
-- **(aa) origin-picker-dual-input — issue#27 update.** Theta input is
-  now a third visible numeric field alongside x_m / y_m. +/- step
-  buttons render next to each input (default step 0.01 m / 0.01 m /
-  0.1°, operator-tunable via `origin_step.*` schema rows). Korean copy
-  reflects SUBTRACT semantic ("이 좌표를 새 (0, 0)으로 만듭니다" vs the
-  previous "더해서"). Pin: `tests/unit/originPicker.test.ts` (existing
-  cases + 6 issue#27 cases).
+- **(aa) origin-picker-dual-input — issue#27 update.** x_m / y_m
+  numeric inputs each render a +/- step button pair next to them
+  (default step 0.01 m / 0.01 m, operator-tunable via `origin_step.x_m`
+  / `origin_step.y_m` schema rows). Korean copy reflects SUBTRACT
+  semantic ("이 좌표를 새 (0, 0)으로 만듭니다" vs the previous "더해서").
+  **Theta input + ±buttons are gated `THETA_EDIT_ENABLED=false` in
+  `OriginPicker.svelte` (commit `2b4c3fe`).** Operator HIL during
+  issue#27 ship surfaced that tracker doesn't consume YAML `origin[2]`
+  (uses `cfg.amcl_origin_yaw_deg` at `cold_writer.cpp:371-663`), so
+  theta editing was metadata-only with zero pose-output effect.
+  Backend `theta_deg` parameter + `origin_step.yaw_deg` schema row
+  remain — B-MAPEDIT-3 (issue#28) flips the gate AND fixes the
+  plumbing in the same PR. Delta mode resolves on the SPA via
+  `subscribeLastPose` + `resolveDeltaFromPose`; `no_pose_for_delta`
+  banner shown when `lastPose` is null (Mode-B Maj-1 fix). Pin:
+  `tests/unit/originPicker.test.ts` (16 cases incl. delta-with-pose +
+  delta-without-pose + theta-UI-gated).

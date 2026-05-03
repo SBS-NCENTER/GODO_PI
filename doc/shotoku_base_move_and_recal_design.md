@@ -194,6 +194,10 @@ issue#29 ship 전 선행 필요:
 
 ---
 
+### 5.1 추가 의존성 — issue#27 HIL 발견 사항 (2026-05-04 KST)
+
+issue#27 ship 시 운영자가 발견: **tracker는 YAML `origin[2]` (theta)를 boot 시 읽지 않음**. 별도 `cfg.amcl_origin_yaw_deg` Tier-2 config 키를 사용 (`cold_writer.cpp:371,377,385,515,521,529,649,655,663`). issue#28 (B-MAPEDIT-3) 가 먼저 이 plumbing을 고친 후에야 issue#29의 base re-anchor 워크플로우가 정상 동작 가능 — re-anchor가 새 base_yaw_cal 을 결정해도 tracker가 YAML theta 무시하면 의미 없음. issue#28의 fix path (a) "YAML origin[2] → AMCL frame 직결" or (b) "transactional 동시 갱신" 결정에 따라 issue#29 의 anchor 저장 형식(YAML vs. 별도 anchor.toml)도 영향 받음.
+
 ## 6. 미해결 질문 (issue#29 시작 시 풀어야 할 항목)
 
 1. **Re-anchor 캡쳐의 simultaneous 보장**: LiDAR cold-path는 5 Hz, FreeD hot-path는 60 Hz. capture 시점에 두 값이 같은 물리 instant 를 반영하는지 보장 방법 (SO_TIMESTAMPNS_NEW + matching window?). issue#26 결과에 의존.

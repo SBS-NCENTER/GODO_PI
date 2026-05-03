@@ -10,6 +10,71 @@
 
 ---
 
+## 2026-05-03 → 2026-05-04 (심야 ~ 새벽 — 22:00 KST 2026-05-03 → 06:00 KST 2026-05-04, 스물 한 번째 세션 — issue#27 ship: output_transform 단 + SUBTRACT origin + LastOutput SSE — "한 번에 가자")
+
+### 한 줄 요약
+
+지도 미리보기 UX 다듬기(우상단 hover, Edit 탭 pose dot, ±버튼) + RT 파이프라인 신규 변환 단(6채널 offset+sign, 최종 송출 직전)을 한 PR(#79, `c28bc1d`)로 묶어 ship. **운영자의 2026-04-30 ADD origin spec이 sign 반대였음을 HIL 3 픽으로 확인 → SUBTRACT로 정정** (locked memory `feedback_subtract_semantic_locked.md`). theta 편집 UI 출시했다가 **tracker가 YAML `origin[2]`를 안 읽는 plumbing 버그를 발견** → UI 게이트 닫고 issue#28 (B-MAPEDIT-3) critical 항목으로 명시.
+
+### 1개 PR
+
+| PR | issue# | 제목 | 결과 |
+|---|---|---|---|
+| #79 | issue#27 | feat(issue#27): output_transform stage + SUBTRACT origin + LastOutput SSE | merged at `c28bc1d` (66 files / +3586 / -632, 1426/1426 tests) |
+
+### 핵심 발견 1 — 운영자 직관 SUBTRACT, 2026-04-30 ADD spec은 정정 대상
+
+세션 도입부에 운영자가 origin pick UX 결과를 의심: "원점 (2.01, 8.56)으로 잡았는데 (6.42, 7.02) 좌표가 (12.88, 15.49)로 바뀜". 두 차례 더 픽(PICK#2/#3)해서 데이터 맞춰보니 **현재 동작 = `new_pose = old_pose + (typed - old_origin)`** 임을 확인. 운영자의 mental model은 "이 점을 새 (0,0)으로" → SUBTRACT. 2026-04-30 KST 열두 번째 세션에서 lock된 ADD spec body ("실제 원점 위치는 여기서 (x, y)만큼 더 간 곳")는 운영자가 그때 "더 가는" 방향을 *YAML literal* 의미로 해석한 결과. 코드는 spec을 정확히 따랐지만 spec 자체가 운영자의 운영 직관과 부호 반대였음.
+
+PICK#2/#3 데이터를 SUBTRACT 회귀 테스트 두 개로 pin 해서 issue#27에 ship. 새 메모리 `feedback_subtract_semantic_locked.md` 로 "operator-intuitive (0,0)-marker → SUBTRACT" 잠금. 기존 `project_map_edit_origin_rotation.md` 의 ADD spec body는 *superseded historical context* 로 보존 (sign-flip 이력 추적 가능).
+
+### 핵심 발견 2 — tracker가 YAML `origin[2]` 를 안 읽음
+
+issue#27 의 P-A4 가 origin pick 에 theta_deg 편집 추가. 운영자 HIL: "yaw 편집을 하고 tracker 재시작 해도 LiDAR raw 값에 변동 없어". `cold_writer.cpp:371,377,385,515,521,529,649,655,663` grep — tracker는 **`cfg.amcl_origin_yaw_deg` (Tier-2 config 키)** 를 읽고, YAML의 `origin[2]` 는 `occupancy_grid.cpp:113-130` 에서 파싱은 하지만 어디에도 propagate 되지 않음. issue#27 의 theta 편집은 metadata-only 였는데 그 metadata를 소비하는 사람이 없는 상태.
+
+미드-PR 미티게이션: `THETA_EDIT_ENABLED = false` 상수로 `OriginPicker.svelte` theta UI 게이트 닫음 (commit `2b4c3fe`). backend `theta_deg` 파라미터 + `origin_step.yaw_deg` 스키마 row는 그대로 남김 → B-MAPEDIT-3 (issue#28) 가 plumbing 픽스 하면서 같은 PR에서 게이트 다시 켜기. 이 발견은 두 곳에 기록:
+- `.claude/memory/project_map_edit_origin_rotation.md` 의 B-MAPEDIT-3 섹션 아래 "Critical pre-implementation findings — issue#27 HIL surfaced".
+- `/doc/shotoku_base_move_and_recal_design.md` §5.1 (issue#29 base re-anchor 도 같은 plumbing 의존).
+
+### 핵심 발견 3 — D1 spec 9-11 byte는 "Reserved" 지만 PIXOTOPE는 Roll로 디코드
+
+운영자가 세션 중 `/tmp/D1.jpeg` 로 공식 FreeD D1 byte-order spec 사진 전송. 표 분석:
+- Pan (3-5 byte): 24-bit signed, 1/32768° per LSB — 명시
+- Tilt (6-8 byte): 단위 명시 안 됐지만 Pan 과 동일 관례
+- **`<AXH/AXM/AXL>` (9-11 byte): "Reserved Data, Always 0x000000"**
+- X (12-14): 24-bit signed, 1/64 mm per LSB — 명시
+- Y (15-17), Z (18-20): X 와 동일 관례
+- Zoom (21-23) / Focus (24-26): unsigned, offset 0x080000
+
+운영자 코멘트: "shotoku에서 roll값이 없더라도 혹시 모르니 offset 기능은 넣어도 돼. 우린 PIXOTOPE 엔진 장비를 사용하는데, 일단 기본적으로 ROLL값이 FreeD에서 -0.017정도로 일정한 값이 나와. 아마 FreeD_to_UDP 툴에서도 Roll 값이 고정으로 날아갔을거야. bypass였으니까." → 6채널 (X/Y/Z/Pan/Tilt/Roll) 모두 offset+sign 진행. Roll 스케일은 Pan/Tilt 와 동일 (1/32768°) byte-position 관례로 가정. 우리 코드의 `OFF_ROLL = 8` 라벨은 misnomer 가 아니라 의미 있는 라벨이었음.
+
+### 핵심 발견 4 — SSE wrap-and-version 이 프로젝트 precedent
+
+Mode-A reviewer 가 SSE wire shape 결정 잠금: nested `{pose: {...}, output: {...}}` (NOT flat-spread). 이미 `sse.py:diag_stream` 이 같은 multi-source 이유로 `{pose, jitter, amcl_rate, resources}` wrap 패턴 — 신규 개발은 무조건 이 패턴 따라가도록 invariant 화. frontend store split (`stores/lastPose.ts` 는 `frame.pose` 읽기, 신규 `stores/lastOutput.ts` 는 `frame.output` 읽기), missing key 는 "Final output (UDP) — unavailable" 로 graceful degrade.
+
+### 프로세스 노트
+
+- **풀 파이프라인** (Planner → Mode-A APPROVE-WITH-CHANGES → Writer → Mode-B Conditional approve → 운영자 HIL → merge). Mode-A 가 3 Critical (FreeD scale 검증 / SSE shape / HIL data 보강) + 5 Major (ondraw 이미 존재 / hover-coord shared store / theta drift / SeqLock asserts / row-count 3-site) 잡음. Mode-B 가 Maj-1 (delta-mode SPA wiring missing) 잡아서 Parent inline-fold (~30 LOC + 2 Vitest pin).
+- **운영자 직접 web upload 두 번 연속**: PR #78 (twentieth-session 분석 docs) + `7a8428f` (XR_Bypass_Controller, 본 PR에서 삭제). 후자는 운영자가 "이전 버전 올라갔었네 — bypass controller 는 삭제해야겠다" 결정. 패턴이 두 번 반복되면 다음 세션에 이유 확인 필요.
+- **Jitter 측정**: p99 = 18.5 µs (samples 2048). Phase 4-1 baseline 12.7 µs vs +5.8 µs / +45% 상승. 절대 천장 ≤ 30 µs 안쪽이라 머지 블로커 아니지만 baseline 이 6개월 stale (PR #58 / #66 / #75 등 누적) — issue#27 단독 영향은 정적 분석상 ~100 ns 정도이므로 다른 누적 요인. 별도 추적.
+- **새 SSOT design doc**: `/doc/shotoku_base_move_and_recal_design.md` (242 lines) — issue#29 deferred spec, UART migration 패턴. 베이스 평행이동 (Case A, 현재 동작) / 회전 (Case B, 미처리) / SHOTOKU two-point cal 리셋 (Case C, 미처리) 세 케이스 + 수식 + 워크플로우 + 미해결 7개 질문 + 트리거 조건.
+
+### 다음 세션 큐 (운영자 lock 우선순위, 2026-05-04 06:00 KST)
+
+1. **★ issue#28 — B-MAPEDIT-3 yaw rotation (full)**. 우선순위 #1. issue#27 HIL 에서 surfaced 된 두 가지 prerequisite (YAML `origin[2]` plumbing fix + Pose/Yaw/scan 동시 회전 렌더링) 함께 ship. 운영자 코멘트: "B-MAPEDIT-3 구현하면 POSE, Yaw를 함께 랜더링 할 수 있도록 해야 해. 시간이 좀 걸려도 괜찮으니까."
+2. issue#26 round 2 + Writer + HIL — 측정 도구 (반나절).
+3. issue#11 design analysis (paused) — issue#26 첫 capture 후 재개.
+4. issue#13 (continued) — distance-weighted AMCL likelihood.
+5. issue#4 — AMCL silent-converge diagnostic.
+6. **issue#29 — SHOTOKU base-move + two-point cal-reset 워크플로우** (NEW deferred). spec at `/doc/shotoku_base_move_and_recal_design.md`. issue#28 plumbing fix 의존. UART migration 패턴.
+7. issue#17 — GPIO UART direct (perma-deferred).
+8. Bug B — Live mode standstill jitter.
+9. issue#7 — boom-arm angle masking.
+
+다음 free issue 정수: `issue#30`.
+
+---
+
 ## 2026-05-03 (오후 — 12:30 KST → 15:30 KST, 스무 번째 세션 — 분석 전용 세션, PR 없음, issue#11 + issue#26 두 차례 REJECT-rework — "측정-우선으로 방향 전환")
 
 ### 한 줄 요약

@@ -174,6 +174,57 @@ All host-side bring-up steps complete. See per-step session log entry below. The
 
 ## Session log
 
+### 2026-05-03 (late-night → cross-day — 22:00 KST 2026-05-03 → 06:00 KST 2026-05-04, twenty-first-session — issue#27 ships: output_transform stage + SUBTRACT origin + LastOutput SSE)
+
+Twenty-first-session opened off the twentieth-session close (`/doc/issue11_design_analysis.md` + 2 paused-spec memories landed via PR #78 directly to main as "Add files via upload" — operator chose web upload over a normal docs PR for this analytical-only batch). Session bundled BOTH map-preview UX polish AND a new RT-pipeline transform stage into a single cross-stack PR per operator's "한 번에 가자" call. Net result: 1 merged PR (#79, squash at `c28bc1d`), 66 files / +3586 / -632 LOC, 1426/1426 tests pass, full pipeline (Planner → Mode-A APPROVE-WITH-CHANGES → Writer → Mode-B Conditional approve → operator HIL → merge), with two distinct mid-flight scope corrections.
+
+**Notable structural revelation #1 — operator's 2026-04-30 ADD origin spec was wrong by sign**. The operator-locked `project_map_edit_origin_rotation.md` spec (locked twelfth-session 2026-04-30 KST, body said "in delta mode the typed (x_m, y_m) is the offset of the new origin from the current origin — i.e. new_origin = current_origin + (x_m, y_m)") was implemented faithfully by the existing backend. Operator HIL during issue#27 conversation surfaced 3 sequential origin picks, each producing pose drift in the WRONG direction (PICK#1 typed (2.01, 8.56) → pose moved +6.46 / +8.47 instead of -6.46 / -8.47; PICK#2 + PICK#3 with full data confirmed the ADD formula). Operator's natural mental model is "the typed point should become the new (0, 0)" → SUBTRACT, not ADD. Lesson locked in new memory `feedback_subtract_semantic_locked.md`: "operator-intuitive '(0,0) marker' implies SUBTRACT direction; ADD on YAML literal is dev-frame, not operator-frame. When in doubt, ask 'does typing positive value make the picked point closer to (0,0)?' If yes → SUBTRACT". The original 2026-04-30 ADD body in `project_map_edit_origin_rotation.md` is preserved as superseded historical context to make the sign-flip auditable.
+
+**Notable structural revelation #2 — tracker silently ignores YAML `origin[2]`**. Operator HIL on the new theta editing UI (P-A4) found pose yaw did NOT shift after theta edit + restart, even though origin x/y editing DID shift pose values correctly. Grep of the C++ tracker source revealed root cause: `cold_writer.cpp:371,377,385,515,521,529,649,655,663` reads `cfg.amcl_origin_yaw_deg` (a Tier-2 config knob), NOT the YAML's `origin[2]` field. The YAML loader at `occupancy_grid.cpp:113-130` parses the third value but never propagates it into the AMCL frame transform. So the issue#27 theta editing was metadata-only on the YAML disk side, with zero effect on the running tracker. Mid-PR mitigation: gated theta UI with `THETA_EDIT_ENABLED=false` in `OriginPicker.svelte` (commit `2b4c3fe`) so operators cannot trigger the silent breakage. Backend `theta_deg` parameter + `origin_step.yaw_deg` schema row remain — B-MAPEDIT-3 (issue#28) flips the constant AND fixes the plumbing in the same PR. The discovery is captured both in `project_map_edit_origin_rotation.md` (under B-MAPEDIT-3 "Critical pre-implementation findings — issue#27 HIL surfaced") and in `/doc/shotoku_base_move_and_recal_design.md` §5.1 (because issue#29 base re-anchor depends on the same plumbing fix).
+
+**Notable structural revelation #3 — D1 spec only covers Pan + X explicitly, but operator confirms PIXOTOPE decodes the "Reserved" bytes 9-11 as Roll**. Operator scp'd `/tmp/D1.jpeg` mid-session with the official FreeD D1 byte-order spec. Per the spec table, only Pan (1/32768°) and X (1/64 mm) carry explicit per-LSB scale; Tilt/Y/Z follow the same units by convention; bytes 9-11 (`<AXH/AXM/AXL>`) are listed as "Reserved Data, always 0x000000". HOWEVER, operator confirmed the production SHOTOKU TK-53LVR / Ti-04VR family emits a constant non-zero (~-0.017°) at this byte position, and the bypass forwarder (legacy `XR_FreeD_to_UDP` + the just-deleted `XR_Bypass_Controller`) passes it through unchanged. PIXOTOPE-side decoders treat the bytes as a Roll channel. Resolution: keep `OFF_ROLL = 8` label as meaningful (NOT a misnomer), assume Roll's per-LSB scale equals Pan/Tilt's `1/32768°` by byte-position convention, document the rationale in `udp/output_transform.cpp` source comment + the `output_transform.roll_*` schema row. A future operator finding PIXOTOPE decodes Roll differently has the rationale + correction path documented in source.
+
+**Notable structural revelation #4 — wrap-and-version SSE shape is the project precedent**. Mode-A reviewer locked the SSE wire shape decision the Planner had left ambiguous: nested `{pose: {<existing LastPose fields>}, output: {<new LastOutputFrame fields>}}`, NOT flat-spread. Precedent: `sse.py:diag_stream` already wraps `{pose, jitter, amcl_rate, resources}` for the same multi-source reason. New stores split (`stores/lastPose.ts` reads `frame.pose`; new `stores/lastOutput.ts` reads `frame.output`); missing `output` key renders "Final output (UDP) — unavailable" gracefully. Existing flat-shape consumers handled via a `'pose' in payload` check at `stores/lastPose.ts:55-60` for backwards compat with the polling fallback path.
+
+**Notable process artefact — `7a8428f Add files via upload`**: operator uploaded `XR_Bypass_Controller/Embedded_CheckPoint.md` directly to main via the GitHub web UI (no PR). Folder turned out to contain only the embedded checkpoint markdown (no source code). Operator subsequently asked to delete it ("괜히 헷갈릴테니"); deletion folded into the issue#27 PR. Not a process violation per se (operator-authored direct push is rare but allowed — see `feedback_check_branch_before_commit.md` discipline applies to *Claude*-driven commits), but worth flagging as the second occurrence of operator's web-upload pattern in a row (PR #78 was also web-upload).
+
+**1 PR landed this session**:
+
+| PR | Issue | Title | State |
+|---|---|---|---|
+| #79 | issue#27 | feat(issue#27): output_transform stage + SUBTRACT origin + LastOutput SSE | merged at `c28bc1d` |
+
+**Cross-cutting rules locked in memory this session**:
+
+- `feedback_subtract_semantic_locked.md` (new) — operator-intuitive (0,0)-marker semantic implies SUBTRACT. Origin pick + future Map Edit mutations follow the SUBTRACT direction; ADD is the dev-frame literal interpretation that drifts from operator intent.
+
+**Cross-cutting findings NOT yet locked but folded into B-MAPEDIT-3 spec**:
+
+- Tracker doesn't consume YAML `origin[2]` (uses `cfg.amcl_origin_yaw_deg`). B-MAPEDIT-3 must fix the plumbing as part of lighting up the theta UI. Documented in `project_map_edit_origin_rotation.md` under "Critical pre-implementation findings — issue#27 HIL surfaced".
+- Pose + Yaw must render together on the rotated map (operator-locked 2026-05-04 KST). Same memory entry.
+
+**Live system on news-pi01 (post twenty-first-session close)**:
+
+- godo-tracker rebuilt from main `c28bc1d`, Restarted via SPA System tab. New `output_transform.*` (12) + `origin_step.*` (3) schema keys — defaults flow from `config_defaults.hpp` (live `tracker.toml` does not yet carry them).
+- godo-webctl Restarted post-deploy; SSE multiplexes `{pose, output}` envelope; new `GET /api/last_output` REST endpoint live.
+- godo-frontend hashed bundle deployed to `/opt/godo-frontend/dist/`; Dashboard now mounts `<LastPoseCard/>`; Edit-tab pose dot live; hover-coord top-right always-on.
+- Jitter post-deploy: p99 = 18.5 µs (samples 2048), p50 = 3.0 µs, p95 = 12.9 µs, max = 24.2 µs, mean = 5.0 µs. vs Phase 4-1 baseline 12.7 µs p99 = +5.8 µs / +45% relative — within absolute design ceiling (≤ 30 µs target). Output_transform's per-tick cost is ~100 ns by static analysis (6 channels × {decode, mul, add, sign-mul, encode} + checksum); the 5.8 µs delta is dominated by other factors (baseline drift across PR #58 / #66 / #75 etc., not attributable to issue#27 alone). NOT a merge blocker; flagged for separate tracking.
+- main = `c28bc1d`. Working tree on `docs/2026-05-04-twenty-first-session-close` for the chronicler bundle.
+
+**Open queue for next session** (operator-locked priority, refreshed 2026-05-04 06:00 KST):
+
+1. **★ issue#28 — B-MAPEDIT-3 yaw rotation (full)**. Operator-locked priority #1. Two structural prerequisites surfaced this session (now in spec): (a) wire YAML `origin[2]` through to AMCL frame transform (replace `cfg.amcl_origin_yaw_deg` consumption OR add transactional YAML+config dual-write); (b) Pose + Yaw + LiDAR scan dots must render coherently together when YAML theta changes (no "rotate bitmap, but pose stays in old frame" intermediate state). Theta UI gate (`THETA_EDIT_ENABLED`) flips back on as part of this PR. Spec: `.claude/memory/project_map_edit_origin_rotation.md` (B-MAPEDIT-3 section + critical findings subsection).
+2. **issue#26 round 2 + Writer + HIL** — cross-device latency measurement tool. Half-day effort after issue#28.
+3. **issue#11 design analysis (paused)** — resumes after issue#26 first capture lands.
+4. **issue#13 (continued)** — distance-weighted AMCL likelihood.
+5. **issue#4** — AMCL silent-converge diagnostic.
+6. **issue#29 — SHOTOKU base-move + two-point cal-reset workflow** (NEW deferred). Spec at `/doc/shotoku_base_move_and_recal_design.md`. Depends on issue#28 (YAML `origin[2]` plumbing fix). UART migration pattern — pick up when field evidence accumulates.
+7. **issue#17** — GPIO UART direct (perma-deferred unless field evidence).
+8. **Bug B** — Live mode standstill jitter.
+9. **issue#7** — boom-arm angle masking.
+
+**Next free issue integer: `issue#30`** (issue#28 = B-MAPEDIT-3 yaw rotation; issue#29 = SHOTOKU base-move design).
+
 ### 2026-05-03 (afternoon — 12:30 KST → 15:30 KST, twentieth-session — analytical session, NO PRs merged, two REJECT-rework iterations on issue#11 + issue#26)
 
 Twentieth-session opened directly off the nineteenth-session close (PR #77 docs merged 12:07 KST → main = `7668c14`). Operator opened with: "issue#11 deep dive — Planner + Reviewer must do wider cross-analysis of possibilities, risks, impact points than usual." The session ran two full Planner → Mode-A iterations back-to-back (issue#11 round 1 + issue#26 round 1), both REJECTED on numerical/factual foundation collapse, both on the same root pattern. Operator scope-shifted twice mid-session — first dropping OneShot calibrate from issue#11 value equation, then promoting empirical-measurement-first via a new cross-device test tool (issue#26). Net result: zero source code changes, zero PRs, but ~2000 lines of plan + Mode-A folds + new `/doc/issue11_design_analysis.md` SSOT + two new `.claude/memory/` entries that let next-session pick up from a clean cold-start.

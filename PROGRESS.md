@@ -174,6 +174,46 @@ All host-side bring-up steps complete. See per-step session log entry below. The
 
 ## Session log
 
+### 2026-05-03 (early morning → late morning — 04:30 KST → 09:30 KST+, eighteenth-session — issue#16.1 t5 trap-timeout fix + issue#10 udev /dev/rplidar + issue#10.1 lidar-serial config row + UDS stale-socket guard ships)
+
+Eighteenth-session opened by absorbing the seventeenth-session's deferred Tier-A bundle (issue#16.1 + issue#10) and closed with two squash-merged PRs and a UDS stale-socket race surface promoted to issue#18. Both PRs went through the full pipeline (planner → Mode-A → writer → Mode-B); the first required two Mode-A rounds (REWORK → APPROVE), the second cleared in a single round because plan accuracy improved with PR #72's lessons.
+
+**Notable structural revelation #1 — generic `services.SUBPROCESS_TIMEOUT_S=10s` is insufficient for the mapping path**: t5 incident at 22:27:16 KST 2026-05-02 (deferred from seventeenth) lost a 2 h 5 min mapping when `systemctl stop godo-mapping@active.service` was killed by the wrapper's 10 s timeout before the entrypoint trap's `map_saver_cli` finished its atomic-rename of the PGM/YAML pair. Other systemctl-controlled services (godo-tracker, godo-webctl, godo-irq-pin) stop in <500 ms so the 10 s ceiling fits them, but mapping's trap performs disk I/O proportional to map size — long mappings need a per-callsite deadline. Fix: new schema row `webctl.mapping_systemctl_subprocess_timeout_s` (default 45 s), bound to BOTH `_run_systemctl_start_mapping` and `_run_systemctl_stop_mapping` callsites in `godo-webctl/src/godo_webctl/mapping.py`. The existing 3-row trio defaults bumped 20/30/35 → 30/45/50 in lockstep so the cascade ladder (`docker_grace < systemd_timeout < webctl_stop_timeout`) holds, with a new pairwise pin `systemctl_subprocess < webctl_stop_timeout` enforced at three sites: C++ `Config::load:validate_webctl_mapping_ladder`, C++ `apply_set` ladder gate, Python `read_webctl_section`. Lesson: per-callsite deadlines must reflect the callsite's worst-case I/O budget — a single generic constant cannot cover paths that include trap disk-I/O.
+
+**Notable structural revelation #2 — schema-default migrations need a deploy-time gate when stateful runtime config exists**: Live `/var/lib/godo/tracker.toml` on news-pi01 pinned `(20, 30, 35)` (the seventeenth-session defaults). Deploying PR #72 with new defaults `(30, 45, 50)` without migration would have (a) left t5 unfixed because install.sh's tomllib block sed-substitutes the unit file FROM the live tracker.toml not from the new schema, AND (b) crash-looped webctl because the new validator requires `systemctl(45) < webctl(35)` which the live trio violates. Solution: install.sh `[5/12]` step gains a Python-heredoc detection block with five verdicts — `LEGACY_TRIO_REWRITE` auto-rewrites with timestamped backup, `OVERRIDE_LADDER_REFUSE` refuses-with-instructions on non-default overrides, `ALREADY_NEW`/`EMPTY_OK`/`OVERRIDE_OK` no-op. The detection runs BEFORE the existing tomllib parse so post-rewrite the unit file gets sed-substituted with the new ladder. Mode-A round 2 added the timestamped suffix (`tracker.toml.bak.<unixts>`) so re-runs preserve prior backups. Lesson: deploy-time race between schema-default change and stateful runtime config requires explicit migration step, not "operator will hand-edit".
+
+**Notable structural revelation #3 — atomic-rename is necessary but not sufficient for UDS bootstrap**: PR #73 HIL surfaced `/run/godo/ctl.sock` as 0-byte regular file alongside the live listening socket at `ctl.sock.<pid>.tmp` (root cause unconfirmed — webctl ENOENT placeholder, half-failed prior rename, or systemd-tmpfiles interaction). `uds_server.cpp` already implements the atomic-rename pattern (unlink stale .tmp → bind → rename → chmod → listen), but POSIX `rename(2)`'s atomic overwrite only protects against torn-state visibility, not against silent rename failure. Quick fix: `lstat → unlink-if-non-socket → log` guard added BEFORE rename (live socket targets `S_IFSOCK` left alone). Failure mode self-documents via stderr: `stale non-socket at '...' (mode=..., size=...); unlinking before atomic rename`. Broader audit (rename failure path-aware logging, atexit/destructor unlink, mapping@active socket parity, `ss -lxp` historical-bind-path cache cleanup) deferred to **issue#18**. Lesson: atomic-rename solves the visibility problem; it does NOT solve the post-failure cleanup or the diagnostic-trail problem. Both need first-class handling.
+
+**Process correction — operator deploy gotcha (working tree branch)**: Mid-session operator hit `tracker:"unreachable"` after redeploying `/opt/godo-webctl/`. Cause: at deploy time the working tree was on the issue#10.1 feature branch where the writer had already bumped `EXPECTED_ROW_COUNT 52 → 53`; the rsync therefore deployed 53-pin webctl against the live 52-row tracker schema, producing 503 on `/api/config/schema`. Hotfix: in-place sed `/opt/godo-webctl/.../config_schema.py:111` to 52 + webctl restart. Lesson: operator deploy SOP must include `git status && git branch --show-current` BEFORE rsync, OR a `git stash → git switch main → rsync → git switch back → stash pop` sequence when Parent is mid-PR. Memory entry pending in `.claude/memory/feedback_deploy_branch_check.md` (Parent territory).
+
+**N PRs landed this session**:
+
+| PR | Issue | Title | State |
+|---|---|---|---|
+| #72 | issue#16.1 + issue#10 | mapping stop ladder bump + udev /dev/rplidar (+ 도움말 sub-tab follow-up commit `e5c90ab`) | merged 06:45 KST 2026-05-03 |
+| #73 | issue#10.1 | LiDAR udev serial config row + 도움말 card + UDS stale-socket guard | merged 08:58 KST 2026-05-03 |
+
+**Cross-cutting rules locked**:
+
+1. **Relaxed validator + strict installer** pattern: C++ String validator stays generic (non-empty + ≤256 ASCII printable); install.sh enforces format-specific check (e.g., `^[0-9a-f]{32}$`). Operator can Apply a wrong value in Config tab; install.sh refuses-with-instructions while preserving the existing rule. Single-point-of-strict, debugger-friendly.
+2. **Schema-driven counts in UI**: static "(~37)" string drift caught at HIL → replaced with `{schema.length}` from the existing `$state` binding. Any analogous static count anywhere else should be migrated.
+3. **post-Mode-B inline polish is OK**: small operator-driven additions (UI text fix, defensive guards) absorbed without re-review; verified for PR #73's `~37` fix and UDS guard. The boundary: Mode-B verdict must be unchanged by the addition (no new contract-touching code).
+4. **Deploy SOP — git tree branch awareness**: production rsync depends on the source git tree state. Document branch + uncommitted-changes check in deploy procedure.
+
+**Open queue for next session** (operator-locked priority):
+
+1. **★ issue#18 (NEW)** — UDS bootstrap audit (broader). PR #73 shipped the quick fix only; broader coverage of stale-state root cause, rename failure logging, atexit/destructor unlink semantics, mapping@active socket parity, `ss -lxp` historical-bind-path cleanup. ~50-100 LOC. Operator quote: "UDS를 전반적으로 점검하는 것이 좋겠어".
+2. **issue#16.2** — preview `.tmp` cleanup (residual issue#14 race). ~10 LOC.
+3. **issue#11** — Live pipelined-parallel multi-thread.
+4. **issue#13 cont.** — distance-weighted AMCL likelihood.
+5. **issue#4** — AMCL silent-converge diagnostic.
+6. **issue#6** — B-MAPEDIT-3 yaw rotation.
+7. **issue#17** — GPIO UART direct (perma-deferred unless issue#10/#10.1/#16 mitigation insufficient).
+8. **Bug B** — Live mode standstill jitter.
+9. **issue#7** — boom-arm masking (contingent on issue#4).
+
+**Next free issue integer: `issue#19`** (issue#18 reserved at session-close).
+
 ### 2026-05-02 (late-night → cross-day — 21:30 KST 2026-05-02 → 00:50 KST 2026-05-03, seventeenth-session — issue#16 v0..v7 hot-fix series ships + issue#15 PR #70 in flight + cross-reboot HIL stress test passes)
 
 Seventeenth-session followed directly from sixteenth-session's close (PR #68 docs merged 2026-05-02 16:30 KST). Operator drove issue#16 from feature merge through six iterative HIL hot-fixes (v2 → v7) over ~3 hours and 20 minutes, all squash-merged into PR #69. Each hot-fix narrowed a different race surface that prior fixes had not covered, exposing two distinct root-cause patterns in webctl's `mapping.status()` reconcile path. After PR #69 merged, operator stress-tested the full pipeline through an RPi reboot and 16+ mapping cycles (v7, v9..v16, plus earlier t-series); every map saved cleanly with intact `P5` PGM + YAML pair. issue#15 (Config tab domain grouping + edit-input bg swap) was bundled into PR #70 as a quick frontend-only follow-up before session-close, awaiting operator HIL.

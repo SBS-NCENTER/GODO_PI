@@ -847,6 +847,76 @@ canvas shows "아직 미리보기 PGM이 발행되지 않았습니다 (1초 후
 
 ---
 
+## 8.6. issue#16.1 / issue#10.1 — System tab 도움말 sub-tab (operator help notes)
+
+System 탭에 4번째 sub-tab `도움말` 신설. 운영자가 SSH로 손으로 쳐야 하는 명령어 (백업 복원, 라이다 시리얼 확인 등)를 SPA에서 발견 가능하게 하되, **실행 path는 SPA 안에 두지 않음** — 친마찰을 의도적으로 유지.
+
+### 8.6.1. 4-sub-tab 라우팅
+
+```text
+System Overview       (existing — 서비스 카드 + 부팅 / 종료)
+System Processes      (existing — process table)
+System Extended       (existing — resource bars)
+System 도움말         (new — operator help cards stack)
+```
+
+`SYSTEM_SUBTAB_HELP = 'help'` 상수가 `lib/constants.ts`에 추가. `routes/System.svelte`의 `{#if activeSubtab === SYSTEM_SUBTAB_HELP}` branch가 `.help-stack` flex column을 렌더링; 카드는 `<aside class="help-section">` 단위.
+
+### 8.6.2. 카드 추가 패턴
+
+```svelte
+<div class="help-stack">
+  <aside class="help-section" data-testid="...-help">
+    <h3>도움말 제목 (issue#N)</h3>
+    <p class="help-intro">왜 필요한지 + 언제 쓰는지.</p>
+    <ol class="help-steps">
+      <li>
+        <span class="step-label">단계 설명</span>
+        <pre><code>실제 SSH 명령어</code></pre>
+      </li>
+      ...
+    </ol>
+    <p class="help-note">추가 주의사항 / 보충 안내.</p>
+  </aside>
+  <!-- 다음 카드는 같은 .help-section 패턴으로 추가 -->
+</div>
+```
+
+`.help-section` / `.help-intro` / `.help-steps` / `.help-note` / `.step-label` 클래스는 generic — 새 안내문 추가 시 styling 재활용 (CSS 추가 X). 카드는 chronological (구현 시점 순) 또는 importance 순으로 정렬.
+
+### 8.6.3. 운영자-locked 디자인 결정 — 복원 / 실행 버튼은 일부러 안 만듦
+
+세 옵션 검토:
+
+| 옵션 | 동작 | 비용 | 위험 |
+|---|---|---|---|
+| A: 풀 복원 UI 버튼 | 백업 목록 + 모달 + cp + restart cascade | ~150-200 LOC + polkit rule + UDS endpoint | 한 클릭으로 전체 설정 revert → 사고 위험 |
+| B: 패시브 리스팅 패널 | 백업 목록 + 명령어 표시 (실행 X) | ~40-60 LOC | 거의 없음 |
+| **C (locked): 도움말 텍스트만** | SSH 명령어를 카드에 노출 | ~10-15 LOC | 0 |
+
+운영자 결정 (2026-05-03): **C, 단 새 sub-tab으로 분리** ("추후 다른 안내문도 적을 수 있도록"). 이유:
+- 백업 복원 / 라이다 교체 같은 작업은 1년에 0~1회 빈도 → 풀 UI 비용 정당화 어려움
+- 한 클릭 destructive 액션은 잘못 누르면 운영 설정 통째로 revert → 친마찰이 안전 마진
+- SSH 동선은 운영자가 의도해서 치는 만큼 디버그 친화적
+
+### 8.6.4. 현재 등록된 카드
+
+| issue | 제목 | 다루는 시나리오 |
+|---|---|---|
+| issue#16.1 | tracker.toml 백업 — 수동 복원 안내 | install.sh `[2/12]` gate가 auto-rewrite 후 timestamped backup (`tracker.toml.bak.<unixts>`) 생성. 복원 시 `ls / cp / systemctl restart` 3단계 SSH 명령어 노출. |
+| issue#10.1 | 라이다 시리얼 번호 확인 방법 | 라이다 교체 시 cp210x 시리얼 확인 — `udevadm info` 3-tier 명령어 (symlink 통한 / ttyUSB 직접 / multi-cp210x 필터). |
+
+미래 카드 후보 (issue 시점 결정):
+- mapping log tail 명령어 모음
+- USB 디바이스 권한 troubleshoot
+- AMCL converge 디버깅 (gnuplot, etc.)
+
+### 8.6.5. Cross-doc
+
+- `godo-frontend/CODEBASE.md` 2026-05-03 06:30 KST 변경 로그 항목 (issue#16.1 backup help)
+- `godo-frontend/CODEBASE.md` 2026-05-03 (afternoon) 항목 (issue#10.1 라이다 시리얼 카드)
+- 코드: `routes/System.svelte` `SYSTEM_SUBTAB_HELP` branch + `.help-section` CSS
+
 ## 9. 보류 / 추후 결정
 
 - **차트 라이브러리**: P1 진입 시 결정 (uPlot 후보, lightweight + Canvas 기반).

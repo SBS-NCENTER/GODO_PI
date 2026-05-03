@@ -78,6 +78,18 @@ Endpoint shape (provisional): `POST /api/map/origin` admin-gated, JSON body `{x_
 
 Apply path: PGM bilinear resample (sole-owner module `map_rotate.py`) + YAML `origin[2]` update + auto-backup of BOTH files (PGM bytes change in this PR — unlike B-MAPEDIT-2 which kept PGM intact). Restart-pending sentinel. Same backup-FIRST 3-step contractual sequence as B-MAPEDIT-2.
 
+### Critical pre-implementation findings — issue#27 HIL surfaced (2026-05-04 KST)
+
+Operator HIL during issue#27 ship verified two structural gaps that B-MAPEDIT-3 must close:
+
+1. **Tracker does NOT consume YAML `origin[2]` at boot.** Verified by grep: `cold_writer.cpp:371,377,385,515,521,529,649,655,663` reads `cfg.amcl_origin_yaw_deg` (Tier-2 config knob), NOT the YAML origin's third element. `occupancy_grid.cpp:113-130` parses the third value into the struct but never propagates it to AMCL frame transform. → Editing `origin[2]` via B-MAPEDIT-2's theta_deg parameter currently has ZERO effect on tracker pose output (operator confirmed: theta edit + restart → LiDAR raw yaw unchanged). B-MAPEDIT-3 MUST either (a) wire YAML `origin[2]` through to AMCL replacing `cfg.amcl_origin_yaw_deg`, OR (b) auto-update both YAML AND `cfg.amcl_origin_yaw_deg` together as a single transactional Apply. (a) is cleaner SSOT; (b) preserves backward compat. Lean (a). Either way, the test pin must verify "edit theta → restart → raw yaw shifts by edited delta".
+
+2. **Pose + Yaw must render together on the rotated map.** Operator-locked 2026-05-04 KST: when B-MAPEDIT-3 ships the PGM bilinear resample, the rendered overlay (pose dot + heading arrow + LiDAR scan dots) MUST stay coherent with the rotated bitmap throughout the operator's interaction. No "rotate the bitmap, but the pose stays in the old frame" intermediate state. The shared `MapUnderlay` + `lib/poseDraw.ts` extracted in issue#27 makes this straightforward (the draw layer reads world coords, the underlay handles pixel-space transform); B-MAPEDIT-3 plan must include a Vitest pin that demonstrates pose + scan + bitmap all rotate together when YAML theta changes.
+
+These two findings tighten the B-MAPEDIT-3 spec: the rotation is not just a UI feature, it's a backend-tracker plumbing fix with a UI on top. Until both land, the existing `MapUnderlay.svelte:402-406` theta-warning banner is the operator's only signal that theta != 0 produces inconsistent state.
+
+issue#27 mitigation: theta UI gated `THETA_EDIT_ENABLED=false` in `OriginPicker.svelte` (commit `2b4c3fe`) so operators can't trigger the silent breakage. Backend `theta_deg` parameter + `origin_step.yaw_deg` schema row remain — B-MAPEDIT-3 lights up the UI by flipping the constant.
+
 ## Dual-input rationale (recurring pattern)
 
 The dual-input requirement (GUI + numeric) is intentional and applies to EVERY future Map Edit feature where a continuous correction value is involved. GUI is good for coarse exploration; numeric is good for fine reproduction (the operator already has a measurement from a tape or known reference). Locking the page to one mode forces the other workflow into a workaround. Future plans for similar features should default to dual-input from the start; flag any single-input proposal as a regression.

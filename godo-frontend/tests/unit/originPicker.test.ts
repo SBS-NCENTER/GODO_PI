@@ -9,7 +9,8 @@ import { flushSync, mount, unmount } from 'svelte';
 
 import OriginPicker from '../../src/components/OriginPicker.svelte';
 import MapMaskCanvas from '../../src/components/MapMaskCanvas.svelte';
-import type { OriginPatchBody } from '../../src/lib/protocol';
+import type { LastPose, OriginPatchBody } from '../../src/lib/protocol';
+import { lastPose } from '../../src/stores/lastPose';
 
 interface CleanupFn {
   (): void;
@@ -122,11 +123,31 @@ afterEach(() => {
     cleanups.pop()?.();
   }
   vi.restoreAllMocks();
+  lastPose.set(null);
 });
 
 describe('OriginPicker (Track B-MAPEDIT-2)', () => {
-  it('mode toggle switches absolute ↔ delta and the form payload reflects mode', () => {
+  it('mode toggle switches absolute ↔ delta — radio state reflects selection', () => {
+    const { target } = mountPicker({});
+    flushSync();
+    const absoluteRadio = target.querySelector<HTMLInputElement>(
+      '[data-testid="origin-mode-absolute"]',
+    );
+    const deltaRadio = target.querySelector<HTMLInputElement>('[data-testid="origin-mode-delta"]');
+    expect(absoluteRadio!.checked).toBe(true);
+    deltaRadio!.click();
+    flushSync();
+    expect(deltaRadio!.checked).toBe(true);
+    expect(absoluteRadio!.checked).toBe(false);
+  });
+
+  // Mode-B Maj-1 fix — delta resolves on the SPA via subscribeLastPose, then
+  // sends absolute to the backend. These two tests pin both the resolution
+  // happy-path and the no-pose error-path.
+
+  it('delta mode without lastPose blocks Apply with no_pose_for_delta banner', () => {
     let captured: OriginPatchBody | null = null;
+    lastPose.set(null);
     const { target } = mountPicker({
       onapply: (b) => (captured = b),
     });
@@ -135,26 +156,61 @@ describe('OriginPicker (Track B-MAPEDIT-2)', () => {
     const yInput = target.querySelector<HTMLInputElement>('[data-testid="origin-y-input"]');
     const applyBtn = target.querySelector<HTMLButtonElement>('[data-testid="origin-apply-btn"]');
     const deltaRadio = target.querySelector<HTMLInputElement>('[data-testid="origin-mode-delta"]');
-    expect(xInput).not.toBeNull();
-    expect(yInput).not.toBeNull();
-    expect(applyBtn).not.toBeNull();
-    expect(deltaRadio).not.toBeNull();
 
     xInput!.value = '0.32';
     xInput!.dispatchEvent(new Event('input', { bubbles: true }));
     yInput!.value = '-0.18';
     yInput!.dispatchEvent(new Event('input', { bubbles: true }));
+    deltaRadio!.click();
     flushSync();
 
+    applyBtn!.click();
+    flushSync();
+    expect(captured).toBeNull();
+    const banner = target.querySelector<HTMLParagraphElement>('[data-testid="origin-banner"]');
+    expect(banner).not.toBeNull();
+    expect(banner!.textContent).toMatch(/Delta 모드는 현재 LiDAR pose가 필요합니다/);
+  });
+
+  it('delta mode with valid lastPose resolves typed delta to absolute via current pose', () => {
+    let captured: OriginPatchBody | null = null;
+    const pose: LastPose = {
+      valid: true,
+      x_m: 5.0,
+      y_m: -3.0,
+      yaw_deg: 0,
+      xy_std_m: 0.01,
+      yaw_std_deg: 0.5,
+      iterations: 100,
+      converged: true,
+      forced: false,
+      published_mono_ns: 1,
+    };
+    lastPose.set(pose);
+    const { target } = mountPicker({
+      onapply: (b) => (captured = b),
+    });
+    flushSync();
+    const xInput = target.querySelector<HTMLInputElement>('[data-testid="origin-x-input"]');
+    const yInput = target.querySelector<HTMLInputElement>('[data-testid="origin-y-input"]');
+    const applyBtn = target.querySelector<HTMLButtonElement>('[data-testid="origin-apply-btn"]');
+    const deltaRadio = target.querySelector<HTMLInputElement>('[data-testid="origin-mode-delta"]');
+
+    xInput!.value = '0.32';
+    xInput!.dispatchEvent(new Event('input', { bubbles: true }));
+    yInput!.value = '-0.18';
+    yInput!.dispatchEvent(new Event('input', { bubbles: true }));
     deltaRadio!.click();
     flushSync();
 
     applyBtn!.click();
     flushSync();
     expect(captured).not.toBeNull();
-    expect(captured!.mode).toBe('delta');
-    expect(captured!.x_m).toBeCloseTo(0.32, 10);
-    expect(captured!.y_m).toBeCloseTo(-0.18, 10);
+    // SPA resolves: abs = pose + delta = (5.0 + 0.32, -3.0 + -0.18) = (5.32, -3.18)
+    // Body always carries mode=absolute (backend stays dumb).
+    expect(captured!.mode).toBe('absolute');
+    expect(captured!.x_m).toBeCloseTo(5.32, 10);
+    expect(captured!.y_m).toBeCloseTo(-3.18, 10);
   });
 
   it('NaN-like input (1e9999 = Infinity) is rejected and Apply is disabled', () => {
@@ -270,6 +326,73 @@ describe('OriginPicker (Track B-MAPEDIT-2)', () => {
     flushSync();
     expect(applyBtn!.disabled).toBe(true);
     expect(applyBtn!.title).toContain('로그인');
+  });
+});
+
+describe('OriginPicker (issue#27 — +/- step buttons; theta gated until B-MAPEDIT-3)', () => {
+  it('theta UI is hidden until B-MAPEDIT-3 (THETA_EDIT_ENABLED=false) — input + buttons absent, Apply body never carries theta_deg', () => {
+    let captured: OriginPatchBody | null = null;
+    const { target } = mountPicker({
+      onapply: (b) => (captured = b),
+    });
+    flushSync();
+    // Theta UI elements MUST NOT render while the gate is closed.
+    expect(target.querySelector('[data-testid="origin-theta-input"]')).toBeNull();
+    expect(target.querySelector('[data-testid="origin-theta-minus"]')).toBeNull();
+    expect(target.querySelector('[data-testid="origin-theta-plus"]')).toBeNull();
+    // Apply with x/y only — body has no theta_deg key.
+    const xInput = target.querySelector<HTMLInputElement>('[data-testid="origin-x-input"]');
+    const yInput = target.querySelector<HTMLInputElement>('[data-testid="origin-y-input"]');
+    const applyBtn = target.querySelector<HTMLButtonElement>('[data-testid="origin-apply-btn"]');
+    xInput!.value = '0.32';
+    xInput!.dispatchEvent(new Event('input', { bubbles: true }));
+    yInput!.value = '-0.18';
+    yInput!.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(applyBtn!.disabled).toBe(false);
+    applyBtn!.click();
+    flushSync();
+    expect(captured).not.toBeNull();
+    expect('theta_deg' in captured!).toBe(false);
+  });
+
+  it('+x button increments x by step (default 0.01 m)', () => {
+    const { target } = mountPicker({});
+    flushSync();
+    const xInput = target.querySelector<HTMLInputElement>('[data-testid="origin-x-input"]');
+    const xPlus = target.querySelector<HTMLButtonElement>('[data-testid="origin-x-plus"]');
+    expect(xPlus).not.toBeNull();
+    // Set baseline to 1.000.
+    xInput!.value = '1.000';
+    xInput!.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    xPlus!.click();
+    flushSync();
+    // Default step is 0.01; xText fmtDisplay rounds to 3 decimals.
+    expect(xInput!.value).toBe('1.010');
+  });
+
+  it('-y button decrements y by step', () => {
+    const { target } = mountPicker({});
+    flushSync();
+    const yInput = target.querySelector<HTMLInputElement>('[data-testid="origin-y-input"]');
+    const yMinus = target.querySelector<HTMLButtonElement>('[data-testid="origin-y-minus"]');
+    yInput!.value = '0.000';
+    yInput!.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    yMinus!.click();
+    flushSync();
+    expect(yInput!.value).toBe('-0.010');
+  });
+
+  it('+x clicked from empty input starts at 0 + step', () => {
+    const { target } = mountPicker({});
+    flushSync();
+    const xInput = target.querySelector<HTMLInputElement>('[data-testid="origin-x-input"]');
+    const xPlus = target.querySelector<HTMLButtonElement>('[data-testid="origin-x-plus"]');
+    xPlus!.click();
+    flushSync();
+    expect(xInput!.value).toBe('0.010');
   });
 });
 

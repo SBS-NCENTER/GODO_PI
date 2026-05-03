@@ -9,7 +9,7 @@
 import { writable, type Writable } from 'svelte/store';
 import { apiGet } from '$lib/api';
 import { LAST_POSE_POLL_FALLBACK_MS } from '$lib/constants';
-import type { LastPose } from '$lib/protocol';
+import type { LastPose, LastPoseStreamFrame } from '$lib/protocol';
 import { SSEClient } from '$lib/sse';
 import { getToken } from './auth';
 
@@ -48,7 +48,16 @@ function startSSE(): void {
       // EventSource auto-reconnects, so a transient backend bounce that
       // armed the poller will leave us double-fetching otherwise.
       stopPolling();
-      lastPose.set(payload as LastPose);
+      // issue#27 wrap-and-version: payload is {pose, output}; unwrap
+      // the pose branch. Backwards compat: the one-shot /api/last_pose
+      // endpoint still returns flat LastPose, so the polling-fallback
+      // path needs no change.
+      if (payload && typeof payload === 'object' && 'pose' in (payload as object)) {
+        const frame = payload as LastPoseStreamFrame;
+        lastPose.set(frame.pose);
+      } else {
+        lastPose.set(payload as LastPose);
+      }
     },
     onError: () => {
       // Fall back to polling until SSE recovers; `stopPolling` runs on

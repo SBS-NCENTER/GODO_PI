@@ -19,18 +19,9 @@
    *     to MapUnderlay via the `canvasTestId` prop).
    */
   import { untrack } from 'svelte';
-  import {
-    DEG_TO_RAD,
-    MAP_HEADING_LINE_WIDTH_PX,
-    MAP_POSE_COLOR,
-    MAP_POSE_DOT_RADIUS_PX,
-    MAP_POSE_HEADING_LEN_PX,
-    MAP_TRAIL_COLOR,
-    MAP_TRAIL_DOT_RADIUS_RATIO,
-    MAP_TRAIL_LENGTH,
-    MAP_TRAIL_MAX_OPACITY,
-  } from '$lib/constants';
+  import { MAP_TRAIL_LENGTH } from '$lib/constants';
   import { createMapViewport, type MapViewport } from '$lib/mapViewport.svelte';
+  import { drawPose, drawTrail } from '$lib/poseDraw';
   import type { LastPose, LastScan } from '$lib/protocol';
   import MapUnderlay from './MapUnderlay.svelte';
 
@@ -80,42 +71,14 @@
    * Layer-3 paint hook — called by `<MapUnderlay/>` after the bitmap +
    * scan layers, against the SAME canvas + projection. Renders the
    * trail (faint history dots) and the current-pose dot + heading
-   * arrow.
+   * arrow via the shared `lib/poseDraw` helpers (issue#27 — extracted).
    */
   function drawPoseLayer(
     ctx: CanvasRenderingContext2D,
     worldToCanvas: (wx: number, wy: number) => [number, number],
   ): void {
-    // Trail (oldest faintest).
-    for (let i = 0; i < trail.length; i++) {
-      const p = trail[i]!;
-      const [cx, cy] = worldToCanvas(p.x, p.y);
-      const alpha = (i + 1) / trail.length;
-      ctx.globalAlpha = alpha * MAP_TRAIL_MAX_OPACITY;
-      ctx.fillStyle = MAP_TRAIL_COLOR;
-      ctx.beginPath();
-      ctx.arc(cx, cy, MAP_POSE_DOT_RADIUS_PX * MAP_TRAIL_DOT_RADIUS_RATIO, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    ctx.globalAlpha = 1;
-
-    // Current pose.
-    if (pose && pose.valid) {
-      const [cx, cy] = worldToCanvas(pose.x_m, pose.y_m);
-      ctx.fillStyle = MAP_POSE_COLOR;
-      ctx.beginPath();
-      ctx.arc(cx, cy, MAP_POSE_DOT_RADIUS_PX, 0, Math.PI * 2);
-      ctx.fill();
-      const yawRad = pose.yaw_deg * DEG_TO_RAD;
-      const ex = cx + Math.cos(yawRad) * MAP_POSE_HEADING_LEN_PX;
-      const ey = cy - Math.sin(yawRad) * MAP_POSE_HEADING_LEN_PX;
-      ctx.strokeStyle = MAP_POSE_COLOR;
-      ctx.lineWidth = MAP_HEADING_LINE_WIDTH_PX;
-      ctx.beginPath();
-      ctx.moveTo(cx, cy);
-      ctx.lineTo(ex, ey);
-      ctx.stroke();
-    }
+    drawTrail(ctx, worldToCanvas, trail);
+    drawPose(ctx, worldToCanvas, pose);
   }
 </script>
 

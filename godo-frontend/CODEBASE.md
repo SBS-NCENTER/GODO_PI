@@ -3077,3 +3077,146 @@ single follow-up commit on the same branch.
   렌더링하므로 별도 컴포넌트 추가는 없습니다. 도움말 카드는 SSH
   접근이 필요한 단계(udevadm + install.sh)를 운영자에게 안내하기
   위한 단방향 정보 표시만 수행합니다 (no Apply 버튼, no fetch).
+
+## 2026-05-04 KST — issue#27: hover-coord propagation + Edit pose dot + LastOutput card + theta editing
+
+### Added
+
+- `src/lib/poseDraw.ts` — extracted `drawPose` + `drawTrail` from
+  `<PoseCanvas/>::drawPoseLayer`. Pure functions taking `ctx` +
+  `worldToCanvas` + payload as parameters; no closures or module-state.
+  Consumed by `<PoseCanvas/>` (Overview, with trail) AND `<MapEdit/>`
+  (`ondraw=` hook on `<MapUnderlay/>`, no trail).
+- `src/lib/protocol.ts::LAST_OUTPUT_FIELDS` + `interface LastOutputFrame`
+  + `interface LastPoseStreamFrame`. Hand-mirrored from
+  `godo-webctl/src/godo_webctl/protocol.py::LAST_OUTPUT_FIELDS`. Wire
+  shape: `{pose: LastPose, output: LastOutputFrame}` per issue#27 wrap-
+  and-version SSE lock. `OriginPatchBody.theta_deg?` for the new theta
+  input.
+- `src/stores/lastOutput.ts` — store mirror of `lastPose`. Reads the
+  `output` branch of the extended `/api/last_pose/stream` SSE payload;
+  polling fallback hits `/api/last_output`. `subscribeLastOutput()`
+  refcounts the SSE connection (parallel to `subscribeLastPose`).
+- `src/lib/mapViewport.svelte.ts::hoverWorld` getter +
+  `setHoverWorld(wx, wy)` setter — issue#27 Mode-A M2 lock. Owns the
+  shared hover-coord state so overlays (mask, pose-hint) can push their
+  own pointer-move coords without losing the always-on top-right
+  readout. `setHoverWorld(null)` clears.
+- `src/lib/originMath.ts::resolveDeltaFromPose` — issue#27 SUBTRACT
+  helper. SPA path: typed `(dx, dy)` is an offset vector from the
+  current LiDAR-frame pose to the point that should become the new
+  `(0, 0)`. Returns the absolute world coord; the SPA then sends
+  `mode="absolute"` so the backend stays dumb.
+- `src/lib/constants.ts` — `ORIGIN_STEP_*_DEFAULT` (mirror of the C++
+  schema row defaults; fallback when /api/config is in flight) +
+  `ORIGIN_THETA_DEG_ABS_MAX` (180° bound mirror of the schema's
+  `amcl.origin_yaw_deg` row).
+
+### Changed
+
+- `src/components/MapUnderlay.svelte` — hover-coord state moved from
+  local `$state` to `viewport.hoverWorld`; `onMouseMove` now calls
+  `viewport.setHoverWorld(wx, wy)`; `onMouseLeave` clears via
+  `viewport.setHoverWorld(null)`. CSS `bottom: 8px; right: 8px` →
+  `top: 8px; right: 8px` (issue#27 A1 — top-left taken by `map-error`).
+- `src/components/MapMaskCanvas.svelte` — new `onhovermove?(lx, ly|null)`
+  callback prop fires on every pointermove regardless of paint state /
+  origin-pick mode. New `onpointerleave={onPointerLeave}` handler fires
+  `onhovermove(null)`. Parent route is responsible for converting
+  logical PGM coords → world coords (it already holds resolution +
+  origin) and pushing into the viewport. Cheaper than re-architecting
+  the math through the shared viewport.
+- `src/components/PoseHintLayer.svelte` — `onPointerMove` now pushes
+  `viewport.setHoverWorld(world_x, world_y)` UNCONDITIONALLY (regardless
+  of `enabled`) so the hover-coord stays live even when the hint layer
+  is the topmost capturer. New `onpointerleave` handler clears.
+- `src/components/PoseCanvas.svelte` — `drawPoseLayer` reduced to a
+  thin compose: `drawTrail(ctx, w2c, trail); drawPose(ctx, w2c, pose);`.
+  Behaviour unchanged on Overview.
+- `src/components/OriginPicker.svelte` — added optional `theta_deg`
+  input row (with `placeholder="optional"` so empty submit preserves
+  YAML byte-for-byte). 6 +/- step buttons (x±, y±, theta±) wired to
+  `nudgeX/Y/Theta`. Step deltas come from /api/config on mount;
+  fallback to constants defaults during the fetch. Korean copy updated:
+  delta hint says "현재 pose에서 입력한 만큼 떨어진 점이 새 origin(0, 0)이
+  됩니다" (was "더해서…"). Absolute hint added.
+- `src/components/LastPoseCard.svelte` — full rewrite. Two sections:
+  "LiDAR raw" (bolded x/y/yaw + σ_xy + converged chip) +
+  "Final output (UDP)" (8-channel grid: x/y/z/pan/tilt/roll/zoom/focus).
+  Each section renders independently — null store in either branch
+  shows an "unavailable" placeholder. Subscribes to BOTH `lastPose` and
+  `lastOutput`.
+- `src/routes/MapEdit.svelte` — new `subscribeLastPose` subscription;
+  `<MapUnderlay/>` invocation gains `ondraw={(ctx, w2c) => drawPose(ctx, w2c, pose)}`
+  so the Edit tab shows the same pose dot+heading as Overview (no trail).
+  `<MapMaskCanvas/>` invocation gains `onhovermove={onCanvasHoverMove}`
+  which pushes world coords via `pixelToWorld → viewport.setHoverWorld`.
+- `src/routes/Dashboard.svelte` — inline pose readout REPLACED by
+  `<LastPoseCard />` (issue#27 P-B5 (a) decision). `pose` /
+  `subscribeLastPose` refs removed from Dashboard; LastPoseCard owns
+  the subscription internally.
+- `src/lib/originMath.ts::resolveDelta` REMOVED (renamed to
+  `resolveDeltaFromPose` with new signature). Existing call sites used
+  the now-superseded ADD spec; the SPA path goes through
+  `resolveDeltaFromPose` instead.
+- `src/stores/lastPose.ts` — SSE message handler unwraps the
+  issue#27 `{pose, output}` envelope when present; polling fallback
+  path (one-shot `/api/last_pose`) is unchanged (still flat shape).
+
+### Tests
+
+- New: `tests/unit/poseDraw.test.ts` — 5 cases. Stub-context smoke
+  tests: drawPose paints 1 arc + 1 line when valid; skips on null/invalid;
+  drawTrail paints N circles for N entries; empty trail = no-op.
+- New: `tests/unit/hoverCoordVisibility.test.ts` — 5 cases. Pin the
+  factory-level contract: default null, setHoverWorld(wx, wy) populates,
+  setHoverWorld(null) clears, defensive single-arg clears, two viewports
+  don't share state.
+- Modified: `tests/unit/lastPoseCard.test.ts` — full rewrite for the
+  2-section layout. 7 cases: both sections render when both stores
+  valid, converged chip on/off, raw "no valid pose" when output-only,
+  output "unavailable" when raw-only, both empty placeholders when both
+  null, defensive valid=0 cases for each store.
+- Modified: `tests/unit/originPicker.test.ts` — 6 new cases for issue#27
+  (theta optional / theta populated → body carries theta_deg / +x button
+  step / -y button step / +theta button step / +x from empty input).
+  Existing Apply-shape test untouched (still passes; theta_deg key
+  absent when theta empty).
+- Modified: `tests/unit/originMath.test.ts` — full rewrite of the
+  delta-mode describe block. `resolveDeltaFromPose` test replaces
+  `resolveDelta`; PICK#2 + PICK#3 SUBTRACT semantic pins added (mirror
+  of the Python regression tests). Pre-existing pixelToWorld + yawFromDrag
+  cases untouched.
+- Full Vitest suite: 405/405 pass (46 files). Build green via
+  `npm run build` (163 KB JS, 38 KB CSS).
+
+### Invariants
+
+- **(v) hover-coord-via-shared-viewport** — issue#27 Mode-A M2 lock.
+  Hover-coord state lives on `viewport.hoverWorld` / `viewport.setHoverWorld`
+  instead of `<MapUnderlay/>`'s local `$state`. Overlay layers (mask,
+  pose-hint) push their own pointer-move world coords; the underlay
+  consumes via `viewport.hoverWorld` in its `{#if}` render block.
+  Pointer-leave on any layer clears via `setHoverWorld(null)`. Pin:
+  `tests/unit/hoverCoordVisibility.test.ts` (5 cases). Future map
+  overlays should follow the same pattern; never re-introduce a
+  layer-local `hoverWorld` state.
+- **(w) pose-draw-shared-helper** — issue#27. The pose+heading +
+  trail render math is centralised in `lib/poseDraw.ts::drawPose` /
+  `drawTrail` (pure functions). Consumers: `<PoseCanvas/>` (Overview
+  with trail) + `<MapEdit/>` `ondraw` hook (Edit, no trail). Future
+  pose-rendering call sites MUST use these helpers; do NOT inline the
+  arc + atan2 math directly. Pin: `tests/unit/poseDraw.test.ts`.
+- **(x) last-pose-card-sole-pose-display** — issue#27. `<LastPoseCard/>`
+  is the sole DOM surface that renders the AMCL pose + final output
+  channels. `Dashboard.svelte`'s prior inline readout has been removed
+  (replaced by `<LastPoseCard/>` mount); the Map / MapEdit overview
+  layouts already mounted the card. Future routes wanting "show me the
+  pose" SHOULD mount `<LastPoseCard/>` rather than rolling their own.
+- **(aa) origin-picker-dual-input — issue#27 update.** Theta input is
+  now a third visible numeric field alongside x_m / y_m. +/- step
+  buttons render next to each input (default step 0.01 m / 0.01 m /
+  0.1°, operator-tunable via `origin_step.*` schema rows). Korean copy
+  reflects SUBTRACT semantic ("이 좌표를 새 (0, 0)으로 만듭니다" vs the
+  previous "더해서"). Pin: `tests/unit/originPicker.test.ts` (existing
+  cases + 6 issue#27 cases).

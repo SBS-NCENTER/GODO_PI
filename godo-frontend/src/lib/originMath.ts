@@ -56,31 +56,41 @@ export function pixelToWorld(
 }
 
 /**
- * Resolve a delta-mode `(dx, dy)` to absolute world coords using the
- * ADD sign convention (operator-locked 2026-04-30 KST, see
- * `.claude/memory/project_map_edit_origin_rotation.md`):
+ * issue#27 — SUBTRACT semantic (supersedes 2026-04-30 ADD lock).
  *
- *   new_origin = current_origin + (dx, dy)
+ * Operator's mental model: typed (x_m, y_m) names the world coord of
+ * the point that should become the new (0, 0). The backend computes
+ * `new_yaml_origin = old_yaml_origin - typed`. Frontend math here
+ * resolves delta-mode input to the absolute-mode equivalent BEFORE
+ * sending to the backend so the backend stays dumb (single SUBTRACT
+ * formula, no UDS round-trip on the rename path, no stale-pose risk).
  *
- * Operator phrasing: "실제 원점 위치는 여기서 (x, y)만큼 더 간 곳".
- * Pinned by `tests/unit/originMath.test.ts::resolveDelta adds`.
+ * `resolveDeltaFromPose` — the SPA's preferred path: typed (dx, dy) is
+ * an offset vector from the current LiDAR-frame pose to the point that
+ * should become the new (0, 0). Returns the absolute world coord that
+ * the operator's typed delta resolves to. The backend then applies its
+ * canonical SUBTRACT to produce the YAML origin update.
+ *
+ * Pinned by `tests/unit/originMath.test.ts::resolveDeltaFromPose subtracts`.
  */
-export function resolveDelta(
-  currentOrigin: OriginXyTheta,
+export function resolveDeltaFromPose(
+  currentPose: { x_m: number; y_m: number },
   dx: number,
   dy: number,
 ): { x_m: number; y_m: number } {
   return {
-    x_m: currentOrigin[0] + dx,
-    y_m: currentOrigin[1] + dy,
+    x_m: currentPose.x_m + dx,
+    y_m: currentPose.y_m + dy,
   };
 }
 
 /**
  * Identity wrapper for absolute-mode input. Exists for symmetry with
- * `resolveDelta` so the call sites (`OriginPicker.svelte`, the apply
- * handler) read uniformly regardless of mode and tests can pin the
- * shape contract.
+ * `resolveDeltaFromPose` so the call sites read uniformly regardless of
+ * mode and tests can pin the shape contract. Under issue#27 SUBTRACT
+ * semantic, the typed value here names the world coord that should
+ * become the new (0, 0); the backend computes
+ * `new_yaml_origin = old_yaml_origin - {x_m, y_m}`.
  */
 export function resolveAbsolute(absX: number, absY: number): { x_m: number; y_m: number } {
   return { x_m: absX, y_m: absY };

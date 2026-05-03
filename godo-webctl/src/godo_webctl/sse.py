@@ -109,22 +109,43 @@ async def last_pose_stream(
     *,
     sleep: SleepCallable = asyncio.sleep,
 ) -> AsyncIterator[bytes]:
-    """get_last_pose poller. Tick cadence resolves at stream open
-    from ``[webctl] pose_stream_hz`` in tracker.toml (default 30 Hz,
-    operator-tunable in [1, 60]; issue#12). Yields one frame per tick
-    or skips on tracker fault. Heartbeat every ``SSE_HEARTBEAT_S`` of
-    virtual time."""
+    """get_last_pose + get_last_output multiplexed poller. Tick cadence
+    resolves at stream open from ``[webctl] pose_stream_hz`` in
+    tracker.toml (default 30 Hz, operator-tunable in [1, 60]; issue#12).
+
+    Wire shape (issue#27 wrap-and-version, locked Mode-A 2026-05-03 KST):
+    each frame is ``{"pose": {<LastPose fields>}, "output":
+    {<LastOutputFrame fields>}}``. Either sub-payload may be a
+    ``{"valid": 0, "err": "<exception_class>"}`` sentinel if its UDS
+    round-trip failed (per ``_sentinel_for_error`` precedent in
+    ``diag_stream``). Both fail → frame still emitted with two
+    sentinels; the SPA renders both sub-cards as "unavailable".
+
+    Lifecycle mirrors the pre-issue#27 stream: cancel-safe, heartbeat
+    every ``SSE_HEARTBEAT_S`` of virtual time, skip-on-cancel only.
+    """
     tick_s = _resolve_pose_tick_s(cfg)
     elapsed_since_keepalive = 0.0
     while True:
+        # Two UDS round-trips in parallel — bound on slowest, not sum.
         try:
-            resp = await uds_mod.call_uds(client.get_last_pose, SSE_UDS_TIMEOUT_S)
-            yield _sse_event(resp)
+            results = await asyncio.gather(
+                uds_mod.call_uds(client.get_last_pose, SSE_UDS_TIMEOUT_S),
+                uds_mod.call_uds(client.get_last_output, SSE_UDS_TIMEOUT_S),
+                return_exceptions=True,
+            )
         except asyncio.CancelledError:
             raise
-        except uds_mod.UdsError as e:
-            logger.debug("sse.last_pose_uds_error: %s", e)
-            # Skip this frame; loop continues.
+
+        pose_r, output_r = results
+        pose = _sentinel_for_error(pose_r) if isinstance(pose_r, BaseException) else pose_r
+        output = (
+            _sentinel_for_error(output_r)
+            if isinstance(output_r, BaseException)
+            else output_r
+        )
+        yield _sse_event({"pose": pose, "output": output})
+
         try:
             await sleep(tick_s)
         except asyncio.CancelledError:

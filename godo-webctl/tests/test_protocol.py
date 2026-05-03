@@ -426,7 +426,12 @@ def test_amcl_rate_fields_match_cpp_source() -> None:
     found = _extract_format_keys(
         src,
         "format_ok_amcl_rate(const godo::rt::AmclIterationRate",
-        "\nstd::string_view mode_to_string",
+        # issue#27: format_ok_output now sits between amcl_rate and
+        # mode_to_string, so use the function-end `}\n` close as the
+        # sentinel. The amcl_rate body has a single fallback `return
+        # std::string(...)` that ends right before the closing brace; we
+        # bound on the comment marker that introduces format_ok_output.
+        "// Field order pin — MUST match godo::rt::LastOutputFrame",
     )
     assert found == P.AMCL_RATE_FIELDS, (
         f"Field-order drift: C++={found} Python={P.AMCL_RATE_FIELDS}"
@@ -530,6 +535,39 @@ def test_last_pose_fields_match_cpp_source() -> None:
     assert fields_in_cpp == P.LAST_POSE_FIELDS, (
         f"Field-order drift: C++={fields_in_cpp} Python={P.LAST_POSE_FIELDS}"
     )
+
+
+def test_last_output_fields_match_cpp_format_ok_output() -> None:
+    """issue#27 drift pin: regex-extract field names from
+    format_ok_output's printf format string and assert byte-equal against
+    LAST_OUTPUT_FIELDS. Editing one side without the other fails."""
+    src = _JSON_MINI_CPP.read_text(encoding="utf-8")
+    func_marker = "format_ok_output"
+    start = src.find(func_marker + "(const godo::rt::LastOutputFrame")
+    assert start != -1, f"Could not locate '{func_marker}' definition in {_JSON_MINI_CPP}"
+    snprintf_idx = src.find("std::snprintf(buf, sizeof(buf),", start)
+    assert snprintf_idx != -1, "Could not locate snprintf in format_ok_output body"
+    args_idx = src.find("static_cast<unsigned>(f.valid)", snprintf_idx)
+    assert args_idx != -1
+    fmt_block = src[snprintf_idx:args_idx]
+    # Match `\"<key>\":` allowing digits in the key (z_m, x_m, etc.).
+    field_pattern = re.compile(r'\\"([a-z_0-9]+)\\":')
+    found = field_pattern.findall(fmt_block)
+    fields_in_cpp = tuple(name for name in found if name != "ok")
+    assert fields_in_cpp == P.LAST_OUTPUT_FIELDS, (
+        f"Field-order drift: C++={fields_in_cpp} Python={P.LAST_OUTPUT_FIELDS}"
+    )
+
+
+def test_encode_get_last_output_byte_exact() -> None:
+    """issue#27 — canonical wire encoding pin."""
+    assert P.encode_get_last_output() == b'{"cmd":"get_last_output"}\n'
+
+
+def test_cmd_get_last_output_matches_cpp() -> None:
+    """issue#27 — command name matches the C++ dispatch branch in
+    `production/RPi5/src/uds/uds_server.cpp`."""
+    assert P.CMD_GET_LAST_OUTPUT == "get_last_output"
 
 
 # --- Track B-CONFIG (PR-CONFIG-β) — config edit pipeline pins -----------

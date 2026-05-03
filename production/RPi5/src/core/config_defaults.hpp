@@ -196,4 +196,29 @@ inline constexpr int              WEBCTL_MAPPING_SYSTEMCTL_SUBPROCESS_TIMEOUT_S_
 inline constexpr int              WEBCTL_MAPPING_SYSTEMD_STOP_TIMEOUT_S_DEFAULT       = 45;
 inline constexpr int              WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S_DEFAULT        = 50;
 
+// issue#27 — final-output transform defaults. Identity transform: all
+// offsets zero, all signs +1. Operator overrides via Config tab to
+// match UE-side coordinate conventions (e.g. flip X if the studio
+// reference frame disagrees with the AMCL pose frame). See
+// production/RPi5/src/udp/output_transform.hpp for math.
+inline constexpr double           OUTPUT_TRANSFORM_X_OFFSET_M_DEFAULT       = 0.0;
+inline constexpr double           OUTPUT_TRANSFORM_Y_OFFSET_M_DEFAULT       = 0.0;
+inline constexpr double           OUTPUT_TRANSFORM_Z_OFFSET_M_DEFAULT       = 0.0;
+inline constexpr double           OUTPUT_TRANSFORM_PAN_OFFSET_DEG_DEFAULT   = 0.0;
+inline constexpr double           OUTPUT_TRANSFORM_TILT_OFFSET_DEG_DEFAULT  = 0.0;
+inline constexpr double           OUTPUT_TRANSFORM_ROLL_OFFSET_DEG_DEFAULT  = 0.0;
+inline constexpr int              OUTPUT_TRANSFORM_X_SIGN_DEFAULT           = 1;
+inline constexpr int              OUTPUT_TRANSFORM_Y_SIGN_DEFAULT           = 1;
+inline constexpr int              OUTPUT_TRANSFORM_Z_SIGN_DEFAULT           = 1;
+inline constexpr int              OUTPUT_TRANSFORM_PAN_SIGN_DEFAULT         = 1;
+inline constexpr int              OUTPUT_TRANSFORM_TILT_SIGN_DEFAULT        = 1;
+inline constexpr int              OUTPUT_TRANSFORM_ROLL_SIGN_DEFAULT        = 1;
+
+// issue#27 — OriginPicker +/- step defaults. 1 cm for X/Y, 0.1° for yaw
+// — fine enough for sub-cm calibration, coarse enough that one click is
+// operator-perceptible. Frontend-only consumer; tracker stores verbatim.
+inline constexpr double           ORIGIN_STEP_X_M_DEFAULT                   = 0.01;
+inline constexpr double           ORIGIN_STEP_Y_M_DEFAULT                   = 0.01;
+inline constexpr double           ORIGIN_STEP_YAW_DEG_DEFAULT               = 0.1;
+
 }  // namespace godo::config::defaults

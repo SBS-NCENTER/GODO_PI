@@ -1,13 +1,19 @@
 /**
  * Track B-MAPEDIT-2 — `lib/originMath.ts` vitest cases.
  *
- * 6 cases per planner §5.3 + Mode-A M4 fold (Y-flip uses `height - 1 - py`,
- * NOT `height - py`). Sign convention is ADD (operator-locked 2026-04-30 KST).
+ * Issue#27 SUBTRACT semantic (supersedes 2026-04-30 ADD lock).
+ * `resolveDeltaFromPose` resolves operator delta → absolute world coord
+ * frontend-side (the backend then SUBTRACTs to update YAML).
  */
 
 import { describe, expect, it } from 'vitest';
 
-import { pixelToWorld, resolveAbsolute, resolveDelta, yawFromDrag } from '../../src/lib/originMath';
+import {
+  pixelToWorld,
+  resolveAbsolute,
+  resolveDeltaFromPose,
+  yawFromDrag,
+} from '../../src/lib/originMath';
 
 describe('originMath.pixelToWorld (M4 fold — Y-flip uses height-1-py)', () => {
   it('center pixel of a 200x100 map at resolution 0.05 returns world (0, 0)', () => {
@@ -44,20 +50,51 @@ describe('originMath.pixelToWorld (M4 fold — Y-flip uses height-1-py)', () => 
   });
 });
 
-describe('originMath.resolveDelta (ADD sign convention pin)', () => {
-  it('resolveDelta adds — operator-locked ADD: new_origin = current + (dx, dy)', () => {
-    // Drift catch: if a future writer flips to SUBTRACT, this fails. The
-    // wrong direction would silently shift the origin by 2× the typed
-    // offset (Mode-A M2 caught this against the spec memory's literal
-    // "subtract" wording vs. the example "ADD" semantics).
-    const out = resolveDelta([1.0, 2.0, 0], 0.32, -0.18);
-    expect(out.x_m).toBeCloseTo(1.32, 10);
-    expect(out.y_m).toBeCloseTo(1.82, 10);
+describe('originMath.resolveDeltaFromPose (issue#27 SUBTRACT — frontend resolution)', () => {
+  it('resolveDeltaFromPose adds delta to current pose to get absolute world coord', () => {
+    // SPA path: typed (dx, dy) is an offset vector from the current
+    // LiDAR-frame pose to the point that should become the new (0, 0).
+    // Frontend resolves to the absolute world coord BEFORE sending to
+    // the backend; backend then SUBTRACTs to update YAML origin.
+    const out = resolveDeltaFromPose({ x_m: 12.87, y_m: 15.49 }, 0.32, -0.18);
+    expect(out.x_m).toBeCloseTo(12.87 + 0.32, 10);
+    expect(out.y_m).toBeCloseTo(15.49 + (-0.18), 10);
+  });
+
+  it('zero delta returns the current pose unchanged', () => {
+    const out = resolveDeltaFromPose({ x_m: 1.0, y_m: 2.0 }, 0, 0);
+    expect(out).toEqual({ x_m: 1.0, y_m: 2.0 });
   });
 
   it('resolveAbsolute is identity-shaped (passthrough)', () => {
     const out = resolveAbsolute(0.32, -0.18);
     expect(out).toEqual({ x_m: 0.32, y_m: -0.18 });
+  });
+});
+
+describe('originMath SUBTRACT semantic (issue#27, operator HIL pins)', () => {
+  // PICK#2 + PICK#3 historical data points (operator HIL 2026-05-03 KST).
+  // The pins here mirror the Python regression tests in
+  // godo-webctl/tests/test_map_origin.py:
+  //   test_apply_origin_edit_absolute_subtracts_pose_pick_{2,3}
+  //
+  // SPA path: operator types absolute (the world coord of the point
+  // that should become the new (0, 0)). Backend computes new YAML
+  // origin = old YAML origin - typed.
+  it('PICK#2 — typed=(7.86, 18.34) on old_pose=(12.87, 15.49) → expected new_pose ≈ (5.01, -2.85)', () => {
+    const oldPose = { x_m: 12.87, y_m: 15.49 };
+    const typed = { x_m: 7.86, y_m: 18.34 };
+    const newPose = { x_m: oldPose.x_m - typed.x_m, y_m: oldPose.y_m - typed.y_m };
+    expect(newPose.x_m).toBeCloseTo(5.01, 2);
+    expect(newPose.y_m).toBeCloseTo(-2.85, 2);
+  });
+
+  it('PICK#3 — typed=(10.32, 28.86) on old_pose=(18.72, 25.27) → expected new_pose ≈ (8.40, -3.59)', () => {
+    const oldPose = { x_m: 18.72, y_m: 25.27 };
+    const typed = { x_m: 10.32, y_m: 28.86 };
+    const newPose = { x_m: oldPose.x_m - typed.x_m, y_m: oldPose.y_m - typed.y_m };
+    expect(newPose.x_m).toBeCloseTo(8.40, 2);
+    expect(newPose.y_m).toBeCloseTo(-3.59, 2);
   });
 });
 

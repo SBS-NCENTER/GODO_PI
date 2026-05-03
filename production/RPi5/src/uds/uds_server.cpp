@@ -90,7 +90,8 @@ UdsServer::UdsServer(std::string        socket_path,
                      AmclRateGetter     get_amcl_rate,
                      ConfigGetter       get_config,
                      ConfigSchemaGetter get_config_schema,
-                     ConfigSetter       set_config)
+                     ConfigSetter       set_config,
+                     LastOutputGetter   get_last_output)
     : socket_path_(std::move(socket_path)),
       get_mode_(std::move(get_mode)),
       set_mode_(std::move(set_mode)),
@@ -100,7 +101,8 @@ UdsServer::UdsServer(std::string        socket_path,
       get_amcl_rate_(std::move(get_amcl_rate)),
       get_config_(std::move(get_config)),
       get_config_schema_(std::move(get_config_schema)),
-      set_config_(std::move(set_config)) {}
+      set_config_(std::move(set_config)),
+      get_last_output_(std::move(get_last_output)) {}
 
 UdsServer::~UdsServer() {
     close();
@@ -435,6 +437,17 @@ void UdsServer::handle_one_request(int conn_fd) noexcept {
         scan.iterations = -1;
         if (get_last_scan_) scan = get_last_scan_();
         const auto resp = format_ok_scan(scan);
+        (void)::send(conn_fd, resp.data(), resp.size(), MSG_NOSIGNAL);
+        return;
+    }
+    if (req.cmd == "get_last_output") {
+        // issue#27 — final-output frame snapshot. Same null-callback
+        // semantics as get_last_pose: valid=0 distinguishes "no frame
+        // yet" from "tracker down". Thread D is the SOLE producer of
+        // last_output_seq; this UDS handler is the SOLE consumer.
+        godo::rt::LastOutputFrame frame{};
+        if (get_last_output_) frame = get_last_output_();
+        const auto resp = format_ok_output(frame);
         (void)::send(conn_fd, resp.data(), resp.size(), MSG_NOSIGNAL);
         return;
     }

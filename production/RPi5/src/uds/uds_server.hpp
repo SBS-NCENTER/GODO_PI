@@ -60,6 +60,11 @@ using LastPoseGetter = std::function<godo::rt::LastPose()>;
 // "tracker down" (no UDS reply).
 using LastScanGetter = std::function<godo::rt::LastScan()>;
 
+// issue#27 — `get_last_output` callback. Production wires this to a
+// Seqlock<LastOutputFrame>::load(). Same null-callback semantics:
+// valid=0 distinguishes "no frame published yet" from "tracker down".
+using LastOutputGetter = std::function<godo::rt::LastOutputFrame()>;
+
 // Track B-DIAG (PR-DIAG) — `get_jitter` / `get_amcl_rate` callbacks.
 // Production wires these to Seqlock<JitterSnapshot>::load() /
 // Seqlock<AmclIterationRate>::load() owned by main.cpp; the diag
@@ -103,7 +108,8 @@ public:
               AmclRateGetter     get_amcl_rate      = nullptr,
               ConfigGetter       get_config         = nullptr,
               ConfigSchemaGetter get_config_schema  = nullptr,
-              ConfigSetter       set_config         = nullptr);
+              ConfigSetter       set_config         = nullptr,
+              LastOutputGetter   get_last_output    = nullptr);
 
     UdsServer(const UdsServer&)            = delete;
     UdsServer& operator=(const UdsServer&) = delete;
@@ -133,6 +139,7 @@ private:
     ConfigGetter       get_config_;
     ConfigSchemaGetter get_config_schema_;
     ConfigSetter       set_config_;
+    LastOutputGetter   get_last_output_;
     int                listen_fd_  = -1;
     bool               path_bound_ = false;
 };

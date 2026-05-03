@@ -1,5 +1,6 @@
 add_library(godo_udp STATIC
     sender.cpp
+    output_transform.cpp
 )
 
 target_include_directories(godo_udp PUBLIC

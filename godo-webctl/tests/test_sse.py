@@ -91,13 +91,8 @@ _DEFAULT_POSE_TICK_S = 1.0 / 30  # webctl_toml.WEBCTL_POSE_STREAM_HZ_DEFAULT
 _DEFAULT_SCAN_TICK_S = 1.0 / 30  # webctl_toml.WEBCTL_SCAN_STREAM_HZ_DEFAULT
 
 
-async def test_last_pose_stream_emits_default_30hz_sleep_sequence() -> None:
-    """Sleep duration sequence is `[1/30, 1/30, ...]` → 30 Hz cadence
-    when no tracker.toml override is present (issue#12 default).
-    No wall-clock involved."""
-    sleep = RecordingSleep(max_calls=3)
-    fake_client = mock.MagicMock(spec=uds_client.UdsClient)
-    pose = {
+def _canned_pose() -> dict[str, object]:
+    return {
         "ok": True,
         "valid": 1,
         "x_m": 0.0,
@@ -110,7 +105,33 @@ async def test_last_pose_stream_emits_default_30hz_sleep_sequence() -> None:
         "forced": 0,
         "published_mono_ns": 0,
     }
-    fake_client.get_last_pose.return_value = pose
+
+
+def _canned_output() -> dict[str, object]:
+    """issue#27 — minimal valid LastOutputFrame-shape dict for SSE tests."""
+    return {
+        "ok": True,
+        "valid": 1,
+        "x_m": 0.0,
+        "y_m": 0.0,
+        "z_m": 0.0,
+        "pan_deg": 0.0,
+        "tilt_deg": 0.0,
+        "roll_deg": 0.0,
+        "zoom": 0.0,
+        "focus": 0.0,
+        "published_mono_ns": 0,
+    }
+
+
+async def test_last_pose_stream_emits_default_30hz_sleep_sequence() -> None:
+    """Sleep duration sequence is `[1/30, 1/30, ...]` → 30 Hz cadence
+    when no tracker.toml override is present (issue#12 default).
+    No wall-clock involved."""
+    sleep = RecordingSleep(max_calls=3)
+    fake_client = mock.MagicMock(spec=uds_client.UdsClient)
+    fake_client.get_last_pose.return_value = _canned_pose()
+    fake_client.get_last_output.return_value = _canned_output()
     chunks = await _drain(sse.last_pose_stream(fake_client, _settings(), sleep=sleep))
     # 3 ticks attempted before recorder cancels the loop.
     assert sleep.calls == [
@@ -122,16 +143,62 @@ async def test_last_pose_stream_emits_default_30hz_sleep_sequence() -> None:
     assert any(c.startswith(b"data:") for c in chunks)
 
 
-async def test_last_pose_stream_skips_frame_on_uds_error() -> None:
-    """Tracker-down: get_last_pose raises → no frame emitted that tick,
-    generator stays alive."""
-    sleep = RecordingSleep(max_calls=2)
+async def test_last_pose_stream_emits_pose_and_output_wrap() -> None:
+    """issue#27 wrap-and-version: each frame is
+    {"pose": {...}, "output": {...}}."""
+    import json as _json
+    sleep = RecordingSleep(max_calls=1)
+    fake_client = mock.MagicMock(spec=uds_client.UdsClient)
+    fake_client.get_last_pose.return_value = _canned_pose()
+    fake_client.get_last_output.return_value = _canned_output()
+    chunks = await _drain(sse.last_pose_stream(fake_client, _settings(), sleep=sleep))
+    data_frames = [c for c in chunks if c.startswith(b"data:")]
+    assert len(data_frames) >= 1
+    body = data_frames[0].removeprefix(b"data: ").rstrip(b"\n")
+    obj = _json.loads(body)
+    assert "pose" in obj
+    assert "output" in obj
+    assert obj["pose"]["valid"] == 1
+    assert obj["output"]["valid"] == 1
+
+
+async def test_last_pose_stream_pose_unavailable_emits_sentinel() -> None:
+    """issue#27 degraded-graceful: get_last_pose fails, get_last_output
+    succeeds → frame still emitted with pose sentinel + output payload.
+    SPA renders the pose card as 'unavailable' but keeps the output card."""
+    import json as _json
+    sleep = RecordingSleep(max_calls=1)
     fake_client = mock.MagicMock(spec=uds_client.UdsClient)
     fake_client.get_last_pose.side_effect = uds_client.UdsUnreachable("down")
+    fake_client.get_last_output.return_value = _canned_output()
     chunks = await _drain(sse.last_pose_stream(fake_client, _settings(), sleep=sleep))
-    assert sleep.calls == [_DEFAULT_POSE_TICK_S, _DEFAULT_POSE_TICK_S]
-    # No data frames emitted at all.
-    assert all(not c.startswith(b"data:") for c in chunks)
+    data_frames = [c for c in chunks if c.startswith(b"data:")]
+    assert len(data_frames) >= 1
+    body = data_frames[0].removeprefix(b"data: ").rstrip(b"\n")
+    obj = _json.loads(body)
+    # Pose sentinel: valid=0 + err=<exception class name>.
+    assert obj["pose"]["valid"] == 0
+    assert obj["pose"]["err"] == "UdsUnreachable"
+    # Output is real.
+    assert obj["output"]["valid"] == 1
+
+
+async def test_last_pose_stream_output_unavailable_emits_sentinel() -> None:
+    """Mirror: get_last_output fails, get_last_pose succeeds → frame
+    emitted with output sentinel."""
+    import json as _json
+    sleep = RecordingSleep(max_calls=1)
+    fake_client = mock.MagicMock(spec=uds_client.UdsClient)
+    fake_client.get_last_pose.return_value = _canned_pose()
+    fake_client.get_last_output.side_effect = uds_client.UdsUnreachable("down")
+    chunks = await _drain(sse.last_pose_stream(fake_client, _settings(), sleep=sleep))
+    data_frames = [c for c in chunks if c.startswith(b"data:")]
+    assert len(data_frames) >= 1
+    body = data_frames[0].removeprefix(b"data: ").rstrip(b"\n")
+    obj = _json.loads(body)
+    assert obj["pose"]["valid"] == 1
+    assert obj["output"]["valid"] == 0
+    assert obj["output"]["err"] == "UdsUnreachable"
 
 
 async def test_last_pose_stream_emits_keepalive_after_heartbeat_window() -> None:
@@ -140,7 +207,8 @@ async def test_last_pose_stream_emits_keepalive_after_heartbeat_window() -> None
     n_ticks_to_keepalive = int(SSE_HEARTBEAT_S / _DEFAULT_POSE_TICK_S) + 1
     sleep = RecordingSleep(max_calls=n_ticks_to_keepalive + 1)
     fake_client = mock.MagicMock(spec=uds_client.UdsClient)
-    fake_client.get_last_pose.return_value = {"ok": True, "valid": 0}
+    fake_client.get_last_pose.return_value = _canned_pose()
+    fake_client.get_last_output.return_value = _canned_output()
     chunks = await _drain(sse.last_pose_stream(fake_client, _settings(), sleep=sleep))
     assert any(c == b": keepalive\n\n" for c in chunks)
 
@@ -152,7 +220,8 @@ async def test_last_pose_stream_cancellation_propagates() -> None:
         raise asyncio.CancelledError()
 
     fake_client = mock.MagicMock(spec=uds_client.UdsClient)
-    fake_client.get_last_pose.return_value = {"ok": True}
+    fake_client.get_last_pose.return_value = _canned_pose()
+    fake_client.get_last_output.return_value = _canned_output()
     with pytest.raises(asyncio.CancelledError):
         async for _ in sse.last_pose_stream(fake_client, _settings(), sleep=cancel_immediately):
             pass
@@ -261,7 +330,8 @@ async def test_last_pose_stream_honours_toml_pose_stream_hz(tmp_path: Path) -> N
     p.write_text("[webctl]\npose_stream_hz = 10\n")
     sleep = RecordingSleep(max_calls=2)
     fake_client = mock.MagicMock(spec=uds_client.UdsClient)
-    fake_client.get_last_pose.return_value = {"ok": True, "valid": 1}
+    fake_client.get_last_pose.return_value = _canned_pose()
+    fake_client.get_last_output.return_value = _canned_output()
     chunks = await _drain(
         sse.last_pose_stream(
             fake_client,
@@ -303,7 +373,8 @@ async def test_last_pose_stream_env_var_overrides_toml(
     monkeypatch.setenv("GODO_WEBCTL_POSE_STREAM_HZ", "60")
     sleep = RecordingSleep(max_calls=2)
     fake_client = mock.MagicMock(spec=uds_client.UdsClient)
-    fake_client.get_last_pose.return_value = {"ok": True, "valid": 1}
+    fake_client.get_last_pose.return_value = _canned_pose()
+    fake_client.get_last_output.return_value = _canned_output()
     await _drain(
         sse.last_pose_stream(
             fake_client,
@@ -324,7 +395,8 @@ async def test_last_pose_stream_falls_back_on_toml_error(tmp_path: Path) -> None
     p.write_text("[webctl]\npose_stream_hz = 9999\n")
     sleep = RecordingSleep(max_calls=2)
     fake_client = mock.MagicMock(spec=uds_client.UdsClient)
-    fake_client.get_last_pose.return_value = {"ok": True, "valid": 1}
+    fake_client.get_last_pose.return_value = _canned_pose()
+    fake_client.get_last_output.return_value = _canned_output()
     await _drain(
         sse.last_pose_stream(
             fake_client,

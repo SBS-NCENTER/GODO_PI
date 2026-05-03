@@ -36,8 +36,10 @@
   } from '$lib/constants';
   import { createMapViewport } from '$lib/mapViewport.svelte';
   import { pixelToWorld } from '$lib/originMath';
+  import { drawPose } from '$lib/poseDraw';
   import type {
     EditResponse,
+    LastPose,
     LastScan,
     MapDimensions,
     OriginEditResponse,
@@ -45,6 +47,7 @@
   } from '$lib/protocol';
   import { navigate } from '$lib/router';
   import { auth } from '$stores/auth';
+  import { subscribeLastPose } from '$stores/lastPose';
   import { subscribeLastScan } from '$stores/lastScan';
   import { loadMapMetadata, mapMetadata } from '$stores/mapMetadata';
   import { refresh as refreshRestartPending } from '$stores/restartPending';
@@ -63,6 +66,7 @@
   let unsubMeta: (() => void) | null = null;
   let unsubScan: (() => void) | null = null;
   let unsubOverlay: (() => void) | null = null;
+  let unsubPose: (() => void) | null = null;
   let brushRadius = $state(BRUSH_RADIUS_PX_DEFAULT);
   let busy = $state(false);
   let banner = $state<string | null>(null);
@@ -74,6 +78,9 @@
   // `lastScan` stores (Rule 3 of `.claude/memory/project_map_viewport_zoom_rules.md`).
   let scan = $state<LastScan | null>(null);
   let scanOn = $state(false);
+  // issue#27 — pose dot+heading on the Edit tab via the shared
+  // drawPose helper. No trail (trail is Overview-only).
+  let pose = $state<LastPose | null>(null);
 
   // Track B-MAPEDIT-2 — origin pick state.
   let originPickEnabled = $state(false);
@@ -110,6 +117,7 @@
     // by the store (gated on the scanOverlay flag). Mirrors `/map`.
     unsubScan = subscribeLastScan((s) => (scan = s));
     unsubOverlay = scanOverlay.subscribe((v) => (scanOn = v));
+    unsubPose = subscribeLastPose((p) => (pose = p));
     // The /map page also calls loadMapMetadata; calling here too is
     // idempotent (same store, abort-cancellable). Without this,
     // operators landing on /map-edit directly would see "loading…"
@@ -125,6 +133,7 @@
     unsubMeta?.();
     unsubScan?.();
     unsubOverlay?.();
+    unsubPose?.();
     if (redirectTimer !== null) {
       clearTimeout(redirectTimer);
       redirectTimer = null;
@@ -172,6 +181,19 @@
     if (!dims || resolution === null || currentOrigin === null) return;
     const w = pixelToWorld(lx, ly, dims, resolution, currentOrigin);
     originPickerRef?.setCandidate({ x_m: w.world_x, y_m: w.world_y });
+  }
+
+  // issue#27 — push hover-coord into the shared viewport from the mask
+  // layer's pointermove (mask captures events with pointer-events: auto
+  // and the underlay's own onMouseMove never fires). null clears.
+  function onCanvasHoverMove(lx: number | null, ly?: number): void {
+    if (lx === null || ly === undefined) {
+      viewport.setHoverWorld(null);
+      return;
+    }
+    if (!dims || resolution === null || currentOrigin === null) return;
+    const w = pixelToWorld(lx, ly, dims, resolution, currentOrigin);
+    viewport.setHoverWorld(w.world_x, w.world_y);
   }
 
   async function onOriginApply(body: OriginPatchBody): Promise<void> {
@@ -258,7 +280,13 @@
     </div>
 
     <div class="map-stack">
-      <MapUnderlay {viewport} mapImageUrl="/api/map/image" {scan} scanOverlayOn={scanOn} />
+      <MapUnderlay
+        {viewport}
+        mapImageUrl="/api/map/image"
+        {scan}
+        scanOverlayOn={scanOn}
+        ondraw={(ctx, w2c) => drawPose(ctx, w2c, pose)}
+      />
       <div class="mask-overlay">
         <MapMaskCanvas
           bind:this={canvasRef}
@@ -270,6 +298,7 @@
           disabled={busy || originBusy}
           mode={originPickEnabled ? 'origin-pick' : 'paint'}
           oncoordpick={onCanvasCoordPick}
+          onhovermove={onCanvasHoverMove}
         />
       </div>
       <MapZoomControls {viewport} />

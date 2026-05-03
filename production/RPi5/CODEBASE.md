@@ -4752,3 +4752,99 @@ introducing inotify watchers or namespace shrinks.
   UdsServer construction earlier must re-validate this ordering.
 
   Spec memory: `.claude/memory/project_uds_bootstrap_audit.md`.
+
+## 2026-05-04 KST — issue#27: udp::output_transform + LastOutputFrame seqlock
+
+### Added
+
+- `src/udp/wire_codec.hpp` — extracted `decode_signed24_be` /
+  `encode_signed24_be` from `udp/sender.cpp`'s file-private `static`
+  helpers into namespace-internal scope (`godo::udp::wire`). Sole owner
+  of the FreeD signed24 BE encode/decode math; consumed by `sender.cpp`
+  + `udp/output_transform.cpp`.
+- `src/udp/output_transform.{hpp,cpp}` — issue#27 sole-owner module for
+  the post-AMCL transform stage. Math: `final = sign * (raw + offset)`
+  in scaled-double space across X/Y/Z (1/64 mm/lsb) + Pan/Tilt/Roll
+  (1/32768°/lsb). Zoom/Focus pass-through. Decoder helper
+  `decode_last_output_from_packet` projects the post-transform packet
+  back into 8 channels of real units for the SeqLock publish.
+- `src/core/rt_types.hpp::LastOutputFrame` — 80 B trivially-copyable
+  Seqlock payload (8 doubles + uint64 mono ns + uint8 valid + 7 B pad).
+  Layout pinned by 3 static_asserts (size, alignment, trivially-copyable).
+- 12 `output_transform.*` schema rows (6 offsets + 6 signs, all Restart
+  class) + 3 `origin_step.*` rows (frontend-only consumer for the
+  OriginPicker +/- buttons). Total schema row count 53 → 68; static_assert
+  + tests bumped in lockstep.
+- `format_ok_output` in `uds/json_mini.{hpp,cpp}` mirrors
+  `format_ok_pose`'s shape; field order matches struct declaration.
+- `LastOutputGetter` callback in `uds/uds_server.hpp` (10th ctor arg);
+  `get_last_output` UDS dispatch branch in `uds_server.cpp` mirrors the
+  `get_last_pose` null-callback semantics (valid=0 sentinel).
+- `Seqlock<LastOutputFrame> last_output_seq` in `main()`; published by
+  Thread D between `apply_output_transform_inplace` and `udp.send`;
+  read by the UDS handler thread.
+- Strict {-1, +1} sign validator at `config/apply.cpp::apply_set` —
+  rejects 0 with `bad_value` + detail. Schema validator stays generic
+  (Int [-1, +1]) per the
+  `feedback_relaxed_validator_strict_installer.md` pattern; the
+  zero-check sits at the consumer boundary.
+- Tests: `tests/test_output_transform.cpp` (9 cases — per-channel
+  identity / offset-only / sign-only / combined, Y/Z/Pan/Tilt/Roll
+  coverage, Zoom/Focus byte-pass-through, signed24 wrap, checksum
+  recompute, decode round-trip), 3 new cases in `tests/test_uds_server.cpp`
+  (`get_last_output` valid=0 + verbatim + `format_ok_output` byte-exact),
+  5 new cases in `tests/test_config_apply.cpp` (sign accepts ±1, sign
+  rejects 0 with bad_value, sign 2 rejected by schema range,
+  `output_transform.x_offset_m` round-trip, `origin_step.x_m` round-trip).
+
+### Changed
+
+- `src/udp/sender.cpp` — anon-namespace `decode_signed24_be` +
+  `encode_signed24_be` removed; consumers now `using` from
+  `udp/wire_codec.hpp`. `apply_offset_inplace` body unchanged.
+- `src/godo_tracker_rt/main.cpp` — `thread_d_rt` signature gains
+  `Seqlock<LastOutputFrame>&`; loop body inserts
+  `apply_output_transform_inplace(out, output_xform)` between
+  `apply_offset_inplace` and `udp.send`, then publishes
+  `LastOutputFrame` via SeqLock store. `thread_uds` signature gains the
+  same SeqLock ref + a `LastOutputGetter` lambda passed as the 10th
+  callback to `UdsServer`. `OutputTransform` config snapshot is captured
+  by const ref from boot-time Config (Restart class — mid-run hot-flip
+  out of scope).
+- `tests/test_config_schema.cpp` row-count assertion bumped 53 → 68.
+- `tests/test_config_apply.cpp` `apply_get_all` / `apply_get_schema`
+  comma counters bumped 52 → 67 (item separators between 68 items).
+
+### Tests
+
+- New: `tests/test_output_transform.cpp` (9 cases, ~225 LOC).
+- Modified: `tests/test_uds_server.cpp` (+3 cases), `tests/test_config_apply.cpp` (+5 cases),
+  `tests/test_config_schema.cpp` (row count bump).
+- Build-grep results post-change: `[hot-config-publisher-grep]`,
+  `[hot-path-isolation-grep]`, `[hot-path-jitter-grep]`,
+  `[hot-path-config-grep]`, `[m1-no-mutex]`, `[scan-publisher-grep]`,
+  `[jitter-publisher-grep]`, `[amcl-rate-publisher-grep]`,
+  `[atomic-toml-write-grep]` all CLEAN. `[rt-alloc-grep]` flags only the
+  pre-existing `udp/sender.cpp:87` `std::string("udp::UdpSender: …")`
+  (boot-time, NOT hot-path; baseline).
+
+### Invariants
+
+- **(v) output-transform-sole-owner-discipline** — issue#27. The
+  post-AMCL transform (per-channel offset + sign for X/Y/Z + Pan/Tilt/
+  Roll) lives ONLY in `src/udp/output_transform.cpp`. Thread D is the
+  SOLE producer of `Seqlock<LastOutputFrame> last_output_seq`; the UDS
+  handler thread is the SOLE consumer. Cold writer NEVER touches the
+  seqlock or the transform fields. Reload class is **Restart** — values
+  are captured by const ref in `thread_d_rt` from the boot-time Config;
+  mid-run hot-flip is out of scope (would race the SeqLock-published
+  `LastOutputFrame`). Operator restarts via SPA System tab to apply
+  updated sign / offset values. The Roll byte position (OFF_ROLL = 8)
+  is FreeD D1's "Reserved Data" per spec, but SHOTOKU emits a non-zero
+  constant there and PIXOTOPE-side decoders treat it as Roll; per-LSB
+  scale is assumed equal to Pan/Tilt's 1/32768° by byte-position
+  convention (documented in `udp/output_transform.hpp` source comment).
+  See `production/RPi5/src/udp/output_transform.hpp` for the math
+  rationale + Roll convention note. Spec memory:
+  `.claude/memory/feedback_subtract_semantic_locked.md` (separate axis,
+  cross-referenced for the broader sign-direction discipline).

@@ -49,6 +49,19 @@ struct ConfigSchemaRow {
     std::string_view description;
 };
 
+// 68 rows — issue#27 fold (2026-05-04 KST). New `output_transform.*`
+// (12 rows: 6 offsets + 6 signs, all Restart class) and `origin_step.*`
+// (3 rows: x/y/yaw step deltas for the OriginPicker +/- buttons,
+// frontend-only consumer). The `output_transform` rows feed the new
+// `udp::output_transform` module that sits between `apply_offset_inplace`
+// and `udp.send` in Thread D; sign rows use Int with range [-1, +1] +
+// strict {-1, +1} validator at the apply.cpp boundary (per
+// .claude/memory/feedback_relaxed_validator_strict_installer.md). The
+// `origin_step.*` rows follow the same `webctl.*` pattern as issue#12 —
+// tracker stores verbatim through render_toml round-trip; webctl
+// /api/config exposes them; SPA reads them and uses them as the +/-
+// button increments on `<OriginPicker/>`.
+//
 // 53 rows — issue#10.1 fold (2026-05-03). New `serial.lidar_udev_serial`
 // row (String, Restart class, default = studio cp210x serial). Sole
 // consumer is install.sh which sed-substitutes the value into
@@ -102,7 +115,7 @@ struct ConfigSchemaRow {
 // CODEBASE.md invariant (q).
 
 // clang-format off
-inline constexpr std::array<ConfigSchemaRow, 53> CONFIG_SCHEMA = {{
+inline constexpr std::array<ConfigSchemaRow, 68> CONFIG_SCHEMA = {{
     {"amcl.anneal_iters_per_phase",     ValueType::Int,    1.0,      200.0,    "10",                             ReloadClass::Recalibrate, "Track D-5: per-phase upper-bound iteration count for sigma annealing."},
     {"amcl.converge_xy_std_m",          ValueType::Double, 0.001,    1.0,      "0.015",                          ReloadClass::Recalibrate, "AMCL converge() xy_std exit threshold (m)."},
     {"amcl.converge_yaw_std_deg",       ValueType::Double, 0.01,     30.0,     "0.3",                            ReloadClass::Recalibrate, "AMCL converge() yaw_std exit threshold (deg)."},
@@ -138,6 +151,21 @@ inline constexpr std::array<ConfigSchemaRow, 53> CONFIG_SCHEMA = {{
     {"ipc.uds_socket",                  ValueType::String, 0.0,      0.0,      "/run/godo/ctl.sock",             ReloadClass::Restart,     "UDS control-plane socket path."},
     {"network.ue_host",                 ValueType::String, 0.0,      0.0,      "192.168.0.0",                    ReloadClass::Restart,     "UE receiver IPv4 / hostname."},
     {"network.ue_port",                 ValueType::Int,    1.0,      65535.0,  "6666",                           ReloadClass::Restart,     "UE receiver UDP port."},
+    {"origin_step.x_m",                 ValueType::Double, 0.001,    1.0,      "0.01",                           ReloadClass::Restart,     "issue#27: OriginPicker +/- button increment for x_m (m). Frontend-only consumer; tracker stores verbatim. Same SSOT pattern as the issue#12 webctl.* rows."},
+    {"origin_step.y_m",                 ValueType::Double, 0.001,    1.0,      "0.01",                           ReloadClass::Restart,     "issue#27: OriginPicker +/- button increment for y_m (m). Frontend-only consumer."},
+    {"origin_step.yaw_deg",             ValueType::Double, 0.01,     10.0,     "0.1",                            ReloadClass::Restart,     "issue#27: OriginPicker +/- button increment for theta_deg (°). Frontend-only consumer."},
+    {"output_transform.pan_offset_deg", ValueType::Double, -360.0,   360.0,    "0.0",                            ReloadClass::Restart,     "issue#27: post-AMCL Pan offset (°) applied before udp.send. final = sign * (raw + offset). See production/RPi5/src/udp/output_transform.hpp."},
+    {"output_transform.pan_sign",       ValueType::Int,    -1.0,     1.0,      "1",                              ReloadClass::Restart,     "issue#27: Pan sign (-1 or +1). 0 rejected by apply.cpp ladder gate."},
+    {"output_transform.roll_offset_deg",ValueType::Double, -360.0,   360.0,    "0.0",                            ReloadClass::Restart,     "issue#27: post-AMCL Roll offset (°). FreeD D1 spec lists bytes 9-11 as Reserved but SHOTOKU emits a non-zero constant; PIXOTOPE-side decoders treat as Roll. Per-LSB scale assumed equal to Pan/Tilt's 1/32768°."},
+    {"output_transform.roll_sign",      ValueType::Int,    -1.0,     1.0,      "1",                              ReloadClass::Restart,     "issue#27: Roll sign (-1 or +1)."},
+    {"output_transform.tilt_offset_deg",ValueType::Double, -360.0,   360.0,    "0.0",                            ReloadClass::Restart,     "issue#27: post-AMCL Tilt offset (°)."},
+    {"output_transform.tilt_sign",      ValueType::Int,    -1.0,     1.0,      "1",                              ReloadClass::Restart,     "issue#27: Tilt sign (-1 or +1)."},
+    {"output_transform.x_offset_m",     ValueType::Double, -1000.0,  1000.0,   "0.0",                            ReloadClass::Restart,     "issue#27: post-AMCL X offset (m)."},
+    {"output_transform.x_sign",         ValueType::Int,    -1.0,     1.0,      "1",                              ReloadClass::Restart,     "issue#27: X sign (-1 or +1)."},
+    {"output_transform.y_offset_m",     ValueType::Double, -1000.0,  1000.0,   "0.0",                            ReloadClass::Restart,     "issue#27: post-AMCL Y offset (m)."},
+    {"output_transform.y_sign",         ValueType::Int,    -1.0,     1.0,      "1",                              ReloadClass::Restart,     "issue#27: Y sign (-1 or +1)."},
+    {"output_transform.z_offset_m",     ValueType::Double, -1000.0,  1000.0,   "0.0",                            ReloadClass::Restart,     "issue#27: post-AMCL Z offset (m)."},
+    {"output_transform.z_sign",         ValueType::Int,    -1.0,     1.0,      "1",                              ReloadClass::Restart,     "issue#27: Z sign (-1 or +1)."},
     {"rt.cpu",                          ValueType::Int,    0.0,      7.0,      "3",                              ReloadClass::Restart,     "RT thread CPU pin."},
     {"rt.priority",                     ValueType::Int,    1.0,      99.0,     "50",                             ReloadClass::Restart,     "SCHED_FIFO priority for Thread D."},
     {"serial.freed_baud",               ValueType::Int,    9600.0,   921600.0, "38400",                          ReloadClass::Restart,     "FreeD serial baud."},
@@ -159,7 +187,7 @@ inline constexpr std::array<ConfigSchemaRow, 53> CONFIG_SCHEMA = {{
 }};
 // clang-format on
 
-static_assert(CONFIG_SCHEMA.size() == 53,
+static_assert(CONFIG_SCHEMA.size() == 68,
               "CONFIG_SCHEMA row count drifted; update tests + schema mirror");
 
 // O(N) lookup. N=40 keeps this trivially fine; O(log N) binary search is

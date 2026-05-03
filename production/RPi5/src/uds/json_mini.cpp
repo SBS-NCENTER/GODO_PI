@@ -452,6 +452,42 @@ std::string format_ok_amcl_rate(const godo::rt::AmclIterationRate& r) {
     return std::string(buf, len);
 }
 
+// Field order pin — MUST match godo::rt::LastOutputFrame declaration in
+// core/rt_types.hpp. The Python mirror godo-webctl/protocol.py::
+// LAST_OUTPUT_FIELDS is regex-extracted from this format string at test
+// time (tests/test_protocol.py drift pin). Touching the field names here
+// breaks the Python mirror; touch both in the same commit.
+//
+// Precision split (issue#27):
+//   - 6 transformed channels (x/y/z/pan/tilt/roll) → %.6f (µm / µdeg)
+//   - zoom / focus (raw u24)                        → %.4f
+//   - published_mono_ns                             → %llu
+//   - valid                                         → %u
+std::string format_ok_output(const godo::rt::LastOutputFrame& f) {
+    char buf[512];
+    const int n = std::snprintf(buf, sizeof(buf),
+        "{\"ok\":true,\"valid\":%u,\"x_m\":%.6f,\"y_m\":%.6f,"
+        "\"z_m\":%.6f,\"pan_deg\":%.6f,\"tilt_deg\":%.6f,"
+        "\"roll_deg\":%.6f,\"zoom\":%.4f,\"focus\":%.4f,"
+        "\"published_mono_ns\":%llu}\n",
+        static_cast<unsigned>(f.valid),
+        f.x_m, f.y_m, f.z_m,
+        f.pan_deg, f.tilt_deg, f.roll_deg,
+        f.zoom, f.focus,
+        static_cast<unsigned long long>(f.published_mono_ns));
+    if (n <= 0) {
+        return std::string("{\"ok\":true,\"valid\":0,\"x_m\":0.000000,"
+            "\"y_m\":0.000000,\"z_m\":0.000000,\"pan_deg\":0.000000,"
+            "\"tilt_deg\":0.000000,\"roll_deg\":0.000000,"
+            "\"zoom\":0.0000,\"focus\":0.0000,"
+            "\"published_mono_ns\":0}\n");
+    }
+    const std::size_t len = (static_cast<std::size_t>(n) >= sizeof(buf))
+                            ? sizeof(buf) - 1
+                            : static_cast<std::size_t>(n);
+    return std::string(buf, len);
+}
+
 std::string_view mode_to_string(godo::rt::AmclMode mode) noexcept {
     switch (mode) {
         case godo::rt::AmclMode::Idle:    return "Idle";

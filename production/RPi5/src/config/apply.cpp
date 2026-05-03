@@ -216,6 +216,22 @@ EffectiveValue read_effective(const Config& c, const ConfigSchemaRow& row) {
     else if (k == "webctl.mapping_systemctl_subprocess_timeout_s") v.as_int = c.webctl_mapping_systemctl_subprocess_timeout_s;
     else if (k == "webctl.mapping_systemd_stop_timeout_s")        v.as_int = c.webctl_mapping_systemd_stop_timeout_s;
     else if (k == "webctl.mapping_webctl_stop_timeout_s")         v.as_int = c.webctl_mapping_webctl_stop_timeout_s;
+    // issue#27 — final-output transform + OriginPicker step.
+    else if (k == "origin_step.x_m")                              v.as_double = c.origin_step_x_m;
+    else if (k == "origin_step.y_m")                              v.as_double = c.origin_step_y_m;
+    else if (k == "origin_step.yaw_deg")                          v.as_double = c.origin_step_yaw_deg;
+    else if (k == "output_transform.x_offset_m")                  v.as_double = c.output_transform_x_offset_m;
+    else if (k == "output_transform.y_offset_m")                  v.as_double = c.output_transform_y_offset_m;
+    else if (k == "output_transform.z_offset_m")                  v.as_double = c.output_transform_z_offset_m;
+    else if (k == "output_transform.pan_offset_deg")              v.as_double = c.output_transform_pan_offset_deg;
+    else if (k == "output_transform.tilt_offset_deg")             v.as_double = c.output_transform_tilt_offset_deg;
+    else if (k == "output_transform.roll_offset_deg")             v.as_double = c.output_transform_roll_offset_deg;
+    else if (k == "output_transform.x_sign")                      v.as_int    = c.output_transform_x_sign;
+    else if (k == "output_transform.y_sign")                      v.as_int    = c.output_transform_y_sign;
+    else if (k == "output_transform.z_sign")                      v.as_int    = c.output_transform_z_sign;
+    else if (k == "output_transform.pan_sign")                    v.as_int    = c.output_transform_pan_sign;
+    else if (k == "output_transform.tilt_sign")                   v.as_int    = c.output_transform_tilt_sign;
+    else if (k == "output_transform.roll_sign")                   v.as_int    = c.output_transform_roll_sign;
     return v;
 }
 
@@ -282,6 +298,22 @@ bool apply_one(Config& c,
     else if (k == "webctl.mapping_systemctl_subprocess_timeout_s") c.webctl_mapping_systemctl_subprocess_timeout_s = static_cast<int>(vr.parsed_double);
     else if (k == "webctl.mapping_systemd_stop_timeout_s")        c.webctl_mapping_systemd_stop_timeout_s        = static_cast<int>(vr.parsed_double);
     else if (k == "webctl.mapping_webctl_stop_timeout_s")         c.webctl_mapping_webctl_stop_timeout_s         = static_cast<int>(vr.parsed_double);
+    // issue#27 — final-output transform + OriginPicker step.
+    else if (k == "origin_step.x_m")                              c.origin_step_x_m   = vr.parsed_double;
+    else if (k == "origin_step.y_m")                              c.origin_step_y_m   = vr.parsed_double;
+    else if (k == "origin_step.yaw_deg")                          c.origin_step_yaw_deg = vr.parsed_double;
+    else if (k == "output_transform.x_offset_m")                  c.output_transform_x_offset_m    = vr.parsed_double;
+    else if (k == "output_transform.y_offset_m")                  c.output_transform_y_offset_m    = vr.parsed_double;
+    else if (k == "output_transform.z_offset_m")                  c.output_transform_z_offset_m    = vr.parsed_double;
+    else if (k == "output_transform.pan_offset_deg")              c.output_transform_pan_offset_deg  = vr.parsed_double;
+    else if (k == "output_transform.tilt_offset_deg")             c.output_transform_tilt_offset_deg = vr.parsed_double;
+    else if (k == "output_transform.roll_offset_deg")             c.output_transform_roll_offset_deg = vr.parsed_double;
+    else if (k == "output_transform.x_sign")                      c.output_transform_x_sign         = static_cast<int>(vr.parsed_double);
+    else if (k == "output_transform.y_sign")                      c.output_transform_y_sign         = static_cast<int>(vr.parsed_double);
+    else if (k == "output_transform.z_sign")                      c.output_transform_z_sign         = static_cast<int>(vr.parsed_double);
+    else if (k == "output_transform.pan_sign")                    c.output_transform_pan_sign       = static_cast<int>(vr.parsed_double);
+    else if (k == "output_transform.tilt_sign")                   c.output_transform_tilt_sign      = static_cast<int>(vr.parsed_double);
+    else if (k == "output_transform.roll_sign")                   c.output_transform_roll_sign      = static_cast<int>(vr.parsed_double);
     else                                             return false;
     return true;
 }
@@ -372,6 +404,32 @@ ApplyResult apply_set(std::string_view                              key,
         ar.err        = vr.err;
         ar.err_detail = vr.err_detail;
         return ar;
+    }
+
+    // issue#27 — strict {-1, +1} validator for output_transform.*_sign
+    // keys. The schema validator enforces the relaxed [-1, +1] Int range
+    // (defence-in-depth: rejects 2 / -2); the strict {-1, +1} (rejecting
+    // 0) lives here at the consumer boundary per
+    // .claude/memory/feedback_relaxed_validator_strict_installer.md.
+    // Zero would silently zero the channel — surely an operator typo.
+    if (vr.row != nullptr) {
+        const std::string_view name = vr.row->name;
+        if (name == "output_transform.x_sign" ||
+            name == "output_transform.y_sign" ||
+            name == "output_transform.z_sign" ||
+            name == "output_transform.pan_sign" ||
+            name == "output_transform.tilt_sign" ||
+            name == "output_transform.roll_sign") {
+            const int sign = static_cast<int>(vr.parsed_double);
+            if (sign != -1 && sign != 1) {
+                ar.err        = "bad_value";
+                ar.err_detail.assign(name);
+                ar.err_detail.append(": sign must be -1 or +1 (got ");
+                ar.err_detail.append(std::to_string(sign));
+                ar.err_detail.append(")");
+                return ar;
+            }
+        }
     }
 
     // Steps 2–6 under the live_cfg mutex.

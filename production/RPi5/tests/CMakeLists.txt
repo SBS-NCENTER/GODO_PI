@@ -149,6 +149,13 @@ target_link_libraries(test_udp_apply_offset PRIVATE
 add_test(NAME test_udp_apply_offset COMMAND test_udp_apply_offset)
 set_tests_properties(test_udp_apply_offset PROPERTIES LABELS "hardware-free")
 
+# issue#27 — final-output transform tests.
+add_executable(test_output_transform test_output_transform.cpp)
+target_link_libraries(test_output_transform PRIVATE
+    doctest::doctest godo_udp godo_freed)
+add_test(NAME test_output_transform COMMAND test_output_transform)
+set_tests_properties(test_output_transform PROPERTIES LABELS "hardware-free")
+
 add_executable(test_udp_loopback test_udp_loopback.cpp)
 target_link_libraries(test_udp_loopback PRIVATE doctest::doctest godo_udp)
 add_test(NAME test_udp_loopback COMMAND test_udp_loopback)

@@ -202,4 +202,37 @@ static_assert(alignof(AmclIterationRate) == 8, "AmclIterationRate must be 8-alig
 static_assert(std::is_trivially_copyable_v<AmclIterationRate>,
               "AmclIterationRate must be trivially copyable for Seqlock payload");
 
+// Issue#27 — final-output frame snapshot, published by Thread D AFTER
+// `apply_offset_inplace` + `apply_output_transform_inplace` and BEFORE
+// `udp.send`. Consumed by the UDS `get_last_output` handler so the SPA
+// can render the actual 8 channels being sent to UE alongside the
+// LiDAR-raw pose.
+//
+// Layout pin (Mode-A M4 / Parent decision fold): 8 doubles + uint64
+// timestamp + uint8 valid flag + 7 byte pad = 80 B exact, 8-byte
+// aligned. Trivially copyable — Seqlock<T> requires it.
+//
+// Field order is ABI-visible — the JSON formatter in
+// uds/json_mini.cpp::format_ok_output mirrors this order; the Python
+// mirror godo-webctl/protocol.py::LAST_OUTPUT_FIELDS is regex-pinned
+// against the format string at test time.
+struct LastOutputFrame {
+    double        x_m;
+    double        y_m;
+    double        z_m;
+    double        pan_deg;
+    double        tilt_deg;
+    double        roll_deg;
+    double        zoom;
+    double        focus;
+    std::uint64_t published_mono_ns;
+    std::uint8_t  valid;
+    std::uint8_t  _pad[7];
+};
+
+static_assert(sizeof(LastOutputFrame) == 80, "LastOutputFrame layout is ABI-visible");
+static_assert(alignof(LastOutputFrame) == 8, "LastOutputFrame must be 8-aligned");
+static_assert(std::is_trivially_copyable_v<LastOutputFrame>,
+              "LastOutputFrame must be trivially copyable for Seqlock payload");
+
 }  // namespace godo::rt

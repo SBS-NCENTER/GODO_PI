@@ -1692,3 +1692,102 @@ TEST_CASE("issue#18 MF2 — log_lstat_for_throw emits expected stderr lines for 
     CHECK(captured.find("S_IFDIR_size=") != std::string::npos);
     ::rmdir(dir_path.c_str());
 }
+
+// --------------------------------------------------------------
+// issue#27 — get_last_output dispatch + format_ok_output shape.
+// --------------------------------------------------------------
+
+TEST_CASE("get_last_output returns valid=0 when no frame has been published") {
+    TempUdsPath guard(tmp_socket_path("getout_invalid"));
+    ServerHarness h;
+    godo::rt::g_running.store(true, std::memory_order_release);
+
+    // No LastOutputGetter wired; server treats as valid=0 sentinel.
+    UdsServer server(
+        guard.path,
+        [&]() { return h.mode_target.load(); },
+        [&](AmclMode m) { h.mode_target.store(m); });
+    REQUIRE_NOTHROW(server.open());
+    h.th = std::thread([&]() { server.run(); });
+
+    int fd = connect_client(guard.path);
+    REQUIRE(fd >= 0);
+    auto resp = send_recv(fd, "{\"cmd\":\"get_last_output\"}\n");
+    ::close(fd);
+
+    CHECK(resp.find("\"ok\":true") != std::string::npos);
+    CHECK(resp.find("\"valid\":0") != std::string::npos);
+    CHECK(resp.find("\"x_m\":0.000000") != std::string::npos);
+    CHECK(resp.back() == '\n');
+
+    godo::rt::g_running.store(false, std::memory_order_release);
+    h.th.join();
+}
+
+TEST_CASE("get_last_output returns published frame verbatim") {
+    TempUdsPath guard(tmp_socket_path("getout_synth"));
+    ServerHarness h;
+    godo::rt::g_running.store(true, std::memory_order_release);
+
+    godo::rt::LastOutputFrame synth{};
+    synth.x_m       = 1.234567;
+    synth.y_m       = -2.345678;
+    synth.z_m       = 0.500000;
+    synth.pan_deg   = 42.500001;
+    synth.tilt_deg  = -1.250000;
+    synth.roll_deg  = 0.017500;
+    synth.zoom      = 524288.0;
+    synth.focus     = 502733.0;
+    synth.published_mono_ns = 9876543210ULL;
+    synth.valid     = 1;
+
+    // Pass nullptr for callbacks 4-9; LastOutputGetter is the 10th.
+    UdsServer server(
+        guard.path,
+        [&]() { return h.mode_target.load(); },
+        [&](AmclMode m) { h.mode_target.store(m); },
+        nullptr,  // LastPoseGetter
+        nullptr,  // LastScanGetter
+        nullptr,  // JitterGetter
+        nullptr,  // AmclRateGetter
+        nullptr,  // ConfigGetter
+        nullptr,  // ConfigSchemaGetter
+        nullptr,  // ConfigSetter
+        [&]() { return synth; });
+    REQUIRE_NOTHROW(server.open());
+    h.th = std::thread([&]() { server.run(); });
+
+    int fd = connect_client(guard.path);
+    REQUIRE(fd >= 0);
+    auto resp = send_recv(fd, "{\"cmd\":\"get_last_output\"}\n");
+    ::close(fd);
+
+    CHECK(resp.find("\"valid\":1") != std::string::npos);
+    CHECK(resp.find("\"x_m\":1.234567") != std::string::npos);
+    CHECK(resp.find("\"y_m\":-2.345678") != std::string::npos);
+    CHECK(resp.find("\"z_m\":0.500000") != std::string::npos);
+    CHECK(resp.find("\"pan_deg\":42.500001") != std::string::npos);
+    CHECK(resp.find("\"tilt_deg\":-1.250000") != std::string::npos);
+    CHECK(resp.find("\"roll_deg\":0.017500") != std::string::npos);
+    CHECK(resp.find("\"zoom\":524288.0000") != std::string::npos);
+    CHECK(resp.find("\"focus\":502733.0000") != std::string::npos);
+    CHECK(resp.find("\"published_mono_ns\":9876543210") != std::string::npos);
+
+    godo::rt::g_running.store(false, std::memory_order_release);
+    h.th.join();
+}
+
+TEST_CASE("format_ok_output — byte-exact shape on a default-zero LastOutputFrame") {
+    using godo::uds::format_ok_output;
+    godo::rt::LastOutputFrame f{};
+    const std::string s = format_ok_output(f);
+    // Field order pin: must match LAST_OUTPUT_FIELDS in the Python
+    // mirror (godo-webctl/protocol.py). Drift here breaks the regex pin.
+    CHECK(s ==
+        "{\"ok\":true,\"valid\":0,\"x_m\":0.000000,\"y_m\":0.000000,"
+        "\"z_m\":0.000000,\"pan_deg\":0.000000,\"tilt_deg\":0.000000,"
+        "\"roll_deg\":0.000000,\"zoom\":0.0000,\"focus\":0.0000,"
+        "\"published_mono_ns\":0}\n");
+    CHECK(s.back() == '\n');
+}
+

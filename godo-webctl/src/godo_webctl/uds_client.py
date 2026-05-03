@@ -42,6 +42,7 @@ from .protocol import (
     encode_get_config,
     encode_get_config_schema,
     encode_get_jitter,
+    encode_get_last_output,
     encode_get_last_pose,
     encode_get_last_scan,
     encode_get_mode,
@@ -138,6 +139,13 @@ class UdsClient:
             timeout,
             response_cap=LAST_SCAN_RESPONSE_CAP,
         )
+
+    def get_last_output(self, timeout: float) -> dict[str, Any]:
+        """issue#27 `get_last_output` round-trip; response shape pinned by
+        ``protocol.LAST_OUTPUT_FIELDS`` (regex-checked against
+        json_mini.cpp::format_ok_output). Reply is small (~200 B); the
+        standard 4 KiB read cap is fine."""
+        return self._roundtrip(encode_get_last_output(), timeout)
 
     def get_jitter(self, timeout: float) -> dict[str, Any]:
         """PR-DIAG `get_jitter` round-trip; response shape pinned by

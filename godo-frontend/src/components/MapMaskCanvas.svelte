@@ -47,6 +47,15 @@
     mode?: 'paint' | 'origin-pick';
     oncoordpick?: (lx: number, ly: number) => void;
     /**
+     * issue#27 — fires on every pointermove with the logical PGM coord
+     * under the cursor; `null` on pointerleave. Parent uses this to
+     * push hover-coord into `viewport.setHoverWorld` so the underlay's
+     * top-right readout stays live regardless of which layer captures
+     * the event. Cheaper than re-architecting the math through the
+     * shared viewport (the parent already holds resolution + origin).
+     */
+    onhovermove?: (lx: number | null, ly?: number) => void;
+    /**
      * Optional shared viewport (PR β commit 4). When supplied, pointer
      * events use `viewport.canvasToImagePixel(...)` to invert the
      * underlay's zoom + pan before mapping to logical mask cells. When
@@ -65,6 +74,7 @@
     disabled = false,
     mode = 'paint',
     oncoordpick,
+    onhovermove,
     viewport,
   }: Props = $props();
 
@@ -183,11 +193,22 @@
   }
 
   function onPointerMove(ev: PointerEvent): void {
+    // issue#27 — always push hover-coord regardless of paint state /
+    // origin-pick mode so the parent can keep the underlay's top-right
+    // readout live.
+    if (onhovermove) {
+      const c = pointerToLogicalCoords(ev);
+      if (c) onhovermove(c.lx, c.ly);
+    }
     if (mode === 'origin-pick') return; // no drag-paint in origin-pick mode
     if (!painting || disabled) return;
     const c = pointerToLogicalCoords(ev);
     if (!c) return;
     paintCircle(c.lx, c.ly, brushRadius);
+  }
+
+  function onPointerLeave(): void {
+    if (onhovermove) onhovermove(null);
   }
 
   function onPointerUp(ev: PointerEvent): void {
@@ -289,6 +310,7 @@
     style="width: {width}px; height: {height}px; transform: {maskTransform()};"
     onpointerdown={onPointerDown}
     onpointermove={onPointerMove}
+    onpointerleave={onPointerLeave}
     onpointerup={onPointerUp}
     onpointercancel={onPointerUp}
     onwheel={onWheel}

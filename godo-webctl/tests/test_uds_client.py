@@ -136,6 +136,44 @@ def test_get_last_scan_response_too_large_raises(fake_uds_server) -> None:
     assert "response_too_large" in str(ei.value)
 
 
+# ---- issue#27: get_last_output ------------------------------------------
+
+
+def test_get_last_output_happy(fake_uds_server) -> None:
+    fake_uds_server.reply(
+        b'{"ok":true,"valid":1,"x_m":1.5,"y_m":-2.0,"z_m":0.5,'
+        b'"pan_deg":42.0,"tilt_deg":-1.0,"roll_deg":0.017,'
+        b'"zoom":524288.0,"focus":502733.0,'
+        b'"published_mono_ns":987654321}',
+    )
+    c = UdsClient(fake_uds_server.path)
+    resp = c.get_last_output(timeout=2.0)
+    assert resp["ok"] is True
+    assert resp["valid"] == 1
+    assert resp["x_m"] == 1.5
+    assert resp["pan_deg"] == 42.0
+    assert resp["zoom"] == 524288.0
+
+
+def test_get_last_output_sends_canonical_bytes(fake_uds_server) -> None:
+    fake_uds_server.reply(b'{"ok":true,"valid":0}')
+    c = UdsClient(fake_uds_server.path)
+    c.get_last_output(timeout=2.0)
+    assert fake_uds_server.captured == [b'{"cmd":"get_last_output"}\n']
+
+
+def test_get_last_output_server_rejected_propagates(fake_uds_server) -> None:
+    """Server replies err=unknown_cmd (e.g. tracker too old to know
+    issue#27); client surfaces UdsServerRejected."""
+    from godo_webctl.uds_client import UdsServerRejected
+
+    fake_uds_server.reply(b'{"ok":false,"err":"unknown_cmd"}')
+    c = UdsClient(fake_uds_server.path)
+    with pytest.raises(UdsServerRejected) as ei:
+        c.get_last_output(timeout=2.0)
+    assert ei.value.err == "unknown_cmd"
+
+
 # ---- PR-DIAG: get_jitter / get_amcl_rate --------------------------------
 
 

@@ -2479,14 +2479,13 @@ async def test_get_config_returns_projected_dict(
     assert body["network.ue_port"] == 6666
 
 
-async def test_get_config_schema_returns_53_rows(
+async def test_get_config_schema_returns_68_rows(
     tmp_path: Path,
     tmp_map_pair: Path,
 ) -> None:
     """The schema is mirrored from C++; the endpoint serves the local
-    parse cache, not a UDS round-trip. issue#10.1 added the
-    serial.lidar_udev_serial row on top of issue#16.1's 52 —
-    count 52 → 53."""
+    parse cache, not a UDS round-trip. issue#27 added 12 output_transform.*
+    + 3 origin_step.* rows on top of issue#10.1's 53 — count 53 → 68."""
     s = _settings_for(
         uds_socket=tmp_path / "u.sock",
         map_path=tmp_map_pair,
@@ -2497,7 +2496,7 @@ async def test_get_config_schema_returns_53_rows(
     assert r.status_code == HTTPStatus.OK
     rows = r.json()
     assert isinstance(rows, list)
-    assert len(rows) == 53
+    assert len(rows) == 68
     # Each row has the documented keys.
     for row in rows:
         assert {
@@ -4002,9 +4001,12 @@ async def test_post_map_origin_admin_absolute_happy_path(
     assert resp["restart_required"] is True
     # 5-field shape pin (mirror of ORIGIN_EDIT_RESPONSE_FIELDS).
     assert set(resp.keys()) == {"ok", "backup_ts", "prev_origin", "new_origin", "restart_required"}
-    # The fixture writes `origin: [-1.5, -2.0, 0.0]`.
+    # The fixture writes `origin: [-1.5, -2.0, 0.0]`. issue#27 SUBTRACT:
+    # new = old - typed = (-1.5 - 0.32, -2.0 - (-0.18), 0.0) = (-1.82, -1.82, 0).
     assert resp["prev_origin"] == [-1.5, -2.0, 0.0]
-    assert resp["new_origin"] == [0.32, -0.18, 0.0]
+    new_x, new_y, _ = resp["new_origin"]
+    assert new_x == pytest.approx(-1.82)
+    assert new_y == pytest.approx(-1.82)
     # Canonical UTC stamp shape.
     import re as _re
 
@@ -4015,8 +4017,10 @@ async def test_post_map_origin_admin_delta_happy_path(
     tmp_path: Path,
     tmp_active_map_pair: tuple[Path, Path],
 ) -> None:
-    """Operator-locked ADD sign convention end-to-end pin: typed `(x_m, y_m)`
-    in delta mode is the offset of the new origin from the current origin.
+    """issue#27 SUBTRACT semantic end-to-end pin (delta-fallback path):
+    SPA always sends absolute (`resolveDeltaFromPose` resolves frontend-
+    side); the backend's delta branch is a fallback for non-SPA clients
+    and computes `new_origin = old_origin - typed` directly.
     """
     s = _settings_for_map_origin(tmp_path=tmp_path, tmp_active_map_pair=tmp_active_map_pair)
     body = {"x_m": 0.32, "y_m": -0.18, "mode": "delta"}
@@ -4026,10 +4030,10 @@ async def test_post_map_origin_admin_delta_happy_path(
     assert r.status_code == HTTPStatus.OK, r.text
     resp = r.json()
     assert resp["prev_origin"] == [-1.5, -2.0, 0.0]
-    # ADD: new = prev + typed = (-1.5 + 0.32, -2.0 + (-0.18), 0.0).
+    # SUBTRACT: new = prev - typed = (-1.5 - 0.32, -2.0 - (-0.18), 0.0).
     new_x, new_y, new_th = resp["new_origin"]
-    assert new_x == pytest.approx(-1.5 + 0.32)
-    assert new_y == pytest.approx(-2.0 + (-0.18))
+    assert new_x == pytest.approx(-1.5 - 0.32)
+    assert new_y == pytest.approx(-2.0 - (-0.18))
     assert new_th == 0.0
 
 
@@ -4270,10 +4274,11 @@ async def test_post_map_origin_backup_ts_matches_disk_snapshot(
     assert backup_yaml.is_file()
     snapshot_text = backup_yaml.read_text("utf-8")
     assert "origin: [-1.5, -2.0, 0.0]" in snapshot_text
-    # Sanity: the LIVE YAML reflects the new origin.
+    # Sanity: the LIVE YAML reflects the new origin (issue#27 SUBTRACT:
+    # new = old - typed = (-1.5 - 0.32, -2.0 - (-0.18)) = (-1.82, -1.82)).
     maps_dir, _active_pgm = tmp_active_map_pair
     live_text = (maps_dir / "active.yaml").read_text("utf-8")
-    assert "origin: [0.32, -0.18, 0.0]" in live_text
+    assert "origin: [-1.82, -1.82, 0.0]" in live_text
 
 
 async def test_post_map_origin_yaml_rewrite_failure_leaves_no_restart_pending(

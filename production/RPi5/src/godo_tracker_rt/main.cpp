@@ -332,6 +332,15 @@ int main(int argc, char** argv, char** envp) {
         return 1;
     }
 
+    // issue#18 — UDS bootstrap audit + stale sibling sweep. Both run
+    // POST-pidfile (so we know we are the sole tracker — invariant (l))
+    // and PRE-thread-spawn (so the tracker's own `<pid>.tmp` does not
+    // exist yet — sweep cannot self-delete). Audit runs first so the
+    // log captures the inherited state; sweep runs second so the log
+    // documents what was reclaimed.
+    godo::uds::audit_runtime_dir(cfg.uds_socket);
+    godo::uds::sweep_stale_siblings(cfg.uds_socket);
+
     std::fprintf(stderr,
         "godo_tracker_rt: ue=%s:%d freed=%s@%d rt_cpu=%d rt_prio=%d "
         "t_ramp_ns=%ld\n",

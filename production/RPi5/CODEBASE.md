@@ -4631,3 +4631,124 @@ button so mapping HIL is unblocked in the meantime.
   path reads it (CODEBASE.md (r) pattern). Strict 32-char lowercase-hex
   format is enforced ONLY at install.sh time so dev hosts can use any
   factory serial unmolested at the C++ tier.
+
+---
+
+## 2026-05-03 09:57 KST — issue#18 — UDS bootstrap audit (MF1 doc closure + MF2 forensic log + MF3 audit hook + SF2 doc append + SF3 sibling sweep)
+
+### Why
+
+issue#10.1 HIL surfaced a stale `/run/godo/ctl.sock` failure mode (regular
+file at the target path; PR #73 added a defensive lstat-and-unlink guard).
+The depth audit (`.claude/memory/project_uds_bootstrap_audit.md`) cataloged
+follow-up work as MF1-MF3 / SF1-SF3 / CF1-CF2. issue#18 ships the
+must-fix + should-fix items that close the operator-forensics gap without
+introducing inotify watchers or namespace shrinks.
+
+### Added
+
+- `src/uds/uds_server.hpp` — three free function declarations in
+  `namespace godo::uds`: `audit_runtime_dir`, `sweep_stale_siblings`,
+  `log_lstat_for_throw`. The last is exposed (rather than file-private)
+  so the unit test can exercise its stderr output directly without
+  forcing rename(2) failure.
+- `src/uds/uds_server.cpp` — implementations of the three free functions.
+  - `audit_runtime_dir` lstat's the target path + globs siblings under
+    `<path>.*.tmp`, emits ONE stderr line summarising inherited state
+    with `<TYPE>_size=` discriminator + truncated sibling list.
+  - `sweep_stale_siblings` walks the same glob, unlinks regular files
+    unconditionally and sockets only when older than
+    `constants::UDS_STALE_SIBLING_MIN_AGE_SEC`. Best-effort; failures
+    log to stderr but never abort boot.
+  - `log_lstat_for_throw` formats one stderr line per endpoint on the
+    rename-failure path; called twice (tmp_path + target) before the
+    pre-existing throw, so the throw text is unchanged.
+  - All three use a `GlobGuard` RAII wrapper so `globfree(&gl)` runs on
+    every return path (no heap leak).
+  - Type discriminator covers S_IFSOCK / S_IFREG / S_IFDIR / S_IFLNK /
+    S_IFBLK / S_IFCHR / S_IFIFO / S_IFOTHER + ENOENT + lstat_errno=N.
+- `src/godo_tracker_rt/main.cpp` — two new calls AFTER pidfile lock
+  acquisition, BEFORE the banner: `audit_runtime_dir(cfg.uds_socket)`
+  then `sweep_stale_siblings(cfg.uds_socket)`. Audit runs first so the
+  log captures inherited state; sweep runs second so the log documents
+  what was reclaimed.
+- `src/core/constants.hpp` — two new Tier-1 constants:
+  - `UDS_STALE_SIBLING_MIN_AGE_SEC = 2` (SF3 sweep mtime threshold).
+  - `UDS_BOOT_AUDIT_SIBLING_LIST_CAP = 3` (MF3 audit-line list cap).
+  Both with rationale comments citing CLAUDE.md §6 no-magic-numbers.
+
+### Changed
+
+- `src/uds/uds_server.cpp::UdsServer::open()` — rename-failure path
+  refactored to call `log_lstat_for_throw(tmp_path, "tmp_path")` +
+  `log_lstat_for_throw(socket_path_, "target")` BEFORE the throw. The
+  throw text is byte-unchanged so any caller / log greppers keying on
+  `rename(` keep working.
+- `scripts/build.sh` `[atomic-toml-write-grep]` allow-list extended to
+  include `src/uds/uds_server.cpp` (legitimate atomic-rename for UDS
+  bind, distinct from atomic-rename for TOML writes). Pre-existing
+  build break introduced by PR #73 also fixed by this allow-list update.
+- `doc/uds_protocol.md` — APPENDED new section H "Bootstrap and operator
+  forensics" with three subsections: H.1 lifecycle diagram, H.2 `ss
+  -lxp` historical-bind-path display quirk, H.3 journalctl forensics
+  recipes including two HIL stale-state injection recipes pinned by
+  the new doctest cases.
+
+### Tests
+
+- New: `tests/test_uds_server.cpp` — six issue#18 doctest cases:
+  - `issue#18 MF1 — UdsServer destructor unlinks bound path on scope exit`.
+  - `issue#18 MF3 — UdsServer::open clears 0-byte regular file at target`
+    (regression pin for PR #73 lstat guard).
+  - `issue#18 SF3 — sweep_stale_siblings unlinks regular-file .tmp siblings older than threshold`.
+  - `issue#18 SF3 — sweep_stale_siblings leaves a fresh sibling alone`
+    (uses a transient UdsServer to bind a fresh `<path>.999.tmp` socket).
+  - `issue#18 SF3 expanded — sweep + open path co-operates with stale .tmp + stale target`.
+  - `issue#18 MF2 — log_lstat_for_throw emits expected stderr lines for each filesystem type`
+    — covers regular file / ENOENT / socket / directory inputs (Mi4 directory
+    arm explicit). Captures stderr via `freopen` + read-back, no mocks.
+- All 6 cases pin `constants::UDS_STALE_SIBLING_MIN_AGE_SEC` directly so
+  any future bump trips the test reviewer.
+- doctest summary after change: 48 cases / 384 assertions / 0 failed.
+
+### Removed
+
+- (none)
+
+### Invariants
+
+- **(u) uds-bootstrap-stale-state-discipline** — issue#18. The tracker
+  bootstrap path against `/run/godo/ctl.sock` stale state is a
+  four-step:
+  1. **Atomic-rename bind** (`UdsServer::open()`): bind to
+     `<path>.<pid>.tmp`, then `rename(tmp → target)`. POSIX rename(2)
+     atomically replaces the destination; clients see either OLD or NEW
+     socket, never a torn intermediate.
+  2. **Stale non-socket guard** (PR #73): pre-rename lstat, if target
+     exists and is NOT a socket, unlink with stderr log line. Defends
+     against the issue#10.1 failure mode where `/run/godo/ctl.sock`
+     lingered as a 0-byte regular file.
+  3. **Destructor unlink** (`UdsServer::~UdsServer()` → `close()`):
+     graceful shutdown unbinds the path. No `atexit` needed; the stack-
+     allocated `UdsServer server` inside `thread_uds` runs its destructor
+     when `g_running.store(false)` causes `server.run()` to return and
+     stack unwinding fires.
+  4. **Sibling sweep** (`sweep_stale_siblings`): boot-time, post-pidfile,
+     pre-thread-spawn. Globs `<path>.*.tmp`; unlinks regular files
+     unconditionally and sockets only when older than
+     `constants::UDS_STALE_SIBLING_MIN_AGE_SEC`. Closes the half-failed-
+     prior-rename hypothesis without inotify.
+
+  Operator-forensics layer (`audit_runtime_dir` + `log_lstat_for_throw`):
+  one stderr line at boot summarising inherited state, two stderr lines
+  per endpoint on rename-failure, all with `<TYPE>_size=` discriminator
+  for one-grep diagnosability. journalctl recipes in `doc/uds_protocol.md`
+  §H.3.
+
+  Pinned by `tests/test_uds_server.cpp::TEST_CASE("issue#18 ...")` (six
+  cases). The atomic-rename + sibling-sweep ordering invariant
+  (`sweep_stale_siblings` BEFORE `thread_uds` spawn) is documented in
+  `uds_server.hpp` and `main.cpp` comments; future refactors moving
+  UdsServer construction earlier must re-validate this ordering.
+
+  Spec memory: `.claude/memory/project_uds_bootstrap_audit.md`.

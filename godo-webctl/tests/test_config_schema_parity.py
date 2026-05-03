@@ -4,7 +4,7 @@ Track B-CONFIG (PR-CONFIG-β, TB1 fold) — cross-language schema parity.
 Loads `production/RPi5/src/core/config_schema.hpp` BY REAL PATH (mirrors
 `tests/test_protocol.py`'s LAST_POSE_FIELDS pattern) and asserts:
 
-  - row count == 53 (issue#10.1 pin: 52 + 1 serial.lidar_udev_serial row),
+  - row count == 68 (issue#27 pin: 53 + 12 output_transform.* + 3 origin_step.*),
   - every row's `reload_class` is one of the 3 known strings,
   - every row's `type` is one of the 3 known strings,
   - the default_repr is non-empty.
@@ -33,16 +33,16 @@ def test_real_source_exists() -> None:
     assert _CPP_SCHEMA_HPP.exists(), f"C++ schema source missing: {_CPP_SCHEMA_HPP}"
 
 
-def test_row_count_pinned_at_53() -> None:
-    """issue#10.1 pin: schema row count is 53 (52 + 1 serial.lidar_udev_serial row)."""
+def test_row_count_pinned_at_68() -> None:
+    """issue#27 pin: schema row count is 68 (53 + 12 output_transform.* + 3 origin_step.*)."""
     rows = schema_mod.load_schema()
-    assert len(rows) == 53
+    assert len(rows) == 68
 
 
-def test_static_assert_in_cpp_says_53_too() -> None:
+def test_static_assert_in_cpp_says_68_too() -> None:
     """Cross-pin: the C++ static_assert text contains the count."""
     text = _CPP_SCHEMA_HPP.read_text(encoding="utf-8")
-    assert "CONFIG_SCHEMA.size() == 53" in text
+    assert "CONFIG_SCHEMA.size() == 68" in text
 
 
 def test_lidar_udev_serial_row_present() -> None:
@@ -161,8 +161,8 @@ def test_every_default_non_empty() -> None:
 
 
 def test_sections_match_design() -> None:
-    """The 8 design-time sections all appear at least once (issue#12
-    added webctl)."""
+    """The 10 design-time sections all appear at least once (issue#12
+    added webctl; issue#27 added origin_step + output_transform)."""
     rows = schema_mod.load_schema()
     sections = {r.name.split(".", 1)[0] for r in rows}
     expected = {
@@ -170,6 +170,8 @@ def test_sections_match_design() -> None:
         "gpio",
         "ipc",
         "network",
+        "origin_step",
+        "output_transform",
         "rt",
         "serial",
         "smoother",
@@ -178,6 +180,52 @@ def test_sections_match_design() -> None:
     assert sections == expected, (
         f"section drift: extra={sections - expected} missing={expected - sections}"
     )
+
+
+def test_output_transform_rows_present() -> None:
+    """issue#27 — 12 output_transform.* rows. 6 offsets (Double) + 6 signs
+    (Int [-1, +1]). All Restart class — operator restarts via SPA System
+    tab to pick up new sign / offset values."""
+    rows = schema_mod.load_schema()
+    by_name = {r.name: r for r in rows}
+    for ch in ("x", "y", "z"):
+        offset = by_name.get(f"output_transform.{ch}_offset_m")
+        sign = by_name.get(f"output_transform.{ch}_sign")
+        assert offset is not None, f"missing output_transform.{ch}_offset_m"
+        assert sign   is not None, f"missing output_transform.{ch}_sign"
+        assert offset.type == "double"
+        assert sign.type   == "int"
+        assert sign.min_d == -1.0
+        assert sign.max_d ==  1.0
+        assert sign.default_repr == "1"
+        assert offset.default_repr == "0.0"
+        assert offset.reload_class == "restart"
+        assert sign.reload_class   == "restart"
+    for ch in ("pan", "tilt", "roll"):
+        offset = by_name.get(f"output_transform.{ch}_offset_deg")
+        sign = by_name.get(f"output_transform.{ch}_sign")
+        assert offset is not None, f"missing output_transform.{ch}_offset_deg"
+        assert sign   is not None, f"missing output_transform.{ch}_sign"
+        assert offset.type == "double"
+        assert sign.type   == "int"
+        assert sign.min_d == -1.0
+        assert sign.max_d ==  1.0
+
+
+def test_origin_step_rows_present() -> None:
+    """issue#27 — 3 origin_step.* rows for the OriginPicker +/- buttons.
+    Frontend-only consumer; tracker stores verbatim."""
+    rows = schema_mod.load_schema()
+    by_name = {r.name: r for r in rows}
+    x   = by_name.get("origin_step.x_m")
+    y   = by_name.get("origin_step.y_m")
+    yaw = by_name.get("origin_step.yaw_deg")
+    assert x   is not None and x.type   == "double" and x.default_repr   == "0.01"
+    assert y   is not None and y.type   == "double" and y.default_repr   == "0.01"
+    assert yaw is not None and yaw.type == "double" and yaw.default_repr == "0.1"
+    assert x.reload_class   == "restart"
+    assert y.reload_class   == "restart"
+    assert yaw.reload_class == "restart"
 
 
 def test_alphabetical_ordering() -> None:

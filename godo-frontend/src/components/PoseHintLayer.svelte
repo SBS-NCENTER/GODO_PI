@@ -254,7 +254,19 @@
   }
 
   function onPointerMove(ev: PointerEvent): void {
-    if (!enabled || !canvas) return;
+    if (!canvas) return;
+    // issue#27 — always push hover-coord even when the layer is
+    // disabled so the underlay's top-right readout stays live whenever
+    // the cursor sits over this layer's box. canvasToWorld is the same
+    // viewport projection the underlay uses.
+    if (canvas) {
+      const rect = canvas.getBoundingClientRect();
+      const cx0 = ev.clientX - rect.left;
+      const cy0 = ev.clientY - rect.top;
+      const w0 = canvasToWorld(cx0, cy0);
+      if (w0) viewport.setHoverWorld(w0[0], w0[1]);
+    }
+    if (!enabled) return;
     if (state.kind === 'placing-pos') {
       const rect = canvas.getBoundingClientRect();
       const cx = ev.clientX - rect.left;
@@ -288,6 +300,10 @@
         currWy: w[1],
       };
     }
+  }
+
+  function onPointerLeave(): void {
+    viewport.setHoverWorld(null);
   }
 
   function onPointerUp(ev: PointerEvent): void {
@@ -345,6 +361,7 @@
   data-state={state.kind}
   onpointerdown={onPointerDown}
   onpointermove={onPointerMove}
+  onpointerleave={onPointerLeave}
   onpointerup={onPointerUp}
   onpointercancel={onPointerUp}
 ></canvas>

@@ -4,6 +4,34 @@ description: B-MAPEDIT family spec — brush erase (P0), origin pick with GUI+nu
 type: project
 ---
 
+## Sign convention update — 2026-05-04 KST (issue#27, SUBTRACT)
+
+**SUPERSEDES the 2026-04-30 ADD lock below.** Operator HIL on 3
+sequential picks (PICK#1 → PICK#3) showed the ADD direction drifted
+the resulting pose by `2 × typed_offset` instead of moving to `(0, 0)`.
+The fix is direction-only; magnitude was already correct. Operator
+confirmed 2026-05-03 23:30 KST.
+
+**Locked rule:** typed `(x_m, y_m)` names the *world coord of the point
+that should become the new (0, 0)*. Backend computes
+`new_yaml_origin = old_yaml_origin - typed`; AMCL pose at next restart
+moves to `new_pose = old_pose - typed`.
+
+**SPA path:** delta mode resolves frontend-side via
+`lib/originMath.resolveDeltaFromPose(currentPose, dx, dy)` → absolute,
+then sends `mode="absolute"` to the backend so the backend stays dumb.
+Backend's delta branch is a fallback for non-SPA clients.
+
+**HIL pins** — `godo-webctl/tests/test_map_origin.py::
+test_apply_origin_edit_absolute_subtracts_pose_pick_{2,3}` and
+`godo-frontend/tests/unit/originMath.test.ts::"PICK#2 …"` /
+`"PICK#3 …"`.
+
+See `.claude/memory/feedback_subtract_semantic_locked.md` for the full
+rationale + cross-stack pin list.
+
+---
+
 The Map Edit feature ships as three separate PRs to keep each change reviewable and rollback-able. All three operate on the active PGM/YAML pair under `cfg.maps_dir` and require a tracker restart to take effect (tracker reads map at boot only — see godo-webctl invariant on restart-pending sentinel).
 
 ## B-MAPEDIT (P0, brush erase) — current
@@ -25,7 +53,7 @@ The Map Edit feature ships as three separate PRs to keep each change reviewable 
 - **Mode A — GUI pick**: click a pixel on the rendered PGM. Frontend converts pixel → world coords using current YAML `resolution` + `origin`, then pre-fills the numeric fields. Operator can adjust before Apply.
 - **Mode B — numeric entry**: two number inputs `x_m` + `y_m` with absolute / delta toggle. Locale-friendly decimal handling (period, not comma). Sub-mm precision in input but display rounds to 1 mm. Negative values allowed.
 
-  **Sign convention (operator-locked 2026-04-30 KST, ADD)**: in `delta` mode the typed `(x_m, y_m)` is the *offset of the new origin from the current origin* — i.e. `new_origin = current_origin + (x_m, y_m)`. Operator phrasing: "실제 원점 위치는 여기서 (x, y)만큼 더 간 곳". Use case: operator measures the studio's real center is at `(+0.32, -0.18)` in the *current* world frame, types those numbers in delta mode → new origin lands on the studio center → studio center reads as world `(0, 0)` in the NEW frame. **SUBTRACT is wrong** and was caught by Mode-A reviewer (would shift origin by `2× typed_offset`).
+  **Sign convention (PREVIOUS spec, superseded 2026-05-04 KST)**: in `delta` mode the typed `(x_m, y_m)` was specified as the *offset of the new origin from the current origin* — i.e. `new_origin = current_origin + (x_m, y_m)`. Operator phrasing: "실제 원점 위치는 여기서 (x, y)만큼 더 간 곳". This spec was operator-locked on 2026-04-30 KST but reversed by issue#27 SUBTRACT lock above (HIL data on 3 sequential picks showed the ADD direction was wrong — pose drifted by `2 × typed_offset`). Preserved here as historical context; the LIVE spec is the SUBTRACT note at the top of this file.
 
 Apply path is unified: both modes resolve to a single `(new_x, new_y)` pair → backend updates YAML `origin[0]` and `origin[1]` only. PGM bytes unchanged. Auto-backup of the YAML (PGM does not need backup since it's not touched). Restart-pending sentinel touched.
 

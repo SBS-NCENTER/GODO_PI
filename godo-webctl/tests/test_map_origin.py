@@ -1,9 +1,9 @@
 """
 Track B-MAPEDIT-2 — `map_origin.apply_origin_edit` unit tests.
 
-12 baseline cases per planner §5.1 + T2 parametrized theta tokens + T3
-parametrized whitespace variants. Sign convention is ADD (operator-locked
-2026-04-30 KST).
+Sign convention is SUBTRACT (issue#27, operator-locked 2026-05-04 KST,
+supersedes the 2026-04-30 ADD spec). PICK#2 / PICK#3 regression pins
+encode the operator-supplied HIL data points.
 """
 
 from __future__ import annotations
@@ -26,8 +26,13 @@ def _write_yaml_bytes(path: Path, body: bytes) -> None:
     path.write_bytes(body)
 
 
-# 1. absolute happy path — round-trip + on-disk byte change
-def test_apply_origin_edit_absolute_happy_path(tmp_path: Path) -> None:
+# 1. absolute happy path — SUBTRACT sign convention pin (issue#27,
+# operator-locked 2026-05-04 KST). Supersedes the 2026-04-30 ADD lock.
+def test_apply_origin_edit_absolute_subtracts_typed(tmp_path: Path) -> None:
+    """SUBTRACT semantic: typed (x_m, y_m) names the world coord that
+    should become the new origin. So:
+        new_yaml_origin = old_yaml_origin - typed
+    """
     yaml = tmp_path / "studio_v1.yaml"
     _write_yaml(
         yaml,
@@ -36,27 +41,59 @@ def test_apply_origin_edit_absolute_happy_path(tmp_path: Path) -> None:
     )
     result = map_origin.apply_origin_edit(yaml, 0.32, -0.18, "absolute")
     assert result.prev_origin == (-1.5, -2.0, 0.0)
-    assert result.new_origin == (0.32, -0.18, 0.0)
+    # SUBTRACT: new_origin = old - typed = (-1.5 - 0.32, -2.0 - (-0.18))
+    assert result.new_origin[0] == pytest.approx(-1.82)
+    assert result.new_origin[1] == pytest.approx(-1.82)
+    assert result.new_origin[2] == 0.0
     text = yaml.read_text("utf-8")
-    assert "origin: [0.32, -0.18, 0.0]" in text
+    assert "origin: [-1.82, -1.82, 0.0]" in text
     # Other lines unchanged.
     assert "image: studio_v1.pgm" in text
     assert "resolution: 0.05" in text
     assert "occupied_thresh: 0.65" in text
 
 
-# 2. delta happy path — ADD sign convention pin (operator-locked 2026-04-30 KST)
-def test_apply_origin_edit_delta_happy_path(tmp_path: Path) -> None:
+# 2. PICK#2 regression pin — operator HIL data point 2026-05-03 KST.
+def test_apply_origin_edit_absolute_subtracts_pose_pick_2(tmp_path: Path) -> None:
+    """PICK#2 historical data — operator HIL 2026-05-03 KST.
+
+    Pre-state: old_origin=(2.01, 8.56), old_pose=(12.87, 15.49).
+    Operator types absolute (7.86, 18.34).
+
+    Backend produces:
+      new_yaml_origin = old_yaml_origin - typed = (2.01 - 7.86, 8.56 - 18.34)
+                     = (-5.85, -9.78)
+    Resulting pose (computed by tracker after restart):
+      new_pose = old_pose - typed = (12.87 - 7.86, 15.49 - 18.34)
+              = (5.01, -2.85)
+    """
     yaml = tmp_path / "studio_v1.yaml"
-    _write_yaml(yaml, "origin: [-1.5, -2.0, 0.0]\n")
-    result = map_origin.apply_origin_edit(yaml, 0.32, -0.18, "delta")
-    # ADD: new = prev + typed
-    assert result.prev_origin == (-1.5, -2.0, 0.0)
-    expected_x = -1.5 + 0.32
-    expected_y = -2.0 + (-0.18)
-    assert result.new_origin[0] == pytest.approx(expected_x)
-    assert result.new_origin[1] == pytest.approx(expected_y)
-    assert result.new_origin[2] == 0.0
+    _write_yaml(yaml, "origin: [2.01, 8.56, 0.0]\n")
+    result = map_origin.apply_origin_edit(yaml, 7.86, 18.34, "absolute")
+    # 5 mm tolerance accounts for AMCL noise (converge_xy_std_m default 0.015).
+    expected_origin = (-5.85, -9.78)
+    assert result.new_origin[0] == pytest.approx(expected_origin[0], abs=0.005)
+    assert result.new_origin[1] == pytest.approx(expected_origin[1], abs=0.005)
+
+
+# 3. PICK#3 regression pin — operator HIL data point 2026-05-03 KST.
+def test_apply_origin_edit_absolute_subtracts_pose_pick_3(tmp_path: Path) -> None:
+    """PICK#3 historical data — operator HIL 2026-05-03 KST.
+
+    Pre-state: old_origin=(7.86, 18.34), old_pose=(18.72, 25.27).
+    Operator types absolute (10.32, 28.86).
+
+    Backend produces:
+      new_yaml_origin = (7.86 - 10.32, 18.34 - 28.86) = (-2.46, -10.52)
+    Resulting pose:
+      new_pose = (18.72 - 10.32, 25.27 - 28.86) = (8.40, -3.59)
+    """
+    yaml = tmp_path / "studio_v1.yaml"
+    _write_yaml(yaml, "origin: [7.86, 18.34, 0.0]\n")
+    result = map_origin.apply_origin_edit(yaml, 10.32, 28.86, "absolute")
+    expected_origin = (-2.46, -10.52)
+    assert result.new_origin[0] == pytest.approx(expected_origin[0], abs=0.005)
+    assert result.new_origin[1] == pytest.approx(expected_origin[1], abs=0.005)
 
 
 # 3 (T2 fold) — theta passthrough byte-for-byte over a parametrized set of
@@ -82,6 +119,8 @@ def test_apply_origin_edit_preserves_theta_byte_for_byte(tmp_path: Path, theta_s
 
 # 4. all non-origin lines preserved byte-for-byte (diff is exactly 1 line)
 def test_apply_origin_edit_preserves_other_yaml_keys_byte_for_byte(tmp_path: Path) -> None:
+    """Use a non-zero typed value so the SUBTRACT-rewritten origin line
+    actually differs from the original."""
     yaml = tmp_path / "studio_v1.yaml"
     original = (
         "# This is a comment line\n"
@@ -95,7 +134,7 @@ def test_apply_origin_edit_preserves_other_yaml_keys_byte_for_byte(tmp_path: Pat
         "\n"  # trailing blank
     )
     _write_yaml(yaml, original)
-    map_origin.apply_origin_edit(yaml, 0.0, 0.0, "absolute")
+    map_origin.apply_origin_edit(yaml, 0.5, 0.5, "absolute")
     new_lines = yaml.read_text("utf-8").splitlines(keepends=True)
     old_lines = original.splitlines(keepends=True)
     diffs = [(i, o, n) for i, (o, n) in enumerate(zip(old_lines, new_lines, strict=True)) if o != n]
@@ -193,8 +232,10 @@ def test_module_does_not_import_maps() -> None:
     assert "import godo_webctl.maps" not in text
 
 
-# 13. round-trip precision — high-precision input survives `.10g` format
+# 13. round-trip precision — high-precision input survives `repr()` format.
 def test_apply_origin_edit_round_trip_precision(tmp_path: Path) -> None:
+    """SUBTRACT semantic: new = old - typed. Pre-state old=(0, 0); typed
+    high-precision values land on disk as their negatives."""
     yaml = tmp_path / "studio_v1.yaml"
     _write_yaml(yaml, "origin: [0.0, 0.0, 0.0]\n")
     high_precision_x = 1.234567890123
@@ -208,8 +249,10 @@ def test_apply_origin_edit_round_trip_precision(tmp_path: Path) -> None:
     assert m is not None, f"no origin line: {text!r}"
     parsed_x = float(m.group(1))
     parsed_y = float(m.group(2))
-    assert abs(parsed_x - high_precision_x) < 1e-10
-    assert abs(parsed_y - high_precision_y) < 1e-10
+    # SUBTRACT: new = 0 - typed = -typed. Round-trip via repr() must
+    # preserve full mantissa.
+    assert abs(parsed_x - (-high_precision_x)) < 1e-10
+    assert abs(parsed_y - (-high_precision_y)) < 1e-10
 
 
 # 14 (T3 fold) — origin line whitespace variants
@@ -225,12 +268,14 @@ def test_apply_origin_edit_round_trip_precision(tmp_path: Path) -> None:
 def test_apply_origin_edit_origin_line_whitespace_variants(
     tmp_path: Path, origin_line: str
 ) -> None:
+    """SUBTRACT semantic: typed (0, 0) leaves the origin unchanged
+    (`new = old - 0 = old`)."""
     yaml = tmp_path / "studio_v1.yaml"
     body = f"image: foo.pgm\nresolution: 0.05\n{origin_line}\nfree_thresh: 0.196\n"
     _write_yaml(yaml, body)
     result = map_origin.apply_origin_edit(yaml, 0.0, 0.0, "absolute")
     assert result.prev_origin == (-1.5, -2.0, 0.0)
-    assert result.new_origin == (0.0, 0.0, 0.0)
+    assert result.new_origin == (-1.5, -2.0, 0.0)
     new_text = yaml.read_text("utf-8")
     assert "image: foo.pgm" in new_text
     assert "free_thresh: 0.196" in new_text
@@ -241,21 +286,92 @@ def test_apply_origin_edit_preserves_crlf_line_endings(tmp_path: Path) -> None:
     yaml = tmp_path / "studio_v1.yaml"
     body = b"image: foo.pgm\r\norigin: [-1.5, -2.0, 0.0]\r\nfree_thresh: 0.196\r\n"
     _write_yaml_bytes(yaml, body)
+    # SUBTRACT semantic: typed (0, 0) leaves origin unchanged → bytes
+    # equal modulo the origin line's exact rewrite shape.
     map_origin.apply_origin_edit(yaml, 0.0, 0.0, "absolute")
     new_bytes = yaml.read_bytes()
     # Other lines retain their CRLF endings.
     assert b"image: foo.pgm\r\n" in new_bytes
     assert b"free_thresh: 0.196\r\n" in new_bytes
-    # Origin line also CRLF (we preserve the original line ending).
-    assert b"origin: [0.0, 0.0, 0.0]\r\n" in new_bytes
+    # Origin line also CRLF (we preserve the original line ending). With
+    # typed=(0,0) under SUBTRACT, new_origin == prev_origin so the origin
+    # line bytes are byte-identical post-rewrite.
+    assert b"origin: [-1.5, -2.0, 0.0]\r\n" in new_bytes
 
 
-# 16. delta computed value out of bound → BadOriginValue
-def test_apply_origin_edit_delta_overflow_raises(tmp_path: Path) -> None:
+# 16. SUBTRACT-computed value out of bound → BadOriginValue
+def test_apply_origin_edit_subtract_overflow_raises(tmp_path: Path) -> None:
+    """SUBTRACT semantic: new = old - typed. Pre-state old at the
+    positive bound; subtracting a large negative typed pushes the new
+    value over the positive bound."""
     yaml = tmp_path / "studio_v1.yaml"
-    # prev origin is at the bound; adding a positive delta tips it over.
     near_bound = ORIGIN_X_Y_ABS_MAX_M - 10.0
     _write_yaml(yaml, f"origin: [{near_bound}, 0.0, 0.0]\n")
     with pytest.raises(map_origin.BadOriginValue) as exc_info:
-        map_origin.apply_origin_edit(yaml, 100.0, 0.0, "delta")
+        # typed=-100 → new = (near_bound) - (-100) = near_bound + 100 → out of bound.
+        map_origin.apply_origin_edit(yaml, -100.0, 0.0, "absolute")
     assert "abs_value_exceeds_bound" in str(exc_info.value)
+
+
+# --- issue#27 — theta editing tests ---------------------------------------
+
+
+def test_apply_origin_edit_theta_passthrough_byte_stable_when_theta_deg_none(
+    tmp_path: Path,
+) -> None:
+    """Mode-A M3 fold pin: when ``theta_deg=None`` (existing callers,
+    public /api/map/origin path before the SPA frontend lands), the
+    theta token bytes are byte-identical pre/post."""
+    yaml = tmp_path / "studio_v1.yaml"
+    # 5° in radians at full f64 precision.
+    theta_str = "0.087266462599716474"
+    _write_yaml(yaml, f"origin: [0.0, 0.0, {theta_str}]\n")
+    pre_bytes = yaml.read_bytes()
+    map_origin.apply_origin_edit(yaml, 0.0, 0.0, "absolute", theta_deg=None)
+    # Origin line bytes byte-identical: typed=(0,0) leaves x/y same;
+    # theta_deg=None preserves theta token verbatim.
+    post_bytes = yaml.read_bytes()
+    assert post_bytes == pre_bytes, (
+        f"byte drift on theta passthrough: {pre_bytes!r} → {post_bytes!r}"
+    )
+
+
+def test_apply_origin_edit_theta_deg_writes_radians(tmp_path: Path) -> None:
+    """When ``theta_deg`` is supplied, the theta token is replaced by
+    `repr(theta_deg * pi / 180)` (radians). ROS map_server convention."""
+    import math as _math
+    yaml = tmp_path / "studio_v1.yaml"
+    _write_yaml(yaml, "origin: [0.0, 0.0, 0.0]\n")
+    map_origin.apply_origin_edit(yaml, 0.0, 0.0, "absolute", theta_deg=5.0)
+    text = yaml.read_text("utf-8")
+    expected_rad = repr(5.0 * (_math.pi / 180.0))
+    assert expected_rad in text
+
+
+def test_apply_origin_edit_theta_deg_zero_writes_zero(tmp_path: Path) -> None:
+    """0° → 0.0 rad. The exact serialised form is `repr(0.0)` = `'0.0'`,
+    which collides with the original token — but we still write through
+    the rewrite path (NOT the passthrough), so the operator's intent
+    (`theta_deg=0`) is recorded."""
+    yaml = tmp_path / "studio_v1.yaml"
+    _write_yaml(yaml, "origin: [0.0, 0.0, 1.5707963267948966]\n")  # was 90°
+    map_origin.apply_origin_edit(yaml, 0.0, 0.0, "absolute", theta_deg=0.0)
+    text = yaml.read_text("utf-8")
+    # The 90°-rad token must be replaced by 0.0.
+    assert "1.5707963267948966" not in text
+    assert "origin: [0.0, 0.0, 0.0]" in text
+
+
+def test_apply_origin_edit_theta_deg_non_finite_raises(tmp_path: Path) -> None:
+    """NaN / Infinity in theta_deg → BadOriginValue."""
+    yaml = tmp_path / "studio_v1.yaml"
+    _write_yaml(yaml, "origin: [0.0, 0.0, 0.0]\n")
+    with pytest.raises(map_origin.BadOriginValue) as ei:
+        map_origin.apply_origin_edit(
+            yaml, 0.0, 0.0, "absolute", theta_deg=float("nan"),
+        )
+    assert "non_finite_theta_deg" in str(ei.value)
+    with pytest.raises(map_origin.BadOriginValue):
+        map_origin.apply_origin_edit(
+            yaml, 0.0, 0.0, "absolute", theta_deg=float("inf"),
+        )

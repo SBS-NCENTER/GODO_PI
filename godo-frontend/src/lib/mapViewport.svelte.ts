@@ -270,9 +270,24 @@ export interface MapViewport {
   /**
    * One-shot at the FACTORY level: the first call captures
    * `window.innerHeight` AT THAT MOMENT and freezes minZoom; every
-   * subsequent call is a NO-OP regardless of caller.
+   * subsequent call is a NO-OP regardless of caller. `canvasW` /
+   * `canvasH` are optional fallbacks used when the caller has measured
+   * the actual canvas via `getBoundingClientRect()` (per the
+   * 2026-05-02 KST operator UX fix — see the implementation comment).
    */
-  setMapDims(width: number, height: number): void;
+  setMapDims(width: number, height: number, canvasW?: number, canvasH?: number): void;
+
+  /**
+   * issue#27 (Mode-A M2 fold) — shared hover-coord state.
+   * `<MapUnderlay/>` consumes `hoverWorld` to render the top-right
+   * coord overlay; overlay layers (`<MapMaskCanvas/>`, `<PoseHintLayer/>`)
+   * call `setHoverWorld` in their pointer-move handlers and
+   * `setHoverWorld(null)` on pointer-leave so the coord stays visible
+   * regardless of which layer captures the event. Pattern matches
+   * `viewport.zoom`/`panX`/`panY` ownership.
+   */
+  readonly hoverWorld: { x: number; y: number } | null;
+  setHoverWorld(wx: number | null, wy?: number): void;
 
   // --- pure-helper passthroughs (Mode-A M4 — single math SSOT) ---
   worldToCanvas(
@@ -304,6 +319,9 @@ export function createMapViewport(): MapViewport {
   let _mapH = $state(0);
   // Factory-internal idempotency (Mode-A M5). NOT exposed to callers.
   let _dimsCaptured = false;
+  // issue#27 — shared hover-coord state, owned by the factory so any
+  // overlay layer can push and the underlay can render.
+  let _hoverWorld = $state<{ x: number; y: number } | null>(null);
 
   return {
     get zoom() {
@@ -419,6 +437,16 @@ export function createMapViewport(): MapViewport {
       const c = panClamp(_panX, _panY, _mapW, _mapH, viewportW, viewportH, _zoom);
       _panX = c.panX;
       _panY = c.panY;
+    },
+    get hoverWorld() {
+      return _hoverWorld;
+    },
+    setHoverWorld(wx: number | null, wy?: number): void {
+      if (wx === null || wy === undefined) {
+        _hoverWorld = null;
+        return;
+      }
+      _hoverWorld = { x: wx, y: wy };
     },
   };
 }

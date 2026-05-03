@@ -1,6 +1,7 @@
 - [CODEBASE.md SSOT freshness + cascade rule](feedback_codebase_md_freshness.md) — per-stack CODEBASE.md files reflect final shape before commit/merge/push; root CODEBASE.md / DESIGN.md update only when the family shape shifts (no duplicate invariant text across levels).
 - [NEXT_SESSION.md is a cache, not a SSOT](feedback_next_session_cache_role.md) — SSOT-docs = RAM, NEXT_SESSION = cache. 3-step absorb routine (read → record in SSOT → prune the NEXT_SESSION item).
 - [Repo topology and multi-machine workflow](project_repo_topology.md) — SSOT = SBS-NCENTER/GODO_PI (company); chunbay/GODO is a mirror only. Three hosts: Mac, Windows, RPi5 (via SSH).
+- [Origin pick — SUBTRACT semantic locked](feedback_subtract_semantic_locked.md) — issue#27 (2026-05-04 KST) supersedes the 2026-04-30 ADD lock. Typed (x_m, y_m) names the world coord that should become the new (0, 0); backend computes new_yaml_origin = old_yaml_origin - typed. SPA resolves delta → absolute frontend-side. Pinned by PICK#2/#3 HIL data.
 - [CLAUDE.md stays concise](feedback_claudemd_concise.md) — CLAUDE.md is a short guide; detailed analyses go into separate reference docs with back-links.
 - [Project overview](project_overview.md) — GODO = RPi 5 single binary (LiDAR localization + FreeD merge + 59.94 fps UDP). Map built once via Docker. Details in SYSTEM_DESIGN.md.
 - [Test-session naming](project_test_sessions.md) — TS4 = Windows bench (2026-04-21). TS5 = 부조정실 chroma studio (production environment). Archive at `/prototype/Python/out/TS<N>/`.

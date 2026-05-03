@@ -50,6 +50,11 @@ CMD_GET_LAST_POSE: Final[str] = "get_last_pose"
 # rt_types.hpp; LAST_SCAN_HEADER_FIELDS below is regex-pinned against
 # that source by tests/test_protocol.py.
 CMD_GET_LAST_SCAN: Final[str] = "get_last_scan"
+# issue#27 — `get_last_output` UDS command. Field-name SSOT is the format
+# string in production/RPi5/src/uds/json_mini.cpp::format_ok_output;
+# LAST_OUTPUT_FIELDS below is regex-pinned against that source by
+# tests/test_protocol.py.
+CMD_GET_LAST_OUTPUT: Final[str] = "get_last_output"
 # PR-DIAG (Track B-DIAG) — uds_server.cpp `get_jitter` / `get_amcl_rate`
 # branches. Field-name SSOT is the format strings in
 # production/RPi5/src/uds/json_mini.cpp::format_ok_jitter +
@@ -132,6 +137,32 @@ LAST_POSE_FIELDS: Final[tuple[str, ...]] = (
     "iterations",
     "converged",
     "forced",
+    "published_mono_ns",
+)
+
+# --- issue#27: get_last_output response field order ---------------------
+# SOLE Python mirror of the field names embedded in the C++ wire format
+# string `format_ok_output`. Order MUST match production/RPi5/src/uds/
+# json_mini.cpp::format_ok_output verbatim. tests/test_protocol.py
+# regex-extracts the JSON keys from the format string and asserts
+# byte-equal — drift fails the pin.
+#
+# The 6 transformed channels (x_m, y_m, z_m, pan_deg, tilt_deg, roll_deg)
+# carry the post-AMCL-merge + post-output-transform values being sent to
+# UE; zoom + focus are pass-through raw u24 cast to double. `valid` and
+# `published_mono_ns` mirror the LastPose envelope semantics.
+#
+# `ok` is intentionally NOT in this tuple (JSON-level success flag).
+LAST_OUTPUT_FIELDS: Final[tuple[str, ...]] = (
+    "valid",
+    "x_m",
+    "y_m",
+    "z_m",
+    "pan_deg",
+    "tilt_deg",
+    "roll_deg",
+    "zoom",
+    "focus",
     "published_mono_ns",
 )
 
@@ -674,6 +705,11 @@ def encode_get_last_pose() -> bytes:
 def encode_get_last_scan() -> bytes:
     """Canonical wire encoding of the Track D ``get_last_scan`` request."""
     return b'{"cmd":"get_last_scan"}\n'
+
+
+def encode_get_last_output() -> bytes:
+    """Canonical wire encoding of the issue#27 ``get_last_output`` request."""
+    return b'{"cmd":"get_last_output"}\n'
 
 
 def encode_get_jitter() -> bytes:

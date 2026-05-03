@@ -68,7 +68,7 @@ def test_project_config_view_ignores_sibling_fields() -> None:
 def test_project_schema_view_real_source() -> None:
     rows = schema_mod.load_schema()
     out = view_mod.project_schema_view(rows)
-    assert len(out) == 53
+    assert len(out) == 68
     # issue#12 — webctl.* rows surface in the projected view.
     names = [r["name"] for r in out]
     assert "webctl.pose_stream_hz" in names

@@ -228,7 +228,7 @@ TEST_CASE("apply_set: write to non-existent parent → write_failed; live_cfg un
     CHECK_FALSE(fs::exists(toml));
 }
 
-TEST_CASE("apply_get_all returns 53 keys, alphabetical, valid JSON-ish") {
+TEST_CASE("apply_get_all returns 68 keys, alphabetical, valid JSON-ish") {
     Config live_cfg = Config::make_default();
     std::mutex mtx;
     const std::string body = apply_get_all(live_cfg, mtx);
@@ -236,8 +236,9 @@ TEST_CASE("apply_get_all returns 53 keys, alphabetical, valid JSON-ish") {
     CHECK_FALSE(body.empty());
     CHECK(body.front() == '{');
     CHECK(body.back()  == '}');
-    // Count commas as "key separators" — exactly 52 between 53 items
-    // (issue#10.1 added serial.lidar_udev_serial on top of issue#16.1's 52).
+    // Count commas as "key separators" — exactly 67 between 68 items
+    // (issue#27 added 12 output_transform.* + 3 origin_step.* on top of
+    // issue#10.1's 53).
     int commas = 0;
     int depth = 0;
     bool in_str = false;
@@ -249,7 +250,7 @@ TEST_CASE("apply_get_all returns 53 keys, alphabetical, valid JSON-ish") {
             else if (c == ',' && depth == 1) ++commas;
         }
     }
-    CHECK(commas == 52);
+    CHECK(commas == 67);
     // First key (alphabetical): "amcl.anneal_iters_per_phase" (Track D-5).
     CHECK(body.find("\"amcl.anneal_iters_per_phase\":") != std::string::npos);
     // issue#3 — hint default rows.
@@ -276,7 +277,7 @@ TEST_CASE("apply_get_all returns 53 keys, alphabetical, valid JSON-ish") {
     CHECK(body.find("\"webctl.scan_stream_hz\":") != std::string::npos);
 }
 
-TEST_CASE("apply_get_schema returns 53-element JSON array") {
+TEST_CASE("apply_get_schema returns 68-element JSON array") {
     const std::string body = apply_get_schema();
     CHECK(body.front() == '[');
     CHECK(body.back()  == ']');
@@ -291,7 +292,7 @@ TEST_CASE("apply_get_schema returns 53-element JSON array") {
             else if (c == ',' && depth == 1) ++commas;
         }
     }
-    CHECK(commas == 52);
+    CHECK(commas == 67);
     // Spot-check schema field names.
     CHECK(body.find("\"reload_class\":\"hot\"")         != std::string::npos);
     CHECK(body.find("\"reload_class\":\"restart\"")     != std::string::npos);
@@ -575,4 +576,107 @@ TEST_CASE("apply_set then apply_get_all reflects post-edit value") {
               live_cfg, mtx, hot_seq, toml, flag);
     const std::string snap = apply_get_all(live_cfg, mtx);
     CHECK(snap.find("\"smoother.deadband_mm\":33.5") != std::string::npos);
+}
+
+// issue#27 — strict {-1, +1} validator at the apply.cpp boundary.
+// Schema validator only enforces the relaxed [-1, +1] Int range; the
+// per-key rejecting-zero check lives at the consumer boundary
+// (feedback_relaxed_validator_strict_installer.md pattern).
+TEST_CASE("apply_set output_transform.x_sign accepts +1 and -1") {
+    TempDir td("xform_sign_ok");
+    Config live_cfg = Config::make_default();
+    std::mutex mtx;
+    Seqlock<HotConfig> hot_seq;
+    hot_seq.store(godo::core::snapshot_hot(live_cfg));
+    const auto toml = td.path / "tracker.toml";
+    const auto flag = td.path / "restart_pending";
+
+    auto r1 = apply_set("output_transform.x_sign", "1",
+                        live_cfg, mtx, hot_seq, toml, flag);
+    CHECK(r1.ok);
+    CHECK(live_cfg.output_transform_x_sign == 1);
+    auto r2 = apply_set("output_transform.x_sign", "-1",
+                        live_cfg, mtx, hot_seq, toml, flag);
+    CHECK(r2.ok);
+    CHECK(live_cfg.output_transform_x_sign == -1);
+}
+
+TEST_CASE("apply_set output_transform.x_sign rejects 0 with bad_value") {
+    TempDir td("xform_sign_zero");
+    Config live_cfg = Config::make_default();
+    std::mutex mtx;
+    Seqlock<HotConfig> hot_seq;
+    hot_seq.store(godo::core::snapshot_hot(live_cfg));
+    const auto toml = td.path / "tracker.toml";
+    const auto flag = td.path / "restart_pending";
+
+    const int pre = live_cfg.output_transform_x_sign;
+    auto r = apply_set("output_transform.x_sign", "0",
+                       live_cfg, mtx, hot_seq, toml, flag);
+    CHECK_FALSE(r.ok);
+    CHECK(r.err == "bad_value");
+    CHECK(r.err_detail.find("sign must be -1 or +1") != std::string::npos);
+    // live_cfg + TOML untouched.
+    CHECK(live_cfg.output_transform_x_sign == pre);
+    CHECK_FALSE(fs::exists(toml));
+}
+
+TEST_CASE("apply_set output_transform.*_sign — value 2 rejected by schema range") {
+    // Defence-in-depth: schema validator rejects |sign| > 1 BEFORE the
+    // strict {-1, +1} gate fires. So 2 surfaces as bad_value with the
+    // schema range message.
+    TempDir td("xform_sign_oor");
+    Config live_cfg = Config::make_default();
+    std::mutex mtx;
+    Seqlock<HotConfig> hot_seq;
+    hot_seq.store(godo::core::snapshot_hot(live_cfg));
+    const auto toml = td.path / "tracker.toml";
+    const auto flag = td.path / "restart_pending";
+
+    auto r = apply_set("output_transform.pan_sign", "2",
+                       live_cfg, mtx, hot_seq, toml, flag);
+    CHECK_FALSE(r.ok);
+    CHECK(r.err == "bad_value");
+}
+
+TEST_CASE("apply_set output_transform.x_offset_m round-trips through render_toml") {
+    TempDir td("xform_x_offset");
+    Config live_cfg = Config::make_default();
+    std::mutex mtx;
+    Seqlock<HotConfig> hot_seq;
+    hot_seq.store(godo::core::snapshot_hot(live_cfg));
+    const auto toml = td.path / "tracker.toml";
+    const auto flag = td.path / "restart_pending";
+
+    auto r = apply_set("output_transform.x_offset_m", "0.5",
+                       live_cfg, mtx, hot_seq, toml, flag);
+    CHECK(r.ok);
+    CHECK(live_cfg.output_transform_x_offset_m == doctest::Approx(0.5));
+    // Restart class — touched the pending flag.
+    CHECK(is_pending(flag));
+    // TOML round-trips.
+    const std::string body = read_file(toml);
+    CHECK(body.find("[output_transform]") != std::string::npos);
+    CHECK(body.find("x_offset_m = 0.5") != std::string::npos);
+}
+
+TEST_CASE("apply_set origin_step.x_m round-trips and survives default-defaults") {
+    // origin_step.* is a frontend-only consumer (the SPA reads it via
+    // /api/config). Tracker stores verbatim; no tracker logic path
+    // consumes the value.
+    TempDir td("origin_step_x");
+    Config live_cfg = Config::make_default();
+    std::mutex mtx;
+    Seqlock<HotConfig> hot_seq;
+    hot_seq.store(godo::core::snapshot_hot(live_cfg));
+    const auto toml = td.path / "tracker.toml";
+    const auto flag = td.path / "restart_pending";
+
+    auto r = apply_set("origin_step.x_m", "0.05",
+                       live_cfg, mtx, hot_seq, toml, flag);
+    CHECK(r.ok);
+    CHECK(live_cfg.origin_step_x_m == doctest::Approx(0.05));
+    const std::string body = read_file(toml);
+    CHECK(body.find("[origin_step]") != std::string::npos);
+    CHECK(body.find("x_m = 0.05") != std::string::npos);
 }

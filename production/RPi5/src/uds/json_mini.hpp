@@ -129,6 +129,16 @@ std::string format_ok_jitter(const godo::rt::JitterSnapshot& j);
 //   - valid                       → %u
 std::string format_ok_amcl_rate(const godo::rt::AmclIterationRate& r);
 
+// issue#27 — `get_last_output` response. Field order MUST match
+// `godo::rt::LastOutputFrame` declaration in core/rt_types.hpp; the
+// Python mirror godo-webctl/protocol.py::LAST_OUTPUT_FIELDS is regex-
+// pinned against the format string at test time. Precision split mirrors
+// format_ok_pose: %.6f for the 6 transformed channels (x/y/z/pan/tilt/
+// roll — µm / µdeg precision), %.4f for zoom/focus (raw u24 cast to
+// double; 4-decimal precision is far below operator interpretive
+// resolution), %llu for `published_mono_ns`, %u for the valid flag.
+std::string format_ok_output(const godo::rt::LastOutputFrame& f);
+
 // Track B-CONFIG (PR-CONFIG-α) — `set_config` reply. The `body_json`
 // argument is the pre-rendered JSON payload (see config/apply.cpp's
 // apply_get_all / apply_get_schema for the get-side encoders). On

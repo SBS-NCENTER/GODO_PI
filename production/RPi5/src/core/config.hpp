@@ -158,6 +158,38 @@ struct Config {
     int                 webctl_mapping_systemd_stop_timeout_s{};
     int                 webctl_mapping_webctl_stop_timeout_s{};
 
+    // issue#27 — final-output transform stage. Operator-tunable per-channel
+    // offset (real units: m for X/Y/Z, ° for Pan/Tilt/Roll) + sign (-1 or
+    // +1). Consumed by `udp::apply_output_transform_inplace` between the
+    // AMCL offset merge and `udp.send`. Reload class is Restart — the
+    // values are captured by const ref in `thread_d_rt` from the boot-time
+    // Config; mid-run hot-flip would race the SeqLock-published LastOutputFrame
+    // and is out of scope (operator restarts via SPA System tab).
+    // See production/RPi5/src/udp/output_transform.hpp for math + Roll byte
+    // position rationale.
+    double              output_transform_x_offset_m{};
+    double              output_transform_y_offset_m{};
+    double              output_transform_z_offset_m{};
+    double              output_transform_pan_offset_deg{};
+    double              output_transform_tilt_offset_deg{};
+    double              output_transform_roll_offset_deg{};
+    int                 output_transform_x_sign{};
+    int                 output_transform_y_sign{};
+    int                 output_transform_z_sign{};
+    int                 output_transform_pan_sign{};
+    int                 output_transform_tilt_sign{};
+    int                 output_transform_roll_sign{};
+
+    // issue#27 — OriginPicker +/- step. Frontend-only consumer (the SPA
+    // reads via /api/config so the Origin form's plus/minus buttons
+    // increment the candidate value by these deltas). Tracker stores
+    // verbatim through the apply / render_toml round-trip; no tracker
+    // logic path consumes these. Restart class for the same reason as
+    // the issue#12 webctl.* family.
+    double              origin_step_x_m{};
+    double              origin_step_y_m{};
+    double              origin_step_yaw_deg{};
+
     // Build a Config with defaults applied from core/config_defaults.hpp.
     static Config make_default();
 

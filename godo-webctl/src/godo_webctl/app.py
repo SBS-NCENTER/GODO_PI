@@ -136,6 +136,7 @@ from .protocol import (
     ERR_TRACKER_STOP_FAILED,
     EXTENDED_RESOURCES_FIELDS,
     JITTER_FIELDS,
+    LAST_OUTPUT_FIELDS,
     LAST_POSE_FIELDS,
     LAST_SCAN_HEADER_FIELDS,
     MAPPING_STATUS_FIELDS,
@@ -238,18 +239,23 @@ class ConfigPatchBody(BaseModel):
 
 
 class OriginPatchBody(BaseModel):
-    """`POST /api/map/origin` body (Track B-MAPEDIT-2).
+    """`POST /api/map/origin` body (Track B-MAPEDIT-2 + issue#27 theta).
 
     `mode` is a Pydantic `Literal` so a typo lands as 422 BEFORE the
     handler runs. NaN / ±Inf are guarded by the explicit `math.isfinite`
     check inside `apply_origin_edit` (S5 fold: `math.isfinite` is the
     load-bearing check; Pydantic's `allow_inf_nan` is best-effort
     defence-in-depth).
+
+    issue#27 — `theta_deg` is optional. When omitted the YAML theta token
+    is preserved byte-for-byte (existing contract). When supplied the
+    value is converted to radians and written via `repr(theta_rad)`.
     """
 
     x_m: float = Field(...)
     y_m: float = Field(...)
     mode: Literal["absolute", "delta"] = Field(...)
+    theta_deg: float | None = Field(default=None)
 
 
 class MappingStartBody(BaseModel):
@@ -537,6 +543,13 @@ def _last_scan_view(resp: dict[str, object]) -> dict[str, object]:
     LAST_SCAN_HEADER_FIELDS so the SPA can iterate the tuple if it wants
     the canonical ordering."""
     return {field: resp.get(field) for field in LAST_SCAN_HEADER_FIELDS}
+
+
+def _last_output_view(resp: dict[str, object]) -> dict[str, object]:
+    """issue#27 — projection through LAST_OUTPUT_FIELDS. Same shape as
+    `_last_pose_view`; the wire fields are the 8 channels emitted to UE
+    after `udp::apply_output_transform_inplace`."""
+    return {field: resp.get(field) for field in LAST_OUTPUT_FIELDS}
 
 
 def _jitter_view(resp: dict[str, object]) -> dict[str, object]:
@@ -1156,6 +1169,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 body.x_m,
                 body.y_m,
                 body.mode,
+                body.theta_deg,
             )
         except map_origin_mod.OriginEditError as e:
             return _map_origin_exc_to_response(e)
@@ -1217,6 +1231,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             media_type=_SSE_MEDIA_TYPE,
             headers=sse_mod.SSE_RESPONSE_HEADERS,
         )
+
+    # ---- /api/last_output (issue#27, anon read) ------------------------
+    @app.get("/api/last_output")
+    async def last_output() -> JSONResponse:
+        # Anonymous read OK — same envelope as /api/last_pose. The 8
+        # channels reported here are the actual values being sent to UE
+        # after `udp::apply_output_transform_inplace`.
+        try:
+            resp = await uds_mod.call_uds(client.get_last_output, cfg.health_uds_timeout_s)
+        except uds_mod.UdsError as e:
+            return _map_uds_exc_to_response(e)
+        return JSONResponse(_last_output_view(resp), status_code=HTTPStatus.OK)
 
     # ---- /api/last_scan -------------------------------------------------
     # Track D: live LIDAR overlay data source. Anonymous read (Track F);

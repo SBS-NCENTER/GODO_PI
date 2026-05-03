@@ -508,7 +508,7 @@ User 결정 fold-in: 새 frontend 도입을 계기로 top-level 디렉토리를 
 
 | 채널 | URL | rate | payload |
 |---|---|---|---|
-| Last pose | `/api/last_pose/stream` | 5 Hz | `LastPose` JSON (Track B schema) |
+| Last pose + output | `/api/last_pose/stream` | 5 Hz | issue#27 wrap-and-version: `{pose: <LastPose>, output: <LastOutputFrame>}`. Either branch may be a `{valid:0, err:<exc>}` sentinel on UDS failure. SPA stores `lastPose` + `lastOutput` unwrap independently; `<LastPoseCard/>` renders both as a 2-section card (LiDAR raw + 8-channel "Final output (UDP)"). Mounted on `/dashboard`, `/map`, `/map-edit`. |
 | Last scan | `/api/last_scan/stream` | 5 Hz | `LastScan` JSON (Track D schema) |
 | Diagnostics combined (있음) | `/api/diag/stream` | 5 Hz | `{pose, jitter, amcl_rate, resources}` (PR-DIAG; Mode-A M2 fold renamed scan_rate) |
 | Service status | `/api/local/services/stream` | 1 Hz | systemctl status 3개 |

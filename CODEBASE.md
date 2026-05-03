@@ -64,6 +64,7 @@ Auxiliary stacks (not part of the runtime triangle):
 - `src/amcl/` — Adaptive Monte Carlo Localization (in-house, ~1k LOC). Sigma annealing, particle filter, likelihood field, scan ops.
 - `src/rt/` — Hot-path scheduler (`SCHED_FIFO`, CPU 3 pinned, `mlockall`, `clock_nanosleep(TIMER_ABSTIME)`), pose double-buffer, smoother.
 - `src/io/` — UDP sink (FreeD→UE), UDS server (`/run/godo/ctl.sock`), JSON encoder/decoder (`json_mini`).
+- `src/udp/output_transform.{hpp,cpp}` — issue#27 sole-owner stage that applies operator-tunable per-channel offset + sign to the FreeD packet AFTER `apply_offset_inplace` (AMCL merge) and BEFORE `udp.send`. Six channels (X/Y/Z/Pan/Tilt/Roll) with `final = sign * (raw + offset)`; Zoom/Focus pass-through. Decodes back into a `LastOutputFrame` SeqLock for the SPA's "Final output (UDP)" readout. See `production/RPi5/CODEBASE.md` invariant (v).
 - `src/cold/` — Cold-path threads (one-shot calibrate, live tracking, cold writer with deadband + tripwire).
 - `src/ipc/` — Restart-pending sentinel reader/clearer (boot-time clear), service control surface.
 - Tests live next to sources under `tests/`. `pytest` is NOT used (this is C++).

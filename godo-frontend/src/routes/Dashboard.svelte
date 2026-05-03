@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
+  import LastPoseCard from '$components/LastPoseCard.svelte';
   import ModeChip from '$components/ModeChip.svelte';
   import { ApiError, apiGet, apiPost } from '$lib/api';
   import {
@@ -7,18 +8,16 @@
     BACKUP_FLASH_DISMISS_MS,
     DASHBOARD_REFRESH_MS,
   } from '$lib/constants';
-  import { formatDegrees, formatMeters, formatTimeOfDay } from '$lib/format';
+  import { formatTimeOfDay } from '$lib/format';
   import {
     MODE_IDLE,
     MODE_LIVE,
     type ActivityEntry,
     type Health,
-    type LastPose,
     type LiveResponse,
     type Mode,
   } from '$lib/protocol';
   import { auth } from '$stores/auth';
-  import { subscribeLastPose } from '$stores/lastPose';
   import { setModeOptimistic, subscribeMode } from '$stores/mode';
 
   let session = $state($auth);
@@ -29,7 +28,6 @@
   let isAdmin = $derived(session?.role === 'admin');
 
   let mode = $state<Mode | null>(null);
-  let pose = $state<LastPose | null>(null);
   let activity = $state<ActivityEntry[]>([]);
   let health = $state<Health | null>(null);
   let actionError = $state<string | null>(null);
@@ -41,7 +39,6 @@
   let busy = $state(false);
 
   let unsubMode: (() => void) | null = null;
-  let unsubPose: (() => void) | null = null;
   let activityTimer: ReturnType<typeof setInterval> | null = null;
 
   function showBackupFlash(kind: 'ok' | 'error', text: string): void {
@@ -118,7 +115,6 @@
 
   onMount(() => {
     unsubMode = subscribeMode((m) => (mode = m));
-    unsubPose = subscribeLastPose((p) => (pose = p));
     void refreshActivity();
     void refreshHealth();
     activityTimer = setInterval(() => {
@@ -129,7 +125,6 @@
 
   onDestroy(() => {
     unsubMode?.();
-    unsubPose?.();
     if (activityTimer !== null) clearInterval(activityTimer);
     if (backupFlashTimer !== null) clearTimeout(backupFlashTimer);
   });
@@ -184,21 +179,8 @@
     {/if}
   </div>
 
-  <div class="card" style="margin-top: 16px;">
-    <h3>Last pose</h3>
-    {#if pose && pose.valid}
-      <div class="hstack">
-        <span>x: {formatMeters(pose.x_m)}</span>
-        <span>y: {formatMeters(pose.y_m)}</span>
-        <span>yaw: {formatDegrees(pose.yaw_deg)}</span>
-        <span class="muted">σ_xy: {formatMeters(pose.xy_std_m)}</span>
-        {#if pose.converged}
-          <span class="chip ok">converged</span>
-        {/if}
-      </div>
-    {:else}
-      <div class="muted">no valid pose yet</div>
-    {/if}
+  <div style="margin-top: 16px;">
+    <LastPoseCard />
   </div>
 
   <div class="card" style="margin-top: 16px;">

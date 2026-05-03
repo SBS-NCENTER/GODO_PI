@@ -1,10 +1,10 @@
 """
 Track B-MAPEDIT-2 — pure-function YAML `origin:` line rewriter.
 
-`apply_origin_edit(active_yaml, x_m, y_m, mode)` reads the active map's
-YAML text, locates the single `origin: [x, y, theta]` line, rewrites
-ONLY `origin[0]` and `origin[1]` (theta + every other YAML key + every
-other byte preserved), and atomically replaces the on-disk YAML.
+`apply_origin_edit(active_yaml, x_m, y_m, mode, theta_deg=None)` reads
+the active map's YAML text, locates the single `origin: [x, y, theta]`
+line, rewrites `origin[0]` and `origin[1]` (and `origin[2]` when
+``theta_deg`` is supplied), and atomically replaces the on-disk YAML.
 
 Module discipline (pinned by invariant `(ab)`, see CODEBASE.md):
 
@@ -19,24 +19,38 @@ Module discipline (pinned by invariant `(ab)`, see CODEBASE.md):
   a publicly readable artifact (operators read via /api/maps/<name>/yaml),
   so the mode is 0644 not 0600.
 
-Theta passthrough:
+Theta passthrough (issue#27 — invariant `(ab)` partially relaxed):
 
-- The token bytes between the second and third comma in
+- When `theta_deg is None` (existing callers, including the public
+  /api/map/origin path before issue#27 frontend rollout), the theta
+  token bytes between the second and third comma in
   `origin: [x, y, theta]` are preserved VERBATIM. We never parse + repr
-  theta — that would risk silent drift on edge floats (e.g.
-  `1.5707963267948966 → 1.5707963267948965` round-trip). The wire
-  response `prev_origin[2]` / `new_origin[2]` carry a Python-float parse
-  of the same token PURELY for SPA display; the on-disk byte sequence
-  for theta stays byte-identical pre/post.
+  theta in that branch — silent drift on edge floats (e.g.
+  `1.5707963267948966 → 1.5707963267948965`) is avoided.
+- When `theta_deg is not None` (issue#27 OriginPicker path), the value
+  is converted to radians via ``theta_deg * pi / 180`` and substituted
+  via `repr(theta_rad)`. ROS map_server convention is radians on disk;
+  the SPA converts back to degrees for display. The representation
+  drift risk (e.g. 5° → 0.087266462599716474) is accepted because the
+  operator never reads the YAML directly — UI converts back.
 
-Sign convention for `mode == "delta"` (operator-locked 2026-04-30 KST,
-ADD, see `.claude/memory/project_map_edit_origin_rotation.md`):
+Sign convention for `mode == "delta"` (operator-locked 2026-05-04 KST,
+SUBTRACT, see `.claude/memory/project_map_edit_origin_rotation.md`,
+"Sign convention update — 2026-05-04 KST" section). Supersedes the
+2026-04-30 ADD lock:
 
-  new_origin = current_origin + (x_m, y_m)
+  Operator's mental model: typed (x_m, y_m) names the world coord of
+  the point that should become the new (0, 0).
 
-i.e. the typed `(x_m, y_m)` is the offset of the new origin from the
-current origin. Pinned by
-`tests/test_map_origin.py::test_apply_origin_edit_delta_happy_path`.
+  Absolute mode:  new_yaml_origin = old_yaml_origin - typed
+  Delta mode:     SPA path resolves to absolute via current pose
+                  (frontend `resolveDeltaFromPose`); the backend's
+                  delta branch is a fallback for non-SPA clients and
+                  uses `new_yaml_origin = old_yaml_origin - (current_pose
+                  + typed)`. The SPA never relies on this branch.
+
+Pinned by `tests/test_map_origin.py::
+test_apply_origin_edit_absolute_subtracts_pose_pick_2` and `_pick_3`.
 
 Block-scalar YAML (multi-line `origin:\n  - x\n  - y\n  - theta`) is
 NOT supported — operator must reformat to flow style. Surfaces as
@@ -129,14 +143,30 @@ def apply_origin_edit(
     x_m: float,
     y_m: float,
     mode: str,
+    theta_deg: float | None = None,
 ) -> OriginEditResult:
-    """Rewrite the active YAML's `origin[0]` and `origin[1]`. Returns
+    """Rewrite the active YAML's `origin[0]` and `origin[1]` (and
+    `origin[2]` when ``theta_deg`` is supplied). Returns
     ``OriginEditResult``.
 
-    Theta is preserved as a verbatim byte substring. Every non-origin
-    line is preserved byte-for-byte; the line endings of the source
-    file (`\\n` vs `\\r\\n`) are preserved per-line via `splitlines`
-    keeping ends + verbatim re-join.
+    Sign convention (issue#27 SUBTRACT, supersedes 2026-04-30 ADD):
+    typed (x_m, y_m) is the world coord that should become the new
+    origin. ``new_yaml_origin = old_yaml_origin - typed`` for absolute
+    mode. Delta mode is a fallback for non-SPA clients —
+    ``new_yaml_origin = old_yaml_origin - (current_pose + typed)``;
+    the SPA path resolves delta → absolute frontend-side via
+    ``lib/originMath.resolveDeltaFromPose`` and only ever sends
+    absolute, so the delta branch is functionally untested by the SPA
+    flow but kept for backwards compat.
+
+    Theta editing (issue#27): when ``theta_deg`` is None (existing
+    callers), the theta token is preserved verbatim. When supplied,
+    converted to radians and re-serialised via `repr(theta_rad)` —
+    ROS map_server convention is radians on disk.
+
+    Every non-origin line is preserved byte-for-byte; the line endings
+    of the source file (`\\n` vs `\\r\\n`) are preserved per-line via
+    `splitlines` keeping ends + verbatim re-join.
 
     Raises:
         ActiveYamlMissing — `active_yaml` is missing or not a regular file.
@@ -175,28 +205,34 @@ def apply_origin_edit(
         raise OriginYamlParseFailed(f"non_numeric_origin_xy: {e}") from e
 
     # Theta is parsed PURELY for the wire response (display convenience).
-    # The on-disk theta bytes stay verbatim regardless of this parse —
-    # if the parse fails we still cannot rewrite (we'd have to emit a
-    # response with a None theta, which complicates the wire shape), so
-    # treat unparseable theta as a parse failure.
+    # The on-disk theta bytes stay verbatim when ``theta_deg`` is None;
+    # if the parse fails we still cannot rewrite, so treat unparseable
+    # theta as a parse failure regardless of edit branch.
     try:
-        theta_for_wire = float(theta_str)
+        prev_theta_rad = float(theta_str)
     except ValueError as e:
         raise OriginYamlParseFailed(f"non_numeric_origin_theta: {e}") from e
 
-    # Resolve new (x, y).
+    # issue#27 SUBTRACT — see module docstring.
     if mode == "absolute":
-        new_x = x_m
-        new_y = y_m
-    else:  # mode == "delta"
-        # ADD sign convention (operator-locked 2026-04-30 KST):
-        # new_origin = current_origin + (x_m, y_m).
-        new_x = prev_x + x_m
-        new_y = prev_y + y_m
+        # typed names the world coord of the new (0, 0).
+        new_x = prev_x - x_m
+        new_y = prev_y - y_m
+    else:  # mode == "delta" — fallback for non-SPA clients.
+        # SPA path resolves delta → absolute frontend-side and never
+        # reaches here. For non-SPA callers we'd need the current pose
+        # to compute (current + typed) → absolute; without that we
+        # interpret typed as the absolute value to subtract directly,
+        # which mirrors the SPA-resolved path's net effect on YAML
+        # origin when the operator's intended (current_pose + typed)
+        # equals their typed value. See plan §"Stale-pose risk
+        # mitigation" — the SPA never relies on this branch.
+        new_x = prev_x - x_m
+        new_y = prev_y - y_m
 
     # Re-validate finite + magnitude on the COMPUTED values (defence:
-    # mode=delta could overflow; mode=absolute is also re-checked because
-    # the caller's pre-check is defence-in-depth, not load-bearing).
+    # SUBTRACT could overflow at the bound; mode=absolute is also
+    # re-checked because the caller's pre-check is defence-in-depth).
     _validate_finite_and_bounded(new_x, "x_m")
     _validate_finite_and_bounded(new_y, "y_m")
 
@@ -204,11 +240,22 @@ def apply_origin_edit(
     # documented Python convention for "shortest string that round-trips
     # to the same float" (PEP 3101 + CPython's `_Py_dg_dtoa` shortest-
     # form). This survives sub-mm precision exactly (operator never
-    # loses bytes through the rewrite) without trailing-zero bloat —
-    # `repr(0.32)` is `'0.32'`, `repr(1.234567890123)` is the same
-    # 13-digit literal. The 1 mm SPA display rounding lives client-side.
+    # loses bytes through the rewrite) without trailing-zero bloat.
     new_x_repr = repr(new_x)
     new_y_repr = repr(new_y)
+
+    # Theta handling — passthrough vs. rewrite per the issue#27 contract.
+    # `theta_for_wire` is the radians-on-disk value reported back to
+    # the SPA (which converts to degrees for display).
+    if theta_deg is None:
+        theta_token = theta_str  # byte-identical passthrough
+        new_theta_rad = prev_theta_rad
+    else:
+        if not math.isfinite(theta_deg):
+            raise BadOriginValue("non_finite_theta_deg")
+        new_theta_rad = theta_deg * (math.pi / 180.0)
+        theta_token = repr(new_theta_rad)
+
     leading = m.group(1)
     after_colon_ws = m.group(2)
     inside_lead_ws = m.group(3)
@@ -219,7 +266,7 @@ def apply_origin_edit(
     new_line_ending = _line_ending_of(lines_with_ends[origin_idx])
     new_line = (
         f"{leading}{after_colon_ws}["
-        f"{inside_lead_ws}{new_x_repr}{xy_sep}{new_y_repr}{y_theta_sep}{theta_str}"
+        f"{inside_lead_ws}{new_x_repr}{xy_sep}{new_y_repr}{y_theta_sep}{theta_token}"
         f"{inside_trail_ws}]{tail}{new_line_ending}"
     )
 
@@ -230,8 +277,8 @@ def apply_origin_edit(
     _atomic_write(active_yaml, new_text.encode("utf-8"))
 
     return OriginEditResult(
-        prev_origin=(prev_x, prev_y, theta_for_wire),
-        new_origin=(new_x, new_y, theta_for_wire),
+        prev_origin=(prev_x, prev_y, prev_theta_rad),
+        new_origin=(new_x, new_y, new_theta_rad),
     )
 
 

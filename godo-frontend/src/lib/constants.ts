@@ -338,6 +338,21 @@ export const ORIGIN_DECIMAL_DISPLAY_MM = 3;
 // pacing so the operator sees the success banner before /map opens.
 export const ORIGIN_PICK_REDIRECT_DELAY_MS = 3000;
 
+// issue#27 — OriginPicker +/- step defaults. Mirror of the C++ schema
+// row defaults (`origin_step.x_m`, `.y_m`, `.yaw_deg`). The SPA reads
+// the live values from /api/config when mounted; these constants are
+// the fallback shown before the fetch resolves (or when /api/config
+// fails). Kept in sync by inspection — drift would mean the operator
+// sees a different step pre/post-fetch, harmless but inconsistent.
+export const ORIGIN_STEP_X_M_DEFAULT = 0.01;
+export const ORIGIN_STEP_Y_M_DEFAULT = 0.01;
+export const ORIGIN_STEP_YAW_DEG_DEFAULT = 0.1;
+
+// issue#27 — theta input bound mirror. The schema's
+// `amcl.origin_yaw_deg` row bounds [-180, 180]; mirror in the SPA so
+// the input rejects out-of-bound values before the backend's 400.
+export const ORIGIN_THETA_DEG_ABS_MAX = 180.0;
+
 // --- Track B-CONFIG PR-C — per-row apply-result marker TTL ------------
 // After Apply finishes, ✓ / ✗ glyphs render next to each row's input.
 // The markers auto-clear after this delay; 2 s is half the System

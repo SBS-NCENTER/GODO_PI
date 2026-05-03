@@ -732,6 +732,41 @@ Notes pinned by the skeleton:
 - CPU affinity, rtprio, and RAM period all come from `Config`; no
   magic numbers in the function body. See §11.
 
+#### 6.2.2 Final-output transform stage (issue#27, 2026-05-04 KST)
+
+Inserted between `apply_offset_inplace` (AMCL merge) and `send_udp`:
+
+```text
+FreedPacket out = latest_freed.load();
+apply_offset_inplace(out, smoother.live());     // AMCL → world delta merge
+apply_output_transform_inplace(out, output_xform); // operator per-channel sign + offset
+LastOutputFrame snap = decode_last_output_from_packet(out);
+snap.published_mono_ns = monotonic_ns();
+snap.valid = 1;
+last_output_seq.store(snap);                    // SeqLock for SPA readout
+udp.send(out);                                  // 60 Hz to UE
+```
+
+The transform applies `final = sign * (raw + offset)` per channel, in
+scaled-double space, across X/Y/Z (1/64 mm/lsb) and Pan/Tilt/Roll
+(1/32768°/lsb). Zoom + Focus pass-through (raw u24 bytes preserved).
+Reload class is **Restart** — values are captured by const ref in
+`thread_d_rt` from boot-time `Config` (no SeqLock-published transform
+fields; mid-run hot-flip would race the post-transform `LastOutputFrame`
+publish).
+
+Roll byte position: the FreeD D1 spec lists bytes 9-11 as "Reserved
+Data" but SHOTOKU emits a non-zero constant there and PIXOTOPE-side
+decoders treat it as Roll; per-LSB scale assumed equal to Pan/Tilt's
+1/32768° (operator can correct via `output_transform.roll_*` schema
+rows if PIXOTOPE-side decode differs). See
+`production/RPi5/src/udp/output_transform.hpp` for the rationale.
+
+The post-transform `LastOutputFrame` flows over UDS (`get_last_output`)
+to the SPA's `<LastPoseCard/>` "Final output (UDP)" 8-channel grid,
+giving operators visibility into the actual values being sent to UE
+without re-implementing the wire decode in the SPA.
+
 ### 6.2.1 UDS bootstrap path (issue#18, 2026-05-03)
 
 `main()`'s pre-thread-spawn boot sequence — between `Config::load` and

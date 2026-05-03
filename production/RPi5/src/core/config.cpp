@@ -103,6 +103,25 @@ const std::set<std::string>& allowed_keys() {
         "webctl.mapping_systemctl_subprocess_timeout_s",
         "webctl.mapping_systemd_stop_timeout_s",
         "webctl.mapping_webctl_stop_timeout_s",
+        // issue#27 — final-output transform (12 rows) + OriginPicker
+        // step (3 rows). The transform rows are consumed by Thread D's
+        // `apply_output_transform_inplace`; the origin_step rows are
+        // frontend-only consumers (SPA's <OriginPicker/> +/- buttons).
+        "origin_step.x_m",
+        "origin_step.y_m",
+        "origin_step.yaw_deg",
+        "output_transform.x_offset_m",
+        "output_transform.y_offset_m",
+        "output_transform.z_offset_m",
+        "output_transform.pan_offset_deg",
+        "output_transform.tilt_offset_deg",
+        "output_transform.roll_offset_deg",
+        "output_transform.x_sign",
+        "output_transform.y_sign",
+        "output_transform.z_sign",
+        "output_transform.pan_sign",
+        "output_transform.tilt_sign",
+        "output_transform.roll_sign",
     };
     return k;
 }
@@ -246,6 +265,23 @@ void apply_toml_file(Config& c, const std::filesystem::path& path) {
     if (auto v = tbl["webctl"]["mapping_systemctl_subprocess_timeout_s"].value<int64_t>();v) c.webctl_mapping_systemctl_subprocess_timeout_s = static_cast<int>(*v);
     if (auto v = tbl["webctl"]["mapping_systemd_stop_timeout_s"].value<int64_t>();        v) c.webctl_mapping_systemd_stop_timeout_s        = static_cast<int>(*v);
     if (auto v = tbl["webctl"]["mapping_webctl_stop_timeout_s"].value<int64_t>();         v) c.webctl_mapping_webctl_stop_timeout_s         = static_cast<int>(*v);
+
+    // issue#27 — final-output transform + OriginPicker step.
+    if (auto v = tbl["output_transform"]["x_offset_m"].value<double>();    v) c.output_transform_x_offset_m    = *v;
+    if (auto v = tbl["output_transform"]["y_offset_m"].value<double>();    v) c.output_transform_y_offset_m    = *v;
+    if (auto v = tbl["output_transform"]["z_offset_m"].value<double>();    v) c.output_transform_z_offset_m    = *v;
+    if (auto v = tbl["output_transform"]["pan_offset_deg"].value<double>();v) c.output_transform_pan_offset_deg  = *v;
+    if (auto v = tbl["output_transform"]["tilt_offset_deg"].value<double>();v) c.output_transform_tilt_offset_deg = *v;
+    if (auto v = tbl["output_transform"]["roll_offset_deg"].value<double>();v) c.output_transform_roll_offset_deg = *v;
+    if (auto v = tbl["output_transform"]["x_sign"].value<int64_t>();       v) c.output_transform_x_sign         = static_cast<int>(*v);
+    if (auto v = tbl["output_transform"]["y_sign"].value<int64_t>();       v) c.output_transform_y_sign         = static_cast<int>(*v);
+    if (auto v = tbl["output_transform"]["z_sign"].value<int64_t>();       v) c.output_transform_z_sign         = static_cast<int>(*v);
+    if (auto v = tbl["output_transform"]["pan_sign"].value<int64_t>();     v) c.output_transform_pan_sign       = static_cast<int>(*v);
+    if (auto v = tbl["output_transform"]["tilt_sign"].value<int64_t>();    v) c.output_transform_tilt_sign      = static_cast<int>(*v);
+    if (auto v = tbl["output_transform"]["roll_sign"].value<int64_t>();    v) c.output_transform_roll_sign      = static_cast<int>(*v);
+    if (auto v = tbl["origin_step"]["x_m"].value<double>();                v) c.origin_step_x_m   = *v;
+    if (auto v = tbl["origin_step"]["y_m"].value<double>();                v) c.origin_step_y_m   = *v;
+    if (auto v = tbl["origin_step"]["yaw_deg"].value<double>();            v) c.origin_step_yaw_deg = *v;
 }
 
 // Linear search over the envp array.
@@ -973,6 +1009,23 @@ Config Config::make_default() {
     c.webctl_mapping_systemctl_subprocess_timeout_s = cfg_defaults::WEBCTL_MAPPING_SYSTEMCTL_SUBPROCESS_TIMEOUT_S_DEFAULT;
     c.webctl_mapping_systemd_stop_timeout_s        = cfg_defaults::WEBCTL_MAPPING_SYSTEMD_STOP_TIMEOUT_S_DEFAULT;
     c.webctl_mapping_webctl_stop_timeout_s         = cfg_defaults::WEBCTL_MAPPING_WEBCTL_STOP_TIMEOUT_S_DEFAULT;
+
+    // issue#27 — final-output transform + OriginPicker step defaults.
+    c.output_transform_x_offset_m       = cfg_defaults::OUTPUT_TRANSFORM_X_OFFSET_M_DEFAULT;
+    c.output_transform_y_offset_m       = cfg_defaults::OUTPUT_TRANSFORM_Y_OFFSET_M_DEFAULT;
+    c.output_transform_z_offset_m       = cfg_defaults::OUTPUT_TRANSFORM_Z_OFFSET_M_DEFAULT;
+    c.output_transform_pan_offset_deg   = cfg_defaults::OUTPUT_TRANSFORM_PAN_OFFSET_DEG_DEFAULT;
+    c.output_transform_tilt_offset_deg  = cfg_defaults::OUTPUT_TRANSFORM_TILT_OFFSET_DEG_DEFAULT;
+    c.output_transform_roll_offset_deg  = cfg_defaults::OUTPUT_TRANSFORM_ROLL_OFFSET_DEG_DEFAULT;
+    c.output_transform_x_sign           = cfg_defaults::OUTPUT_TRANSFORM_X_SIGN_DEFAULT;
+    c.output_transform_y_sign           = cfg_defaults::OUTPUT_TRANSFORM_Y_SIGN_DEFAULT;
+    c.output_transform_z_sign           = cfg_defaults::OUTPUT_TRANSFORM_Z_SIGN_DEFAULT;
+    c.output_transform_pan_sign         = cfg_defaults::OUTPUT_TRANSFORM_PAN_SIGN_DEFAULT;
+    c.output_transform_tilt_sign        = cfg_defaults::OUTPUT_TRANSFORM_TILT_SIGN_DEFAULT;
+    c.output_transform_roll_sign        = cfg_defaults::OUTPUT_TRANSFORM_ROLL_SIGN_DEFAULT;
+    c.origin_step_x_m                   = cfg_defaults::ORIGIN_STEP_X_M_DEFAULT;
+    c.origin_step_y_m                   = cfg_defaults::ORIGIN_STEP_Y_M_DEFAULT;
+    c.origin_step_yaw_deg               = cfg_defaults::ORIGIN_STEP_YAW_DEG_DEFAULT;
 
     return c;
 }

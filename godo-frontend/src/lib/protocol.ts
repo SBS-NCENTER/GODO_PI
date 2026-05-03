@@ -48,6 +48,50 @@ export interface LastPose {
   converged: boolean;
   forced: boolean;
   published_mono_ns: number;
+  /** issue#27 SSE wrap — sentinel field set by sse.py when the
+   * sub-fetch failed. */
+  err?: string;
+}
+
+// --- issue#27 — LastOutputFrame mirror ----------------------------------
+// Tuple order MUST match `godo-webctl/src/godo_webctl/protocol.py::
+// LAST_OUTPUT_FIELDS` exactly (the backend regex-pins the Python tuple
+// against the C++ format string at test time; this TS mirror is hand-
+// pinned by inspection).
+export const LAST_OUTPUT_FIELDS = [
+  'valid',
+  'x_m',
+  'y_m',
+  'z_m',
+  'pan_deg',
+  'tilt_deg',
+  'roll_deg',
+  'zoom',
+  'focus',
+  'published_mono_ns',
+] as const;
+
+export interface LastOutputFrame {
+  valid: number; // 0 | 1
+  x_m: number;
+  y_m: number;
+  z_m: number;
+  pan_deg: number;
+  tilt_deg: number;
+  roll_deg: number;
+  zoom: number;
+  focus: number;
+  published_mono_ns: number;
+  err?: string;
+}
+
+// issue#27 — wrap-and-version SSE frame from /api/last_pose/stream.
+// Either sub-payload may be a `{valid: 0, err: <ExceptionClass>}`
+// sentinel if its UDS round-trip failed; the SPA renders that sub-card
+// as "unavailable" while keeping the other live.
+export interface LastPoseStreamFrame {
+  pose: LastPose;
+  output: LastOutputFrame;
 }
 
 // --- LastScan (Track D schema, mirrors backend LAST_SCAN_HEADER_FIELDS) --
@@ -492,10 +536,16 @@ export const ERR_ACTIVE_YAML_MISSING = 'active_yaml_missing';
 export type OriginMode = 'absolute' | 'delta';
 
 // POST /api/map/origin request body.
+//
+// issue#27 — `theta_deg` is optional. When omitted (existing public
+// API contract before the OriginPicker theta input lands), the YAML
+// theta token is preserved byte-for-byte by the backend. When supplied
+// the value is converted to radians and written via `repr(theta_rad)`.
 export interface OriginPatchBody {
   x_m: number;
   y_m: number;
   mode: OriginMode;
+  theta_deg?: number;
 }
 
 // POST /api/map/origin success response. `prev_origin` and `new_origin`

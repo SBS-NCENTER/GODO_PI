@@ -3492,3 +3492,106 @@ for the CP2102N USB CDC stale-state race observed during issue#14 HIL):
 - godo-webctl runtime code is unmodified — the new schema row reaches
   operators through the existing `/api/config/*` schema-driven pipeline
   (the SPA renders the row from the `/api/config/schema` payload).
+
+## 2026-05-04 KST — issue#27: SUBTRACT origin semantic + theta editing + LastOutput SSE wrap
+
+### Added
+
+- `protocol.py::CMD_GET_LAST_OUTPUT` + `LAST_OUTPUT_FIELDS` (10-tuple
+  mirroring `production/RPi5/src/uds/json_mini.cpp::format_ok_output`).
+  Drift-pinned at test time by regex-extracting the JSON keys from the
+  C++ format string (`tests/test_protocol.py::
+  test_last_output_fields_match_cpp_format_ok_output`).
+- `protocol.py::encode_get_last_output()` — canonical wire encoder
+  (`{"cmd":"get_last_output"}\n`).
+- `uds_client.py::UdsClient.get_last_output(timeout)` — round-trip
+  wrapper mirroring `get_last_pose`. Reply is small (~200 B); standard
+  4 KiB read cap fits.
+- `app.py::GET /api/last_output` — anonymous-readable REST endpoint
+  mirroring `/api/last_pose`. Projects through `LAST_OUTPUT_FIELDS`.
+- `app.py::OriginPatchBody.theta_deg: float | None` — optional theta
+  parameter for the issue#27 OriginPicker. None = preserve YAML byte-
+  for-byte (existing contract); supplied = backend converts to radians
+  and rewrites `repr(theta_rad)` token.
+
+### Changed
+
+- `sse.py::last_pose_stream` — wrap-and-version (issue#27 Mode-A C2
+  lock): each frame is now `{"pose": {<LastPose fields>},
+  "output": {<LastOutputFrame fields>}}`. Either sub-payload may be a
+  `{"valid": 0, "err": "<exception_class>"}` sentinel if its UDS
+  round-trip failed (per `_sentinel_for_error` precedent in
+  `diag_stream`). Uses `asyncio.gather(..., return_exceptions=True)`
+  for parallel pose + output round-trips bounded on slowest, not sum.
+- `map_origin.py::apply_origin_edit` — SUBTRACT semantic
+  (`new_yaml_origin = old_yaml_origin - typed`) supersedes the
+  2026-04-30 ADD lock (`new = old + typed`). SPA path resolves delta →
+  absolute frontend-side via `lib/originMath.resolveDeltaFromPose`;
+  backend's delta branch is a fallback for non-SPA clients and uses the
+  same SUBTRACT formula directly. `theta_deg=None` preserves theta
+  token byte-for-byte; supplied → `repr(theta_deg * pi / 180)` written.
+- `config_schema.py::EXPECTED_ROW_COUNT` 53 → 68 (issue#27 added 12
+  `output_transform.*` + 3 `origin_step.*` schema rows). Module
+  docstring + tests updated in lockstep.
+
+### Tests
+
+- New: `tests/test_protocol.py::test_last_output_fields_match_cpp_format_ok_output`
+  + `test_encode_get_last_output_byte_exact` + `test_cmd_get_last_output_matches_cpp`.
+- New: `tests/test_uds_client.py::test_get_last_output_happy` +
+  `test_get_last_output_sends_canonical_bytes` +
+  `test_get_last_output_server_rejected_propagates`.
+- New: `tests/test_sse.py::test_last_pose_stream_emits_pose_and_output_wrap`
+  + `test_last_pose_stream_pose_unavailable_emits_sentinel` +
+  `test_last_pose_stream_output_unavailable_emits_sentinel`. Existing
+  cadence/keepalive/cancellation tests updated to provide canned
+  output payload alongside pose.
+- New: `tests/test_config_schema_parity.py::
+  test_output_transform_rows_present` (12 rows × type/range/default/reload)
+  + `test_origin_step_rows_present` (3 rows). `test_sections_match_design`
+  bumped 8 → 10 sections.
+- Modified: `tests/test_map_origin.py` — `test_apply_origin_edit_absolute_subtracts_typed`
+  replaces the prior absolute-happy-path test (now SUBTRACT).
+  `test_apply_origin_edit_absolute_subtracts_pose_pick_2` +
+  `_pick_3` add the operator HIL data points (5 mm tolerance for
+  AMCL noise). `test_apply_origin_edit_theta_passthrough_byte_stable_when_theta_deg_none`
+  pins the issue#27 invariant (ab) refinement. `test_apply_origin_edit_theta_deg_writes_radians`
+  + `_zero_writes_zero` + `_non_finite_raises` cover the new theta path.
+  `test_apply_origin_edit_subtract_overflow_raises` replaces the prior
+  delta-overflow test under the new sign convention.
+- Modified: `tests/test_app_integration.py::
+  test_get_config_schema_returns_68_rows` (renamed; was 53). Map-origin
+  happy-path tests updated to reflect SUBTRACT result values.
+- Modified: `tests/test_config_schema.py::
+  test_load_schema_real_source_returns_68_rows` (renamed; was 53).
+  `test_parse_rejects_short_row_count` bumped 53 → 68.
+- Modified: `tests/test_config_view.py::test_project_schema_view_real_source`
+  count bumped 53 → 68.
+- Full Python suite: 972/972 pass (excluding hardware-required
+  `test_app_hardware_tracker.py` which needs a running tracker).
+
+### Invariants
+
+- **(ab) origin-yaml-theta-passthrough — issue#27 partial relax.** The
+  prior invariant (theta token bytes preserved verbatim regardless of
+  caller) holds ONLY when `theta_deg=None` is passed to
+  `apply_origin_edit`. When `theta_deg` is supplied, the function
+  converts to radians and rewrites the token via `repr(theta_rad)`,
+  accepting the float→str round-trip risk explicitly. ROS map_server
+  convention is radians on disk; SPA converts back to degrees for
+  display so the operator never sees the raw value. Pinned by
+  `tests/test_map_origin.py::
+  test_apply_origin_edit_theta_passthrough_byte_stable_when_theta_deg_none`
+  (passthrough branch) + `_writes_radians` (rewrite branch).
+- **(ac) last-output-fields-regex-pinned-against-cpp** — issue#27.
+  `protocol.py::LAST_OUTPUT_FIELDS` MUST match the JSON keys emitted by
+  `production/RPi5/src/uds/json_mini.cpp::format_ok_output` byte-for-
+  byte. `tests/test_protocol.py::
+  test_last_output_fields_match_cpp_format_ok_output` regex-extracts
+  the keys from the format string and asserts tuple-equal. Mirror of
+  invariant (b) for `LAST_POSE_FIELDS`.
+- **Sign convention (operator-locked 2026-05-04 KST, SUBTRACT).** Spec
+  memory: `.claude/memory/feedback_subtract_semantic_locked.md`. Typed
+  `(x_m, y_m)` names the world coord that should become the new
+  `(0, 0)`. Backend computes `new_yaml_origin = old_yaml_origin -
+  typed`. SPA always sends absolute; delta resolves frontend-side.

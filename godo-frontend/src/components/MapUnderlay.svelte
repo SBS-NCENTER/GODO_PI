@@ -97,7 +97,9 @@
   let dragging = false;
   let dragStartX = 0;
   let dragStartY = 0;
-  let hoverWorld = $state<{ x: number; y: number } | null>(null);
+  // issue#27 — hover-coord lives on the shared viewport (M2 fold), so
+  // overlays (mask, pose-hint) can push their own pointer-move
+  // coordinates without losing the always-on top-right readout.
   let meta = $state<MapMetadata | null>(null);
   let metaError = $state<string | null>(null);
   const _metaUnsub = mapMetadata.subscribe((v) => {
@@ -273,12 +275,12 @@
     if (canvas) {
       const rect = canvas.getBoundingClientRect();
       const [wx, wy] = canvasToWorld(e.clientX - rect.left, e.clientY - rect.top);
-      hoverWorld = { x: wx, y: wy };
+      viewport.setHoverWorld(wx, wy);
     }
   }
   function onMouseLeave(): void {
     dragging = false;
-    hoverWorld = null;
+    viewport.setHoverWorld(null);
   }
 
   /**
@@ -386,9 +388,9 @@
     onmouseleave={onMouseLeave}
     onwheel={onWheel}
   ></canvas>
-  {#if hoverWorld}
+  {#if viewport.hoverWorld}
     <div class="hover-coord muted" data-testid="hover-coord">
-      ({hoverWorld.x.toFixed(2)} m, {hoverWorld.y.toFixed(2)} m)
+      ({viewport.hoverWorld.x.toFixed(2)} m, {viewport.hoverWorld.y.toFixed(2)} m)
     </div>
   {/if}
   {#if mapLoadError}
@@ -424,7 +426,7 @@
   }
   .hover-coord {
     position: absolute;
-    bottom: 8px;
+    top: 8px;
     right: 8px;
     background: var(--color-bg-elev);
     padding: 2px 6px;

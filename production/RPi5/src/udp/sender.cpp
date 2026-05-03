@@ -16,6 +16,7 @@
 
 #include "core/constants.hpp"
 #include "freed/d1_parser.hpp"
+#include "udp/wire_codec.hpp"
 #include "yaw/yaw.hpp"
 
 namespace godo::udp {
@@ -23,25 +24,8 @@ namespace godo::udp {
 namespace {
 
 using namespace godo::constants;
-
-// Decode a 24-bit big-endian signed integer from `b[off..off+3)`.
-// Sign-extended from bit 23.
-std::int32_t decode_signed24_be(const std::byte* b) noexcept {
-    const std::uint32_t u =
-        (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(b[0])) << 16) |
-        (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(b[1])) <<  8) |
-         static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(b[2]));
-    // Sign-extend from 24 bits.
-    const std::uint32_t sign = (u & 0x00800000U) ? 0xFF000000U : 0U;
-    return static_cast<std::int32_t>(u | sign);
-}
-
-void encode_signed24_be(std::byte* b, std::int32_t v) noexcept {
-    const std::uint32_t u = static_cast<std::uint32_t>(v) & 0x00FFFFFFU;
-    b[0] = static_cast<std::byte>((u >> 16) & 0xFFU);
-    b[1] = static_cast<std::byte>((u >>  8) & 0xFFU);
-    b[2] = static_cast<std::byte>((u      ) & 0xFFU);
-}
+using godo::udp::wire::decode_signed24_be;
+using godo::udp::wire::encode_signed24_be;
 
 bool is_all_zero(const godo::rt::FreedPacket& p) noexcept {
     for (auto b : p.bytes) {

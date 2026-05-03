@@ -59,6 +59,7 @@
 #include "rt/jitter_ring.hpp"
 #include "rt/rt_setup.hpp"
 #include "smoother/offset_smoother.hpp"
+#include "udp/output_transform.hpp"
 #include "udp/sender.hpp"
 #include "uds/uds_server.hpp"
 
@@ -67,6 +68,7 @@ using godo::rt::AmclRateAccumulator;
 using godo::rt::FreedPacket;
 using godo::rt::JitterRing;
 using godo::rt::JitterSnapshot;
+using godo::rt::LastOutputFrame;
 using godo::rt::LastPose;
 using godo::rt::LastScan;
 using godo::rt::Offset;
@@ -94,16 +96,36 @@ void thread_a_serial(const godo::core::Config& cfg,
     }
 }
 
-void thread_d_rt(const godo::core::Config& cfg,
-                 Seqlock<FreedPacket>&     latest_freed,
-                 Seqlock<Offset>&          target_offset,
-                 JitterRing&               jitter_ring) {
+void thread_d_rt(const godo::core::Config&    cfg,
+                 Seqlock<FreedPacket>&        latest_freed,
+                 Seqlock<Offset>&             target_offset,
+                 Seqlock<LastOutputFrame>&    last_output_seq,
+                 JitterRing&                  jitter_ring) {
     // Thread-local lifecycle stanza.
     godo::rt::setup::pin_current_thread_to_cpu(cfg.rt_cpu);
     godo::rt::setup::set_current_thread_fifo(cfg.rt_priority);
 
     godo::udp::UdpSender        udp(cfg.ue_host, cfg.ue_port);
     godo::smoother::OffsetSmoother smoother(cfg.t_ramp_ns);
+
+    // issue#27 — capture the output transform fields from the boot-time
+    // Config. Reload class is Restart; mid-run hot-flip is out of scope
+    // (would race the SeqLock-published LastOutputFrame). Operator
+    // restarts via SPA System tab to pick up updated sign + offset values.
+    const godo::udp::OutputTransform output_xform{
+        cfg.output_transform_x_offset_m,
+        cfg.output_transform_y_offset_m,
+        cfg.output_transform_z_offset_m,
+        cfg.output_transform_pan_offset_deg,
+        cfg.output_transform_tilt_offset_deg,
+        cfg.output_transform_roll_offset_deg,
+        cfg.output_transform_x_sign,
+        cfg.output_transform_y_sign,
+        cfg.output_transform_z_sign,
+        cfg.output_transform_pan_sign,
+        cfg.output_transform_tilt_sign,
+        cfg.output_transform_roll_sign,
+    };
 
     timespec next{};
     clock_gettime(CLOCK_MONOTONIC, &next);
@@ -120,6 +142,17 @@ void thread_d_rt(const godo::core::Config& cfg,
 
         FreedPacket out = p;
         godo::udp::apply_offset_inplace(out, live);
+        godo::udp::apply_output_transform_inplace(out, output_xform);
+
+        // issue#27 — publish the post-transform snapshot so the SPA's
+        // LastPoseCard can render the actual 8 channels being sent to
+        // UE. Thread D is the SOLE producer of last_output_seq; the UDS
+        // handler thread is the SOLE consumer (see CODEBASE.md (s)).
+        LastOutputFrame snap = godo::udp::decode_last_output_from_packet(out);
+        snap.published_mono_ns = static_cast<std::uint64_t>(now_ns);
+        snap.valid = 1;
+        last_output_seq.store(snap);
+
         udp.send(out);
 
         // PR-DIAG (TM4): record scheduling jitter for the diag publisher
@@ -229,7 +262,8 @@ void thread_uds(const godo::core::Config&                 cfg,
                 Seqlock<LastPose>&                        last_pose_seq,
                 Seqlock<LastScan>&                        last_scan_seq,
                 Seqlock<JitterSnapshot>&                  jitter_seq,
-                Seqlock<AmclIterationRate>&               amcl_rate_seq) {
+                Seqlock<AmclIterationRate>&               amcl_rate_seq,
+                Seqlock<LastOutputFrame>&                 last_output_seq) {
     godo::uds::UdsServer server(
         cfg.uds_socket,
         []() { return godo::rt::g_amcl_mode.load(std::memory_order_acquire); },
@@ -260,7 +294,8 @@ void thread_uds(const godo::core::Config&                 cfg,
                 godo::core::config_schema::reload_class_to_string(
                     ar.reload_class));
             return rep;
-        });
+        },
+        [&last_output_seq]() { return last_output_seq.load(); });
     try {
         server.open();
     } catch (const std::exception& e) {
@@ -430,6 +465,12 @@ int main(int argc, char** argv, char** envp) {
         last_scan_seq.store(init);
     }
 
+    // issue#27 — last final-output frame published by Thread D AFTER
+    // apply_offset_inplace + apply_output_transform_inplace. Consumed
+    // by the UDS `get_last_output` handler. Default-zero payload (valid=0)
+    // signals "no frame published yet" to clients.
+    Seqlock<LastOutputFrame> last_output_seq;
+
     // PR-DIAG — jitter + amcl_rate seqlocks owned by main; the diag
     // publisher thread is the SOLE writer (build-grep
     // [jitter-publisher-grep] enforces). Default-constructed payload
@@ -479,10 +520,12 @@ int main(int argc, char** argv, char** envp) {
                                std::ref(last_pose_seq),
                                std::ref(last_scan_seq),
                                std::ref(jitter_seq),
-                               std::ref(amcl_rate_seq));
+                               std::ref(amcl_rate_seq),
+                               std::ref(last_output_seq));
         t_d      = std::thread(thread_d_rt, std::cref(cfg),
                                std::ref(latest_freed),
                                std::ref(target_offset),
+                               std::ref(last_output_seq),
                                std::ref(jitter_ring));
         // PR-DIAG — diag publisher runs on SCHED_OTHER (no rt_setup
         // calls inside run_diag_publisher; pinned by code review per

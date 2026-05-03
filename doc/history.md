@@ -10,6 +10,90 @@
 
 ---
 
+## 2026-05-03 (오후 — 12:30 KST → 15:30 KST, 스무 번째 세션 — 분석 전용 세션, PR 없음, issue#11 + issue#26 두 차례 REJECT-rework — "측정-우선으로 방향 전환")
+
+### 한 줄 요약
+
+issue#11 Live pipelined-parallel deep dive + issue#26 측정 도구 plan을 한 세션에 풀 pipeline으로 두 번 돌렸고, 두 plan 모두 **Mode-A REJECT — 동일 root cause** (Planner가 source code 미검증으로 cached baseline 위에서 설계). 두 번째 REJECT 직전 운영자가 scope를 두 차례 전환 — (a) "OneShot calibrate은 Live와 달리 실시간성 요구 없음, 가속 목표에서 제외", (b) "측정-우선 — 부조정실 유선 LAN에서 RPi5↔MacBook endpoint latency 실측 도구 먼저 만들고 그 데이터로 architecture 결정". 코드 변경 0줄, PR 0개. 대신 분석 자료 + plan + Mode-A fold + memory 2개 신설 + `/doc/issue11_design_analysis.md` SSOT 신설.
+
+### 0개 PR
+
+| PR | issue# | 제목 | 결과 |
+|---|---|---|---|
+| (none) | — | (분석 전용 세션) | n/a |
+
+### 핵심 발견 #1 — `feedback_verify_before_plan.md` 가 가장 자주 어겨지는 메모리
+
+이번 세션에서 두 번 연속 같은 root cause로 Mode-A REJECT가 발생:
+
+**issue#11 round 1**:
+- Plan 가정: Live가 오늘 `K=1` per tick으로 돈다.
+- 실제: `K≈16` (`converge_anneal_with_hint` 3-phase σ-anneal × ≤10 iters/phase + early-exit + patience-2). HIL 측정값 "iters mode=16, max=21, mean=15.7"이 `config_defaults.hpp:138`의 주석에 명시되어 있음. Planner는 그 주석을 읽지 않음.
+- Plan 가정: `N=10000` particles.
+- 실제: `N=500` steady-state (`config_defaults.hpp:73`). 10000은 buffer ceiling, working population이 아님.
+
+**issue#26 round 1**:
+- Plan 가정: UDP target port `50001`.
+- 실제: `6666` (`config_schema.hpp:140` + `/var/lib/godo/tracker.toml`).
+- Plan 가정: chrony가 RPi5에서 동작 중.
+- 실제: systemd-timesyncd (chrony는 inactive). `systemctl is-active`로 검증.
+- Plan 가정: SSE endpoint `https://`.
+- 실제: `http://` (webctl는 평문 8080 listen). `curl -i`로 검증.
+- Plan 가정: "zero packet" checksum = `0x92`.
+- 실제: `0x6E`. Planner가 `(64 - sum) & 0xFF` 공식의 빼기 방향을 반대로 계산 (`0xD2 - 64` vs `64 - 0xD2`).
+
+두 Plan 모두 구조적으로는 sound했고, Planner 게으름이 아닌 검증 누락이 root cause. Planning brief에 "memory 작성 시점의 fact"가 들어가는데 Planner가 현재 코드와 다시 대조하지 않음. 열아홉 세션에서 잠근 `feedback_verify_before_plan.md`("brief에 'I already inspected X' 명시")는 **취지는 지켜지지만 실행 rigor가 모자라**. 운영자의 "extra-rigor 상호분석" 요구 덕분에 Mode-A의 ROI가 disproportionately 컸음 — 운영자 mandate가 없었으면 이 두 plan들은 wrong reference를 test suite에 박은 채 Writer까지 갔을 가능성 큼.
+
+### 핵심 발견 #2 — 운영자 "측정-우선" 결정이 일반적 엔지니어링 리듬을 뒤집음
+
+issue#11 round 1 REJECT 이후 운영자가 Path A (full rework) 선택 → Round 2 Planner 백그라운드 가동. Round 2 진행 중 운영자가 두 차례 scope 전환:
+
+**전환 1 (~14:00 KST)**: "OneShot calibrate은 Live와 다르게 단발성, 운영자가 ~500 ms 기다릴 수 있음. 가속 목표에서 제외하고 Live mode 실시간성에만 집중."
+- 함의: Round 1 + Round 2 plan 모두 Option C 추천의 부수효과로 "OneShot calibrate ~500 ms → ~150 ms"를 leverage했음. 이 효과가 가치 방정식에서 빠지면 Option C의 cross-applicability 스토리가 좁아짐 (남은 cross-site target은 EDT parallelization issue#19와 미래 Live 재평가).
+
+**전환 2 (~14:20 KST)**: "측정 먼저 — 부조정실 유선 LAN에서 RPi5와 MacBook 두 endpoint를 실측하는 도구를 따로 만들자. 그 데이터로 architecture 결정."
+- 함의: Round 2 Plan 결과물이 일부 obsolete (OneShot 가속이 더 이상 가치 아님). Parent는 Round 2를 file에 persist하지 않음. 대신 종합 분석을 `/doc/issue11_design_analysis.md`에 8개 섹션으로 SSOT화 (problem context / 5-architecture survey / Mode-A categorized findings / cross-analysis verdicts / operator direction shift / outstanding architectural questions / reading order / issue label reservations issue#19-26).
+
+운영자 결정은 일반적 엔지니어링 리듬을 뒤집음 — 보통 코드 ship → 측정 순서지만, 여기는 측정 인프라 ship → architecture 결정 순서. **5개 architecture 후보가 있고 round 1이 phantom baseline (K=1) 위에서 가짜 추정을 만들었으니, planning iteration을 또 burning하는 것보다 측정 먼저가 cheaper.** /doc reference doc은 round 3 Planner가 어떤 방향으로 가더라도 durable input으로 작동.
+
+### 핵심 발견 #3 — 4-timestamp NTP에서 path asymmetry는 구조적으로 unobservable
+
+issue#26 plan은 "asymmetric-path detector"를 5개 validation gate 중 하나로 포함. Mode-A가 재유도: 4-timestamp NTP protocol에서 post-correction forward delay와 reverse delay는 **construction에 의해 항상 같아짐** — 즉 detector는 수학적으로 vacuous. 진짜 asymmetry detection은 PTP HW timestamping, GPS PPS, 또는 known-symmetric ground truth가 있어야 가능. Mode-A reframe: "asymmetry detector"를 **"RTT-variance / minimum-RTT-stability detector"**로 변경 (WARN when `(rtt_p90 - rtt_p10) / rtt_p50 > 0.5`). Plan의 "ms 단위 cross-host alignment" 주장은 RTT/2로 bound되며 asymmetry estimate에 의존하지 않음을 명시. Lesson: 측정 도구의 마케팅 주장이 너무 좋아 보이면 (sub-ms cross-host alignment + asymmetry detection) 알고리즘적 근거를 challenge한 다음 test suite에 박기.
+
+### 운영자 결정 + 본 세션 산출물
+
+**운영자 결정**:
+- issue#11 — **분석 paused**, issue#26 데이터 들어온 뒤 round 3.
+- issue#26 — **round 2 deferred** to next-next session. 다음 세션은 issue#6 (B-MAPEDIT-3 yaw rotation + B-MAPEDIT-2 origin pick polish) 우선.
+- OneShot 가속은 가치 방정식에서 제외, Live만 실시간성 critical.
+- UDP target IP+port는 이미 SSOT (tracker.toml의 `network.ue_host` + `network.ue_port`); 측정 도구는 live config 읽기 + CLI postfix override. 운영자 내일 `ue_port = 50003`으로 업데이트할 수도 있고 아닐 수도.
+- 게이트웨이 NTP 서버 + in-tool 4-timestamp clock-sync 양쪽 다 사용 (게이트웨이가 baseline + drift 억제, in-tool이 per-run offset 기록).
+- 패킷 매칭은 last-N bytes + checksum로 lightweight하게.
+
+**산출물 (untracked, 운영자가 수동 commit 예정)**:
+- `.claude/tmp/plan_issue_11_live_pipelined_parallel.md` — Round 1 plan + Mode-A round 1 fold (Round 2는 obsolete으로 미persist).
+- `.claude/tmp/plan_issue_26_latency_measurement_tool.md` — Round 1 plan + Mode-A round 1 fold.
+- `/doc/issue11_design_analysis.md` (NEW, 8 섹션 SSOT).
+- `.claude/memory/project_issue11_analysis_paused.md` (NEW).
+- `.claude/memory/project_issue26_measurement_tool.md` (NEW).
+- `.claude/memory/MEMORY.md` (UPDATED).
+- `PROGRESS.md` + `doc/history.md` (이번 chronicler entry).
+
+### 다음 세션 큐 (운영자 잠금, 2026-05-03 15:30 KST)
+
+1. **★ issue#6 — B-MAPEDIT-3 yaw rotation + B-MAPEDIT-2 origin pick polish** (1순위, 다음 세션). SPA에서 즉시 검증 가능, 측정 데이터 의존성 없음. Spec: `.claude/memory/project_map_edit_origin_rotation.md`.
+2. **issue#26 round 2 + Writer + HIL** (issue#6 ship 후). 반나절. Plan + Mode-A round 1 fold가 `.claude/tmp/`에 있음. 운영자가 내일 회사에서 부조정실 유선 LAN에 직접 연결 후 HIL 진행.
+3. **issue#11 (paused)** — issue#26 첫 capture 들어온 뒤 round 3. Reading order: `.claude/memory/project_issue11_analysis_paused.md` → `/doc/issue11_design_analysis.md`.
+4. **issue#13 (continued)** — distance-weighted AMCL likelihood.
+5. **issue#4** — AMCL silent-converge diagnostic.
+6. **issue#17** — GPIO UART direct (perma-deferred).
+7. **Bug B** — Live mode standstill jitter (issue#11 결과로 흡수 가능성).
+8. **issue#7** — boom-arm angle masking (contingent on issue#4).
+
+**Next free issue integer: `issue#27`** (issue#19-25는 /doc/issue11_design_analysis.md §8의 missed-alternative follow-ups로 예약, issue#26은 측정 도구).
+
+---
+
 ## 2026-05-03 (오전 ~ 정오 — 09:30 KST → 12:07 KST, 열아홉 번째 세션 — issue#18 UDS bootstrap audit + issue#16.2 preview .tmp sweep — "전 세션 deferred TL;DR 두 건 깔끔히 정리")
 
 ### 한 줄 요약

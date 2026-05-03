@@ -135,6 +135,44 @@ def test_preview_path_rejects_traversal_via_invalidname(tmp_path: Path) -> None:
         M.preview_path(cfg, "../etc/passwd")
 
 
+# --- issue#16.2 preview .tmp sweep ---------------------------------------
+
+
+def test_sweep_preview_tmp_files_unlinks_stale_tmp(tmp_path: Path) -> None:
+    cfg = _settings(tmp_path)
+    preview_dir = cfg.maps_dir / ".preview"
+    stale_a = preview_dir / "studio_v1.pgm.tmp"
+    stale_b = preview_dir / "studio_v2.pgm.tmp"
+    stale_a.write_bytes(b"")
+    stale_b.write_bytes(b"")
+    M._sweep_preview_tmp_files(cfg)
+    assert not stale_a.exists()
+    assert not stale_b.exists()
+
+
+def test_sweep_preview_tmp_files_preserves_canonical_pgm(tmp_path: Path) -> None:
+    cfg = _settings(tmp_path)
+    preview_dir = cfg.maps_dir / ".preview"
+    stale_tmp = preview_dir / "studio_v1.pgm.tmp"
+    canonical = preview_dir / "studio_v1.pgm"
+    stale_tmp.write_bytes(b"orphan")
+    canonical.write_bytes(b"valid")
+    M._sweep_preview_tmp_files(cfg)
+    assert not stale_tmp.exists()
+    assert canonical.read_bytes() == b"valid"
+
+
+def test_sweep_preview_tmp_files_noop_when_preview_dir_missing(tmp_path: Path) -> None:
+    cfg = _settings(tmp_path)
+    (cfg.maps_dir / ".preview").rmdir()
+    M._sweep_preview_tmp_files(cfg)
+
+
+def test_sweep_preview_tmp_files_noop_when_no_tmp_present(tmp_path: Path) -> None:
+    cfg = _settings(tmp_path)
+    M._sweep_preview_tmp_files(cfg)
+
+
 # --- state.json round-trip + corrupt recovery -----------------------------
 
 

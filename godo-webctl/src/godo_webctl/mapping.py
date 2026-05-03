@@ -234,6 +234,28 @@ def preview_path(cfg: Settings, name: str) -> Path:
     return out
 
 
+def _sweep_preview_tmp_files(cfg: Settings) -> None:
+    """Best-effort cleanup of stale ``<name>.pgm.tmp`` files in the
+    preview directory.
+
+    issue#16.2 — ``godo-mapping/preview_node/preview_dumper.py`` atomic-
+    writes ``<name>.pgm`` via ``open(tmp) + fsync + os.replace``. SIGTERM
+    landing in the fsync window leaves the .tmp orphaned — no data loss
+    (the canonical .pgm is either the prior tick's full content or
+    absent), pure housekeeping. Sweep runs once per Phase 1 (under
+    flock) so each new mapping session starts with a clean preview dir.
+    """
+    preview_dir = cfg.maps_dir / MAPPING_PREVIEW_SUBDIR
+    if not preview_dir.is_dir():
+        return
+    for stale in preview_dir.glob("*.pgm.tmp"):
+        try:
+            stale.unlink()
+            logger.info("mapping.start: swept stale preview tmp %s", stale)
+        except OSError as e:
+            logger.warning("mapping.start: sweep failed for %s: %s", stale, e)
+
+
 # --- State persistence ---------------------------------------------------
 
 
@@ -658,6 +680,11 @@ def start(name: str, cfg: Settings) -> MappingStatus:
         current = _load_state(cfg)
         if current.state != MappingState.IDLE:
             raise MappingAlreadyActive(current.state.value)
+
+        # issue#16.2 — sweep stale ``<name>.pgm.tmp`` from prior crashed
+        # sessions before this session can write its own preview tmp.
+        # Best-effort housekeeping; never blocks start().
+        _sweep_preview_tmp_files(cfg)
 
         # Pre-flight: image present? Quick subprocess (~ms) — fine
         # under the flock. The expensive bits (tracker stop, systemctl

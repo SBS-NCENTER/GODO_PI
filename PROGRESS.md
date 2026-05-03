@@ -174,6 +174,48 @@ All host-side bring-up steps complete. See per-step session log entry below. The
 
 ## Session log
 
+### 2026-05-03 (late morning → noon — 09:30 KST → 12:07 KST, nineteenth-session — issue#18 UDS bootstrap audit ships + issue#16.2 preview .tmp sweep ships)
+
+Nineteenth-session opened directly off the eighteenth-session close (PR #74 docs merged 09:18 KST). Operator absorbed the eighteenth's deferred TL;DR #1 (UDS bootstrap audit, operator-locked priority) and TL;DR #2 (preview `.tmp` cleanup) in a focused ~2.5 h block, both squash-merged. PR #75 ran the FULL pipeline (planner → Mode-A → writer → Mode-B); PR #76 ran the ABBREVIATED pipeline (direct writer + Parent self-verify) per `feedback_pipeline_short_circuit.md`. Operator quote at session-close: "어제 mapping 관련 오류들 개선하니까 맵 제작 과정이 너무 쾌적하다 ㅎㅎ" — the cumulative effect of the issue#16 family (cp210x recovery + mapping stop ladder + udev `/dev/rplidar` + operator-tunable serial + preview `.tmp` sweep) and the issue#18 UDS hardening is now noticeably smoother in the production mapping workflow.
+
+**Notable structural revelation #1 — already-implemented discovery before delegating to Planner**: issue#18 spec (`.claude/memory/project_uds_bootstrap_audit.md`) listed MF1 atexit/destructor unlink as a fix to ship. Pre-Planner code inspection (`uds_server.cpp:103-105` destructor → `uds_server.cpp:502-515` `close()` → `unlink(socket_path_)` gated by `path_bound_=true`; `main.cpp:233` stack-allocated `UdsServer server(...)` inside `thread_uds`; `main.cpp:275-294` signal handler flips `g_running` so `server.run()` returns and stack unwinding fires destructor) showed MF1 was ALREADY wired via stack unwinding on graceful shutdown. Adding `atexit` would have duplicated the destructor path and created a redundant unlink race. Plan downgraded MF1 to "doc-only closure with one test pin + new CODEBASE invariant `(u)`". Lesson: when a memory file describes a fix to ship, ALWAYS verify the current code state first before delegating to Planner — saves a wasted plan iteration. Pattern is generalizable: the spec captures "what was true at the time of writing", not "what is true now".
+
+**Notable structural revelation #2 — helper-injection-for-testability over forcing-failure-or-mocks**: PR #75 Mode-A reviewer's Mi3 — to test the MF2 forensic logging path, the obvious approaches are (a) force `rename(2)` failure (chmod-as-root bypasses on test hosts running as root; EXDEV cross-fs requires gymnastics) or (b) introduce a mock layer (would violate codebase convention since `production/RPi5/tests/` has zero mocking framework usage; verified by Mode-A grep). Mi3 solution: expose `log_lstat_for_throw(path, label)` as a namespace-internal helper in `uds_server.hpp` (NOT file-private static) so the unit test calls it directly with regular-file / ENOENT / socket / directory inputs and asserts stderr substrings via `freopen` capture. The throw call site stays untested by unit; the helper that the throw delegates to is fully testable. Generalizable to other "I want to test this branch but the trigger is hard to force" cases without compromising codebase conventions.
+
+**Notable structural revelation #3 — build-grep allow-list extension as legitimate scope creep**: PR #75 Writer extended `production/RPi5/scripts/build.sh`'s `[atomic-toml-write-grep]` allow-list to include `src/uds/uds_server.cpp`. Root cause: the gate exists to discipline `atomic_toml_writer.cpp`; PR #73's UDS atomic-rename pattern incidentally matched the same `mkstemp/rename` regex. Two correct responses: (a) tighten the grep to be more specific to TOML, or (b) extend the allow-list with a one-file rationale comment. Option (b) chosen (narrow scope, single-file allow, well-documented). Mode-B accepted as inline scope. Generalizable lesson: when a build-gate guard catches a legitimate use of the same syntactic pattern in a different domain, prefer narrowing the allow-list with clear rationale over weakening the regex.
+
+**2 PRs landed this session**:
+
+| PR | Issue | Title | State |
+|---|---|---|---|
+| #75 | issue#18 | UDS bootstrap audit (MF1+MF2+MF3+SF2+SF3) | merged 11:37 KST 2026-05-03 |
+| #76 | issue#16.2 | preview `.pgm.tmp` sweep on mapping.start() | merged 12:02 KST 2026-05-03 |
+
+**Cross-cutting rules locked**:
+
+1. **Verify-before-Plan discipline**: when delegating to Planner from a memory-file spec, the Planner brief must include "I already inspected X — note these starting facts" so the Planner doesn't re-discover what's already true. Memory files describe the moment they were written; current code is the SSOT.
+2. **Helper-injection pattern for testability**: if a code branch is gated behind a hard-to-force failure (rename/EXDEV/permission), extract the per-branch helper to namespace-internal scope and test the helper directly. Throw call sites stay untested by unit; helpers that delegates use are fully testable. No mocks, no forcing-failure gymnastics.
+3. **Allow-list narrowing over regex weakening**: build-grep gates that catch unintended legitimate uses should grow per-file allow-list entries with rationale comments, not relax their regex. Single-point-of-strict for the intended discipline + named exceptions for unrelated uses of the same syntactic pattern.
+
+**Live system on news-pi01 (post nineteenth-session close)**:
+
+- godo-tracker rebuilt + redeployed via standard `bash production/RPi5/scripts/build.sh + sudo bash production/RPi5/systemd/install.sh`. New `main()` boot path: pidfile-lock → `audit_runtime_dir(cfg.uds_socket)` → `sweep_stale_siblings(cfg.uds_socket)` → banner → thread spawn. PR #73's lstat guard remains as second line of defence inside `UdsServer::open()`. UDS audit log line confirmed live in journald.
+- godo-webctl redeployed via rsync + uv sync + systemctl restart. `mapping.start()` Phase 1 now sweeps stale `.preview/*.pgm.tmp` before each session.
+- godo-frontend, godo-irq-pin, godo-cp210x-recover, godo-mapping@active: UNCHANGED.
+- HIL Recipe 1 (stale 0-byte regular file at `/run/godo/ctl.sock` → tracker start) + Recipe 2 (sibling sweep at `ctl.sock.99999.tmp`) both passed; `test_studio_v99.pgm.tmp` injection at `/var/lib/godo/maps/.preview/` confirmed swept on next mapping start with canonical `.pgm` files preserved.
+
+**Open queue for next session** (operator-locked priority):
+
+1. **★ issue#11 — Live mode pipelined-parallel multi-thread** (operator-locked priority #1). Operator outlined three planning axes at session-close: (a) trade-off between real-time responsiveness gain and accuracy preservation (CPU-pipeline-style parallelism should improve BOTH); (b) single-core sequential pipeline vs multi-core distributed pipeline — if multi-core, inter-core communication latency that could ripple jitter through the entire pipeline if one stage stalls (a stage stall could cascade to subsequent stages); (c) audit non-Live computation paths (calibration, AMCL one-shot iteration loops) for similar repetitive-pattern pipeline candidates. Full Planner pipeline expected. Spec context: `.claude/memory/project_pipelined_compute_pattern.md` (Parent will absorb the 3 axes into the spec).
+2. **issue#13 (continued)** — distance-weighted AMCL likelihood (`r_cutoff` near-LiDAR down-weight). Standalone single-knob algorithmic experiment.
+3. **issue#4** — AMCL silent-converge diagnostic (fifteenth/sixteenth/seventeenth/eighteenth/nineteenth HIL data accumulated as comprehensive baseline).
+4. **issue#6** — B-MAPEDIT-3 yaw rotation (frame redefinition).
+5. **issue#17** — GPIO UART direct (perma-deferred unless field evidence accumulates).
+6. **Bug B** — Live mode standstill jitter (analysis-first work item).
+7. **issue#7** — boom-arm angle masking (contingent on issue#4 diagnostic).
+
+**Next free issue integer: `issue#19`**. issue#18 + issue#16.2 resolved this session.
+
 ### 2026-05-03 (early morning → late morning — 04:30 KST → 09:30 KST+, eighteenth-session — issue#16.1 t5 trap-timeout fix + issue#10 udev /dev/rplidar + issue#10.1 lidar-serial config row + UDS stale-socket guard ships)
 
 Eighteenth-session opened by absorbing the seventeenth-session's deferred Tier-A bundle (issue#16.1 + issue#10) and closed with two squash-merged PRs and a UDS stale-socket race surface promoted to issue#18. Both PRs went through the full pipeline (planner → Mode-A → writer → Mode-B); the first required two Mode-A rounds (REWORK → APPROVE), the second cleared in a single round because plan accuracy improved with PR #72's lessons.

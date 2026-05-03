@@ -10,6 +10,80 @@
 
 ---
 
+## 2026-05-03 (오전 ~ 정오 — 09:30 KST → 12:07 KST, 열아홉 번째 세션 — issue#18 UDS bootstrap audit + issue#16.2 preview .tmp sweep — "전 세션 deferred TL;DR 두 건 깔끔히 정리")
+
+### 한 줄 요약
+
+열여덟 번째 세션이 NEXT_SESSION에 등록한 두 작업(issue#18 UDS 부팅 경로 감사, issue#16.2 preview 임시파일 sweep)을 같은 세션 안에서 둘 다 squash-merge로 닫음. PR #75는 풀 파이프라인 (Planner → Mode-A → Writer → Mode-B), PR #76은 abbreviated 파이프라인 (direct writer + Parent self-verify) — `.claude/memory/feedback_pipeline_short_circuit.md`의 "small + well-specified는 줄여서 가도 됨" 규칙 두 번째 적용 사례. 운영자 마무리 멘트: "어제 mapping 관련 오류들 개선하니까 맵 제작 과정이 너무 쾌적하다 ㅎㅎ" — issue#16 family (cp210x recovery + mapping stop ladder + udev `/dev/rplidar` + tunable serial + preview `.tmp` sweep) + issue#18 UDS 강화의 누적 효과가 운영 워크플로에서 체감되기 시작.
+
+### 2개 PR 머지
+
+| PR | issue# | 제목 | 결과 |
+|---|---|---|---|
+| #75 | issue#18 | UDS bootstrap audit (MF1+MF2+MF3+SF2+SF3) | merged 11:37 KST 2026-05-03 |
+| #76 | issue#16.2 | preview `.pgm.tmp` sweep on mapping.start() | merged 12:02 KST 2026-05-03 |
+
+### 핵심 발견 #1 — Planner에 위임하기 전, "이미 구현됐는지" 코드 직접 검증의 가치
+
+issue#18 spec(`project_uds_bootstrap_audit.md`)은 MF1으로 "atexit/destructor unlink on graceful shutdown"을 ship 대상에 올렸음. 그런데 Planner를 띄우기 전 Parent가 코드를 직접 읽어보니:
+
+- `production/RPi5/src/uds/uds_server.cpp:103-105` — `~UdsServer()`가 `close()` 호출
+- `production/RPi5/src/uds/uds_server.cpp:502-515` — `close()`가 `path_bound_=true`이면 `unlink(socket_path_)` 수행
+- `production/RPi5/src/godo_tracker_rt/main.cpp:233` — `UdsServer server(...)`가 `thread_uds` stack에 할당
+- `production/RPi5/src/godo_tracker_rt/main.cpp:275-294` — signal handler가 `g_running.store(false)` 플립 → `server.run()` 루프 탈출 → stack unwinding → destructor 발사 → unlink
+
+즉, MF1은 graceful shutdown 경로에서 stack unwinding으로 이미 wired되어 있었음. `atexit` 추가는 destructor 경로 중복 + redundant unlink race 유발. Planner 브리프에 "I already inspected X — these are the starting facts" 섹션을 명시해서 MF1을 "doc-only closure with one test pin + new CODEBASE invariant `(u)`"로 다운그레이드. 한 라운드 plan iteration 절약. **교훈**: 메모리 파일은 작성 시점의 진실을 캡처한 것. 현재 코드가 SSOT. Planner에 위임하기 전 항상 현재 코드 상태부터 확인.
+
+### 핵심 발견 #2 — "강제 실패 못 시키는 코드 분기"의 단위 테스트 (Mi3 패턴)
+
+PR #75 Mode-A reviewer가 짚은 Mi3 — MF2 forensic logging 경로를 단위 테스트하려는데 두 가지 obvious 접근법은 모두 함정:
+
+- (a) `rename(2)` 실패를 강제: `chmod` 트릭은 테스트 호스트가 root로 도는 상황에서 우회됨; `EXDEV` cross-fs 강제는 테스트 호스트 환경 의존성이 큼.
+- (b) mock layer 도입: `production/RPi5/tests/`의 모든 테스트가 mock 없이 작성됨 (Mode-A reviewer가 grep으로 확인). codebase convention 위반.
+
+**Mi3 해법**: 던지기 직전 호출되는 헬퍼 `log_lstat_for_throw(path, label)`를 namespace-internal scope (file-private static 아닌, `uds_server.hpp`에 노출)로 추출. 단위 테스트가 이 헬퍼를 직접 호출 (regular-file / ENOENT / socket / directory 4개 입력) + `freopen`으로 stderr 캡처 + substring assert. throw 호출 자리는 unit 테스트 안 됨; 그 throw가 위임하는 헬퍼가 fully testable. **일반화**: "이 분기를 테스트하고 싶은데 trigger가 강제 안 됨" 케이스에서 mock도 force-failure도 안 쓰고 푸는 패턴.
+
+### 핵심 발견 #3 — build-grep allow-list 확장은 "정당한 scope creep"
+
+PR #75 Writer가 `production/RPi5/scripts/build.sh`의 `[atomic-toml-write-grep]` allow-list에 `src/uds/uds_server.cpp`를 추가. 이유: 그 grep은 원래 `atomic_toml_writer.cpp`의 atomic-write discipline을 잡는 게이트. PR #73이 도입한 UDS atomic-rename 패턴(`mkstemp + rename` for ctl.sock)이 같은 정규식에 우연히 매칭. 두 가지 fix 방향:
+
+- (a) regex를 TOML-specific하게 좁힘
+- (b) allow-list에 한 파일 + rationale 코멘트 추가
+
+(b) 채택 (좁은 범위, 단일 파일, 명시적 documentation). Mode-B inline scope로 수용. **일반화**: build-gate guard가 "다른 도메인에서 같은 syntactic 패턴을 정당하게 쓰는 케이스"를 잡으면 → regex 약화보다 allow-list 좁게 명명적 확장이 SSOT 정신에 맞음. 의도된 discipline은 single-point-of-strict로 유지하면서 named exceptions만 허용.
+
+### 운영 시스템 상태 (열아홉 번째 세션 close 후)
+
+- **godo-tracker**: 재빌드 + 재배포 완료. 새 `main()` 부팅 경로: pidfile-lock → `audit_runtime_dir(cfg.uds_socket)` → `sweep_stale_siblings(cfg.uds_socket)` → banner → thread spawn. PR #73의 lstat 가드는 `UdsServer::open()` 안의 second line of defence로 유지. UDS audit 로그 라인 journald에 라이브 확인.
+- **godo-webctl**: rsync + `uv sync` + `systemctl restart`로 재배포. `mapping.start()` Phase 1이 매 세션 시작 전 stale `.preview/*.pgm.tmp` 청소.
+- **godo-frontend**, **godo-irq-pin**, **godo-cp210x-recover**, **godo-mapping@active**: 변경 없음.
+- HIL: Recipe 1 (`/run/godo/ctl.sock` 자리에 0-byte regular file 주입 → tracker start) + Recipe 2 (`ctl.sock.99999.tmp` sibling sweep) 둘 다 통과. `/var/lib/godo/maps/.preview/`에 `test_studio_v99.pgm.tmp` 주입 → 다음 mapping start에서 sweep 확인 (canonical `.pgm` 파일들은 untouched).
+
+### 다음 세션 큐 (운영자 잠금 우선순위)
+
+1. **★ issue#11 — Live mode pipelined-parallel multi-thread** (운영자 잠금 #1). 운영자가 close 시점에 3가지 planning axis 명시:
+   - (a) 실시간성 향상과 그로 인한 trade-off 최소화 — CPU-pipeline 스타일의 parallelism이 정확성도 동시에 향상시켜야 함.
+   - (b) 단일 코어 sequential pipeline vs 다중 코어 distributed pipeline. 다중 코어인 경우 코어 간 통신 지연이 한 stage가 밀리면 나머지 stage에도 같이 jitter cascade 가능성.
+   - (c) Live 외 다른 반복 계산 경로(calibration, AMCL one-shot iteration loop)에도 같은 pipeline 패턴이 적용 가능한지 audit.
+   - 풀 Planner 파이프라인 예상. spec context는 `.claude/memory/project_pipelined_compute_pattern.md` (Parent가 위 3 axis를 spec에 흡수 예정).
+2. **issue#13 cont.** — distance-weighted AMCL likelihood (`r_cutoff` near-LiDAR down-weight). 단일-knob algorithmic 실험.
+3. **issue#4** — AMCL silent-converge diagnostic (fifteenth부터 nineteenth까지 HIL 데이터 누적 baseline 보유).
+4. **issue#6** — B-MAPEDIT-3 yaw rotation (frame redefinition).
+5. **issue#17** — GPIO UART direct (perma-deferred unless field evidence accumulates).
+6. **Bug B** — Live mode standstill jitter (analysis-first).
+7. **issue#7** — boom-arm masking (contingent on issue#4).
+
+**Next free issue integer: `issue#19`**. issue#18 + issue#16.2 이번 세션에 closed.
+
+### 운영자 코멘트
+
+> "어제 mapping 관련 오류들 개선하니까 맵 제작 과정이 너무 쾌적하다 ㅎㅎ"
+> "이번 세션 깔끔하다 ㅎㅎ"
+
+cumulative 효과 — issue#16 (cp210x recovery) + issue#16.1 (mapping stop ladder) + issue#10 (udev `/dev/rplidar`) + issue#10.1 (operator-tunable serial + UDS guard) + issue#16.2 (preview `.tmp` sweep) + issue#18 (UDS bootstrap audit) — 운영 매핑 워크플로의 체감 안정성이 임계점을 넘어선 시점.
+
+---
+
 ## 2026-05-03 (새벽 ~ 늦은 오전 — 04:30 KST → 09:30 KST+, 열여덟 번째 세션 — issue#16.1 t5 trap-timeout fix + issue#10 udev /dev/rplidar + issue#10.1 시리얼 입력 UI + UDS stale-socket guard — "안정성 장치 통합 + 운영 동선 개선")
 
 ### 한 줄 요약

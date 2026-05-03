@@ -329,58 +329,31 @@ describe('OriginPicker (Track B-MAPEDIT-2)', () => {
   });
 });
 
-describe('OriginPicker (issue#27 — theta + +/- step buttons)', () => {
-  it('theta input is optional — Apply enabled with x/y valid + theta empty', () => {
+describe('OriginPicker (issue#27 — +/- step buttons; theta gated until B-MAPEDIT-3)', () => {
+  it('theta UI is hidden until B-MAPEDIT-3 (THETA_EDIT_ENABLED=false) — input + buttons absent, Apply body never carries theta_deg', () => {
     let captured: OriginPatchBody | null = null;
     const { target } = mountPicker({
       onapply: (b) => (captured = b),
     });
     flushSync();
+    // Theta UI elements MUST NOT render while the gate is closed.
+    expect(target.querySelector('[data-testid="origin-theta-input"]')).toBeNull();
+    expect(target.querySelector('[data-testid="origin-theta-minus"]')).toBeNull();
+    expect(target.querySelector('[data-testid="origin-theta-plus"]')).toBeNull();
+    // Apply with x/y only — body has no theta_deg key.
     const xInput = target.querySelector<HTMLInputElement>('[data-testid="origin-x-input"]');
     const yInput = target.querySelector<HTMLInputElement>('[data-testid="origin-y-input"]');
-    const thetaInput = target.querySelector<HTMLInputElement>(
-      '[data-testid="origin-theta-input"]',
-    );
     const applyBtn = target.querySelector<HTMLButtonElement>('[data-testid="origin-apply-btn"]');
-    expect(thetaInput).not.toBeNull();
     xInput!.value = '0.32';
     xInput!.dispatchEvent(new Event('input', { bubbles: true }));
     yInput!.value = '-0.18';
     yInput!.dispatchEvent(new Event('input', { bubbles: true }));
     flushSync();
-    // theta empty — Apply still enabled.
     expect(applyBtn!.disabled).toBe(false);
     applyBtn!.click();
     flushSync();
-    // Body has NO theta_deg key (preserves YAML byte-stability per
-    // backend invariant).
     expect(captured).not.toBeNull();
     expect('theta_deg' in captured!).toBe(false);
-  });
-
-  it('theta input populated → body carries theta_deg', () => {
-    let captured: OriginPatchBody | null = null;
-    const { target } = mountPicker({
-      onapply: (b) => (captured = b),
-    });
-    flushSync();
-    const xInput = target.querySelector<HTMLInputElement>('[data-testid="origin-x-input"]');
-    const yInput = target.querySelector<HTMLInputElement>('[data-testid="origin-y-input"]');
-    const thetaInput = target.querySelector<HTMLInputElement>(
-      '[data-testid="origin-theta-input"]',
-    );
-    const applyBtn = target.querySelector<HTMLButtonElement>('[data-testid="origin-apply-btn"]');
-    xInput!.value = '0';
-    xInput!.dispatchEvent(new Event('input', { bubbles: true }));
-    yInput!.value = '0';
-    yInput!.dispatchEvent(new Event('input', { bubbles: true }));
-    thetaInput!.value = '5.0';
-    thetaInput!.dispatchEvent(new Event('input', { bubbles: true }));
-    flushSync();
-    applyBtn!.click();
-    flushSync();
-    expect(captured).not.toBeNull();
-    expect(captured!.theta_deg).toBeCloseTo(5.0, 6);
   });
 
   it('+x button increments x by step (default 0.01 m)', () => {
@@ -410,25 +383,6 @@ describe('OriginPicker (issue#27 — theta + +/- step buttons)', () => {
     yMinus!.click();
     flushSync();
     expect(yInput!.value).toBe('-0.010');
-  });
-
-  it('+theta button increments theta by step (default 0.1°)', () => {
-    const { target } = mountPicker({});
-    flushSync();
-    const thetaInput = target.querySelector<HTMLInputElement>(
-      '[data-testid="origin-theta-input"]',
-    );
-    const thetaPlus = target.querySelector<HTMLButtonElement>(
-      '[data-testid="origin-theta-plus"]',
-    );
-    expect(thetaInput).not.toBeNull();
-    expect(thetaPlus).not.toBeNull();
-    thetaInput!.value = '0.0';
-    thetaInput!.dispatchEvent(new Event('input', { bubbles: true }));
-    flushSync();
-    thetaPlus!.click();
-    flushSync();
-    expect(thetaInput!.value).toBe('0.1');
   });
 
   it('+x clicked from empty input starts at 0 + step', () => {

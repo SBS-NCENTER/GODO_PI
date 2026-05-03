@@ -65,6 +65,17 @@
 
   const { currentOrigin, role, busy, bannerMsg, bannerKind, onapply }: Props = $props();
 
+  // B-MAPEDIT-3 feature gate. Theta editing is metadata-only on the YAML
+  // (origin[2]) and the SPA can't render rotation today, so changing
+  // theta without B-MAPEDIT-3's PGM bilinear resample produces a
+  // visual vs. coordinate inconsistency (theta-warning at
+  // MapUnderlay.svelte:402-406 stays; pose yaw shifts but map doesn't
+  // rotate). Hide the UI until B-MAPEDIT-3 (issue#28) ships the full
+  // rotation gizmo + PGM resample. Backend `theta_deg` parameter +
+  // `origin_step.yaw_deg` schema row stay so B-MAPEDIT-3 can light up
+  // the UI by flipping this constant to true.
+  const THETA_EDIT_ENABLED = false;
+
   // Form state — owned exclusively by this component.
   let mode = $state<OriginMode>('absolute');
   let xText = $state<string>('');
@@ -327,36 +338,38 @@
         data-testid="origin-y-plus"
       >+</button>
     </label>
-    <label class="num-label">
-      theta:
-      <input
-        type="text"
-        inputmode="decimal"
-        bind:value={thetaText}
-        oninput={clearBanner}
-        disabled={busy || role !== 'admin'}
-        data-testid="origin-theta-input"
-        placeholder="optional"
-        class={thetaParsed.error && thetaText !== '' ? 'input-invalid' : ''}
-      />
-      °
-      <button
-        type="button"
-        class="step-btn"
-        onclick={() => nudgeTheta(-stepYaw)}
-        disabled={busy || role !== 'admin'}
-        title={`-${stepYaw}°`}
-        data-testid="origin-theta-minus"
-      >−</button>
-      <button
-        type="button"
-        class="step-btn"
-        onclick={() => nudgeTheta(+stepYaw)}
-        disabled={busy || role !== 'admin'}
-        title={`+${stepYaw}°`}
-        data-testid="origin-theta-plus"
-      >+</button>
-    </label>
+    {#if THETA_EDIT_ENABLED}
+      <label class="num-label">
+        theta:
+        <input
+          type="text"
+          inputmode="decimal"
+          bind:value={thetaText}
+          oninput={clearBanner}
+          disabled={busy || role !== 'admin'}
+          data-testid="origin-theta-input"
+          placeholder="optional"
+          class={thetaParsed.error && thetaText !== '' ? 'input-invalid' : ''}
+        />
+        °
+        <button
+          type="button"
+          class="step-btn"
+          onclick={() => nudgeTheta(-stepYaw)}
+          disabled={busy || role !== 'admin'}
+          title={`-${stepYaw}°`}
+          data-testid="origin-theta-minus"
+        >−</button>
+        <button
+          type="button"
+          class="step-btn"
+          onclick={() => nudgeTheta(+stepYaw)}
+          disabled={busy || role !== 'admin'}
+          title={`+${stepYaw}°`}
+          data-testid="origin-theta-plus"
+        >+</button>
+      </label>
+    {/if}
   </div>
 
   {#if currentOrigin !== null}

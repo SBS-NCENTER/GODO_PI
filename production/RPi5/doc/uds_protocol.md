@@ -487,3 +487,168 @@ def call(req: dict) -> dict:
 
 The 4 KiB buffer cap is far above the response size; a 256-byte recv is
 safe.
+
+## H. Bootstrap and operator forensics
+
+issue#18 (2026-05-03) hardened the tracker UDS bootstrap path against the
+stale-`/run/godo/ctl.sock` failure mode observed during issue#10.1 HIL.
+This section is the operator-facing reference for how the bootstrap path
+behaves and how to diagnose future stale-state events.
+
+### H.1 Atomic-rename + stale guard + destructor unlink lifecycle
+
+The full lifecycle of `/run/godo/ctl.sock` looks like this:
+
+```text
+┌───────────────────────────────────────────────────────────────────┐
+│ Boot path                                                         │
+├───────────────────────────────────────────────────────────────────┤
+│ 1. main() — pidfile lock acquired (CODEBASE invariant (l))        │
+│    └─ proves we are the sole tracker.                             │
+│ 2. main() — audit_runtime_dir(cfg.uds_socket)                     │
+│    └─ ONE stderr line documenting inherited state.                │
+│ 3. main() — sweep_stale_siblings(cfg.uds_socket)                  │
+│    └─ unlinks stale `<path>.<pid>.tmp` (regular files always;     │
+│       sockets only when older than                                │
+│       constants::UDS_STALE_SIBLING_MIN_AGE_SEC).                  │
+│ 4. thread_uds — UdsServer::open()                                 │
+│    ├─ socket(AF_UNIX) → bind to `<path>.<our_pid>.tmp`            │
+│    ├─ lstat(target) — if non-socket, unlink (PR #73 guard).       │
+│    ├─ rename(tmp → target) — atomic; on failure logs lstat of     │
+│    │  both endpoints (issue#18 MF2) before throwing.              │
+│    ├─ chmod(target, 0660)                                         │
+│    └─ listen(LISTEN_BACKLOG=4)                                    │
+│ 5. UdsServer::run() — accept loop.                                │
+├───────────────────────────────────────────────────────────────────┤
+│ Shutdown path                                                     │
+├───────────────────────────────────────────────────────────────────┤
+│ 6. signal handler → g_running.store(false)                        │
+│ 7. UdsServer::run() returns at next 100 ms poll wake.             │
+│ 8. ~UdsServer() → close()                                         │
+│    ├─ close(listen_fd_)                                           │
+│    └─ unlink(socket_path_)  ◄ MF1 destructor closure.             │
+└───────────────────────────────────────────────────────────────────┘
+```
+
+Source pointers:
+
+- `src/uds/uds_server.cpp::UdsServer::open()` — atomic-rename bind +
+  PR #73 stale-non-socket guard + MF2 rename-failure forensic logging.
+- `src/uds/uds_server.cpp::UdsServer::close()` — destructor's unlink
+  path (MF1).
+- `src/uds/uds_server.cpp::audit_runtime_dir()` — MF3 boot-audit log line.
+- `src/uds/uds_server.cpp::sweep_stale_siblings()` — SF3 sibling sweep.
+
+### H.2 `ss -lxp` historical-bind-path display quirk
+
+`ss -lxp` shows the FIRST bind path of each AF_UNIX socket — meaning the
+`.<pid>.tmp` path created during atomic-rename, NOT the post-rename target
+`/run/godo/ctl.sock`. The kernel records the original bind path for
+historical reasons; the rename(2) syscall rebinds the directory entry
+without updating this record.
+
+This is a kernel display quirk, NOT a tracker bug. The actual socket inode
+IS reachable via `/run/godo/ctl.sock` — clients connect successfully.
+
+Verification recipe:
+
+```bash
+sudo ss -lxp | grep ctl.sock
+# Likely output:
+#   u_str  LISTEN  0  4  /run/godo/ctl.sock.12345.tmp ...  users:(("godo_tracker_",pid=12345,fd=N))
+# Even though `ls -la /run/godo/ctl.sock` shows a srw-rw---- socket file.
+ls -la /run/godo/ctl.sock
+# srw-rw---- 1 ncenter ncenter 0 ... /run/godo/ctl.sock
+```
+
+If you need the actual bound-and-served path, use `lsof -p <pid> | grep
+ctl.sock` — `lsof` resolves the inode rather than reading the bind cache.
+
+### H.3 journalctl forensics recipe
+
+Every new log tag from issue#18 is greppable; one grep per failure
+hypothesis lets the operator localise the issue without reading the
+whole boot log.
+
+Boot-audit line (always emitted, fresh every boot):
+
+```bash
+sudo journalctl -u godo-tracker -b | grep 'uds bootstrap audit'
+# Fresh boot:           ctl.sock=ENOENT siblings=0 []
+# Clean shutdown ran:   ctl.sock=ENOENT siblings=0 []
+# Unclean shutdown:     ctl.sock=S_IFSOCK_size=0 siblings=0 []
+# issue#10.1 failure:   ctl.sock=S_IFREG_size=0 siblings=1 [ctl.sock.12345.tmp]
+# Pathological:         ctl.sock=S_IFDIR_size=4096 siblings=4 [...] (out-of-band mkdir)
+```
+
+Stale-non-socket-cleared by PR #73 guard:
+
+```bash
+sudo journalctl -u godo-tracker -b | grep 'stale non-socket'
+# Expected when issue#10.1 fires:
+#   uds_server::open: stale non-socket at '/run/godo/ctl.sock' (mode=0100644, size=0); unlinking before atomic rename
+```
+
+Sibling sweep activity:
+
+```bash
+sudo journalctl -u godo-tracker -b | grep 'uds sibling sweep'
+# Expected when stale .tmp leftovers get reclaimed:
+#   godo_tracker_rt: uds sibling sweep: unlinked stale '/run/godo/ctl.sock.99999.tmp' (mode=0100644, size=0)
+# Or when a fresh socket is kept:
+#   godo_tracker_rt: uds sibling sweep: keeping fresh socket '/run/godo/ctl.sock.12345.tmp' (mtime=..., threshold=...)
+```
+
+Rename-failure forensics (only fires on the ENOSPC / EACCES failure path):
+
+```bash
+sudo journalctl -u godo-tracker -b | grep 'rename failure forensics'
+# Two lines per failure — one per endpoint:
+#   uds_server::open: rename failure forensics — tmp_path='/run/godo/ctl.sock.NNNNN.tmp' lstat=S_IFSOCK_size=0
+#   uds_server::open: rename failure forensics — target='/run/godo/ctl.sock' lstat=S_IFREG_size=0
+```
+
+#### HIL recipe — stale-state injection
+
+Replays the issue#10.1 failure on demand to verify the PR #73 guard is
+still in place:
+
+```bash
+# On news-pi01, after the new build is deployed to /opt/godo-tracker/:
+sudo systemctl stop godo-tracker
+sudo rm -f /run/godo/ctl.sock /run/godo/ctl.sock.*.tmp
+# Inject a stale regular file:
+sudo install -m 0644 -o ncenter -g ncenter /dev/null /run/godo/ctl.sock
+ls -la /run/godo/ctl.sock                # expect -rw-r--r-- (regular file)
+# Start tracker via SPA System tab Start button (operator-managed; do NOT
+# systemctl-enable per .claude/memory/project_godo_service_management_model.md).
+# Verify the boot-audit captured the stale state:
+sudo journalctl -u godo-tracker -b | grep 'uds bootstrap audit'
+# Expected: ctl.sock=S_IFREG_size=0 siblings=0 []
+sudo journalctl -u godo-tracker -b | grep 'stale non-socket'
+# Expected: stale non-socket at '/run/godo/ctl.sock' (mode=0100644, size=0); unlinking before atomic rename
+ls -la /run/godo/ctl.sock                # expect srw-rw---- (socket)
+# Verify SPA reaches the tracker:
+# - hard-reload SPA (Ctrl+Shift+R), observe Dashboard tracker:"reachable"
+# - press Calibrate to confirm UDS round-trip
+```
+
+#### HIL recipe — sibling sweep
+
+Replays the half-failed-rename hypothesis:
+
+```bash
+sudo systemctl stop godo-tracker
+sudo rm -f /run/godo/ctl.sock /run/godo/ctl.sock.*.tmp
+sudo install -m 0644 -o ncenter -g ncenter /dev/null /run/godo/ctl.sock.99999.tmp
+sleep 3                                  # > UDS_STALE_SIBLING_MIN_AGE_SEC
+# Start tracker via SPA System tab.
+sudo journalctl -u godo-tracker -b | grep 'uds bootstrap audit'
+# Expected: siblings=1 [ctl.sock.99999.tmp]
+sudo journalctl -u godo-tracker -b | grep 'uds sibling sweep'
+# Expected: unlinked stale '/run/godo/ctl.sock.99999.tmp' (mode=0100644, size=0)
+ls -la /run/godo/ctl.sock.99999.tmp      # expect ENOENT
+```
+
+Both recipes are pinned by the unit tests in
+`tests/test_uds_server.cpp::TEST_CASE("issue#18 ...")`.

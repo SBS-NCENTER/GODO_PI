@@ -79,6 +79,24 @@ inline constexpr int          GPIO_MAX_BCM_PIN         = 27;
 inline constexpr int          UDS_LISTEN_BACKLOG       = 4;
 inline constexpr int          UDS_CONN_READ_TIMEOUT_SEC = 1;
 
+// issue#18 — UDS bootstrap audit (SF3 + MF3). Tier-1 because changing
+// these alters operator-visible boot semantics.
+//
+// UDS_STALE_SIBLING_MIN_AGE_SEC: SF3 sweep mtime threshold. Sockets with
+// mtime newer than (now - this) are left alone (defence in depth — the
+// pidfile invariant (l) already rules out a concurrent tracker, but the
+// threshold guards against any future code path that creates a `<pid>.tmp`
+// before the boot-time sweep runs). 2 s is short enough to never miss a
+// truly-stale sibling and long enough that 1-s tmpfs mtime granularity
+// does not cause false negatives.
+//
+// UDS_BOOT_AUDIT_SIBLING_LIST_CAP: MF3 audit-line truncation cap. Caps
+// the boot-audit log line at a parseable single-line length. A pathological
+// sibling list (>3) is itself a finding; the truncation marker `[...]`
+// surfaces it to operators without flooding journalctl.
+inline constexpr int          UDS_STALE_SIBLING_MIN_AGE_SEC   = 2;
+inline constexpr int          UDS_BOOT_AUDIT_SIBLING_LIST_CAP = 3;
+
 // libgpiod edge-event drain depth (Mode-B SHOULD-FIX S2). One real button
 // press emits at most a handful of bounce events before the debounce
 // window closes; 16 is a generous ceiling that keeps wait_edge_events

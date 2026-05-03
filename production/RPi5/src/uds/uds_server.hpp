@@ -137,4 +137,27 @@ private:
     bool               path_bound_ = false;
 };
 
+// issue#18 — UDS bootstrap audit free functions. All three are pure
+// noexcept boot-time helpers; SOLE caller in production is `main()` for
+// `audit_runtime_dir` + `sweep_stale_siblings`, and the rename-failure
+// throw site inside `UdsServer::open()` for `log_lstat_for_throw`. The
+// last one is exposed (rather than file-private) so the unit test can
+// exercise its stderr output without forcing rename(2) failure (Mi3).
+
+// MF3 — emit a single stderr line summarising the inherited
+// /run/godo/<basename> + sibling state. Best-effort; never aborts boot.
+void audit_runtime_dir(const std::string& socket_path) noexcept;
+
+// SF3 — unlink stale `<socket_path>.*.tmp` siblings older than
+// constants::UDS_STALE_SIBLING_MIN_AGE_SEC seconds. Best-effort; failures
+// are logged to stderr but never aborts boot. Caller MUST hold the
+// tracker pidfile lock before invoking this (CODEBASE invariant (l)).
+void sweep_stale_siblings(const std::string& socket_path) noexcept;
+
+// MF2 — lstat the given path and emit one stderr line with TYPE+size or
+// errno discriminator. Used pre-throw on the rename-failure path so
+// journalctl records both endpoints' filesystem state. `label` is a
+// short tag like "tmp_path" or "target" embedded in the log line.
+void log_lstat_for_throw(const std::string& path, const char* label) noexcept;
+
 }  // namespace godo::uds

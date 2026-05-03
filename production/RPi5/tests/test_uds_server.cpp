@@ -13,10 +13,12 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <string>
 #include <thread>
 #include <utility>
 
+#include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -1423,4 +1425,270 @@ TEST_CASE("M3 ordering torture — hint flag is true when mode is observed OneSh
     godo::rt::g_amcl_mode.store(
         godo::rt::AmclMode::Idle, std::memory_order_release);
     reset_calibrate_hint_state();
+}
+
+// =====================================================================
+// issue#18 — UDS bootstrap audit (MF1 + MF2 + MF3 + SF3) test cases.
+// =====================================================================
+
+namespace {
+
+// Helper — touch a regular file with optional content. Returns true on success.
+bool touch_regular_file(const std::string& path, const char* contents = "") {
+    int fd = ::open(path.c_str(), O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (fd < 0) return false;
+    if (contents && *contents) {
+        const ssize_t n =
+            ::write(fd, contents, std::strlen(contents));
+        if (n < 0) { ::close(fd); return false; }
+    }
+    ::close(fd);
+    return true;
+}
+
+// Helper — capture stderr via freopen, return the captured text.
+// Restores stderr to /dev/tty on completion (best-effort).
+std::string capture_stderr(const std::function<void()>& body) {
+    char tmpl[] = "/tmp/godo_uds_stderr_XXXXXX";
+    int fd = ::mkstemp(tmpl);
+    if (fd < 0) return {};
+    ::close(fd);
+    // Redirect stderr to the tmp file. fflush first so any prior writes
+    // do not leak into the capture.
+    std::fflush(stderr);
+    FILE* saved = ::freopen(tmpl, "w", stderr);
+    if (!saved) {
+        ::unlink(tmpl);
+        return {};
+    }
+    body();
+    std::fflush(stderr);
+    // Restore stderr — best-effort using fd 2 dup'd from /dev/tty if
+    // available; otherwise just leave the capture file as stderr
+    // (subsequent test failures will still print via doctest's stdout).
+    ::freopen("/dev/tty", "w", stderr);
+
+    // Read back the captured content.
+    int rfd = ::open(tmpl, O_RDONLY);
+    std::string out;
+    if (rfd >= 0) {
+        char buf[4096];
+        ssize_t n;
+        while ((n = ::read(rfd, buf, sizeof(buf))) > 0) {
+            out.append(buf, static_cast<std::size_t>(n));
+        }
+        ::close(rfd);
+    }
+    ::unlink(tmpl);
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("issue#18 MF1 — UdsServer destructor unlinks bound path on scope exit") {
+    const std::string path = tmp_socket_path("mf1_dtor");
+    ::unlink(path.c_str());  // pre-clean
+
+    godo::rt::g_running.store(true, std::memory_order_release);
+
+    {
+        std::atomic<AmclMode> mode_target{AmclMode::Idle};
+        UdsServer server(
+            path,
+            [&]() { return mode_target.load(); },
+            [&](AmclMode m) { mode_target.store(m); });
+        REQUIRE_NOTHROW(server.open());
+
+        // Mid-scope — socket exists at the path.
+        struct stat st{};
+        REQUIRE(::lstat(path.c_str(), &st) == 0);
+        CHECK(S_ISSOCK(st.st_mode));
+        // Note: server.run() not called — we are pinning the lifecycle,
+        // not the request loop. Destructor still must unlink.
+    }
+
+    // Post-scope — destructor fired, path must be gone.
+    struct stat st{};
+    const int rc = ::lstat(path.c_str(), &st);
+    CHECK(rc < 0);
+    CHECK(errno == ENOENT);
+}
+
+TEST_CASE("issue#18 MF3 — UdsServer::open clears 0-byte regular file at target") {
+    const std::string path = tmp_socket_path("mf3_stale_regular");
+    ::unlink(path.c_str());
+
+    // Pre-create a 0-byte regular file at the target path — the failure
+    // mode the issue#10.1 PR #73 lstat guard was added for.
+    REQUIRE(touch_regular_file(path));
+    {
+        struct stat st{};
+        REQUIRE(::lstat(path.c_str(), &st) == 0);
+        CHECK(S_ISREG(st.st_mode));
+    }
+
+    godo::rt::g_running.store(true, std::memory_order_release);
+
+    std::atomic<AmclMode> mode_target{AmclMode::Idle};
+    UdsServer server(
+        path,
+        [&]() { return mode_target.load(); },
+        [&](AmclMode m) { mode_target.store(m); });
+    REQUIRE_NOTHROW(server.open());
+
+    struct stat st{};
+    REQUIRE(::lstat(path.c_str(), &st) == 0);
+    CHECK(S_ISSOCK(st.st_mode));
+
+    // Cleanup — close() unlinks; rely on destructor.
+}
+
+TEST_CASE("issue#18 SF3 — sweep_stale_siblings unlinks regular-file .tmp siblings older than threshold") {
+    const std::string base = tmp_socket_path("sf3_sweep_old");
+    const std::string sib1 = base + ".111.tmp";
+    const std::string sib2 = base + ".222.tmp";
+    ::unlink(sib1.c_str());
+    ::unlink(sib2.c_str());
+
+    REQUIRE(touch_regular_file(sib1));
+    REQUIRE(touch_regular_file(sib2));
+
+    // Sleep just past the threshold so the sweep treats them as stale.
+    // Pinned to the constant so future bumps trip the test reviewer.
+    ::sleep(godo::constants::UDS_STALE_SIBLING_MIN_AGE_SEC + 1);
+
+    godo::uds::sweep_stale_siblings(base);
+
+    struct stat st{};
+    CHECK(::lstat(sib1.c_str(), &st) < 0);
+    CHECK(errno == ENOENT);
+    CHECK(::lstat(sib2.c_str(), &st) < 0);
+    CHECK(errno == ENOENT);
+}
+
+TEST_CASE("issue#18 SF3 — sweep_stale_siblings leaves a fresh sibling alone") {
+    const std::string base = tmp_socket_path("sf3_sweep_fresh");
+    const std::string sib  = base + ".999.tmp";
+    ::unlink(sib.c_str());
+
+    REQUIRE(touch_regular_file(sib));
+
+    // No sleep — sibling is fresh. But: the sweep treats REGULAR files
+    // as always-cleanable (regular files at `.tmp` are necessarily
+    // half-failed-rename leftovers; the threshold applies only to
+    // sockets, which is the actual race surface). Re-read the
+    // sweep_stale_siblings body to confirm the contract.
+    //
+    // For the freshness pin we use a SOCKET sibling — bind a transient
+    // UdsServer at the .tmp path so its mtime is "now".
+    ::unlink(sib.c_str());
+
+    {
+        std::atomic<AmclMode> mode_target{AmclMode::Idle};
+        UdsServer transient(
+            sib,
+            [&]() { return mode_target.load(); },
+            [&](AmclMode m) { mode_target.store(m); });
+        REQUIRE_NOTHROW(transient.open());
+
+        struct stat st{};
+        REQUIRE(::lstat(sib.c_str(), &st) == 0);
+        CHECK(S_ISSOCK(st.st_mode));
+
+        // Sweep — sibling is a fresh socket; threshold should keep it.
+        godo::uds::sweep_stale_siblings(base);
+
+        REQUIRE(::lstat(sib.c_str(), &st) == 0);
+        CHECK(S_ISSOCK(st.st_mode));
+    }
+
+    // Destructor unlinks the transient socket, but the test budget
+    // already verified the keep-fresh-socket contract above.
+}
+
+TEST_CASE("issue#18 SF3 expanded — sweep + open path co-operates with stale .tmp + stale target") {
+    const std::string base = tmp_socket_path("sf3_combined");
+    const std::string sib  = base + ".55555.tmp";
+    ::unlink(base.c_str());
+    ::unlink(sib.c_str());
+
+    // Both stale leftovers — regular files at the target AND a sibling.
+    REQUIRE(touch_regular_file(base));
+    REQUIRE(touch_regular_file(sib));
+
+    ::sleep(godo::constants::UDS_STALE_SIBLING_MIN_AGE_SEC + 1);
+
+    // Sweep first — should remove the regular-file sibling.
+    godo::uds::sweep_stale_siblings(base);
+    struct stat sst{};
+    CHECK(::lstat(sib.c_str(), &sst) < 0);
+    CHECK(errno == ENOENT);
+
+    // Now open the server — the existing PR #73 lstat guard handles
+    // the regular-file target.
+    godo::rt::g_running.store(true, std::memory_order_release);
+    std::atomic<AmclMode> mode_target{AmclMode::Idle};
+    UdsServer server(
+        base,
+        [&]() { return mode_target.load(); },
+        [&](AmclMode m) { mode_target.store(m); });
+    REQUIRE_NOTHROW(server.open());
+
+    struct stat st{};
+    REQUIRE(::lstat(base.c_str(), &st) == 0);
+    CHECK(S_ISSOCK(st.st_mode));
+}
+
+TEST_CASE("issue#18 MF2 — log_lstat_for_throw emits expected stderr lines for each filesystem type") {
+    const std::string regfile_path = tmp_socket_path("mf2_regular") + ".reg";
+    const std::string nonexistent  = tmp_socket_path("mf2_noent")   + ".missing";
+    const std::string sock_path    = tmp_socket_path("mf2_socket")  + ".sock";
+    const std::string dir_path     = tmp_socket_path("mf2_dir")     + ".d";
+    ::unlink(regfile_path.c_str());
+    ::unlink(nonexistent.c_str());
+    ::unlink(sock_path.c_str());
+    ::rmdir(dir_path.c_str());
+
+    // (a) regular file — should yield S_IFREG_size=
+    REQUIRE(touch_regular_file(regfile_path, "abc"));
+    std::string captured = capture_stderr([&]() {
+        godo::uds::log_lstat_for_throw(regfile_path, "tmp_path");
+    });
+    CHECK(captured.find("rename failure forensics") != std::string::npos);
+    CHECK(captured.find("tmp_path='") != std::string::npos);
+    CHECK(captured.find(regfile_path) != std::string::npos);
+    CHECK(captured.find("S_IFREG_size=") != std::string::npos);
+    ::unlink(regfile_path.c_str());
+
+    // (b) ENOENT — non-existent path
+    captured = capture_stderr([&]() {
+        godo::uds::log_lstat_for_throw(nonexistent, "target");
+    });
+    CHECK(captured.find("target='") != std::string::npos);
+    CHECK(captured.find("lstat=ENOENT") != std::string::npos);
+
+    // (c) socket — bind a transient UdsServer at the path then capture
+    //     stderr WHILE the socket exists.
+    {
+        godo::rt::g_running.store(true, std::memory_order_release);
+        std::atomic<AmclMode> mode_target{AmclMode::Idle};
+        UdsServer transient(
+            sock_path,
+            [&]() { return mode_target.load(); },
+            [&](AmclMode m) { mode_target.store(m); });
+        REQUIRE_NOTHROW(transient.open());
+
+        captured = capture_stderr([&]() {
+            godo::uds::log_lstat_for_throw(sock_path, "target");
+        });
+        CHECK(captured.find("S_IFSOCK_size=") != std::string::npos);
+    }
+
+    // (d) directory — Mi4 explicit arm
+    REQUIRE(::mkdir(dir_path.c_str(), 0755) == 0);
+    captured = capture_stderr([&]() {
+        godo::uds::log_lstat_for_throw(dir_path, "target");
+    });
+    CHECK(captured.find("S_IFDIR_size=") != std::string::npos);
+    ::rmdir(dir_path.c_str());
 }

@@ -4,11 +4,13 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <stdexcept>
 #include <string>
 #include <utility>
 
 #include <fcntl.h>
+#include <glob.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -200,6 +202,13 @@ void UdsServer::open() {
     // unaffected (rename rebinds the path, not the inode).
     if (::rename(tmp_path.c_str(), socket_path_.c_str()) < 0) {
         const int e = errno;
+        // issue#18 MF2 — emit forensic lstat output for both endpoints
+        // BEFORE the throw so journalctl records the on-disk state at
+        // the moment of failure. `log_lstat_for_throw` is noexcept and
+        // best-effort; the existing throw text below is unchanged so any
+        // log greppers keying on "rename(" keep working.
+        log_lstat_for_throw(tmp_path, "tmp_path");
+        log_lstat_for_throw(socket_path_, "target");
         ::unlink(tmp_path.c_str());
         ::close(listen_fd_);
         listen_fd_ = -1;
@@ -511,6 +520,181 @@ void UdsServer::close() noexcept {
                 socket_path_.c_str(), strerror_safe(errno).c_str());
         }
         path_bound_ = false;
+    }
+}
+
+// ----------------------------------------------------------------------
+// issue#18 — UDS bootstrap audit free helpers.
+// ----------------------------------------------------------------------
+
+namespace {
+
+// Format `<TYPE_size_or_ENOENT>` discriminator for both the MF2 forensic
+// log and the MF3 boot-audit line. Mi4 explicitly covers S_IFDIR.
+std::string format_lstat_discriminator(const char* path) noexcept {
+    struct stat st{};
+    if (::lstat(path, &st) < 0) {
+        if (errno == ENOENT) {
+            return "ENOENT";
+        }
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "lstat_errno=%d", errno);
+        return std::string(buf);
+    }
+    char buf[64];
+    const char* type = nullptr;
+    switch (st.st_mode & S_IFMT) {
+        case S_IFSOCK: type = "S_IFSOCK"; break;
+        case S_IFREG:  type = "S_IFREG";  break;
+        case S_IFDIR:  type = "S_IFDIR";  break;
+        case S_IFLNK:  type = "S_IFLNK";  break;
+        case S_IFBLK:  type = "S_IFBLK";  break;
+        case S_IFCHR:  type = "S_IFCHR";  break;
+        case S_IFIFO:  type = "S_IFIFO";  break;
+        default:       type = "S_IFOTHER"; break;
+    }
+    std::snprintf(buf, sizeof(buf), "%s_size=%lld",
+                  type, static_cast<long long>(st.st_size));
+    return std::string(buf);
+}
+
+// RAII guard for glob_t (Mi2 — every return path MUST call globfree()).
+struct GlobGuard {
+    glob_t* g;
+    explicit GlobGuard(glob_t* gp) noexcept : g(gp) {}
+    ~GlobGuard() { if (g) ::globfree(g); }
+    GlobGuard(const GlobGuard&) = delete;
+    GlobGuard& operator=(const GlobGuard&) = delete;
+};
+
+}  // namespace
+
+void log_lstat_for_throw(const std::string& path, const char* label) noexcept {
+    const std::string disc = format_lstat_discriminator(path.c_str());
+    std::fprintf(stderr,
+        "uds_server::open: rename failure forensics — %s='%s' lstat=%s\n",
+        label ? label : "?", path.c_str(), disc.c_str());
+}
+
+void audit_runtime_dir(const std::string& socket_path) noexcept {
+    // Build the sibling glob pattern: `<socket_path>.*.tmp`. We want to
+    // surface inherited `.tmp` siblings without recursively scanning the
+    // whole runtime dir.
+    const std::string glob_pattern = socket_path + ".*.tmp";
+    const std::string ctl_disc = format_lstat_discriminator(socket_path.c_str());
+
+    glob_t gl{};
+    GlobGuard guard(&gl);
+    const int rc = ::glob(glob_pattern.c_str(), GLOB_NOSORT, nullptr, &gl);
+
+    std::size_t count = 0;
+    if (rc == 0) {
+        count = gl.gl_pathc;
+    } else if (rc == GLOB_NOMATCH) {
+        count = 0;
+    } else {
+        // GLOB_ABORTED / GLOB_NOSPACE — log but continue with count=0.
+        std::fprintf(stderr,
+            "godo_tracker_rt: uds bootstrap audit: glob('%s') rc=%d "
+            "(treating as no siblings)\n",
+            glob_pattern.c_str(), rc);
+        count = 0;
+    }
+
+    // Build the truncated sibling list. Only basenames in the list keep
+    // the line readable; the full glob pattern is constant and known.
+    std::string list_body;
+    const std::size_t cap =
+        static_cast<std::size_t>(godo::constants::UDS_BOOT_AUDIT_SIBLING_LIST_CAP);
+    const std::size_t shown = (count < cap) ? count : cap;
+    for (std::size_t i = 0; i < shown; ++i) {
+        const char* full = gl.gl_pathv[i];
+        const char* slash = std::strrchr(full, '/');
+        const char* base = slash ? slash + 1 : full;
+        if (i > 0) list_body += ", ";
+        list_body += base;
+    }
+    if (count > shown) {
+        list_body += ", ...";
+    }
+
+    std::fprintf(stderr,
+        "godo_tracker_rt: uds bootstrap audit: ctl.sock=%s siblings=%zu [%s]\n",
+        ctl_disc.c_str(), count, list_body.c_str());
+}
+
+void sweep_stale_siblings(const std::string& socket_path) noexcept {
+    const std::string glob_pattern = socket_path + ".*.tmp";
+
+    glob_t gl{};
+    GlobGuard guard(&gl);
+    const int rc = ::glob(glob_pattern.c_str(), GLOB_NOSORT, nullptr, &gl);
+    if (rc == GLOB_NOMATCH) {
+        return;
+    }
+    if (rc != 0) {
+        std::fprintf(stderr,
+            "godo_tracker_rt: uds sibling sweep: glob('%s') rc=%d "
+            "(skipping sweep)\n",
+            glob_pattern.c_str(), rc);
+        return;
+    }
+
+    timespec now_ts{};
+    if (::clock_gettime(CLOCK_REALTIME, &now_ts) < 0) {
+        std::fprintf(stderr,
+            "godo_tracker_rt: uds sibling sweep: clock_gettime: %s "
+            "(skipping sweep)\n",
+            strerror_safe(errno).c_str());
+        return;
+    }
+    const time_t threshold =
+        now_ts.tv_sec - godo::constants::UDS_STALE_SIBLING_MIN_AGE_SEC;
+
+    for (std::size_t i = 0; i < gl.gl_pathc; ++i) {
+        const char* full = gl.gl_pathv[i];
+        struct stat st{};
+        if (::lstat(full, &st) < 0) {
+            std::fprintf(stderr,
+                "godo_tracker_rt: uds sibling sweep: lstat('%s'): %s "
+                "(skipping)\n",
+                full, strerror_safe(errno).c_str());
+            continue;
+        }
+        const bool is_regular = S_ISREG(st.st_mode);
+        const bool is_socket  = S_ISSOCK(st.st_mode);
+        if (!is_regular && !is_socket) {
+            // Leave directories, symlinks, etc. alone — operator-driven
+            // out-of-band state we should not silently delete.
+            std::fprintf(stderr,
+                "godo_tracker_rt: uds sibling sweep: leaving '%s' alone "
+                "(mode=0%o, not regular or socket)\n",
+                full, static_cast<unsigned>(st.st_mode));
+            continue;
+        }
+        // Regular files are always cleaned up (typical half-failed rename
+        // leftover). Sockets are cleaned up only when older than the
+        // threshold — defence in depth against a future code path that
+        // creates a `.tmp` socket concurrently with the sweep.
+        if (is_socket && st.st_mtime > threshold) {
+            std::fprintf(stderr,
+                "godo_tracker_rt: uds sibling sweep: keeping fresh socket "
+                "'%s' (mtime=%lld, threshold=%lld)\n",
+                full, static_cast<long long>(st.st_mtime),
+                static_cast<long long>(threshold));
+            continue;
+        }
+        if (::unlink(full) < 0) {
+            std::fprintf(stderr,
+                "godo_tracker_rt: uds sibling sweep: unlink('%s'): %s\n",
+                full, strerror_safe(errno).c_str());
+            continue;
+        }
+        std::fprintf(stderr,
+            "godo_tracker_rt: uds sibling sweep: unlinked stale '%s' "
+            "(mode=0%o, size=%lld)\n",
+            full, static_cast<unsigned>(st.st_mode),
+            static_cast<long long>(st.st_size));
     }
 }
 

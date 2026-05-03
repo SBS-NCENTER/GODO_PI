@@ -275,13 +275,19 @@ echo "[hot-config-publisher-grep] clean (hot_cfg_seq.store only in config/apply.
 # `::mkstemp(`, or `std::filesystem::rename` against TOML paths. Other
 # producers writing tracker.toml directly would bypass the atomic-write
 # protocol (TM3 in plan).
+#
+# Allow-list: `src/uds/uds_server.cpp` legitimately uses ::rename for
+# atomic-rename UDS bind (issue#10.1 PR #73 + issue#18). The UDS rename
+# operates on `/run/godo/ctl.sock`, not on TOML — different invariant
+# surface; both producers may safely co-exist.
 # -----------------------------------------------------------------------
 ATOMIC_TOML_PATTERN='::mkstemp\(|::rename\(|std::filesystem::rename'
 ATOMIC_TOML_HITS="$(grep -rnE --include='*.cpp' "${ATOMIC_TOML_PATTERN}" "${ROOT_DIR}/src" 2>/dev/null \
-    | grep -v "${ROOT_DIR}/src/config/atomic_toml_writer.cpp" || true)"
+    | grep -v "${ROOT_DIR}/src/config/atomic_toml_writer.cpp" \
+    | grep -v "${ROOT_DIR}/src/uds/uds_server.cpp" || true)"
 if [[ -n "${ATOMIC_TOML_HITS}" ]]; then
-    echo "[atomic-toml-write-grep] FAIL — mkstemp/rename called outside atomic_toml_writer.cpp:" >&2
+    echo "[atomic-toml-write-grep] FAIL — mkstemp/rename called outside atomic_toml_writer.cpp / uds_server.cpp:" >&2
     echo "${ATOMIC_TOML_HITS}" | sed 's/^/[atomic-toml-write-grep]   /' >&2
     exit 1
 fi
-echo "[atomic-toml-write-grep] clean (mkstemp/rename only in config/atomic_toml_writer.cpp)"
+echo "[atomic-toml-write-grep] clean (mkstemp/rename only in config/atomic_toml_writer.cpp + uds/uds_server.cpp)"

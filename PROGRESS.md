@@ -174,6 +174,61 @@ All host-side bring-up steps complete. See per-step session log entry below. The
 
 ## Session log
 
+### 2026-05-03 (afternoon — 12:30 KST → 15:30 KST, twentieth-session — analytical session, NO PRs merged, two REJECT-rework iterations on issue#11 + issue#26)
+
+Twentieth-session opened directly off the nineteenth-session close (PR #77 docs merged 12:07 KST → main = `7668c14`). Operator opened with: "issue#11 deep dive — Planner + Reviewer must do wider cross-analysis of possibilities, risks, impact points than usual." The session ran two full Planner → Mode-A iterations back-to-back (issue#11 round 1 + issue#26 round 1), both REJECTED on numerical/factual foundation collapse, both on the same root pattern. Operator scope-shifted twice mid-session — first dropping OneShot calibrate from issue#11 value equation, then promoting empirical-measurement-first via a new cross-device test tool (issue#26). Net result: zero source code changes, zero PRs, but ~2000 lines of plan + Mode-A folds + new `/doc/issue11_design_analysis.md` SSOT + two new `.claude/memory/` entries that let next-session pick up from a clean cold-start.
+
+**Notable structural revelation #1 — `feedback_verify_before_plan.md` is the most-violated memory**. Two REJECTs in one session, both root-caused to "Planner trusts assumed/cached baselines without source-code verification":
+- issue#11 round 1: Plan asserted Live runs `K=1` per tick today; reality `K≈16` via `converge_anneal_with_hint` 3-phase σ-anneal at `cold_writer.cpp:601-645` (HIL evidence "iters mode=16, max=21, mean=15.7" sits in a comment at `config_defaults.hpp:138`, but Planner did not read it). Plan asserted `N=10000` particles; reality `N=500` steady-state at `config_defaults.hpp:73` (10000 is the buffer ceiling, not the working population).
+- issue#26 round 1: Plan asserted UDP target port `50001`; reality `6666` per `config_schema.hpp:140` and `/var/lib/godo/tracker.toml`. Plan asserted `chrony` runs on RPi5; reality `systemd-timesyncd` (verified via `systemctl is-active`). Plan asserted SSE endpoint `https://`; reality `http://` (verified via `curl -i`). Plan's worked checksum example for "zero packet" was `0x92`; reality `0x6E` (Planner inverted subtraction direction in the `(64 - sum) & 0xFF` formula).
+
+The pattern is not lazy planning — both Planners produced thorough, structurally-sound plans. The pattern is that planning brief context includes "what was true when memory was written" and the Planner does not double-check against current code. The lesson `feedback_verify_before_plan.md` (locked at nineteenth session) requires the brief to include "I already inspected X — note these starting facts"; both this session's Planner invocations honored that instruction in spirit but not in execution rigor. Mode-A's ROI was disproportionately high precisely because the deep-cross-analysis mandate forced source-code verification that the Planner deferred.
+
+**Notable structural revelation #2 — operator's "measurement-first" decision flips the typical engineering rhythm**. After issue#11 round 1's REJECT, operator chose to fully rework (Path A) rather than absorb inline. Round 2 Planner ran in background. Mid-Round-2, operator scope-shifted: "OneShot calibrate is NOT a goal — only Live mode real-time matters" + "Empirical measurement first — build cross-device test tool measuring RPi5↔MacBook endpoint latency. Decide architecture later on real numbers." Round 2 Plan content arrived but was deemed partially obsolete (OneShot speedups no longer relevant); Parent did NOT persist Round 2 to file. Instead saved comprehensive analysis to `/doc/issue11_design_analysis.md` (8 sections: 5-architecture survey + Mode-A categorized findings + cross-analysis verdicts + operator direction shift + outstanding architectural questions + reading order + issue label reservations issue#19-26). Lesson: when a planning surface has 5 candidate architectures AND the current baseline is mis-specified (Round 1 used phantom K=1), shipping measurement infrastructure first is cheaper than burning planning iterations on phantom data. The /doc reference doc captures the analysis as durable input for whichever round 3 the operator chooses.
+
+**Notable structural revelation #3 — asymmetry detection is structurally unobservable with 4-timestamp NTP**. issue#26 plan included an "asymmetric-path detector" as a key validation gate (Mode-A test 4). Mode-A re-derivation: with the 4-timestamp NTP protocol, post-correction forward and reverse delays are equal *by construction* — the test is mathematically vacuous. True asymmetry detection requires PTP HW timestamping, GPS PPS, or known-symmetric ground truth. Mode-A reframe: replace "asymmetry detector" with "RTT-variance / minimum-RTT-stability detector" (WARN when `(rtt_p90 - rtt_p10) / rtt_p50 > 0.5`), AND document explicitly that path asymmetry is unobservable with this protocol class. Plan's ms-level accuracy claim is bounded by RTT/2, not by an "asymmetry estimate". Lesson: when a measurement tool's marketing claim looks too good (sub-ms cross-host alignment with asymmetry detection), challenge the algorithmic foundation before shipping the test suite that locks in a wrong reference.
+
+**0 PRs landed this session**:
+
+| PR | Issue | Title | State |
+|---|---|---|---|
+| (none) | — | (analytical-only session) | n/a |
+
+**Cross-cutting rules NOT (yet) locked in memory** (Parent will decide post-chronicler whether to add):
+
+- **Verify-before-Plan repeated violation pattern**: existing `feedback_verify_before_plan.md` is honored in spirit but not in execution rigor when the brief is long. Worth a stronger phrasing or a build-step that has Planner explicitly cite source line:column for each numeric premise.
+- **"Measurement-first when architecture surface > 3 alternatives"**: candidate `feedback_measurement_first.md` capturing the issue#11 → issue#26 flip pattern.
+- **"Asymmetry needs PTP/GPS"**: candidate `project_clock_sync_limits.md` capturing the structural unobservability of asymmetry with 4-timestamp NTP.
+
+**Files in flight (untracked, ready for operator commit)**:
+
+- `.claude/tmp/plan_issue_11_live_pipelined_parallel.md` — Round 1 plan body lines 1-531 + Mode-A round 1 fold lines 533-728. Round 2 content NOT persisted (deemed partially obsolete by operator scope shift; analysis preserved at `/doc/issue11_design_analysis.md` instead).
+- `.claude/tmp/plan_issue_26_latency_measurement_tool.md` — Round 1 plan body lines 1-633 + Mode-A round 1 fold lines 634-849. Round 2 deferred per operator decision.
+- `/doc/issue11_design_analysis.md` (NEW) — 8 sections, comprehensive analysis SSOT for issue#11 + linked issue label reservations (`issue#19-26`).
+- `.claude/memory/project_issue11_analysis_paused.md` (NEW) — UART-migration-style paused-spec memory.
+- `.claude/memory/project_issue26_measurement_tool.md` (NEW) — UART-migration-style paused-spec memory with full Critical-finding table.
+- `.claude/memory/MEMORY.md` (UPDATED) — index entries for both new memory files.
+
+**Live system on news-pi01 (post twentieth-session close)**:
+
+UNCHANGED across all surfaces:
+- godo-tracker, godo-webctl, godo-frontend, godo-irq-pin, godo-cp210x-recover, godo-mapping@active — all as deployed at nineteenth-session close.
+- `/var/lib/godo/tracker.toml` — operator may update `network.ue_port = 50003` before tomorrow's broadcasting-room measurement (currently `6666` from schema default; operator mentioned 50003 in conversation but had not applied).
+- main = `7668c14`. Working tree currently on `docs/2026-05-03-twentieth-session-close` for the chronicler bundle.
+
+**Open queue for next session** (operator-locked priority, refreshed 2026-05-03 15:30 KST):
+
+1. **★ issue#6 — B-MAPEDIT-3 yaw rotation + B-MAPEDIT-2 origin pick polish** (operator-locked priority #1 for next session). Concrete, immediately verifiable in SPA, no algorithmic dependency on measurement data. Spec: `.claude/memory/project_map_edit_origin_rotation.md`.
+2. **issue#26 round 2 + Writer + HIL** (after issue#6 ships). Half-day effort. Plan + Mode-A round 1 fold ready at `.claude/tmp/plan_issue_26_latency_measurement_tool.md`. Operator drives HIL at office tomorrow on broadcasting-room wired Ethernet.
+3. **issue#11 design analysis (paused)** — resumes after issue#26 first capture lands. Reading order: `.claude/memory/project_issue11_analysis_paused.md` → `/doc/issue11_design_analysis.md`.
+4. **issue#13 (continued)** — distance-weighted AMCL likelihood. Standalone single-knob algorithmic experiment.
+5. **issue#4** — AMCL silent-converge diagnostic. Comprehensive HIL baseline accumulated through nineteenth-session.
+6. **issue#17** — GPIO UART direct (perma-deferred unless field evidence accumulates).
+7. **Bug B** — Live mode standstill jitter (analysis-first; subsumed by issue#11 path once resumed).
+8. **issue#7** — boom-arm angle masking (contingent on issue#4 diagnostic).
+
+**Next free issue integer: `issue#27`** (issue#19-25 reserved as missed-alternative follow-ups in /doc/issue11_design_analysis.md §8; issue#26 reserved for the measurement tool).
+
 ### 2026-05-03 (late morning → noon — 09:30 KST → 12:07 KST, nineteenth-session — issue#18 UDS bootstrap audit ships + issue#16.2 preview .tmp sweep ships)
 
 Nineteenth-session opened directly off the eighteenth-session close (PR #74 docs merged 09:18 KST). Operator absorbed the eighteenth's deferred TL;DR #1 (UDS bootstrap audit, operator-locked priority) and TL;DR #2 (preview `.tmp` cleanup) in a focused ~2.5 h block, both squash-merged. PR #75 ran the FULL pipeline (planner → Mode-A → writer → Mode-B); PR #76 ran the ABBREVIATED pipeline (direct writer + Parent self-verify) per `feedback_pipeline_short_circuit.md`. Operator quote at session-close: "어제 mapping 관련 오류들 개선하니까 맵 제작 과정이 너무 쾌적하다 ㅎㅎ" — the cumulative effect of the issue#16 family (cp210x recovery + mapping stop ladder + udev `/dev/rplidar` + operator-tunable serial + preview `.tmp` sweep) and the issue#18 UDS hardening is now noticeably smoother in the production mapping workflow.

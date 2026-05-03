@@ -49,3 +49,65 @@ Operator asked to systematically check where this pattern fits — **beyond AMCL
 5. **AMCL Live mode tiered confidence** — concurrent σ tiers giving real-time "are we still locked" signal in operator UI.
 
 Output: ranked table by (a) measured operator benefit (b) impl cost (c) RT-safety on hot path. Tracked as TaskCreate #8 (active "[Next session] Verify pipelined-pattern applicability across GODO").
+
+## issue#11 planning axes (operator-locked, 2026-05-03 12:07 KST nineteenth-session close)
+
+Operator outlined three axes for the next-session deep dive on issue#11
+(Live mode pipelined-parallel multi-thread). These are the planning
+constraints the Planner must address up front:
+
+### Axis 1 — real-time-vs-accuracy trade-off minimization
+
+The pipelined pattern should improve BOTH simultaneously, not trade one for the other.
+Sequential Live currently runs K refinement steps per tick → fixed
+latency budget caps K, which caps achievable accuracy at high tick
+rates. Pipelined: more steps amortized across cores → tighter
+convergence per pose output without lengthening the wallclock per tick.
+The Planner must show the projected improvement in BOTH dimensions
+(latency p99 + steady-state pose error std-dev) — failing to improve
+both is a scope misfit.
+
+### Axis 2 — single-core sequential vs multi-core distributed (and the cascade-jitter risk)
+
+The Planner must decide between:
+
+- **Single-core deeper pipeline** (CPU 3 RT-isolated, deeper per-tick
+  schedule): no inter-core comm latency, no cascade-jitter risk, but
+  caps total throughput at one core's compute budget. Simpler model.
+- **Multi-core distributed pipeline** (cores 0/1/2 host different
+  pipeline stages, CPU 3 reserved for hot path): higher aggregate
+  compute, BUT inter-core handoff adds ~µs-scale latency and — operator's
+  key concern — **a stage stall ripples jitter through every downstream
+  stage in the pipeline**. One stage missing its deadline means every
+  later stage is also late on the next tick.
+
+The Planner must propose a **stall-isolation strategy** for the
+multi-core option (e.g., per-stage deadline + skip-tick on overrun + bounded
+queue size) OR justify falling back to single-core. "It just works" is
+not acceptable — show the worst-case stage-stall ripple analysis.
+
+### Axis 3 — non-Live computation paths audit
+
+Live mode is the obvious candidate, but the Planner must also audit:
+
+- **Calibration (OneShot AMCL)**: σ-anneal already runs sequentially
+  (Track D-5 ships sequential). Pipelined-parallel candidate (Track
+  D-5-P).
+- **AMCL one-shot iteration loops**: per-σ K-step refinement is
+  inherently iterative. Could K-step distribute across cores within a
+  single σ tier?
+- Any other repetitive-pattern compute path the Planner discovers via
+  grep of "while" + "for k in range" patterns in production/RPi5/src/.
+
+Goal: a single architectural pattern usable across multiple compute
+sites, NOT a Live-mode-specific bolt-on.
+
+### Cross-references
+
+- This memory file's earlier sections describe the conceptual idiom
+  + Track D-5 sequential implementation status.
+- Spec context for issue#11 is consolidated here; the eighteenth-
+  session HIL data baseline (Live ±5 cm stationary / ±10 cm motion /
+  yaw ±1°) is the "before" measurement to beat.
+- CPU 3 isolation invariant: `.claude/memory/project_cpu3_isolation.md`
+  pins CPU 3 RT-only; pipeline must respect this.

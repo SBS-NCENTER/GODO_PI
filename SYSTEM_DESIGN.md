@@ -732,6 +732,63 @@ Notes pinned by the skeleton:
 - CPU affinity, rtprio, and RAM period all come from `Config`; no
   magic numbers in the function body. See §11.
 
+### 6.2.1 UDS bootstrap path (issue#18, 2026-05-03)
+
+`main()`'s pre-thread-spawn boot sequence — between `Config::load` and
+`spawn_threads` — runs three UDS-bootstrap actions in this exact order:
+
+```
+pidfile_lock(cfg.pidfile_path)                    // invariant (l)
+godo::uds::audit_runtime_dir(cfg.uds_socket)      // MF3 — log-only
+godo::uds::sweep_stale_siblings(cfg.uds_socket)   // SF3 — clean stale .tmp
+banner emit
+spawn_threads(cfg)                                // thread_uds → UdsServer::open()
+```
+
+**Why this exact order**:
+
+- `pidfile_lock` first — every later step depends on the single-instance
+  invariant. If the lock fails, no UDS state is touched.
+- `audit_runtime_dir` second — emits ONE stderr line cataloguing the
+  inherited UDS state at boot:
+  `uds bootstrap audit: ctl.sock=<TYPE_size_or_ENOENT> siblings=<n> [<list-cap-3>]`.
+  Captures the inherited state BEFORE any cleanup so journalctl can
+  forensic-trace what was found at boot.
+- `sweep_stale_siblings` third — `glob(3)` over `<socket_path>.*.tmp`
+  with strict `globfree()` RAII. Regular files unconditionally swept;
+  socket-typed siblings are unlinked only if `mtime` is older than
+  `UDS_STALE_SIBLING_MIN_AGE_SEC = 2s` (defence-in-depth — pidfile
+  invariant already excludes concurrent trackers, but the mtime gate
+  prevents a hypothetical self-delete race).
+- Banner + `spawn_threads` last — `thread_uds` constructs the
+  `UdsServer` on its stack; `UdsServer::open()` runs the atomic-rename
+  bind sequence + the existing PR #73 `lstat`-non-socket guard as
+  second line of defence inside the open path. `<pid>.tmp` does not
+  exist until `UdsServer::open()` runs, so `sweep_stale_siblings` (which
+  ran earlier) cannot self-delete the tracker's own temp socket.
+
+**Graceful shutdown** — SIGTERM → `g_running.store(false)` →
+`server.run()` returns → stack unwinding fires `~UdsServer()` →
+`close()` → `unlink(socket_path_)`. The destructor-unlink path is the
+canonical cleanup; `audit_runtime_dir` + `sweep_stale_siblings` cover
+the unclean-shutdown case where the destructor never ran.
+
+**Forensic logging** — `UdsServer::open()`'s rename failure path now
+calls `log_lstat_for_throw(path, label)` BEFORE the existing throw,
+emitting per-endpoint stderr lines with the `S_IFSOCK / S_IFREG /
+S_IFDIR / ENOENT / lstat_errno=<n>` discriminator. The throw text is
+unchanged so any caller / journalctl grep keying on `rename(`
+continues to work. The helper is namespace-internal (exposed in
+`uds_server.hpp`) so the unit test can drive it directly with the
+four discriminator inputs without forcing `rename(2)` failure or
+introducing mocks.
+
+Cross-references: production CODEBASE invariant `(u)
+uds-bootstrap-stale-state-discipline`; `production/RPi5/doc/uds_protocol.md`
+§H Bootstrap and operator forensics (with H.2 documenting the
+`ss -lxp` historical-bind-path display quirk and H.3 the operator
+journalctl + HIL recipes).
+
 ### 6.3 Operational checklist
 
 - [ ] `/etc/security/limits.conf`: `@godo - rtprio 99`.

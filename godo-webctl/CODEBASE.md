@@ -1025,6 +1025,33 @@ Pinned by:
 
 ## Change log
 
+### 2026-05-03 11:41 KST — issue#16.2 — preview `.tmp` sweep on mapping.start()
+
+#### Why
+
+`godo-mapping/preview_node/preview_dumper.py:54-64` atomic-writes
+`<name>.pgm` via `open(tmp) + fsync + os.replace` while subscribed to
+`/map`. SIGTERM landing in the fsync window leaves the
+`<name>.pgm.tmp` orphaned in `/var/lib/godo/maps/.preview/`. No data
+loss (the canonical `.pgm` is either the prior tick's full content or
+absent), but stale `.tmp` files accumulate across crashed mapping
+sessions. Pure housekeeping.
+
+#### Fix
+
+`mapping._sweep_preview_tmp_files(cfg)` — best-effort glob over
+`cfg.maps_dir / .preview / *.pgm.tmp` with per-file `unlink`. OSError
+warnings are logged but never abort. Invoked once per `start()` Phase
+1 (under `_coordinator_flock` so the single-writer invariant holds),
+right after the IDLE-state gate and before the image pre-flight.
+Each new mapping session starts from a clean preview directory.
+
+Tests: 4 new cases in `tests/test_mapping.py` —
+`test_sweep_preview_tmp_files_unlinks_stale_tmp` (positive, two
+siblings), `..._preserves_canonical_pgm` (only `.tmp` swept; `.pgm`
+untouched), `..._noop_when_preview_dir_missing`,
+`..._noop_when_no_tmp_present`.
+
 ### 2026-05-03 02:30 KST — issue#16.1 + issue#10 bundle — t5 trap-timeout fix + /dev/rplidar default
 
 #### Why

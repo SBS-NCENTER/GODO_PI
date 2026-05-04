@@ -511,6 +511,8 @@
               worldMaxX: Math.max(w0x, w1x),
               worldMinY: Math.min(w0y, w1y),
               worldMaxY: Math.max(w0y, w1y),
+              // HIL fix 2026-05-04 KST — grid follows axis rotation.
+              yawDeg: yamlYawDeg,
             });
           }
           if (originAxisOn) {

@@ -107,6 +107,11 @@ export interface GridParams {
   worldMaxX: number;
   worldMinY: number;
   worldMaxY: number;
+  /** HIL fix 2026-05-04 KST — grid rotation in degrees (CCW). Grid
+   * lines align with the +x and +y axes of the same rotated frame
+   * the axis overlay uses, so they always look "stuck to" the
+   * yamlOriginYawDeg direction. Default 0 = world-axis-aligned. */
+  yawDeg?: number;
 }
 
 interface GridScheduleEntry {
@@ -123,9 +128,11 @@ function pickGridInterval(pxPerMeter: number): GridScheduleEntry {
   return { intervalM: 1, lineWidthPx: 1 };
 }
 
-/** Draw a world-frame grid (horizontal + vertical lines at every
- * `intervalM` metres, picked from the zoom schedule). All lines
- * project through `w2c` so they pan/zoom with the underlay. */
+/** Draw a grid (lines parallel to the +x and +y axes of a frame
+ * rotated by `yawDeg` from the world frame). At yawDeg=0 the grid
+ * is world-axis-aligned; at yawDeg=30° the grid lines align with
+ * the rotated axes the operator sees in the axis overlay. All
+ * lines project through `w2c` so they pan/zoom with the underlay. */
 export function drawGrid(
   ctx: CanvasRenderingContext2D,
   w2c: WorldToCanvas,
@@ -134,32 +141,62 @@ export function drawGrid(
   const { intervalM, lineWidthPx } = pickGridInterval(params.pxPerMeter);
   if (!(intervalM > 0)) return;
 
+  const yawRad = ((params.yawDeg ?? 0) * Math.PI) / 180;
+  const cosY = Math.cos(yawRad);
+  const sinY = Math.sin(yawRad);
+
+  // Inverse-rotate the visible world bounds into the rotated local
+  // frame so we know which line indices fall inside the viewport.
+  // local = R(-yaw) · world ⇒ (lx, ly) = (wx*cos+wy*sin, -wx*sin+wy*cos).
+  const corners: Array<[number, number]> = [
+    [params.worldMinX, params.worldMinY],
+    [params.worldMinX, params.worldMaxY],
+    [params.worldMaxX, params.worldMinY],
+    [params.worldMaxX, params.worldMaxY],
+  ];
+  const localXs = corners.map(([wx, wy]) => wx * cosY + wy * sinY);
+  const localYs = corners.map(([wx, wy]) => -wx * sinY + wy * cosY);
+  const localMinX = Math.min(...localXs);
+  const localMaxX = Math.max(...localXs);
+  const localMinY = Math.min(...localYs);
+  const localMaxY = Math.max(...localYs);
+
   ctx.save();
   ctx.strokeStyle = GRID_LINE_COLOR;
   ctx.lineWidth = lineWidthPx;
 
-  // Vertical lines (constant world x)
-  const startX = Math.ceil(params.worldMinX / intervalM) * intervalM;
+  // Forward-rotation helper: world = R(yaw) · local.
+  const localToWorld = (lx: number, ly: number): [number, number] => [
+    lx * cosY - ly * sinY,
+    lx * sinY + ly * cosY,
+  ];
+
+  // Lines parallel to rotated +y (constant local x)
+  const startX = Math.ceil(localMinX / intervalM) * intervalM;
   let drawnX = 0;
-  for (let wx = startX; wx <= params.worldMaxX; wx += intervalM) {
+  for (let lx = startX; lx <= localMaxX; lx += intervalM) {
     if (drawnX++ >= GRID_MAX_LINES_PER_AXIS) break;
-    const [x0, y0] = w2c(wx, params.worldMinY);
-    const [x1, y1] = w2c(wx, params.worldMaxY);
+    const [w0x, w0y] = localToWorld(lx, localMinY);
+    const [w1x, w1y] = localToWorld(lx, localMaxY);
+    const [c0x, c0y] = w2c(w0x, w0y);
+    const [c1x, c1y] = w2c(w1x, w1y);
     ctx.beginPath();
-    ctx.moveTo(x0, y0);
-    ctx.lineTo(x1, y1);
+    ctx.moveTo(c0x, c0y);
+    ctx.lineTo(c1x, c1y);
     ctx.stroke();
   }
-  // Horizontal lines (constant world y)
-  const startY = Math.ceil(params.worldMinY / intervalM) * intervalM;
+  // Lines parallel to rotated +x (constant local y)
+  const startY = Math.ceil(localMinY / intervalM) * intervalM;
   let drawnY = 0;
-  for (let wy = startY; wy <= params.worldMaxY; wy += intervalM) {
+  for (let ly = startY; ly <= localMaxY; ly += intervalM) {
     if (drawnY++ >= GRID_MAX_LINES_PER_AXIS) break;
-    const [x0, y0] = w2c(params.worldMinX, wy);
-    const [x1, y1] = w2c(params.worldMaxX, wy);
+    const [w0x, w0y] = localToWorld(localMinX, ly);
+    const [w1x, w1y] = localToWorld(localMaxX, ly);
+    const [c0x, c0y] = w2c(w0x, w0y);
+    const [c1x, c1y] = w2c(w1x, w1y);
     ctx.beginPath();
-    ctx.moveTo(x0, y0);
-    ctx.lineTo(x1, y1);
+    ctx.moveTo(c0x, c0y);
+    ctx.lineTo(c1x, c1y);
     ctx.stroke();
   }
   ctx.restore();

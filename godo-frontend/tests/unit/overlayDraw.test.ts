@@ -65,6 +65,49 @@ describe('drawGrid', () => {
     expect(drawn).toBeGreaterThan(0);
   });
 
+  it('rotates lines by yawDeg so the grid aligns with the axis overlay', () => {
+    // At yawDeg=90°, lines that were parallel to world +y should now
+    // be parallel to world +x. We verify by feeding a rectangular
+    // visible region and checking that both line endpoints share the
+    // SAME world-y when rotated 90° (= horizontal in world frame).
+    const w2c: WorldToCanvas = vi.fn((wx, wy) => [wx, wy]);
+    const { ctx, calls } = fakeCtx();
+    drawGrid(ctx as unknown as CanvasRenderingContext2D, w2c, {
+      pxPerMeter: 50, // selects 1 m interval per the schedule
+      worldMinX: 0,
+      worldMaxX: 5,
+      worldMinY: 0,
+      worldMaxY: 5,
+      yawDeg: 90,
+    });
+    // Find moveTo / lineTo pairs that came from "constant local x"
+    // lines. After 90° rotation, constant local x = constant world y.
+    // With identity w2c, the canvas y-coords of paired moveTo/lineTo
+    // should be identical for those lines.
+    const points: Array<[number, number]> = [];
+    for (const c of calls) {
+      if (c.op === 'moveTo' || c.op === 'lineTo') {
+        points.push([c.args[0] as number, c.args[1] as number]);
+      }
+    }
+    // For 90° yaw, every drawn segment should have either both
+    // endpoints sharing canvas-y (horizontal in world) OR both
+    // sharing canvas-x (vertical in world). Pairs alternate
+    // (moveTo, lineTo) — check the pairs.
+    let horizontalCount = 0;
+    let verticalCount = 0;
+    for (let i = 0; i < points.length; i += 2) {
+      const a = points[i]!;
+      const b = points[i + 1];
+      if (!b) continue;
+      if (Math.abs(a[1] - b[1]) < 1e-6) horizontalCount++;
+      else if (Math.abs(a[0] - b[0]) < 1e-6) verticalCount++;
+    }
+    // Both axes of the rotated grid must produce visible lines.
+    expect(horizontalCount).toBeGreaterThan(0);
+    expect(verticalCount).toBeGreaterThan(0);
+  });
+
   it('caps lines per axis at GRID_MAX_LINES_PER_AXIS', () => {
     const w2c: WorldToCanvas = vi.fn(() => [0, 0]);
     const { ctx, calls } = fakeCtx();

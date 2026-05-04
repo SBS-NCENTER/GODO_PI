@@ -78,6 +78,15 @@
      * Track B-MAPEDIT-2 single-axis flow keeps working.
      */
     resolutionMPerPx?: number | null;
+    /**
+     * issue#28 (HIL fix) — when false, hide the inline "Apply origin"
+     * button. The parent route (`MapEdit.svelte`) owns Apply via the
+     * outer toolbar + modal flow; the inline button caused operator
+     * confusion (clicked it → hit legacy `/api/map/origin` path with
+     * no modal). Default true keeps back-compat tests + non-modal
+     * callers working.
+     */
+    inlineApplyEnabled?: boolean;
   }
 
   const {
@@ -88,6 +97,7 @@
     bannerKind,
     onapply,
     resolutionMPerPx = null,
+    inlineApplyEnabled = true,
   }: Props = $props();
 
   // issue#28 — feature gate flipped on. Theta editing is now backed by
@@ -545,27 +555,29 @@
     </p>
   {/if}
 
-  <div class="actions">
-    <button
-      type="button"
-      class="btn-secondary"
-      onclick={onDiscardClick}
-      disabled={busy}
-      data-testid="origin-discard-btn"
-    >
-      Discard
-    </button>
-    <button
-      type="button"
-      class="btn-primary"
-      onclick={onApplyClick}
-      disabled={applyDisabled}
-      data-testid="origin-apply-btn"
-      title={role !== 'admin' ? '제어 동작은 로그인 필요' : ''}
-    >
-      Apply origin
-    </button>
-  </div>
+  {#if inlineApplyEnabled}
+    <div class="actions">
+      <button
+        type="button"
+        class="btn-secondary"
+        onclick={onDiscardClick}
+        disabled={busy}
+        data-testid="origin-discard-btn"
+      >
+        Discard
+      </button>
+      <button
+        type="button"
+        class="btn-primary"
+        onclick={onApplyClick}
+        disabled={applyDisabled}
+        data-testid="origin-apply-btn"
+        title={role !== 'admin' ? '제어 동작은 로그인 필요' : ''}
+      >
+        Apply origin
+      </button>
+    </div>
+  {/if}
 
   {#if inlineError}
     <p class="banner banner-error" data-testid="origin-banner">

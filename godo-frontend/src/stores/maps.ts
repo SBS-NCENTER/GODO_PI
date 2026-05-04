@@ -17,6 +17,7 @@ import { apiDelete, apiGet, apiPost } from '$lib/api';
 import {
   MAPS_NAME_REGEX_PATTERN_STR,
   type MapEntry,
+  type MapGroup,
   type MapListResponse,
   type ActivateResponse,
 } from '$lib/protocol';
@@ -34,6 +35,10 @@ export class InvalidMapName extends Error {
 
 export const maps: Writable<MapEntry[]> = writable([]);
 
+// issue#28 — pristine + variants tree shape for the new `<MapList>`
+// grouped renderer. Populated alongside `maps` in `refresh()`.
+export const mapGroups: Writable<MapGroup[]> = writable([]);
+
 export function isValidMapName(name: string): boolean {
   return NAME_REGEX.test(name);
 }
@@ -50,7 +55,9 @@ export async function refresh(): Promise<MapEntry[]> {
   // when wired in.
   const resp = await apiGet<MapListResponse>('/api/maps');
   const flat: MapEntry[] = Array.isArray(resp) ? resp : (resp.flat ?? []);
+  const groups: MapGroup[] = Array.isArray(resp) ? [] : (resp.groups ?? []);
   maps.set(flat);
+  mapGroups.set(groups);
   return flat;
 }
 

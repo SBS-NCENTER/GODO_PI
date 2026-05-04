@@ -555,6 +555,7 @@
           void onLegacyOriginApply(body);
         }}
         resolutionMPerPx={resolution}
+        inlineApplyEnabled={false}
       />
     </div>
   {/if}

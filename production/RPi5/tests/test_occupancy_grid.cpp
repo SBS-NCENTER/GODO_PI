@@ -21,7 +21,6 @@
 
 #include <unistd.h>
 
-#include "core/constants.hpp"
 #include "localization/occupancy_grid.hpp"
 
 #ifndef GODO_FIXTURES_MAPS_DIR

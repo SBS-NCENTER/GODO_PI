@@ -286,6 +286,27 @@ Sign convention: **SUBTRACT** (operator-locked 2026-05-04 KST, supersedes 2026-0
 
 **Origin/Axis overlay** (`<OriginAxisOverlay>`): YAML origin을 dot으로, +x를 빨강 (`AXIS_X_COLOR = '#dc2626'`), +y를 초록 (`AXIS_Y_COLOR = '#16a34a'`)으로 ROS REP-103 convention으로 그림. `yamlOriginYawDeg`로 회전 — Apply 후 운영자가 시각적으로 회전 적용 여부 확인. Component-mount 핀 `tests/unit/OriginAxisOverlay.test.ts` (Mode-B CR1 fix).
 
+#### I3-bis-update. Viewport-tracking overlays + grid-axis 정렬 (HIL round 4-5)
+
+I3-bis 초기 spec은 `<OriginAxisOverlay>` / `<GridOverlay>`를 standalone canvas 컴포넌트로 정의했지만, 운영자 HIL에서 두 가지 결함이 발견됨:
+
+1. Standalone overlay 캔버스가 PGM 논리 차원(`mapDims`)으로 마운트되어 `viewport.zoom` / `panX` / `panY`를 구독하지 않음 → underlay PoseCanvas가 zoom/drag되어도 overlay는 화면에 박힘.
+2. Grid는 world-axis-aligned (수평/수직 in world frame)인데 axis는 `yamlYawDeg`로 회전 → 두 overlay가 별개 frame처럼 보임.
+
+운영자 HIL round 4-5 lock된 architecture:
+
+- **`lib/overlayDraw.ts`**가 단일 sole owner. `drawOriginAxis`, `drawGrid`, `drawPickPreview` 순수 함수로 노출. 각 함수는 **반드시 supplied `w2c` projector를 통해 좌표 변환** — 자체적인 pan/zoom 가정 금지 (invariant `(ap)`).
+- 호출 site는 **MapUnderlay의 `ondraw` hook 내부** (or `<PoseCanvas>`의 `drawPoseLayer` 내부). MapUnderlay가 underlay 자체를 그릴 때 사용하는 `worldToCanvas` projector를 hook에 전달하므로 overlay가 viewport pan/zoom을 자동 상속.
+- Standalone `<OriginAxisOverlay>` / `<GridOverlay>` 컴포넌트 파일은 디스크에 남아있으나 production code에서 mount되지 않음 (issue#28.1에서 정리 예정).
+- **Grid는 `yawDeg` 파라미터를 받아 axis와 같은 회전 따라감**. Inverse-rotate visible world bounds → local rotated frame → line index 결정 → forward-rotate back to world → project via `w2c`. `tests/unit/overlayDraw.test.ts::rotates lines by yawDeg`로 핀.
+
+**Orange pick preview** (`drawPickPreview`): Apply 전에 운영자가 picked 위치를 시각적으로 확인하도록:
+- XY pick: 채워진 주황 점 (`PICK_PREVIEW_COLOR = '#f97316'`, `PICK_PREVIEW_DOT_RADIUS_PX = 6`).
+- Yaw P1 only (P2 대기): 주황 hollow ring (P1 아직 pending 시각화).
+- Yaw P1+P2: 주황 화살표 (shaft + 25° 화살촉) P1 → P2.
+
+상태는 MapEdit.svelte 내 `xyPreview`, `yawP1Preview`, `yawP2Preview` `$state`로 관리; Apply 또는 Discard 시 `clearPickPreviews()` 호출.
+
 #### I4. Zoom UX uniform (PR β, 2026-04-30)
 
 모든 map-showing 탭(`/map`, `/map-edit`)에서 동일한 zoom UX. 좌상단 (+) / (−) 버튼 + `<input type="text" inputmode="decimal">` numeric input — 정수 percentage. **Mouse-wheel zoom 금지** (operator-locked Rule 1; `MAP_WHEEL_ZOOM_FACTOR` 상수 삭제 = 구조적 증거). Pan-by-drag는 그대로. Discrete step `MAP_ZOOM_STEP = 1.25` (10 클릭에 10 % → 931 %; 100 % → 200 % = 4 클릭). 정확도는 numeric input으로 supplied; (+/−)는 coarse exploration용. 코드 재사용 mandate (operator phrasing: "코드도 재사용 가능할거야 같은 기능이니"): zoom controls + viewport state + scan overlay logic이 단일 shared component / store에 살아야 함 — `mapViewport.svelte.ts` factory + `MapUnderlay.svelte` + `MapZoomControls.svelte`. Per-page duplication은 regression (Mode-A Critical).

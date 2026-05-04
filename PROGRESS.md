@@ -174,6 +174,81 @@ All host-side bring-up steps complete. See per-step session log entry below. The
 
 ## Session log
 
+### 2026-05-04 (morning → late-night — 06:00 KST → 22:30 KST, twenty-second-session — issue#28 ships B-MAPEDIT-3 yaw rotation full stack + 5 HIL fix rounds)
+
+Twenty-second-session opened directly off the twenty-first-session close (PR #80 docs merged 06:11 KST → main = `046d49d`). Operator brief: "B-MAPEDIT-3 yaw rotation 다음 세션 1순위" plus mid-session "이번에 같은 PR로 맞추자" — fold every Critical / Major / cascade item into ONE PR rather than splitting follow-ups. Net result: 1 merged PR (#81 squash at `da78dd0`), 54 files / +6746 / -384 LOC, 1456/1456 tests pass, longest pipeline stack of any session to date (Planner → Mode-A ACCEPT-WITH-NITS → Writer × 3 commits → Mode-B ACCEPT-WITH-NITS → Writer × 1 fold-in → operator HIL × 5 rounds → 5 HIL-fix commits → squash-merge).
+
+**Notable structural revelation — `grid.origin_yaw_deg` is NOT used by AMCL likelihood-field cell mapping**. The YAML `origin[2]` SSOT this PR introduced is consumed by tracker in only TWO places: `apply_yaw_tripwire` (informational diagnostic) and `compute_offset` (subtracted from pose.yaw to produce the FreeD output offset). `evaluate_scan` in `scan_ops.cpp` ignores it — the AMCL particle filter operates as if origin_yaw = 0, with the YAML yaw acting only as an OUTPUT-stage offset. This was discovered during the operator's PICK#1/PICK#2 cascade analysis and explains why **Option B (bake-into-bitmap) is the only correct path** for yaw correction: rotating the bitmap shifts the likelihood field's content, which AMCL DOES see; updating YAML yaw alone (Option A) would change the output `dyaw` but not the pose math, so a wall at world angle X stays at X regardless of YAML yaw. Memory candidate (flagged for Parent).
+
+**Process violation + lesson #1 — components shipped but never mounted**. Round 2 HIL: "Map 목록이 SPA에 보이지 않음" + "axis가 화면 테두리에 박힘". Root causes: (a) `<MapList>` component created in Part 1 but never mounted on Map.svelte (legacy `<MapListPanel>` still rendering with stale `MapEntry[]` consumption against the new `{groups, flat}` response shape — frontend silently rendered nothing); (b) standalone `<OriginAxisOverlay>` + `<GridOverlay>` canvases used PGM logical dimensions and didn't subscribe to `viewport.zoom`/`panX/Y`, so pan/zoom by the underlay didn't reach them; (c) `OriginAxisOverlay` `yamlOriginX/Y` bound to `currentOrigin[0..1]` instead of `(0, 0)` so axis intersection landed at canvas pixel (0, H). Lesson: **"NEW component shipped" ≠ "wired feature"** — Mode-B should pin a HIL-style "did you mount it on a route?" check. Memory candidate.
+
+**Process violation + lesson #2 — yaw direction sign mismatch (round 4 HIL)**. `map_rotate.py:153-154` docstring stated "rotate by `-typed_yaw_deg`" but line 217 passed `+typed_yaw_deg` to Pillow's `Image.rotate()`. Off-by-sign from the module's own documented intent. Coupled with: app.py's `_apply_map_edit_pipeline` passed `theta_deg` through to `apply_origin_edit_in_memory` which SUBTRACT'd YAML yaw, AND map_rotate physically rotated the bitmap — double-counting. Combined effect: a wall at world angle X ended up at world angle X − 2θ instead of 0. Operator caught it on first end-to-end Apply: "Yaw 의도와 반대로 돌아가고 있어." Memory candidate: docstring-vs-implementation drift detection during Mode-B.
+
+**1 PR landed this session**:
+
+| PR | Issue | Title | State |
+|---|---|---|---|
+| #81 | issue#28 | B-MAPEDIT-3 yaw rotation — full plumbing + pristine/derived map model + segmented Edit UI | merged `da78dd0` |
+
+Sub-commit timeline within PR #81 (10 commits before squash):
+
+1. `9b49aba` — Part 1: tracker plumbing (cold_writer reads `grid.origin_yaw_deg`, cfg field deprecated with stderr warning) + webctl backend (`maps.py`, `map_rotate.py` NEW, `map_origin.py` extension, `sse.py` NEW, `/api/map/edit/{coord,erase,progress}` endpoints, `/api/maps` grouped tree) + frontend NEW components (`EditModeSwitcher`, `OverlayToggleRow`, `GridOverlay`, `OriginAxisOverlay`, `ApplyMemoModal`, `MapList`) + `overlayToggles` store + `originMath.ts` extensions + tests. ~1850 LOC.
+2. `1a5c514` — Part 2 SPA wire-up: `OriginPicker.svelte` restructured (THETA_EDIT_ENABLED=true, 2-click yaw state machine, dirty flag split) + `MapEdit.svelte` `<EditModeSwitcher>` mounted with per-mode Apply/Discard + Map.svelte mounts + C7 split (math contract pin renamed to `mapOverlayCoherenceMath.test.ts`).
+3. `2491324` — clangd unused-include cleanup in `test_occupancy_grid.cpp`.
+4. `3fe0a39` — Mode-B CR1+CR2+CR3 + MA10: real `<OriginAxisOverlay>` + `<GridOverlay>` component-mount tests, `ColdWriterTest.OffsetComputedAgainstGridYaw_NotConfigField` asymmetric pin (cfg=0°, grid=10°), SPA filters SSE frames by `request_id`, SYSTEM_DESIGN §13 "Map edit pipeline" + FRONT_DESIGN §3 I3-bis added, 2 NEW memory files (`project_pristine_baseline_pattern.md`, `feedback_overlay_toggle_unification.md`).
+5. `24ecf22` — Latent TypeError fix: server now emits `derived_pair: {pgm, yaml}` + `pristine_pair` shapes the SPA's success banner already expected (TS interface declared them but server never sent — first Apply would have thrown `Cannot read properties of undefined (reading 'pgm')`).
+6. `fdffdc5` — HIL round 1 P0 fixes: (a) `stores/maps.refresh()` now extracts `flat` from `{groups, flat}` response shape (legacy `<MapListPanel>` was iterating wrapper object → empty list); (b) `<OriginAxisOverlay>` `yamlOriginX/Y={0}` so axis intersects world (0, 0) inside the bitmap (was at canvas corner); (c) `coordClickMode` default `'off'` → `'xy'` so canvas is immediately clickable in Coord mode.
+7. `0d0a86e` — HIL round 2 fix: mount `<MapList>` grouped tree on `Map.svelte` above legacy `<MapListPanel>` + `mapGroups` writable in `stores/maps.ts` + `<ConfirmDialog>` activate/delete wrappers + `OriginPicker.svelte` `inlineApplyEnabled={false}` from MapEdit (operator was clicking the legacy `/api/map/origin` Apply button next to the numeric inputs instead of the new modal-flow button at the top toolbar).
+8. `87af3bc` — HIL round 3+4 fix: (a) `map_rotate.py:217` `img.rotate(typed_yaw_deg)` → `img.rotate(-typed_yaw_deg)` per module docstring intent; (b) `app.py:_apply_map_edit_pipeline` passes `theta_deg=None` to `apply_origin_edit_in_memory` to stop YAML yaw double-counting against bitmap rotation. Pinned by `test_rotation_direction_negates_typed_yaw` (90° rotation lands dark cell to right of center) + `test_post_map_edit_coord_with_theta_does_not_double_count` (derived YAML origin[2] = pristine origin[2]).
+9. `917cefa` — HIL round 4 UI fix: NEW `lib/overlayDraw.ts` with `drawOriginAxis` / `drawGrid` / `drawPickPreview` pure helpers called inside MapUnderlay's `ondraw` hook. Removes standalone overlay canvas mounts on both Map.svelte and MapEdit.svelte. Overlays now inherit viewport pan/zoom transform from MapUnderlay's `worldToCanvas` projector. Adds orange pick preview state (`xyPreview`, `yawP1Preview`, `yawP2Preview`) cleared on Apply / Discard.
+10. `853864d` — HIL round 5 fix: grid extends with `yawDeg` param so lines align with the rotated axis overlay. `drawGrid` inverse-rotates visible world bounds into the local rotated frame, generates line endpoints in local coords, forward-rotates back to world for projection.
+
+**Operator-locked decisions this session** (all tracked in spec memory `project_map_edit_origin_rotation.md`):
+
+- **Pristine baseline pattern** — `<base>.{pgm,yaml}` immutable; every Apply emits `<base>.YYYYMMDD-HHMMSS-<memo>.{pgm,yaml}` derived pair. Quality loss = 1× resample regardless of iteration count.
+- **Translate first, then rotate** composition order.
+- **Lanczos-3 + re-threshold** intent (Pillow constraint forced fallback to BICUBIC; documented in code comments as a separate-pipeline follow-up).
+- **Auto-expand canvas** for long studios.
+- **No-cancel atomic Apply** with tracker control disable.
+- **SUBTRACT semantic for yaw** (mirror of x/y per `feedback_subtract_semantic_locked.md`); ROTATE#1/#2 fixtures pinned (`5°→10°→−5°`, `−5°→20°→−25°`).
+- **Segmented-control Edit tab** (Coordinate / Erase) with per-mode Apply/Discard; mode switch does NOT auto-discard.
+- **Two independent picks** within Coordinate mode (origin OR yaw OR both).
+- **Two-click yaw pick** — P1→P2 vector defines +x; length ignored.
+- **Dual-input mandate** — GUI + numeric (+/- 0.01 step) coexist.
+- **Postfix memo regex** `[A-Za-z0-9_-]+`.
+- **Hybrid grouped tree map list** (pristine parent, derived indented children, active badge, manual confirm).
+- **Manual active map switch + confirm dialog**, no auto-restart.
+- **Tracker plumbing fix**: `cfg.amcl_origin_yaw_deg` → YAML `origin[2]` SSOT (with 2-step deprecation: keep field as ignored + stderr warning one release, hard-remove in follow-up).
+- **Unified overlay toggle row** (Origin/Axis, LiDAR migrated, Grid) with localStorage persistence.
+- **Origin/Axis overlay** = origin dot + +x red + +y green axes to screen edge (REP-103); intersects WORLD (0, 0).
+- **Grid overlay** = world-frame anchored, zoom-adaptive, **rotates with `yamlYawDeg` to match the axis** (round-5 HIL-locked).
+- **Coherent rendering** Vitest pin (pose+scan+bitmap rotate together).
+- **Orange pick preview**: filled dot for XY pick, hollow ring for yaw P1-only, arrow for P1+P2.
+
+**Operator deferral** (operator-locked 2026-05-04 KST late-night): "이번에 같은 PR로 맞추자" closed the round, BUT the **YAML normalization to (0, 0, 0°)** path (operator's "Option Q" from the PICK#1/PICK#2 cascade analysis) is queued for a NEW PR in twenty-third-session. Current SUBTRACT-from-pristine semantic produces `new_yaml = pristine - typed`, NEVER (0, 0, 0°); operator's mental model wants the new derived map's YAML to read (0, 0, 0°) so the picked point IS the new world origin by definition. This requires bitmap translation + canvas adjustment + cumulative-typed tracking, NOT just metadata change. Spec lives in operator's PICK#1/PICK#2 cascade analysis — Parent will absorb into a new memory entry for next-session Planner brief.
+
+**Live system on news-pi01 (post twenty-second-session close)**:
+
+- `godo-tracker.service`: rebuilt from `da78dd0`. `cold_writer` now reads `grid.origin_yaw_deg()` (YAML SSOT); `cfg.amcl_origin_yaw_deg` retained as deprecated field with one-shot stderr warning. Tier-2 schema row still parseable (no TOML break per `feedback_toml_branch_compat.md`).
+- `godo-webctl.service`: NEW endpoints live — `POST /api/map/edit/coord` (JSON), `POST /api/map/edit/erase` (multipart), `GET /api/map/edit/progress` (SSE), `GET /api/maps` returns `{groups, flat}` grouped tree shape.
+- `godo-frontend` (`/opt/godo-frontend/dist/`): mounts `<EditModeSwitcher>` segmented control, `<OverlayToggleRow>` unified toggle, `<MapList>` grouped tree, `<ApplyMemoModal>` SSE-driven progress, viewport-tracking overlays via `lib/overlayDraw.ts`.
+- HIL pre-deploy step (operator-executed): `sudo sed -i.bak '/^amcl\.origin_yaw_deg/d' /var/lib/godo/tracker.toml` to silence the deprecation warning.
+
+UNCHANGED: godo-irq-pin, godo-cp210x-recover, godo-mapping@active, polkit (14 rules), Docker `godo-mapping:dev`, `/etc/udev/rules.d/99-rplidar.rules`, `/run/godo/`, journald.
+
+**Open queue for next session** (priority order, operator-locked):
+
+1. **issue#30 — YAML normalization (0, 0, 0°) per Apply** (NEW, operator-locked twenty-second-session late-night) — opens new PR. Bitmap translation + canvas adjustment + cumulative-typed tracking from pristine. Spec source: PICK#1/PICK#2 cascade analysis from this session. Uncovers the gap that current SUBTRACT-from-pristine + bake-into-bitmap can never produce YAML = (0, 0, 0°).
+2. **issue#28.1 — B-MAPEDIT-3 follow-ups from Mode-B Major findings** (MA1 4 missing pytests, MA2 test relocation, MA3 docstring fix, MA4 unused LANCZOS_FILTER_NAME, MA6 overlay projection at extreme zoom, MA7 webctl synchronous-vs-202 doc note, MA8 promote `kRadToDeg` to `core/constants.hpp`, MA9 schema row DEPRECATED label) + standalone `<OriginAxisOverlay>` + `<GridOverlay>` component file deletion (no longer mounted).
+3. **issue#26 — cross-device latency measurement tool** (PAUSED at Mode-A round 1 REJECT). Round 2 + Writer + HIL is half-day at broadcasting-room.
+4. **issue#11 — Live pipelined-parallel multi-thread** (PAUSED awaiting issue#26 first capture).
+5. **issue#13 (continued) — distance-weighted AMCL likelihood**.
+6. **issue#4 — AMCL silent-converge diagnostic**.
+7. **issue#29 — SHOTOKU base-move + two-point cal-reset workflow** (depends on issue#30 normalization for clean re-anchor math).
+8. **issue#17 — GPIO UART** (perma-deferred).
+9. **Bug B — Live mode standstill jitter** (analysis-first).
+10. **issue#7 — boom-arm angle masking** (contingent on issue#4).
+
 ### 2026-05-03 (late-night → cross-day — 22:00 KST 2026-05-03 → 06:00 KST 2026-05-04, twenty-first-session — issue#27 ships: output_transform stage + SUBTRACT origin + LastOutput SSE)
 
 Twenty-first-session opened off the twentieth-session close (`/doc/issue11_design_analysis.md` + 2 paused-spec memories landed via PR #78 directly to main as "Add files via upload" — operator chose web upload over a normal docs PR for this analytical-only batch). Session bundled BOTH map-preview UX polish AND a new RT-pipeline transform stage into a single cross-stack PR per operator's "한 번에 가자" call. Net result: 1 merged PR (#79, squash at `c28bc1d`), 66 files / +3586 / -632 LOC, 1426/1426 tests pass, full pipeline (Planner → Mode-A APPROVE-WITH-CHANGES → Writer → Mode-B Conditional approve → operator HIL → merge), with two distinct mid-flight scope corrections.

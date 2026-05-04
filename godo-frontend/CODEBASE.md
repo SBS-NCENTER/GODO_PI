@@ -3342,3 +3342,92 @@ Apply modal with SSE progress, and a grouped-tree map list.
   `map_origin.wrap_yaw_deg`. The two-click yaw pick uses world-frame
   coordinates supplied by the caller (canvas → world goes through
   `viewport.canvasToWorld`, NOT pixelToWorld — Mode-A M5 SSOT).
+
+---
+
+## 2026-05-04 (afternoon — KST) — issue#28 part 2: SPA wire-up
+
+### Why
+
+The first issue#28 commit shipped the new components + helpers + tests
+in isolation; this follow-up wires them into the live `/map-edit` and
+`/map` routes, flips `THETA_EDIT_ENABLED=true` in `OriginPicker.svelte`,
+and lights up the modal-driven Apply pipeline that targets
+`/api/map/edit/coord` and `/api/map/edit/erase`.
+
+### Added
+
+- `src/lib/api.ts` — `postMapEditCoord<T>(body, init?)` (JSON) and
+  `postMapEditErase<T>(blob, memo, init?)` (multipart) — the two new
+  Apply gateways that the modal flow targets.
+- `src/lib/protocol.ts` — `MapEditCoordBody` and `MapEditPipelineResult`
+  wire shapes mirroring the webctl `MapEditCoordBody` Pydantic model
+  and the pipeline response.
+- `OriginPicker.svelte`:
+  - `THETA_EDIT_ENABLED = true` (was `false`).
+  - Imperative API `setYawClick({x_m, y_m})`, `isYawP1Pending()`,
+    `getDirtyBody()`, `clearAll()`.
+  - 2-click yaw state machine; coincident-click guard via
+    `YAW_PICK_MIN_PIXEL_DIST_PX` + `resolutionMPerPx` prop.
+  - SUBTRACT theta preview row (`prev → next` via
+    `resolveYawDeltaFromPose`).
+- `routes/MapEdit.svelte` (large rewrite):
+  - `<EditModeSwitcher>` mounted at top of control row.
+  - `<OverlayToggleRow>` mounted on the same row (operator-locked).
+  - `<GridOverlay>` and `<OriginAxisOverlay>` mounted in `.map-stack`
+    (gated by toggles + `mapMetadata`).
+  - Per-mode toolbar with Discard / Apply buttons; Apply opens
+    `<ApplyMemoModal>` which on confirm fires the appropriate POST.
+  - Coord-mode click sub-mode picker (`Off / 원점 (XY) / 방향 (Yaw,
+    2-click)`) routes canvas pointer clicks to either
+    `setCandidate` or `setYawClick`.
+  - OriginPicker stays MOUNTED across mode switches (CSS hide/show)
+    so dirty state survives Coord ↔ Erase toggling — operator-locked.
+- `routes/Map.svelte`:
+  - `<OverlayToggleRow>` mounted at top of Overview sub-tab.
+  - `<GridOverlay>` and `<OriginAxisOverlay>` mounted inside
+    `.canvas-stack` (gated by toggles + `mapMetadata`).
+- `tests/unit/originPicker.test.ts` — 6 new cases (two-click cardinal
+  pre-fill, coincident-click guard, dual-input parity, Discard clears
+  pending P1, `getDirtyBody()` empty + theta-only branches). Existing
+  `theta UI hidden until B-MAPEDIT-3` case repurposed as `theta UI
+  rendered (issue#28 — gate flipped on)`.
+- `tests/unit/mapEdit.test.ts` — 4 cases rewritten for the issue#28
+  flow (default mode is Coord; switching modes preserves both pending
+  states; per-mode Apply only commits its mode; Apply buttons disabled
+  for anon viewer in BOTH modes). The legacy `/api/map/edit` cases were
+  superseded by the new pipeline tests above.
+- `tests/unit/mapOverlayCoherence.test.ts` (NEW) — C7 disposition
+  3-axis split: `pose_dot_position_matches_rotated_yaml_origin`,
+  `heading_arrow_direction_matches_rotated_yaml_yaw`,
+  `scan_dots_rotate_with_bitmap`, plus an integration pin under
+  +30° YAML rotation.
+
+### Changed invariants
+
+- **(u) MapMaskCanvas sole owner of mask state** — extended for issue#28.
+  `routes/MapEdit.svelte` now owns the segmented-control mode state
+  (`mode: 'coord' | 'erase'`) AND the per-mode busy + banner state pairs
+  (`coordBusy`/`coordBanner` vs `eraseBusy`/`eraseBanner`). The mask
+  buffer remains owned exclusively by `<MapMaskCanvas>` (the sole-owner
+  rule for mask state survives byte-identical). The OriginPicker stays
+  mounted across mode switches via CSS `display:none` so the operator's
+  XY/yaw dirty state survives Coord ↔ Erase toggling — operator-locked
+  "no auto-discard" pin tested by
+  `mapEdit.test.ts::switching mode preserves both pending states`.
+
+- **(aa) origin-math-extended-yaw-helpers** — extended further. The
+  `OriginPicker` now exposes `setYawClick`, `getDirtyBody`,
+  `isYawP1Pending`, and `clearAll` as the imperative API the parent
+  `<MapEdit>` route uses to drive the 2-click yaw gesture and the
+  modal-driven Apply.
+
+### Tests
+
+- New: `tests/unit/mapOverlayCoherence.test.ts` (4 cases — C7 axis
+  pins + integration pin).
+- Extended: `tests/unit/originPicker.test.ts` (16 → 22 cases; +6 yaw
+  cases; +1 case repurposed for the gate flip).
+- Rewritten: `tests/unit/mapEdit.test.ts` (4 page-level cases redone
+  for the segmented control + modal Apply flow; mask-canvas DPR pin
+  cases preserved byte-identical).

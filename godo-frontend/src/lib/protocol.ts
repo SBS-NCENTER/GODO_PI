@@ -561,6 +561,28 @@ export interface OriginEditResponse {
   restart_required: true;
 }
 
+// --- issue#28 — POST /api/map/edit/{coord,erase} wire shapes ----------
+// Mirror of `godo_webctl.app::MapEditCoordBody` /
+// `MapEditPipelineResult`. Coord endpoint is JSON; Erase endpoint is
+// multipart/form-data. SUBTRACT semantic for x_m, y_m, theta_deg.
+export interface MapEditCoordBody {
+  x_m: number;
+  y_m: number;
+  /** When omitted, no rotation is applied; PGM passes through. */
+  theta_deg?: number;
+  /** Filesystem-safe postfix; matches MEMO_REGEX_SOURCE. */
+  memo: string;
+}
+
+export interface MapEditPipelineResult {
+  ok: true;
+  derived_pair: { pgm: string; yaml: string };
+  pristine_pair: { pgm: string; yaml: string };
+  prev_origin: [number, number, number];
+  new_origin: [number, number, number];
+  restart_required: true;
+}
+
 // --- Track B-SYSTEM PR-2 — service observability wire shapes ---------
 // Mirror of `godo_webctl.protocol::SYSTEM_SERVICES_FIELDS` and the
 // `services.ServiceShow` dataclass. Drift detected by inspection per

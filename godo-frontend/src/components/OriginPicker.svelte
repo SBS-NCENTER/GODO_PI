@@ -1,6 +1,6 @@
 <script lang="ts">
   /**
-   * Track B-MAPEDIT-2 — origin-pick controls.
+   * Track B-MAPEDIT-2 + issue#28 — origin-pick controls.
    *
    * Sole owner of the dual-input origin form state per
    * `godo-frontend/CODEBASE.md` invariant (aa). The Edit sub-tab's
@@ -8,7 +8,7 @@
    * `'paint' | 'origin-pick'` click-mode toggle on `MapMaskCanvas`,
    * but does NOT mirror any of the form fields in a store.
    *
-   * Two input modes:
+   * Two input modes for x_m / y_m:
    *   - Mode A (GUI pick): parent route's pointer-coord callback calls
    *     `setCandidate({x_m, y_m})` to pre-fill the absolute fields.
    *     This component flips its own mode toggle to `'absolute'`
@@ -17,22 +17,22 @@
    *   - Mode B (numeric entry): operator types `x_m` / `y_m` / `theta_deg`
    *     directly and toggles `mode` between `absolute` and `delta`.
    *
-   * issue#27 additions:
-   *   - `theta_deg` input row (sub-degree precision, ±180° bound).
-   *     Backend converts deg → rad before writing to YAML.
-   *   - +/- step buttons next to each numeric input. Step deltas come
-   *     from the live /api/config response (`origin_step.x_m`,
-   *     `.y_m`, `.yaw_deg`); fallback to the constants defaults
-   *     when the config fetch is in flight.
-   *   - SUBTRACT sign convention (operator-locked 2026-05-04 KST,
-   *     supersedes 2026-04-30 ADD): typed (x_m, y_m) names the world
-   *     coord that should become the new (0, 0). Korean copy says
-   *     "이 좌표를 새 (0, 0)으로 만듭니다" instead of the previous
-   *     "더해서" wording.
-   *
-   * Apply path emits via the `onapply` callback prop with a fully
-   * validated `OriginPatchBody`. Parents handle the actual fetch +
-   * success/error banner orchestration.
+   * issue#28 additions:
+   *   - `THETA_EDIT_ENABLED` flipped to true (B-MAPEDIT-3 ships full
+   *     PGM rotation on the backend, so theta is no longer a metadata-
+   *     only no-op).
+   *   - Dual-input parity for theta: numeric (with +/- step buttons)
+   *     OR 2-click yaw pick (P1 → P2 vector defines the new +x axis).
+   *     `setYawClick(world_x, world_y)` is the imperative API the
+   *     parent calls when the canvas is in `'yaw-pick'` sub-mode.
+   *   - Independent dirty flags per axis (`xyDirty`, `thetaDirty`); the
+   *     parent's Apply button commits whichever is dirty via
+   *     `getDirtyBody()`.
+   *   - Inline Apply button + redirect-after-Apply pattern REMOVED;
+   *     `<ApplyMemoModal>` (mounted by parent) owns the flow.
+   *   - SUBTRACT semantic for theta: parent computes
+   *     `new_yaml_yaw = wrap(prev_yaml_yaw - typed_yaw)` and shows it
+   *     as a preview; backend re-computes the same delta server-side.
    */
 
   import { onDestroy, onMount } from 'svelte';
@@ -44,11 +44,17 @@
     ORIGIN_STEP_YAW_DEG_DEFAULT,
     ORIGIN_THETA_DEG_ABS_MAX,
     ORIGIN_X_Y_ABS_MAX_M,
+    YAW_PICK_MIN_PIXEL_DIST_PX,
   } from '$lib/constants';
-  import { resolveDeltaFromPose } from '$lib/originMath';
+  import {
+    resolveDeltaFromPose,
+    resolveYawDeltaFromPose,
+    twoClickToYawDeg,
+  } from '$lib/originMath';
   import type {
     ConfigGetResponse,
     LastPose,
+    MapEditCoordBody,
     OriginMode,
     OriginPatchBody,
   } from '$lib/protocol';
@@ -60,21 +66,35 @@
     busy: boolean;
     bannerMsg: string | null;
     bannerKind: 'info' | 'success' | 'error' | null;
+    /**
+     * Legacy callback (kept for the `/api/map/origin` back-compat path
+     * + tests). Parent route is FREE to leave this as a no-op when the
+     * issue#28 modal flow owns Apply.
+     */
     onapply: (body: OriginPatchBody) => void;
+    /**
+     * issue#28 — per-axis pixel resolution required to evaluate the
+     * 2-click yaw guard (`YAW_PICK_MIN_PIXEL_DIST_PX`). Optional so the
+     * Track B-MAPEDIT-2 single-axis flow keeps working.
+     */
+    resolutionMPerPx?: number | null;
   }
 
-  const { currentOrigin, role, busy, bannerMsg, bannerKind, onapply }: Props = $props();
+  const {
+    currentOrigin,
+    role,
+    busy,
+    bannerMsg,
+    bannerKind,
+    onapply,
+    resolutionMPerPx = null,
+  }: Props = $props();
 
-  // B-MAPEDIT-3 feature gate. Theta editing is metadata-only on the YAML
-  // (origin[2]) and the SPA can't render rotation today, so changing
-  // theta without B-MAPEDIT-3's PGM bilinear resample produces a
-  // visual vs. coordinate inconsistency (theta-warning at
-  // MapUnderlay.svelte:402-406 stays; pose yaw shifts but map doesn't
-  // rotate). Hide the UI until B-MAPEDIT-3 (issue#28) ships the full
-  // rotation gizmo + PGM resample. Backend `theta_deg` parameter +
-  // `origin_step.yaw_deg` schema row stay so B-MAPEDIT-3 can light up
-  // the UI by flipping this constant to true.
-  const THETA_EDIT_ENABLED = false;
+  // issue#28 — feature gate flipped on. Theta editing is now backed by
+  // the `/api/map/edit/coord` pipeline (Lanczos-3 PGM rotation +
+  // SUBTRACT YAML rewrite), so the visual ↔ coordinate inconsistency
+  // that justified hiding the UI in issue#27 is gone.
+  const THETA_EDIT_ENABLED = true;
 
   // Form state — owned exclusively by this component.
   let mode = $state<OriginMode>('absolute');
@@ -83,21 +103,18 @@
   let thetaText = $state<string>('');
   let inlineError = $state<string | null>(null);
 
-  // issue#27 — step deltas for the +/- buttons. Fetched from
-  // /api/config on mount; fallback to constants defaults during the
-  // fetch (or if it fails — UI stays usable). No reactive subscription:
-  // schema rows are Restart class, so the value at mount time is the
-  // operator's current spec for the session.
+  // issue#28 — 2-click yaw pick state. `yawP1` holds the first click in
+  // world coords; the second click closes the gesture by calling
+  // `twoClickToYawDeg`. Cleared on Discard, on numeric edit of theta,
+  // and on `setCandidate` (an XY click overrides any pending yaw click).
+  let yawP1 = $state<{ wx: number; wy: number } | null>(null);
+  let inlineYawError = $state<string | null>(null);
+
+  // issue#27 — step deltas for the +/- buttons.
   let stepX = $state<number>(ORIGIN_STEP_X_M_DEFAULT);
   let stepY = $state<number>(ORIGIN_STEP_Y_M_DEFAULT);
   let stepYaw = $state<number>(ORIGIN_STEP_YAW_DEG_DEFAULT);
 
-  // issue#27 Mode-B Maj-1 fix — delta mode resolves on the SPA side.
-  // Frontend reads lastPose, computes `abs = current_pose + delta`,
-  // sends absolute to backend so the backend stays dumb (single
-  // SUBTRACT formula). Without this subscription the delta branch would
-  // silently behave identically to absolute (the backend treats both
-  // identically as SUBTRACT-of-typed; only the *meaning* differs).
   let lastPose = $state<LastPose | null>(null);
   let unsubLastPose: (() => void) | null = null;
 
@@ -149,16 +166,23 @@
   let yParsed = $derived(parseField(yText, ORIGIN_X_Y_ABS_MAX_M));
   let thetaParsed = $derived(parseField(thetaText, ORIGIN_THETA_DEG_ABS_MAX));
 
-  // Theta is OPTIONAL — empty input is allowed (preserves YAML byte-for-
-  // byte). Apply is gated on x AND y being valid; theta blocks Apply
-  // only when typed AND invalid.
-  let bothValid = $derived(xParsed.value !== null && yParsed.value !== null);
+  let xyBothValid = $derived(xParsed.value !== null && yParsed.value !== null);
   let thetaBlocking = $derived(thetaText.trim() !== '' && thetaParsed.value === null);
 
-  let applyDisabled = $derived(busy || role !== 'admin' || !bothValid || thetaBlocking);
+  // Independent dirty flags. xy is dirty when BOTH inputs parse and at
+  // least one is non-empty. theta is dirty when the input parses to a
+  // finite number (empty = clean).
+  let xyDirty = $derived(xyBothValid && (xText.trim() !== '' || yText.trim() !== ''));
+  let thetaDirty = $derived(thetaText.trim() !== '' && thetaParsed.value !== null);
+
+  let applyDisabled = $derived(busy || role !== 'admin' || (!xyDirty && !thetaDirty) || thetaBlocking);
 
   function clearBanner(): void {
     inlineError = null;
+  }
+
+  function clearYawError(): void {
+    inlineYawError = null;
   }
 
   function fmtDisplay(v: number): string {
@@ -166,9 +190,6 @@
   }
 
   function fmtTheta(v: number): string {
-    // 1 decimal place matches the operator's typical "fine-tune by tenths
-    // of a degree" workflow without losing the operator's typed precision
-    // when it overshoots — the parsed value is full f64 round-tripped.
     return v.toFixed(1);
   }
 
@@ -180,8 +201,124 @@
     xText = fmtDisplay(c.x_m);
     yText = fmtDisplay(c.y_m);
     inlineError = null;
+    // An XY click cancels any in-progress yaw gesture.
+    yawP1 = null;
+    inlineYawError = null;
   }
 
+  // issue#28 — yaw-click feeder. Called by the parent in `'yaw-pick'`
+  // sub-mode. First call records P1; second call resolves to a yaw
+  // angle via `twoClickToYawDeg` and pre-fills `thetaText`. P1→P2 must
+  // exceed `YAW_PICK_MIN_PIXEL_DIST_PX` (converted via
+  // `resolutionMPerPx`); coincident clicks raise an inline error and
+  // leave P1 in place so the operator can re-click P2 without resetting.
+  export function setYawClick(c: { x_m: number; y_m: number }): void {
+    if (!THETA_EDIT_ENABLED) return;
+    if (yawP1 === null) {
+      yawP1 = { wx: c.x_m, wy: c.y_m };
+      inlineYawError = null;
+      return;
+    }
+    const res = resolutionMPerPx;
+    if (res === null || !(res > 0)) {
+      // Without a resolution we cannot evaluate the pixel-distance
+      // guard; reject the gesture explicitly so the operator gets a
+      // fixable error rather than a silently-skipped click.
+      inlineYawError = 'no_resolution';
+      return;
+    }
+    const yaw = twoClickToYawDeg(
+      yawP1.wx,
+      yawP1.wy,
+      c.x_m,
+      c.y_m,
+      YAW_PICK_MIN_PIXEL_DIST_PX,
+      res,
+    );
+    if (yaw === null) {
+      inlineYawError = 'yaw_pick_too_close';
+      return;
+    }
+    thetaText = fmtTheta(yaw);
+    yawP1 = null;
+    inlineYawError = null;
+  }
+
+  /**
+   * issue#28 — yaw-pick state observer. Used by tests + parent for the
+   * "P1 placed, awaiting P2" UI affordance.
+   */
+  export function isYawP1Pending(): boolean {
+    return yawP1 !== null;
+  }
+
+  /**
+   * issue#28 — Apply gateway. Returns the JSON body for
+   * `POST /api/map/edit/coord` based on the dirty flags. Returns null
+   * when nothing is dirty (Apply must remain disabled), when only
+   * theta is supplied (the backend pipeline requires x/y to anchor
+   * the SUBTRACT), or when delta-mode lacks a pose. The parent's
+   * Apply button is `disabled = !canApply()` mirroring this.
+   *
+   * `memo` is supplied by `<ApplyMemoModal>` and appended at the call
+   * site, so this method intentionally returns the body MINUS memo.
+   */
+  export function getDirtyBody(): Omit<MapEditCoordBody, 'memo'> | null {
+    if (!xyDirty && !thetaDirty) return null;
+    if (thetaBlocking) return null;
+
+    // x/y must always be present for the backend pipeline. If only
+    // theta is dirty, fill x/y from the current YAML origin so the
+    // SUBTRACT becomes a no-op on those axes.
+    let resolvedX: number;
+    let resolvedY: number;
+    if (xyDirty && xParsed.value !== null && yParsed.value !== null) {
+      resolvedX = xParsed.value;
+      resolvedY = yParsed.value;
+      if (mode === 'delta') {
+        if (lastPose === null || !lastPose.valid) {
+          inlineError = 'no_pose_for_delta';
+          return null;
+        }
+        const abs = resolveDeltaFromPose(
+          { x_m: lastPose.x_m, y_m: lastPose.y_m },
+          xParsed.value,
+          yParsed.value,
+        );
+        resolvedX = abs.x_m;
+        resolvedY = abs.y_m;
+      }
+    } else if (currentOrigin !== null) {
+      resolvedX = currentOrigin[0];
+      resolvedY = currentOrigin[1];
+    } else {
+      inlineError = 'no_xy_baseline';
+      return null;
+    }
+
+    const body: Omit<MapEditCoordBody, 'memo'> = { x_m: resolvedX, y_m: resolvedY };
+    if (thetaDirty && thetaParsed.value !== null) {
+      body.theta_deg = thetaParsed.value;
+    }
+    return body;
+  }
+
+  /**
+   * issue#28 — clear all dirty state. Parent calls on Discard.
+   */
+  export function clearAll(): void {
+    xText = '';
+    yText = '';
+    thetaText = '';
+    inlineError = null;
+    inlineYawError = null;
+    yawP1 = null;
+  }
+
+  // Legacy back-compat path: the inline Apply button still exists for
+  // the existing /api/map/origin tests + non-modal callers. The
+  // issue#28 parent route never clicks it (the parent's per-mode Apply
+  // button drives the modal flow instead).
   function nudgeX(delta: number): void {
     const cur = xParsed.value ?? 0;
     xText = fmtDisplay(cur + delta);
@@ -196,20 +333,17 @@
     const cur = thetaParsed.value ?? 0;
     thetaText = fmtTheta(cur + delta);
     clearBanner();
+    clearYawError();
   }
 
   function onApplyClick(): void {
     if (applyDisabled) return;
-    if (xParsed.value === null || yParsed.value === null) {
+    if (!xyDirty || xParsed.value === null || yParsed.value === null) {
       inlineError = 'inputs_invalid';
       return;
     }
     let resolvedX = xParsed.value;
     let resolvedY = yParsed.value;
-    // Maj-1 fix — resolve delta on the SPA side so the backend stays dumb.
-    // Operator's delta-mode mental model: typed (dx, dy) is the offset
-    // from the current LiDAR pose to the point that should become the
-    // new (0, 0). Backend always receives absolute world coords.
     if (mode === 'delta') {
       if (lastPose === null || !lastPose.valid) {
         inlineError = 'no_pose_for_delta';
@@ -228,7 +362,7 @@
       y_m: resolvedY,
       mode: 'absolute',
     };
-    if (thetaText.trim() !== '' && thetaParsed.value !== null) {
+    if (thetaDirty && thetaParsed.value !== null) {
       body.theta_deg = thetaParsed.value;
     }
     onapply(body);
@@ -236,11 +370,16 @@
 
   function onDiscardClick(): void {
     if (busy) return;
-    xText = '';
-    yText = '';
-    thetaText = '';
-    inlineError = null;
+    clearAll();
   }
+
+  // SUBTRACT preview for theta — mirrors backend `wrap(prev - typed)`.
+  let thetaPreview = $derived.by((): { prev: number; next: number } | null => {
+    if (!thetaDirty || thetaParsed.value === null || currentOrigin === null) return null;
+    const prevDeg = currentOrigin[2] * (180 / Math.PI);
+    const nextDeg = resolveYawDeltaFromPose(prevDeg, thetaParsed.value);
+    return { prev: prevDeg, next: nextDeg };
+  });
 </script>
 
 <section class="origin-picker" data-testid="origin-picker">
@@ -345,7 +484,12 @@
           type="text"
           inputmode="decimal"
           bind:value={thetaText}
-          oninput={clearBanner}
+          oninput={() => {
+            clearBanner();
+            clearYawError();
+            // Numeric edit cancels any in-progress yaw gesture.
+            yawP1 = null;
+          }}
           disabled={busy || role !== 'admin'}
           data-testid="origin-theta-input"
           placeholder="optional"
@@ -376,6 +520,18 @@
     <p class="muted current-origin" data-testid="origin-current">
       현재 origin: ({fmtDisplay(currentOrigin[0])}, {fmtDisplay(currentOrigin[1])},
       {(currentOrigin[2] * (180 / Math.PI)).toFixed(1)}°)
+    </p>
+  {/if}
+
+  {#if THETA_EDIT_ENABLED && thetaPreview}
+    <p class="muted preview" data-testid="origin-theta-preview">
+      θ 미리보기: {thetaPreview.prev.toFixed(1)}° → {thetaPreview.next.toFixed(1)}°
+    </p>
+  {/if}
+
+  {#if THETA_EDIT_ENABLED && yawP1 !== null}
+    <p class="muted hint" data-testid="origin-yaw-pending">
+      P1 표시 완료 — +x 축 방향의 두 번째 점을 클릭하세요.
     </p>
   {/if}
 
@@ -421,7 +577,17 @@
             ? `값의 절댓값이 ${ORIGIN_X_Y_ABS_MAX_M} m를 넘습니다.`
             : inlineError === 'no_pose_for_delta'
               ? 'Delta 모드는 현재 LiDAR pose가 필요합니다. AMCL이 수렴할 때까지 기다리거나 Absolute 모드를 사용하세요.'
-              : '입력 값이 잘못되었습니다.'}
+              : inlineError === 'no_xy_baseline'
+                ? 'Theta 단독 적용을 위해서는 현재 origin 메타데이터가 필요합니다.'
+                : '입력 값이 잘못되었습니다.'}
+    </p>
+  {:else if inlineYawError}
+    <p class="banner banner-error" data-testid="origin-yaw-banner">
+      {inlineYawError === 'yaw_pick_too_close'
+        ? '두 점이 너무 가깝습니다. 더 멀리 떨어진 곳을 클릭하세요.'
+        : inlineYawError === 'no_resolution'
+          ? '맵 해상도를 불러오지 못해 yaw 픽 가드를 평가할 수 없습니다.'
+          : '두 점 입력에 문제가 있습니다.'}
     </p>
   {:else if bannerMsg}
     <p class="banner banner-{bannerKind ?? 'info'}" data-testid="origin-banner">{bannerMsg}</p>
@@ -478,6 +644,11 @@
   .current-origin {
     font-family: var(--font-mono, ui-monospace, monospace);
     font-size: 0.9em;
+  }
+  .preview {
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 0.9em;
+    margin: 4px 0;
   }
   .muted {
     color: var(--color-text-muted, #666);

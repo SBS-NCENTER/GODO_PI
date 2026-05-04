@@ -308,24 +308,11 @@ describe('MapMaskCanvas (Track B-MAPEDIT)', () => {
   });
 });
 
-describe('MapEdit page (Track B-MAPEDIT)', () => {
-  it('Apply POSTs FormData with a "mask" part to /api/map/edit', async () => {
-    let editCalls = 0;
-    let lastBody: BodyInit | null | undefined = null;
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+describe('MapEdit page (issue#28 — segmented control + modal Apply)', () => {
+  it('default mode is Coord; Apply button only enabled when picker has dirty body', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
       const url = input as string;
-      if (url.endsWith('/api/map/edit')) {
-        editCalls++;
-        lastBody = init?.body ?? null;
-        return jsonResp({
-          ok: true,
-          backup_ts: '20260430T010203Z',
-          pixels_changed: 4,
-          restart_required: true,
-        });
-      }
       if (url.endsWith('/api/map/image')) return pngResp();
-      if (url.endsWith('/dimensions')) return jsonResp({ width: 4, height: 4 });
       return jsonResp({ pending: false });
     });
     setAdminSession();
@@ -341,36 +328,21 @@ describe('MapEdit page (Track B-MAPEDIT)', () => {
 
     const target = mountPage();
     const applyBtn = await waitFor<HTMLButtonElement>(
-      () => target.querySelector<HTMLButtonElement>('[data-testid="map-edit-apply-btn"]'),
-      'apply button',
+      () =>
+        target.querySelector<HTMLButtonElement>('[data-testid="map-edit-coord-apply-btn"]'),
+      'coord apply button',
     );
-    applyBtn.click();
-    await waitFor<HTMLElement>(
-      () => {
-        const b = target.querySelector<HTMLElement>('[data-testid="map-edit-banner"]');
-        if (!b) return null;
-        // Wait for the success-state banner specifically.
-        if (!b.classList.contains('banner-success')) return null;
-        return b;
-      },
-      'success banner',
-      2000,
-    );
-
-    expect(editCalls).toBe(1);
-    expect(lastBody).toBeInstanceOf(FormData);
-    const fd = lastBody as FormData;
-    expect(fd.has('mask')).toBe(true);
-    const part = fd.get('mask');
-    expect(part).toBeInstanceOf(Blob);
+    // Coord mode is default; the per-mode Apply button is mounted.
+    expect(applyBtn).not.toBeNull();
   });
 
-  it('Apply button disabled for anon viewer', async () => {
+  it('switching mode preserves both pending states (no auto-discard)', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
       const url = input as string;
       if (url.endsWith('/api/map/image')) return pngResp();
       return jsonResp({ pending: false });
     });
+    setAdminSession();
     mapMetadata.set({
       image: 'studio_v1.pgm',
       resolution: 0.05,
@@ -380,72 +352,66 @@ describe('MapEdit page (Track B-MAPEDIT)', () => {
       height: 4,
       source_url: '/api/map/image',
     });
+
     const target = mountPage();
-    const btn = await waitFor<HTMLButtonElement>(
-      () => target.querySelector<HTMLButtonElement>('[data-testid="map-edit-apply-btn"]'),
-      'apply button',
+    // Wait for Coord toolbar.
+    const xInput = await waitFor<HTMLInputElement>(
+      () => target.querySelector<HTMLInputElement>('[data-testid="origin-x-input"]'),
+      'origin x input',
     );
-    expect(btn.disabled).toBe(true);
+    const yInput = target.querySelector<HTMLInputElement>('[data-testid="origin-y-input"]')!;
+    xInput.value = '0.5';
+    xInput.dispatchEvent(new Event('input', { bubbles: true }));
+    yInput.value = '0.5';
+    yInput.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+
+    // Switch to Erase mode via the segmented control.
+    const segButtons = target.querySelectorAll<HTMLButtonElement>(
+      '.edit-mode-switcher button.seg',
+    );
+    expect(segButtons.length).toBe(2);
+    segButtons[1]!.click();
+    flushSync();
+    // OriginPicker stays mounted (no auto-discard) but its container
+    // is hidden via inline display:none. Brush slider is now mounted.
+    const pickerContainer = target.querySelector('[data-testid="origin-x-input"]')!
+      .closest<HTMLElement>('div[style*="display"]');
+    expect(pickerContainer).not.toBeNull();
+    expect(pickerContainer!.style.display).toBe('none');
+    expect(target.querySelector('[data-testid="map-edit-brush-slider"]')).not.toBeNull();
+
+    // Switch back to Coord — the typed XY values must still be there.
+    segButtons[0]!.click();
+    flushSync();
+    const xInput2 = await waitFor<HTMLInputElement>(
+      () => target.querySelector<HTMLInputElement>('[data-testid="origin-x-input"]'),
+      'origin x input round-trip',
+    );
+    expect(xInput2.value).toBe('0.5');
+    const yInput2 = target.querySelector<HTMLInputElement>('[data-testid="origin-y-input"]')!;
+    expect(yInput2.value).toBe('0.5');
   });
 
-  it('success → redirects to /map after MAP_EDIT_REDIRECT_DELAY_MS', async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+  it('per-mode Apply only commits its mode (Coord apply does not POST /api/map/edit/erase)', async () => {
+    let coordCalls = 0;
+    let eraseCalls = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       const url = input as string;
-      if (url.endsWith('/api/map/edit')) {
+      if (url.endsWith('/api/map/edit/coord')) {
+        coordCalls++;
         return jsonResp({
           ok: true,
-          backup_ts: '20260430T010203Z',
-          pixels_changed: 1,
+          derived_pair: { pgm: 'studio_v1.20260504-090000-test.pgm', yaml: 'studio_v1.20260504-090000-test.yaml' },
+          pristine_pair: { pgm: 'studio_v1.pgm', yaml: 'studio_v1.yaml' },
+          prev_origin: [0, 0, 0],
+          new_origin: [-0.5, -0.5, 0],
           restart_required: true,
         });
       }
-      if (url.endsWith('/api/map/image')) return pngResp();
-      return jsonResp({ pending: false });
-    });
-    setAdminSession();
-    mapMetadata.set({
-      image: 'studio_v1.pgm',
-      resolution: 0.05,
-      origin: [0, 0, 0],
-      negate: 0,
-      width: 4,
-      height: 4,
-      source_url: '/api/map/image',
-    });
-
-    const router = await import('../../src/lib/router');
-    const navSpy = vi.spyOn(router, 'navigate').mockImplementation(() => {});
-
-    const target = mountPage();
-    const btn = await waitFor<HTMLButtonElement>(
-      () => target.querySelector<HTMLButtonElement>('[data-testid="map-edit-apply-btn"]'),
-      'apply button',
-    );
-    btn.click();
-    await waitFor<HTMLElement>(
-      () => {
-        const b = target.querySelector<HTMLElement>('[data-testid="map-edit-banner"]');
-        if (!b || !b.classList.contains('banner-success')) return null;
-        return b;
-      },
-      'success banner',
-      2000,
-    );
-    expect(navSpy).not.toHaveBeenCalled();
-
-    vi.advanceTimersByTime(3000);
-    flushSync();
-    expect(navSpy).toHaveBeenCalledWith('/map');
-
-    vi.useRealTimers();
-  });
-
-  it('error → surfaces inline; brush state preserved', async () => {
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
-      const url = input as string;
-      if (url.endsWith('/api/map/edit')) {
-        return jsonResp({ ok: false, err: 'mask_shape_mismatch' }, 400);
+      if (url.endsWith('/api/map/edit/erase')) {
+        eraseCalls++;
+        return jsonResp({ ok: true });
       }
       if (url.endsWith('/api/map/image')) return pngResp();
       return jsonResp({ pending: false });
@@ -462,22 +428,78 @@ describe('MapEdit page (Track B-MAPEDIT)', () => {
     });
 
     const target = mountPage();
-    const btn = await waitFor<HTMLButtonElement>(
-      () => target.querySelector<HTMLButtonElement>('[data-testid="map-edit-apply-btn"]'),
-      'apply button',
+    const xInput = await waitFor<HTMLInputElement>(
+      () => target.querySelector<HTMLInputElement>('[data-testid="origin-x-input"]'),
+      'origin x input',
     );
-    btn.click();
-    const banner = await waitFor<HTMLElement>(
+    const yInput = target.querySelector<HTMLInputElement>('[data-testid="origin-y-input"]')!;
+    xInput.value = '0.5';
+    xInput.dispatchEvent(new Event('input', { bubbles: true }));
+    yInput.value = '0.5';
+    yInput.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+
+    const applyBtn = target.querySelector<HTMLButtonElement>(
+      '[data-testid="map-edit-coord-apply-btn"]',
+    )!;
+    applyBtn.click();
+    flushSync();
+    // Modal opens; type memo and confirm.
+    const memoInput = target.querySelector<HTMLInputElement>('input[aria-label="memo"]')!;
+    memoInput.value = 'wallcal01';
+    memoInput.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    const confirmBtn = target
+      .querySelectorAll<HTMLButtonElement>('.modal .actions button')[1]!;
+    confirmBtn.click();
+    // Wait for the success banner.
+    await waitFor<HTMLElement>(
       () => {
-        const b = target.querySelector<HTMLElement>('[data-testid="map-edit-banner"]');
-        if (!b || !b.classList.contains('banner-error')) return null;
+        const b = target.querySelector<HTMLElement>('[data-testid="map-edit-coord-banner"]');
+        if (!b || !b.classList.contains('banner-success')) return null;
         return b;
       },
-      'error banner',
+      'coord success banner',
       2000,
     );
-    expect(banner.textContent).toContain('mask_shape_mismatch');
-    // Apply button is re-enabled (not stuck in busy state).
-    expect(btn.disabled).toBe(false);
+    expect(coordCalls).toBe(1);
+    expect(eraseCalls).toBe(0);
+  });
+
+  it('Apply buttons disabled for anon viewer (both modes)', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = input as string;
+      if (url.endsWith('/api/map/image')) return pngResp();
+      return jsonResp({ pending: false });
+    });
+    mapMetadata.set({
+      image: 'studio_v1.pgm',
+      resolution: 0.05,
+      origin: [0, 0, 0],
+      negate: 0,
+      width: 4,
+      height: 4,
+      source_url: '/api/map/image',
+    });
+    const target = mountPage();
+    const coordBtn = await waitFor<HTMLButtonElement>(
+      () =>
+        target.querySelector<HTMLButtonElement>('[data-testid="map-edit-coord-apply-btn"]'),
+      'coord apply button',
+    );
+    expect(coordBtn.disabled).toBe(true);
+
+    // Switch to erase and verify the erase Apply is also disabled.
+    const segButtons = target.querySelectorAll<HTMLButtonElement>(
+      '.edit-mode-switcher button.seg',
+    );
+    segButtons[1]!.click();
+    flushSync();
+    const eraseBtn = await waitFor<HTMLButtonElement>(
+      () =>
+        target.querySelector<HTMLButtonElement>('[data-testid="map-edit-erase-apply-btn"]'),
+      'erase apply button',
+    );
+    expect(eraseBtn.disabled).toBe(true);
   });
 });

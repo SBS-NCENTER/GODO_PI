@@ -1,8 +1,11 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
+  import GridOverlay from '$components/GridOverlay.svelte';
   import LastPoseCard from '$components/LastPoseCard.svelte';
   import MapListPanel from '$components/MapListPanel.svelte';
   import MapZoomControls from '$components/MapZoomControls.svelte';
+  import OriginAxisOverlay from '$components/OriginAxisOverlay.svelte';
+  import OverlayToggleRow from '$components/OverlayToggleRow.svelte';
   import PoseCanvas from '$components/PoseCanvas.svelte';
   import PoseHintLayer, { type HintPose } from '$components/PoseHintLayer.svelte';
   import PoseHintNumericFields from '$components/PoseHintNumericFields.svelte';
@@ -22,7 +25,9 @@
   import { navigate, route } from '$lib/router';
   import { subscribeLastPose } from '$stores/lastPose';
   import { subscribeLastScan } from '$stores/lastScan';
+  import { mapMetadata } from '$stores/mapMetadata';
   import { subscribeMappingStatus } from '$stores/mappingStatus';
+  import { overlayToggles } from '$stores/overlayToggles';
   import { scanOverlay } from '$stores/scanOverlay';
   import MapEdit from './MapEdit.svelte';
   import MapMapping from './MapMapping.svelte';
@@ -69,6 +74,18 @@
   //   - Tooltip on the disabled Edit button.
   let mappingStatus = $state<MappingStatus | null>(null);
   let unsubMapping: (() => void) | null = null;
+
+  // issue#28 — overlay toggles + map metadata for the world-anchored
+  // grid + origin/axis overlays mounted on the Overview sub-tab.
+  let originAxisOn = $state(false);
+  let gridOn = $state(false);
+  let unsubToggles: (() => void) | null = null;
+  let mapDimsState = $state<{ width: number; height: number } | null>(null);
+  let mapResolution = $state<number | null>(null);
+  let mapOrigin = $state<readonly [number, number, number] | null>(null);
+  let unsubMeta: (() => void) | null = null;
+  let axisCanvas = $state<HTMLCanvasElement | null>(null);
+  let gridCanvas = $state<HTMLCanvasElement | null>(null);
   let mappingActive = $derived(
     mappingStatus !== null &&
       (mappingStatus.state === MAPPING_STATE_STARTING ||
@@ -105,6 +122,19 @@
     // issue#14 — subscribe to the mapping store so the sub-tab buttons
     // can disable the Edit sub-tab while mapping is active.
     unsubMapping = subscribeMappingStatus((s) => (mappingStatus = s));
+    // issue#28 — overlay toggles + map metadata for the world-anchored
+    // overlays mounted on Overview.
+    unsubToggles = overlayToggles.subscribe((s) => {
+      originAxisOn = s.originAxisOn;
+      gridOn = s.gridOn;
+    });
+    unsubMeta = mapMetadata.subscribe((m) => {
+      if (m) {
+        mapDimsState = { width: m.width, height: m.height };
+        mapResolution = m.resolution;
+        mapOrigin = m.origin;
+      }
+    });
   });
 
   onDestroy(() => {
@@ -113,7 +143,11 @@
     unsubOverlay?.();
     unsubRoute?.();
     unsubMapping?.();
+    unsubToggles?.();
+    unsubMeta?.();
   });
+
+  let yamlYawDeg = $derived(mapOrigin === null ? 0 : mapOrigin[2] * (180 / Math.PI));
 </script>
 
 <div data-testid="map-page">
@@ -190,6 +224,11 @@
         ({formatMeters(pose.x_m)}, {formatMeters(pose.y_m)}) · {formatDegrees(pose.yaw_deg)}
       </div>
     {/if}
+    <!-- issue#28 — unified overlay toggle row. Mounted at the top of
+         Overview (and on the same row as the segmented control on Edit). -->
+    <div class="overlay-row" data-testid="map-overlay-row">
+      <OverlayToggleRow />
+    </div>
     <div class="canvas-stack">
       <PoseCanvas {viewport} {pose} mapImageUrl={previewUrl} {scan} scanOverlayOn={scanOn} />
       {#if poseHintEnabled}
@@ -198,6 +237,41 @@
           enabled={poseHintEnabled}
           {hint}
           onhintchange={onHintChange}
+        />
+      {/if}
+      {#if originAxisOn && mapOrigin !== null && mapDimsState !== null}
+        <canvas
+          class="overlay-canvas"
+          width={mapDimsState.width}
+          height={mapDimsState.height}
+          data-testid="map-axis-overlay"
+          bind:this={axisCanvas}
+        ></canvas>
+        <OriginAxisOverlay
+          canvas={axisCanvas}
+          zoomPxPerMeter={mapResolution !== null && mapResolution > 0 ? 1 / mapResolution : 1}
+          worldOriginX={mapOrigin[0]}
+          worldOriginY={mapOrigin[1]}
+          yamlOriginX={mapOrigin[0]}
+          yamlOriginY={mapOrigin[1]}
+          yamlOriginYawDeg={yamlYawDeg}
+        />
+      {/if}
+      {#if gridOn && mapOrigin !== null && mapDimsState !== null}
+        <canvas
+          class="overlay-canvas"
+          width={mapDimsState.width}
+          height={mapDimsState.height}
+          data-testid="map-grid-overlay"
+          bind:this={gridCanvas}
+        ></canvas>
+        <GridOverlay
+          canvas={gridCanvas}
+          zoomPxPerMeter={mapResolution !== null && mapResolution > 0 ? 1 / mapResolution : 1}
+          worldOriginX={mapOrigin[0]}
+          worldOriginY={mapOrigin[1]}
+          worldWidthM={mapDimsState.width * (mapResolution ?? 0)}
+          worldHeightM={mapDimsState.height * (mapResolution ?? 0)}
         />
       {/if}
       <MapZoomControls {viewport} />
@@ -237,6 +311,19 @@
   .canvas-stack {
     position: relative;
     margin-bottom: 12px;
+  }
+  /* issue#28 — world-anchored overlays (axis, grid) live in the same
+     stacking context as PoseCanvas; pointer-events: none so they don't
+     swallow the underlay's pan/wheel/click handlers. */
+  .overlay-canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+  }
+  .overlay-row {
+    margin: 8px 0;
   }
   /* Sub-tab styling mirrors System.svelte (PR-B Processes / Extended
      resources) so the visual idiom is consistent across the SPA. */

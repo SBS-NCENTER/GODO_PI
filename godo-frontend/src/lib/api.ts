@@ -196,6 +196,41 @@ export async function postMapEdit<T>(maskBlob: Blob, init?: RequestInit): Promis
   return (await resp.json()) as T;
 }
 
+/**
+ * issue#28 — POST /api/map/edit/coord with a JSON body. SUBTRACT
+ * semantic on (x_m, y_m, theta_deg); the backend reads the pristine
+ * pair and writes a new derived pair.
+ */
+export async function postMapEditCoord<T>(
+  body: import('./protocol').MapEditCoordBody,
+  init?: RequestInit,
+): Promise<T> {
+  return apiPost<T>('/api/map/edit/coord', body, init);
+}
+
+/**
+ * issue#28 — POST /api/map/edit/erase with a multipart body carrying
+ * the mask PNG and the postfix `memo`.
+ */
+export async function postMapEditErase<T>(
+  maskBlob: Blob,
+  memo: string,
+  init?: RequestInit,
+): Promise<T> {
+  const fd = new FormData();
+  fd.append('mask', maskBlob, 'mask.png');
+  fd.append('memo', memo);
+  const headers = new Headers(init?.headers || {});
+  headers.delete('Content-Type');
+  const resp = await apiFetch('/api/map/edit/erase', {
+    ...init,
+    method: 'POST',
+    headers,
+    body: fd,
+  });
+  return (await resp.json()) as T;
+}
+
 export async function apiDelete<T>(path: string, init?: RequestInit): Promise<T | null> {
   const resp = await apiFetch(path, { ...init, method: 'DELETE' });
   const ctype = resp.headers.get('content-type') || '';

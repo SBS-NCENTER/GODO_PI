@@ -104,6 +104,10 @@
   // the open prop.
   let modalOpen = $state(false);
   let modalScope = $state<EditMode | null>(null);
+  // issue#28 (Mode-B CR3) — captured `request_id` from the server's
+  // POST /api/map/edit/{coord,erase} response. Passed to ApplyMemoModal
+  // so its SSE consumer drops frames belonging to other sessions.
+  let sessionRequestId = $state<string | null>(null);
   // Resolution + origin captured from mapMetadata for the GUI-pick math.
   let resolution = $state<number | null>(null);
   let currentOrigin = $state<readonly [number, number, number] | null>(null);
@@ -245,6 +249,8 @@
     setCoordBanner('적용 중…', 'info');
     try {
       const resp = await postMapEditCoord<MapEditPipelineResult>(body);
+      // issue#28 (Mode-B CR3) — pin the SSE filter to this session's id.
+      sessionRequestId = resp.request_id ?? null;
       setCoordBanner(
         `완료: 파생 ${resp.derived_pair.pgm}. godo-tracker 재시작 후 활성화하세요.`,
         'success',
@@ -253,6 +259,7 @@
       originPickerRef.clearAll();
       modalOpen = false;
       modalScope = null;
+      sessionRequestId = null;
     } catch (e) {
       if (e instanceof ApiError) {
         const errCode = e.body?.err || `http_${e.status}`;
@@ -286,6 +293,8 @@
     try {
       const blob = await canvasRef.getMaskPng();
       const resp = await postMapEditErase<MapEditPipelineResult>(blob, memo);
+      // issue#28 (Mode-B CR3) — pin the SSE filter to this session's id.
+      sessionRequestId = resp.request_id ?? null;
       setEraseBanner(
         `완료: 파생 ${resp.derived_pair.pgm}. godo-tracker 재시작 후 활성화하세요.`,
         'success',
@@ -294,6 +303,7 @@
       canvasRef.clear();
       modalOpen = false;
       modalScope = null;
+      sessionRequestId = null;
     } catch (e) {
       if (e instanceof ApiError) {
         const errCode = e.body?.err || `http_${e.status}`;
@@ -548,12 +558,14 @@
 
   <ApplyMemoModal
     open={modalOpen}
+    sessionRequestId={sessionRequestId}
     onApply={(memo) => {
       void onModalApply(memo);
     }}
     onCancel={() => {
       modalOpen = false;
       modalScope = null;
+      sessionRequestId = null;
     }}
   />
 

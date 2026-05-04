@@ -1,12 +1,25 @@
 /**
- * issue#28 (C7 disposition) — coherent-render axis pins.
+ * issue#28 (C7 disposition) — coherent-render axis MATH pins.
  *
- * Operator-locked split per Mode-A C7: instead of a single `pose dot +
- * heading arrow + LiDAR scan dots + bitmap rotate together when YAML
- * theta changes` test, we pin THREE axis tests + ONE integration test.
- * If any axis drifts (pose drawn relative to old origin while bitmap
- * is drawn relative to new origin, etc.) the corresponding axis test
- * fails first and points at the broken contract.
+ * NOTE (Mode-B CR1 follow-up, renamed 2026-05-04 KST): this file pins
+ * the *math contract* used by the rotation overlays — pure-function
+ * algebra against `originMath.pixelToWorld` and
+ * `scanTransform.projectScanToWorld`. It does NOT mount any Svelte
+ * component; the production overlays are pinned via real
+ * component-mount tests in:
+ *   - tests/unit/OriginAxisOverlay.test.ts (CR1 fix)
+ *   - tests/unit/GridOverlay.test.ts (CR1 fix — schedule + mount pins)
+ * Math + component pins are intentionally split so a math regression
+ * surfaces here while a "production component bypassed the math" bug
+ * surfaces in the mount tests.
+ *
+ * Operator-locked C7 split: instead of a single `pose dot + heading
+ * arrow + LiDAR scan dots + bitmap rotate together when YAML theta
+ * changes` test, we pin THREE math axis tests + ONE integration test
+ * (this file). If any axis drifts (pose drawn relative to old origin
+ * while bitmap is drawn relative to new origin, etc.) the
+ * corresponding axis test fails first and points at the broken
+ * contract.
  *
  * The pins are pure math against the world↔canvas projection chain
  * exposed by:

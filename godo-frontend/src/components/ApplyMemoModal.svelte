@@ -20,9 +20,18 @@
     open: boolean;
     onApply: (memo: string) => void;
     onCancel: () => void;
+    /**
+     * issue#28 (Mode-B CR3) — request_id captured from the POST
+     * /api/map/edit/{coord,erase} response body. When non-null,
+     * incoming SSE frames whose `request_id` does NOT match are
+     * dropped on the client. Null means "do not filter" — applies
+     * before the POST returns OR when the parent has not yet wired
+     * the filter (back-compat with older callers).
+     */
+    sessionRequestId?: string | null;
   }
 
-  let { open, onApply, onCancel }: Props = $props();
+  let { open, onApply, onCancel, sessionRequestId = null }: Props = $props();
 
   let memo = $state('');
   let progress = $state(0);
@@ -63,7 +72,30 @@
           phase: typeof phase;
           progress: number;
           reason?: string;
+          request_id?: string;
         };
+        // issue#28 (Mode-B CR3) — drop frames belonging to a different
+        // Apply session. The server tags every frame with `request_id`
+        // (verified in app.py::_apply_map_edit_pipeline); a stale
+        // tab's leftover frames or a near-simultaneous Apply on
+        // another browser would otherwise mix into this modal's
+        // progress bar.
+        if (
+          sessionRequestId !== null &&
+          typeof frame.request_id === 'string' &&
+          frame.request_id !== sessionRequestId
+        ) {
+          // Visible-in-DevTools breadcrumb without warn-spam; the
+          // rejected frame still drops cleanly.
+          // eslint-disable-next-line no-console
+          console.debug(
+            '[ApplyMemoModal] dropping stale SSE frame',
+            frame.request_id,
+            'expected',
+            sessionRequestId,
+          );
+          return;
+        }
         progress = frame.progress;
         phase = frame.phase;
         if (frame.phase === 'rejected') {

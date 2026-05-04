@@ -576,6 +576,13 @@ export interface MapEditCoordBody {
 
 export interface MapEditPipelineResult {
   ok: true;
+  /**
+   * issue#28 (Mode-B CR3) — server-issued request id, captured by the
+   * SPA so subsequent SSE frames on `/api/map/edit/progress` can be
+   * filtered to this Apply session. Stale-tab frames carrying a
+   * different `request_id` are dropped on the client.
+   */
+  request_id: string;
   derived_pair: { pgm: string; yaml: string };
   pristine_pair: { pgm: string; yaml: string };
   prev_origin: [number, number, number];

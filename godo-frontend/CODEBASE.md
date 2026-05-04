@@ -603,6 +603,175 @@ preview proxy needed.
 
 ## Change log
 
+### 2026-05-04 13:23 KST — issue#28 (PR #81) — B-MAPEDIT-3 SPA full UI + viewport-tracking overlays
+
+#### Why
+
+Operator-locked B-MAPEDIT-3 spec demands: segmented Coordinate /
+Erase Edit modes with per-mode Apply, dual-input GUI + numeric
+(0.01° step), 2-click yaw pick, hybrid grouped tree map list,
+Apply memo modal driven by SSE progress, unified overlay toggle
+row. HIL across 5 rounds reshaped the UI substantially: standalone
+overlay canvases couldn't track viewport pan/zoom (replaced with
+ondraw composition), legacy OriginPicker inline Apply confused
+operators (gated off in modal flow), grid had to rotate WITH axis
+to read as a single coherent reference frame.
+
+#### Added
+
+- `godo-frontend/src/components/EditModeSwitcher.svelte` (NEW) —
+  segmented control (Coordinate / Erase) with per-mode dirty
+  state preserved across switches.
+- `godo-frontend/src/components/OverlayToggleRow.svelte` (NEW) —
+  unified row hosting `originAxisOn` + `lidarOn` (migrated from
+  per-tab toggle) + `gridOn`. localStorage persistence via
+  `OVERLAY_LS_KEY` versioned schema (v0 → v1 one-shot migration).
+- `godo-frontend/src/components/ApplyMemoModal.svelte` (NEW) —
+  postfix memo input + SSE progress consumer + tracker control
+  disable signal. Filters SSE frames by `request_id` (Mode-B CR3).
+- `godo-frontend/src/components/MapList.svelte` (NEW) — hybrid
+  grouped tree (pristine parent + indented derived variants +
+  active badge). Activate/delete trigger ConfirmDialog wrappers
+  in parent.
+- `godo-frontend/src/lib/overlayDraw.ts` (NEW, sole owner of
+  overlay drawing arithmetic) — `drawOriginAxis`, `drawGrid`,
+  `drawPickPreview` pure helpers. Called from MapUnderlay's
+  `ondraw` hook (and PoseCanvas's drawPoseLayer) so overlays
+  inherit viewport pan/zoom from the underlay's `worldToCanvas`
+  projector. Replaces the standalone `<OriginAxisOverlay>` /
+  `<GridOverlay>` canvas mounts.
+- `godo-frontend/src/stores/overlayToggles.ts` (NEW) —
+  localStorage-backed writable for the unified toggle row;
+  one-shot migration from any v0-shaped legacy LiDAR-only key.
+- `godo-frontend/src/stores/maps.ts` — `mapGroups: Writable<MapGroup[]>`
+  added; `refresh()` populates both `maps` (flat) and `mapGroups`.
+- `godo-frontend/src/lib/originMath.ts` — extended for 2-click yaw
+  (`twoClickToYawDeg`, `wrapYawDeg`, `resolveYawDeltaFromPose`,
+  `YAW_PICK_MIN_PIXEL_DIST_PX` proximity guard).
+- `godo-frontend/tests/unit/overlayDraw.test.ts` (NEW, 8 cases) —
+  pins drawHelpers route through w2c projector, grid lines per
+  axis cap, pick-preview shapes (filled-dot for XY, hollow-ring
+  for P1-only, arrow for P1+P2), and **HIL round-5 regression**:
+  `rotates lines by yawDeg so the grid aligns with the axis overlay`.
+
+#### Changed
+
+- `godo-frontend/src/routes/MapEdit.svelte` — restructured for
+  segmented control + per-mode Apply/Discard. Mode switch does
+  NOT auto-discard. OriginPicker hidden via `display:none`
+  (preserves dirty state) when Erase active. Composes pose +
+  grid + axis + pick previews in MapUnderlay's ondraw. Tracks
+  `xyPreview` / `yawP1Preview` / `yawP2Preview` $state for the
+  orange overlay.
+- `godo-frontend/src/components/OriginPicker.svelte` —
+  `THETA_EDIT_ENABLED=true`, 2-click yaw state machine
+  (`setYawClick`, `isYawP1Pending`), dirty flags split (xy vs
+  theta), `getDirtyBody` returns body for both pristine
+  pipelines. New `inlineApplyEnabled` prop (default true for
+  back-compat) — MapEdit passes false to hide the legacy
+  `/api/map/origin` Apply button (HIL-fix round 2 — operator
+  was clicking it instead of the new modal-flow toolbar Apply).
+- `godo-frontend/src/components/PoseCanvas.svelte` — accepts
+  `originAxisOn` / `gridOn` / `mapMeta` / `yamlYawDeg` props
+  and composes the same overlay draws into its drawPoseLayer
+  (so `/map` Overview gets the same viewport-tracking overlays
+  as `/map-edit`).
+- `godo-frontend/src/routes/Map.svelte` — mounts `<MapList>`
+  grouped tree above legacy `<MapListPanel>` (HIL-fix round 2 —
+  legacy panel kept one release for restart-prompt + delete
+  features not yet migrated to MapList). ConfirmDialog wrappers
+  for activate / delete. Standalone overlay canvases removed
+  (PoseCanvas owns them now).
+- `godo-frontend/src/lib/protocol.ts` — `MapListResponse` updated
+  to wrapper shape `{groups, flat}`; `MapEditPipelineResult`
+  declares `derived_pair` + `pristine_pair` + optional
+  `prev_origin` / `new_origin` (only present for coord, not
+  erase).
+- `godo-frontend/src/lib/constants.ts` — `PICK_PREVIEW_*`,
+  `AXIS_*`, `GRID_*` constants for the new overlay helpers
+  (no-magic-numbers compliance).
+
+#### Removed
+
+- (none — `<OriginAxisOverlay>` / `<GridOverlay>` standalone
+  components remain on disk with their tests passing, just
+  no longer mounted anywhere in production code. Deletion
+  queued for issue#28.1 cleanup.)
+
+#### Invariants
+
+- Added `(aj) overlay-toggle-row-sole-owner`: "`<OverlayToggleRow>`
+  is sole owner of overlay toggle UI; `overlayToggles` store is
+  sole owner of toggle state. localStorage-backed (versioned key)."
+- Added `(ak) edit-mode-switcher-sole-owner`: "`<EditModeSwitcher>`
+  segmented control is sole owner of mode state. Mode switch does
+  NOT auto-discard."
+- Added `(al) world-frame-overlays-rotate-with-yaml`: "Origin/Axis
+  + Grid overlays rotate with YAML yaw in real time. Grid lines
+  align with the rotated axis (yawDeg shared, HIL round 5 lock)."
+- Added `(am) apply-memo-modal-sole-sse-consumer`: "`<ApplyMemoModal>`
+  is the sole consumer of `/api/map/edit/progress` SSE. Filters
+  frames by `request_id`. Modal is the only path that disables
+  tracker control buttons."
+- Added `(an) map-list-grouped-tree-renderer`: "`<MapList>` is the
+  sole grouped-tree renderer for `/api/maps`. Click → ConfirmDialog
+  → activate. Delete is variant-only (pristine never deletable
+  from UI)."
+- Added `(ao) overlay-toggles-storage-migration`: "v0 → v1 one-shot
+  migration: read legacy LS key → write new `OVERLAY_LS_KEY` →
+  unlink legacy."
+- Added `(ap) overlay-draw-helpers-sole-owner`: "`lib/overlayDraw.ts`
+  is sole owner of overlay drawing arithmetic. Helpers MUST route
+  every coordinate through the supplied `w2c` projector — never
+  bake in pan/zoom assumptions. Called inside MapUnderlay's
+  `ondraw` (or PoseCanvas's drawPoseLayer) so they inherit
+  viewport transforms automatically."
+- Modified `(u) MapMaskCanvas sole owner of mask state`: extended
+  to clarify `<MapEdit>` owns segmented mode state (`'coord' |
+  'erase'`); brush mask state still child-owned by
+  `<MapMaskCanvas>`; OriginPicker dirty state still child-owned
+  but exposed via imperative API.
+- Modified `(aa) origin-math-extended-yaw-helpers`: extended to
+  enumerate `wrapYawDeg`, `twoClickToYawDeg`,
+  `resolveYawDeltaFromPose`. SUBTRACT for theta mirrors x/y.
+
+#### Test counts
+
+- vitest: 456 passes across 53 files (up from 447 pre-PR; +9 new
+  cases including overlayDraw 8-pin suite + maps store
+  grouped-shape regression pin).
+- svelte-check: 68 errors baseline preserved (down from 72; net −4
+  via stricter typing in new test code).
+- Bundle delta: index.js 162.97 → 182.98 KB (gzip 60→64 KB) — new
+  components + overlay helpers.
+
+#### Notable round-by-round HIL fix log
+
+Round 1 (`fdffdc5`): `<OriginAxisOverlay>` `yamlOriginX/Y={0}` so
+axis intersects WORLD (0, 0) inside the bitmap (was at canvas
+corner). `coordClickMode` default `'off'` → `'xy'` so canvas is
+immediately clickable.
+
+Round 2 (`0d0a86e`): Mount `<MapList>` grouped tree on
+`Map.svelte` above legacy `<MapListPanel>` + ConfirmDialog
+wrappers. Hide OriginPicker inline Apply via
+`inlineApplyEnabled={false}` (operator was hitting the legacy
+`/api/map/origin` path).
+
+Round 3 (`24ecf22`, frontend type): extend `MapEditPipelineResult`
+with `derived_pair` + `pristine_pair` shapes the SPA's success
+banner expected (server now emits them).
+
+Round 4 (`917cefa`): NEW `lib/overlayDraw.ts` — viewport-tracking
+overlays + orange pick previews. Standalone overlay canvas mounts
+removed.
+
+Round 5 (`853864d`): Grid follows axis rotation (`yawDeg` param).
+Inverse-rotate visible bounds into local frame, generate lines
+in local coords, forward-rotate back for projection.
+
+---
+
 ### 2026-05-03 06:30 KST — issue#16.1 backup help — System tab 도움말 sub-tab
 
 #### Why

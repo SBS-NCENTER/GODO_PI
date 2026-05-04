@@ -1025,6 +1025,130 @@ Pinned by:
 
 ## Change log
 
+### 2026-05-04 13:23 KST — issue#28 (PR #81) — B-MAPEDIT-3 yaw rotation pipeline + pristine/derived map model
+
+#### Why
+
+Operator-locked B-MAPEDIT-3 spec (operator twenty-first → twenty-second
+session): rotate the active map's bitmap so the operator's picked
+direction becomes the new +x axis, without losing pristine source.
+Quality must stay at 1× resample regardless of how many times the
+operator iterates (pristine baseline pattern). All Apply mutations
+must be atomic (no partial pair on disk). SSE drives a progress
+modal while tracker control is disabled.
+
+#### Added
+
+- `godo-webctl/src/godo_webctl/map_rotate.py` (NEW, sole owner of
+  PGM rotation/resample) — Pillow-backed `rotate_pristine_to_derived`
+  with auto-canvas-expand, BICUBIC resample (Pillow `rotate()`
+  rejects LANCZOS at runtime; documented in module header), 3-class
+  re-quantise to `{0, 205, 254}`, atomic pair-write protocol
+  (PGM tmp → YAML tmp → fsync both → fsync dir → rename PGM →
+  rename YAML → unlink PGM on YAML failure). Stale `.tmp` sweep
+  helper for crash-mid-pair recovery.
+- `godo-webctl/src/godo_webctl/sse.py` (NEW, sole owner of
+  `/api/map/edit/progress` broadcaster) — single in-process channel,
+  per-Apply `request_id`, monotonic 0.0→1.0 progress + `done` /
+  `rejected` final frames.
+- `godo-webctl/src/godo_webctl/maps.py` — `is_pristine`,
+  `derive_name`, `list_pairs_grouped`, `MapGroup`, `MEMO_REGEX`
+  validator. Pristine = `<base>.{pgm,yaml}`; derived =
+  `<base>.YYYYMMDD-HHMMSS-<memo>.{pgm,yaml}` (second-resolution
+  timestamp + free-text memo, regex `[A-Za-z0-9_-]+`).
+- `POST /api/map/edit/coord` (admin, JSON body `{x_m, y_m,
+  theta_deg?, memo}`).
+- `POST /api/map/edit/erase` (admin, multipart with mask PNG +
+  memo).
+- `GET /api/map/edit/progress` (anon-readable SSE).
+- `GET /api/maps` returns grouped tree shape `{groups: MapGroup[],
+  flat: MapEntry[]}` (legacy `flat` key retained one release for
+  backward compat with browser-cached SPA bundles).
+- `godo-webctl/tests/test_map_rotate.py` (NEW) — 11 pins covering
+  zero-degree dim parity, pristine-untouched, 45° auto-canvas-expand
+  (~√2), `MAP_ROTATE_MAX_CANVAS_PX` cap, 3-class threshold, atomic
+  pair-write rollback (`yaml_failure_unlinks_pgm`), stale `.tmp`
+  sweep, **direction-pin** `test_rotation_direction_negates_typed_yaw`
+  (HIL-fix round 4 regression catch), pristine-not-touched.
+- `godo-webctl/tests/test_app_integration.py` — pins for
+  `test_post_map_edit_coord_with_theta_does_not_double_count`
+  (HIL-fix round 4 — derived YAML origin[2] = pristine origin[2]
+  in Option B), grouped-tree shape contract, derived_pair +
+  pristine_pair response shape.
+- `godo-webctl/tests/test_map_origin.py` — ROTATE#1 (`5°→10°→−5°`)
+  + ROTATE#2 (`−5°→20°→−25°`) sequential pins.
+
+#### Changed
+
+- `godo-webctl/src/godo_webctl/map_origin.py` — `wrap_yaw_deg`
+  helper added (`(-180, 180]` range); `apply_origin_edit_in_memory`
+  extended for theta SUBTRACT semantic (mirror of x/y); pipeline
+  caller passes `theta_deg=None` when bitmap rotation is the
+  source of truth (HIL-fix round 4: stops YAML-yaw double-count
+  against bitmap rotation in Option B).
+- `godo-webctl/src/godo_webctl/app.py:_apply_map_edit_pipeline` —
+  asyncio.Lock wraps the entire Apply pipeline (60 s timeout →
+  `409 pipeline_busy`), `request_id` tagged on every SSE frame so
+  stale-tab connections can be filtered client-side.
+- `godo-webctl/src/godo_webctl/protocol.py` — `MAP_EDIT_COORD_BODY_FIELDS`
+  + grouped-tree response shape + derived_pair / pristine_pair
+  fields documented.
+
+#### Invariants
+
+- Added `(ag) map_rotate-sole-owner-discipline`: "`map_rotate.py`
+  is sole owner of PGM bitmap rotation/resample. ALWAYS reads the
+  pristine baseline; never the previously-rotated derived. BICUBIC
+  resample + 3-class re-threshold."
+- Added `(ah) pristine-vs-derived-classification`: "Pristine =
+  `<base>.{pgm,yaml}`. Derived = `<base>.<DERIVED_TS_REGEX>-<memo>.{pgm,yaml}`
+  (regex pinned in constants). `is_pristine(name)` is the SOLE
+  classifier."
+- Added `(ai) map-edit-pipeline-asyncio-lock-discipline`: "Coord
+  + Erase Apply pipeline holds a module-level `asyncio.Lock` for
+  the duration of the pipeline (read pristine → resample → write
+  pair → SSE complete frame). Concurrent POSTs receive
+  `409 pipeline_busy` after a 60 s wait."
+- Added `(aj) sse-map-edit-progress-broadcaster`: "Single
+  in-process channel (no fan-out). Per-request_id frames so the
+  SPA can drop stale-tab frames. Heartbeat every
+  `SSE_PROGRESS_HEARTBEAT_S`."
+- Added `(ak) maps-grouped-tree-wire-shape`: "`/api/maps` response
+  is `{groups: MapGroup[], flat: MapEntry[]}`. Legacy `flat` key
+  retained one release; new SPA reads `groups`."
+- Modified `(ab) origin-yaml-theta-passthrough`: extended SUBTRACT
+  semantic to theta with `wrap_yaw_deg` `(-180, 180]`. Note:
+  bitmap-rotation pipeline passes `theta_deg=None` to keep YAML
+  yaw at pristine value (Option B operator-locked).
+
+#### Test counts
+
+- pytest: 1008/1008 pass (+10 new pins from this PR; baseline
+  was 1006 pre-PR).
+
+#### Notable round-by-round HIL fix log
+
+Round 1 (`fdffdc5`): `stores/maps.refresh()` extracts `flat` from
+new wrapper shape (legacy MapListPanel was iterating wrapper →
+empty list).
+
+Round 2 (`0d0a86e`): Active activate/delete via ConfirmDialog +
+`mapGroups` writable.
+
+Round 3 (`87af3bc`): Latent crash fix (`derived_pair` /
+`pristine_pair` shape SPA expected but server never sent).
+
+Round 4 (`87af3bc`): Yaw direction sign flip (`map_rotate.py:217`
+`+typed_yaw_deg` → `-typed_yaw_deg` per docstring intent) +
+double-count fix (`theta_deg=None` to `apply_origin_edit_in_memory`
+in rotate pipeline).
+
+Round 5 (`917cefa` + `853864d`): viewport-tracking overlays via
+`lib/overlayDraw.ts` (frontend) + grid follows axis rotation
+(`yawDeg` param). Backend unchanged.
+
+---
+
 ### 2026-05-03 11:41 KST — issue#16.2 — preview `.tmp` sweep on mapping.start()
 
 #### Why

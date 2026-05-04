@@ -10,6 +10,99 @@
 
 ---
 
+## 2026-05-04 (오전 ~ 심야 — 06:00 KST → 22:30 KST, 스물 두 번째 세션 — issue#28 B-MAPEDIT-3 yaw rotation 풀스택 ship + 5라운드 HIL fix — "이번에 같은 PR로 맞추자")
+
+### 한 줄 요약
+
+issue#28 B-MAPEDIT-3 (yaw rotation full feature) 단일 PR로 한 큐에 ship — Planner → Mode-A ACCEPT-WITH-NITS → Writer 3 commit → Mode-B ACCEPT-WITH-NITS → Writer fold-in → 운영자 HIL 5라운드 → HIL fix 5 commit → squash-merge. 본 세션의 가장 큰 발견은 **`grid.origin_yaw_deg`가 AMCL likelihood-field cell mapping에 사용되지 않음**(출력 offset + tripwire 진단에만 쓰임)으로, Option B (bake-into-bitmap)이 yaw 보정의 유일한 정답인 이유를 설명함.
+
+### 1개 PR
+
+| PR | issue# | 제목 | 결과 |
+|---|---|---|---|
+| #81 | issue#28 | B-MAPEDIT-3 yaw rotation — full plumbing + pristine/derived map model + segmented Edit UI | merged `da78dd0` (54 files, +6746/-384, 1456/1456 tests) |
+
+### 핵심 구조 발견 — `grid.origin_yaw_deg`는 AMCL 셀 매핑에 안 쓰임
+
+YAML `origin[2]` SSOT를 신설했지만 tracker가 이를 소비하는 곳은 **딱 두 군데**:
+- `apply_yaw_tripwire` — 정보성 진단 (Studio base가 회전했을 가능성을 stderr로 알림)
+- `compute_offset` — `pose.yaw - origin.yaw_deg`로 FreeD에 전달할 출력 offset 계산
+
+`scan_ops.cpp::evaluate_scan`은 `origin_yaw_deg`를 무시하고 `(origin_x_m, origin_y_m, 0°)` 기준으로 셀을 매핑함. 즉 AMCL particle filter는 원천적으로 yaw=0 기반으로 동작하고, YAML yaw는 **출력단에서만 빼지는 정적 offset** 역할.
+
+이 발견이 운영자의 PICK#1/PICK#2 cascade 분석에서 surface됨. 결론: **yaw 보정은 반드시 bitmap 자체를 회전시키는 Option B로 가야 함** (Option A: metadata-only로는 dyaw만 바뀌고 pose math는 그대로 → 벽이 같은 world 각도에 그대로 남음). 이 로직 분석 메모리 후속 진입 예정 (Parent territory).
+
+### Process lesson #1 — 컴포넌트 ship ≠ wired feature (HIL 라운드 2)
+
+운영자: "Map 목록이 SPA에 보이지 않음" + "axis가 화면 테두리에 박힘"
+
+원인:
+- (a) `<MapList>` 컴포넌트는 Part 1에서 만들었지만 Map.svelte에 마운트 안 됨. 한편 legacy `<MapListPanel>`은 새 `{groups, flat}` 응답 shape을 못 다룸 (writable에 wrapper object 통째로 박음 → iterate해서 빈 리스트).
+- (b) 기존 `<OriginAxisOverlay>` + `<GridOverlay>` standalone 캔버스는 PGM 논리 차원으로 마운트, `viewport.zoom`/`panX/Y` 미구독 → underlay가 zoom/drag되어도 따라가지 않음.
+- (c) `OriginAxisOverlay`의 `yamlOriginX/Y`가 `currentOrigin[0..1]`로 바인딩되어 axis 교점이 캔버스 픽셀 (0, H) — 즉 비트맵 모서리에 박힘.
+
+교훈: **"새 컴포넌트 만듦" ≠ "기능 배선 완료"**. Mode-B 검토 시 "어느 route에 mount되어 사용자가 볼 수 있는가?" HIL-style 체크가 필요. 메모리 후속 진입 예정.
+
+### Process lesson #2 — yaw 부호 mismatch + 이중 적용 (HIL 라운드 3+4)
+
+운영자: "Yaw 의도와 반대로 돌아가고 있어"
+
+두 잠복 버그가 결합된 결과:
+1. **`map_rotate.py:153-154` docstring**은 명확히 "rotate by `-typed_yaw_deg`"라고 적혀있음. 그런데 line 217은 `img.rotate(typed_yaw_deg)` (부호 미적용). 모듈 자체 docstring과 implementation이 부호 어긋남.
+2. `app.py::_apply_map_edit_pipeline`이 `theta_deg`를 `apply_origin_edit_in_memory`로 통과시켜 **YAML yaw도 SUBTRACT**해버림. 동시에 map_rotate가 비트맵을 물리적으로 회전 → 같은 회전이 두 번 적용. World X에 있던 벽이 X − 2θ에 떨어지는 결과.
+
+수정: bitmap 부호를 `-typed_yaw_deg`로 + 파이프라인에서 `theta_deg=None`을 `apply_origin_edit_in_memory`에 전달 (Option B 의미상 비트맵 회전이 yaw 변경의 SSOT). 이중 적용 차단.
+
+교훈: **docstring vs implementation drift**를 Mode-B에서 잡을 수 있도록 reviewer 체크리스트에 "module docstring과 핵심 함수 호출의 부호/방향이 일치하는가?" 추가 후보. 메모리 후속 진입 예정.
+
+### 운영자 lock 결정 (이번 세션)
+
+`project_map_edit_origin_rotation.md`에 모두 동기화됨:
+
+- **Pristine baseline 패턴** — pristine 비트맵 절대 불변, 매 Apply마다 파생 페어 생성, quality 손실은 항상 1× resample.
+- **변환 순서**: 평행이동 먼저 → 회전.
+- **Lanczos-3 의도** — Pillow `rotate()`가 LANCZOS 미지원이라 BICUBIC fallback (코드 주석으로 follow-up issue 후보 표시).
+- **Auto-canvas-expand**, **No-cancel atomic Apply**, **tracker control disable**.
+- **SUBTRACT semantic for yaw** (x/y 미러). ROTATE#1 `5°→10°→−5°`, ROTATE#2 `−5°→20°→−25°` test fixture lock.
+- **Segmented control Edit 탭** (Coordinate / Erase, per-mode Apply/Discard, mode 전환 시 auto-discard 안 함).
+- **두 독립 pick** within Coordinate (origin OR yaw OR 둘 다).
+- **2-click yaw pick** (P1→P2 벡터, 길이 무시).
+- **Dual-input mandate** — GUI + numeric (+/- 0.01) 병행.
+- **Postfix memo regex** `[A-Za-z0-9_-]+`, 분 단위 → **초 단위** timestamp (collision 방지).
+- **Hybrid grouped tree map list** (pristine 부모 + 들여쓰기 자식 + active 뱃지 + 수동 confirm).
+- **수동 active 전환** (자동 restart 없음, restart-pending sentinel).
+- **Tracker plumbing fix**: `cfg.amcl_origin_yaw_deg` → YAML `origin[2]` SSOT (2-step deprecation: 이번 PR엔 deprecated 유지 + stderr warning, 다음 PR에서 hard-remove).
+- **통합 overlay toggle row** (Origin/Axis + LiDAR migrated + Grid, localStorage 영속).
+- **Origin/Axis overlay** = origin dot + REP-103 빨강/초록 axes, 화면 끝까지, **WORLD (0, 0)**에서 교차.
+- **Grid overlay** = world-frame, zoom-adaptive, **`yamlYawDeg`로 회전해서 axis와 정렬** (라운드 5에서 lock).
+- **Coherent rendering** Vitest pin (pose+scan+bitmap 함께 회전).
+- **주황 pick preview**: XY pick은 채워진 점, yaw P1만은 빈 원, P1+P2는 화살표.
+
+### 운영자 deferral — Option Q (다음 PR로 분리)
+
+PICK#1/PICK#2 cascade 분석 끝에 운영자가 발견: 현재 `new_yaml = pristine - typed` semantic은 결코 `(0, 0, 0°)`이 안 됨. 운영자 멘탈 모델은 "picked point가 새 (0, 0)이 되니 새 YAML도 당연히 (0, 0, 0°)"이며, 이를 위해서는:
+
+- bitmap 평행이동 (현재 회전만 함) + 캔버스 재계산
+- pristine부터 cumulative typed 추적
+- 매 Apply마다 새 derived YAML이 (0, 0, 0°)이 되도록 정규화
+
+운영자 결정: **"이 정규화 방식은 다음 세션에서 다음 PR 열고 진행"** → issue#30으로 큐잉. 스물 세 번째 세션 1순위.
+
+### 다음 세션 큐 (운영자 lock 우선순위)
+
+1. **issue#30** — YAML normalization (0, 0, 0°) per Apply (NEW). Bitmap 평행이동 + 캔버스 조정 + cumulative-typed 추적.
+2. **issue#28.1** — B-MAPEDIT-3 follow-ups (Mode-B Major MA1-MA9 + standalone overlay 컴포넌트 파일 정리).
+3. **issue#26** — 측정 도구 round 2 + Writer + HIL.
+4. **issue#11** — Live pipelined-parallel (PAUSED, issue#26 측정 데이터 대기).
+5. **issue#13 (continued)** — distance-weighted likelihood.
+6. **issue#4** — AMCL silent-converge 진단.
+7. **issue#29** — SHOTOKU base-move (issue#30 정규화 의존).
+8. **issue#17** — GPIO UART (perma-deferred).
+9. **Bug B** — Live mode standstill jitter.
+10. **issue#7** — boom-arm angle masking.
+
+---
+
 ## 2026-05-03 → 2026-05-04 (심야 ~ 새벽 — 22:00 KST 2026-05-03 → 06:00 KST 2026-05-04, 스물 한 번째 세션 — issue#27 ship: output_transform 단 + SUBTRACT origin + LastOutput SSE — "한 번에 가자")
 
 ### 한 줄 요약

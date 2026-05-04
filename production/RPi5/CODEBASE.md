@@ -750,6 +750,76 @@ has been synced (`uv sync`).
 
 ---
 
+## 2026-05-04 13:23 KST — issue#28 (PR #81) — B-MAPEDIT-3 yaw-frame plumbing fix
+
+### Why
+
+Pre-PR: `cold_writer.cpp` consumed `cfg.amcl_origin_yaw_deg` (a
+Tier-2 config knob) at 9 sites for the AMCL frame transform. The
+YAML loader at `occupancy_grid.cpp` parsed the `origin: [x, y, yaw]`
+third element into a struct field but never propagated it to AMCL.
+Result: editing YAML `origin[2]` on disk + restart had **zero effect
+on tracker pose output** — the silent-breakage discovered during
+issue#27 HIL.
+
+### Added
+
+- `production/RPi5/src/localization/occupancy_grid.hpp` — new
+  `origin_yaw_deg` struct field (CCW-positive degrees, converted
+  from YAML radians at load time).
+- `production/RPi5/tests/test_occupancy_grid.cpp` — new gtest fixture
+  proving the YAML radians → grid degrees conversion.
+- `production/RPi5/tests/test_cold_writer_offset_invariant.cpp` —
+  new pin `OffsetComputedAgainstGridYaw_NotConfigField` that uses
+  asymmetric values (cfg=0°, grid=10°) so a regression rerouting
+  cold_writer back to the cfg field cannot pass.
+
+### Changed
+
+- `production/RPi5/src/localization/cold_writer.cpp:371,377,385,515,521,529,649,655,663`
+  — all 9 sites now read `grid.origin_yaw_deg` instead of
+  `cfg.amcl_origin_yaw_deg`. AMCL frame transform + tripwire +
+  compute_offset all source the YAML SSOT.
+- `production/RPi5/src/core/config.cpp:1063-1075` — emits a
+  `[DEPRECATED] cfg.amcl_origin_yaw_deg=...` stderr warning at
+  startup if the field is non-zero, pointing operators to remove
+  the line from `tracker.toml`.
+
+### Removed
+
+- (none — `cfg.amcl_origin_yaw_deg` field, schema row, and
+  `apply.cpp` read/write rows all RETAINED for one release per the
+  C2 two-step deprecation. Hard-removal queued for a follow-up
+  issue.)
+
+### Invariants
+
+- Added `(w) yaw-frame-ssot-via-yaml-origin`: "YAML `origin[2]` is
+  the SOLE source of truth for the AMCL frame yaw transform.
+  `cfg.amcl_origin_yaw_deg` is deprecated (still parseable for
+  TOML compat, ignored at runtime, deprecation warning emitted
+  once at boot). cold_writer reads `grid.origin_yaw_deg`. Tier-2
+  schema row `amcl.origin_yaw_deg` retained one release."
+
+### Test counts
+
+- gtest: 47/47 hardware-free pass. New `OffsetComputedAgainstGridYaw_NotConfigField`
+  + `OriginYawParsedFromYamlThird` pin the field-source SSOT.
+
+### Notable structural revelation
+
+`grid.origin_yaw_deg` ended up being consumed in only TWO places by
+the tracker: `apply_yaw_tripwire` (informational diagnostic) and
+`compute_offset` (subtracted from pose.yaw to produce FreeD output
+offset). It is **NOT used by `evaluate_scan` for likelihood-field
+cell mapping**. AMCL particle filter operates as if origin_yaw = 0
+— the YAML yaw functions only as an output-stage offset. This was
+discovered during operator's PICK#1/PICK#2 cascade analysis and
+explains why Option B (bake-into-bitmap) is the only correct path
+for yaw correction. Memory candidate flagged for Parent.
+
+---
+
 ## 2026-05-03 02:30 KST — issue#16.1 + issue#10 bundle — t5 trap-timeout fix + /dev/rplidar udev symlink
 
 ### Why

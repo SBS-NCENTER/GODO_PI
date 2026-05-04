@@ -517,6 +517,34 @@ def recovery_sweep(maps_dir: Path) -> dict[str, int]:
     if not maps_dir.is_dir():
         return _counts_to_dict(counts)
 
+    # Issue#30 Finding 3 cleanup (2026-05-05 KST): unlink sidecar JSON
+    # attached to pristine-named stems before indexing. The pre-fix
+    # recovery_sweep mis-classified all pristine maps (no derived-pattern
+    # filename) as `kind=synthesized` with `lineage.kind=synthesized,
+    # gen=-1`, which surfaced as misleading "synthesized" rows in
+    # LineageModal. Idempotent: a second invocation finds none.
+    for entry in maps_dir.iterdir():
+        if entry.is_symlink() or not entry.is_file():
+            continue
+        if not entry.name.endswith(f".{SIDECAR_EXT}"):
+            continue
+        stem = entry.name[: -len(f".{SIDECAR_EXT}")]
+        if stem == "active":
+            continue
+        if DERIVED_NAME_REGEX.match(stem) is not None:
+            continue
+        # Only unlink if the matching PGM is present (true orphan
+        # sidecars without a PGM peer should be left for a sysadmin
+        # to investigate).
+        if not (maps_dir / f"{stem}.{_PGM_EXT}").is_file():
+            continue
+        with contextlib.suppress(OSError):
+            entry.unlink()
+            logger.info(
+                "sidecar.recovery_sweep: unlinked misclassified pristine sidecar %s",
+                stem,
+            )
+
     # Index: stem → has_pgm, has_yaml, has_sidecar.
     by_stem: dict[str, tuple[bool, bool, bool]] = {}
     for entry in maps_dir.iterdir():
@@ -549,6 +577,16 @@ def recovery_sweep(maps_dir: Path) -> dict[str, int]:
         yaml = maps_dir / f"{stem}.{_YAML_EXT}"
         sidecar_path = maps_dir / f"{stem}.{SIDECAR_EXT}"
         if has_pgm and has_yaml:
+            # Issue#30 Finding 3 (2026-05-05 KST HIL): only emit a
+            # sidecar for orphan pairs whose filename matches the
+            # derived pattern (`<base>.YYYYMMDD-HHMMSS-<memo>`).
+            # Pristine maps (operator-mapped, no derived suffix) MUST
+            # NOT receive a sidecar — they are root nodes with no
+            # parent reference and no cumulative state. The original
+            # sweep classified pristines as `kind=synthesized` which
+            # showed misleading "synthesized (gen=-1)" in LineageModal.
+            if DERIVED_NAME_REGEX.match(stem) is None:
+                continue
             try:
                 sc = synthesize_for_orphan_pair(pgm, yaml)
                 write(sidecar_path, sc)

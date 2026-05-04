@@ -247,18 +247,53 @@ def test_recovery_sweep_classifies_pr81_legacy_as_auto_migrated_not_synthesized(
     assert body["lineage"]["kind"] == "auto_migrated_pre_issue30"
 
 
-def test_recovery_sweep_synthesizes_orphan_pair_with_unknown_generation(
+def test_recovery_sweep_skips_pristine_named_pair_no_sidecar(
     tmp_path: Path,
 ) -> None:
-    """Non-derived-pattern filename without sidecar → synthesized,
-    generation=-1."""
-    pgm = tmp_path / "weird_name.pgm"
-    yaml = tmp_path / "weird_name.yaml"
+    """[Finding 3 fix, 2026-05-05 KST] Pristine-named PGM+YAML pair
+    (no derived `.YYYYMMDD-HHMMSS-<memo>` suffix) MUST be skipped by
+    `recovery_sweep`. Pre-fix this was misclassified as
+    `kind=synthesized, gen=-1` and surfaced as misleading 'synthesized'
+    rows in LineageModal. Now no sidecar is created for pristines."""
+    pgm = tmp_path / "studio_pristine.pgm"
+    yaml = tmp_path / "studio_pristine.yaml"
     pgm.write_bytes(b"P5\n2 2\n255\n\x00\x00\x00\x00")
     yaml.write_text("origin: [0, 0, 0]\nresolution: 0.05\n")
     counts = recovery_sweep(tmp_path)
-    assert counts["synthesized"] == 1
+    assert counts["synthesized"] == 0
     assert counts["auto_migrated"] == 0
+    sidecar_path = tmp_path / "studio_pristine.sidecar.json"
+    assert not sidecar_path.exists()
+
+
+def test_recovery_sweep_unlinks_misclassified_pristine_sidecar(
+    tmp_path: Path,
+) -> None:
+    """[Finding 3 cleanup pass, 2026-05-05 KST] Pre-existing sidecar
+    attached to a pristine-named stem (created by pre-fix
+    `recovery_sweep` mis-classification) is unlinked on next sweep.
+    Idempotent: second sweep finds nothing to clean."""
+    pgm = tmp_path / "studio_pristine.pgm"
+    yaml = tmp_path / "studio_pristine.yaml"
+    sidecar_path = tmp_path / "studio_pristine.sidecar.json"
+    pgm.write_bytes(b"P5\n2 2\n255\n\x00\x00\x00\x00")
+    yaml.write_text("origin: [0, 0, 0]\nresolution: 0.05\n")
+    # Simulate the pre-fix bogus sidecar.
+    sidecar_path.write_text('{"schema":"godo.map.sidecar.v1","kind":"synthesized"}')
+    assert sidecar_path.is_file()
+    counts = recovery_sweep(tmp_path)
+    assert not sidecar_path.exists(), "cleanup pass should unlink bogus pristine sidecar"
+    # Sweep itself didn't synthesize anything new for the now-clean pristine.
+    assert counts["synthesized"] == 0
+    assert counts["auto_migrated"] == 0
+    # Idempotent.
+    counts2 = recovery_sweep(tmp_path)
+    assert counts2 == {
+        "synthesized": 0,
+        "auto_migrated": 0,
+        "orphan_pgm_unlinked": 0,
+        "orphan_yaml_unlinked": 0,
+    }
 
 
 def test_recovery_sweep_unlinks_orphan_pgm_alone(tmp_path: Path) -> None:

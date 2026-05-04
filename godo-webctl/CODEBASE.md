@@ -3846,6 +3846,45 @@ operator iterates.
   `apply_origin_edit` (in-place rewrite) keeps the older semantic for
   backward compat; the in-memory variant is the issue#28 path.
 
+## 2026-05-05 KST — PR #84 issue#30 HIL fold (Findings 1 + 3)
+
+### Why
+
+Operator HIL on news-pi01 (2026-05-05 KST) surfaced two webctl-side
+findings that were folded into the same PR #84 commit. Finding 2
+(rplidar_ros driver) is documented in `godo-mapping/CODEBASE.md`
+invariant `(k)`; the findings memory at `.claude/memory/project_issue30_hil_findings_2026-05-05.md`
+covers all three. Finding 1 + Finding 3 are scoped here.
+
+### Changed
+
+- `src/godo_webctl/map_transform.py` (Finding 1) —
+  `transform_pristine_to_derived` now passes `-theta_rad` to
+  `_affine_matrix_for_pivot_rotation`. Aligns AFFINE direction with
+  `_off_center_bbox`'s `-theta_rad` corner rotation; both pieces now
+  describe a visual CW rotation by the operator-typed θ, honouring
+  the Q2 lock (`+θ` typed → world frame rotates CCW → bitmap content
+  visually rotates CW). The helper itself is unchanged so
+  `test_affine_matrix_golden_4x4_theta45` still passes.
+- `src/godo_webctl/sidecar.py::recovery_sweep` (Finding 3) — orphan
+  PGM+YAML pairs whose stem does NOT match `DERIVED_NAME_REGEX` now
+  skip sidecar synthesis. A new cleanup pass at the start of
+  `recovery_sweep` unlinks pre-existing sidecars attached to
+  pristine-named stems (idempotent, runs once on next webctl
+  restart after deploy). Pre-fix, all pristines (`05.05_v1/v2/v3`,
+  `studio_v1`, `0429_*`, `04.29_v3`) had been mis-classified as
+  `kind=synthesized, gen=-1`.
+
+### Verification
+
+- HIL: post-deploy mapping with same physical setup as
+  `test_180check_left_obstacle.pgm` should place the 1 m wall at
+  PGM `+x_world` (not `-x_world` as before driver patch).
+- Yaw rotation: pick a non-pristine map, type `+30°` yaw, Apply →
+  bitmap visually rotates **CW** by 30° (CCW pre-fix).
+- Pristine cleanup: `journalctl -u godo-webctl` after restart shows
+  7 entries `unlinked misclassified pristine sidecar <stem>`.
+
 ## 2026-05-04 KST — issue#30 — pick-anchored YAML normalization + sidecar SSOT + map_rotate→map_transform rename
 
 ### Why

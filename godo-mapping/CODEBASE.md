@@ -247,6 +247,45 @@ but does NOT add them to `WebctlSection` (PR #63 lock-in). When two
 stacks own different facets of the same concept, the SSOT lives where
 the value originates.
 
+### (k) `rplidar_ros` driver patched at build time (PR #84)
+
+The upstream `Slamtec/rplidar_ros` driver's `src/rplidar_node.cpp:247-251`
+publishes `/scan` with `angle_min/max = M_PI - angle_in/out`. Per
+SLAMTEC's own datasheet (`doc/RPLIDAR/sources/SLAMTEC_rplidar_datasheet_C1_v1.2_en.pdf`
+page 11, Figure 2-4) the correct REP-103 conversion is `ψ = -θ` (single
+negation handles both left-handed → right-handed handedness flip and
+CW → CCW direction). The upstream `M_PI - θ` adds an extra 180°
+rotation, mapping every beam endpoint to the origin-symmetric
+position. A `test_180check_left_obstacle` HIL on 2026-05-05 KST
+verified the fingerprint: a 1 m wall physically in front of the LIDAR
+appeared in the resulting PGM at `-x_world` (origin point reflection).
+
+The `Dockerfile` `RUN` block that builds the rplidar_ros overlay
+(lines 46–90) MUST keep:
+
+1. `git clone https://github.com/Slamtec/rplidar_ros.git` (no `--depth 1`
+   so a specific commit checkout is possible).
+2. `git checkout 24cc9b6dea97e045bda1408eaa867ce730fd3fc3` — pinned
+   commit hash for reproducibility (ros2 HEAD as of 2026-04-27).
+3. `sed -i 's|M_PI - angle_max|-angle_max|g; s|M_PI - angle_min|-angle_min|g' src/rplidar_node.cpp` —
+   the 4 site replacements correcting the upstream sign bug.
+
+The `rf2o_laser_odometry` overlay below uses the same `git clone +
+git checkout + sed` pattern (already pinned to `b38c68e`), so the
+operator-side cognitive cost is one pattern, not two.
+
+A reviewer who removes the sed line OR drops the commit pin MUST
+either (a) document an upstream commit that lands the fix at `M_PI
+- θ → -θ`, OR (b) replace it with a `tf_static` 180° workaround in
+`launch/map.launch.py` and explain why the source patch is no longer
+preferred. Re-introducing the `--depth 1` shallow-clone form is a
+hard violation because it makes commit-pinning + sed-patching impossible.
+
+Live tracker path is unaffected: `production/RPi5/src/lidar/lidar_source_rplidar.cpp`
+uses the vendored `rplidar_sdk` directly and `production/RPi5/src/localization/scan_ops.cpp:53`
+applies the correct `-angle` negation. See `.claude/memory/project_rplidar_cw_vs_ros_ccw.md`
+for the full 5-path angle-convention SSOT.
+
 ## Phase 4.5 follow-up candidates
 
 - Pin `Dockerfile` `FROM ros:jazzy-ros-base` by image digest after the first
@@ -300,6 +339,31 @@ the value originates.
   operator's intentional Ctrl+C.
 
 ## Change log
+
+### 2026-05-05 KST — PR #84 issue#30 Finding 2: rplidar_ros driver patched
+
+#### Changed
+
+- `Dockerfile` (lines 46–90) — replaced `git clone --depth 1 --branch ros2`
+  with `git clone` + `git checkout 24cc9b6dea97e045bda1408eaa867ce730fd3fc3`
+  + `sed -i 's|M_PI - angle_max|-angle_max|g; s|M_PI - angle_min|-angle_min|g' src/rplidar_node.cpp`
+  to fix the upstream `Slamtec/rplidar_ros` sign bug (extra 180° rotation
+  on the published `/scan` topic).
+
+#### Added
+
+- New invariant `(k) rplidar_ros driver patched at build time (PR #84)`
+  documenting the upstream bug evidence (HIL `test_180check_left_obstacle`
+  PGM fingerprint), the SLAMTEC datasheet derivation, the three required
+  `Dockerfile` blocks, and the deletion-resistance rule.
+
+#### Why
+
+Operator HIL on PR #84 (issue#30) on 2026-05-05 KST showed every beam
+endpoint at the origin-symmetric position relative to physical reality.
+Root-caused to `Slamtec/rplidar_ros` upstream `src/rplidar_node.cpp:247-251`
+using `M_PI - angle` where SLAMTEC's own datasheet defines the correct
+REP-103 conversion as `-angle`. Container rebuild required after deploy.
 
 ### 2026-05-01 23:21 KST — issue#14: preview node + LIDAR_DEV env chain
 

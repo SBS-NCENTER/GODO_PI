@@ -4695,6 +4695,17 @@ async def test_post_map_edit_coord_full_pipeline(
     assert (tmp_maps_dir / f"{derived_name}.yaml").is_file()
     # Pristine untouched.
     assert (tmp_maps_dir / "studio_v1.pgm").is_file()
+    # issue#28 part-3 — response carries derived_pair + pristine_pair
+    # so the SPA's success banner can display the operator-visible
+    # filenames without synthesising them client-side.
+    assert body["derived_pair"] == {
+        "pgm": f"{derived_name}.pgm",
+        "yaml": f"{derived_name}.yaml",
+    }
+    assert body["pristine_pair"] == {
+        "pgm": "studio_v1.pgm",
+        "yaml": "studio_v1.yaml",
+    }
 
 
 async def test_post_map_edit_coord_invalid_memo_422(

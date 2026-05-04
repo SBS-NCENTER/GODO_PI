@@ -585,8 +585,12 @@ export interface MapEditPipelineResult {
   request_id: string;
   derived_pair: { pgm: string; yaml: string };
   pristine_pair: { pgm: string; yaml: string };
-  prev_origin: [number, number, number];
-  new_origin: [number, number, number];
+  /**
+   * Present only for the coord endpoint (origin/yaw edit). Erase
+   * endpoint does not touch YAML origin, so these are omitted.
+   */
+  prev_origin?: [number, number, number];
+  new_origin?: [number, number, number];
   restart_required: true;
 }
 

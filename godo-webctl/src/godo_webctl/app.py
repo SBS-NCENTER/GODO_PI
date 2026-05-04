@@ -911,6 +911,14 @@ async def _apply_map_edit_pipeline(
                 "ok": True,
                 "request_id": request_id,
                 "derived_name": derived_name,
+                "derived_pair": {
+                    "pgm": derived_pgm.name,
+                    "yaml": derived_yaml.name,
+                },
+                "pristine_pair": {
+                    "pgm": maps_mod.pgm_for(cfg.maps_dir, pristine_base).name,
+                    "yaml": maps_mod.yaml_for(cfg.maps_dir, pristine_base).name,
+                },
                 "pixels_changed": pixels_changed,
                 "restart_required": True,
             }

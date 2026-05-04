@@ -1,47 +1,54 @@
 <script lang="ts">
   /**
-   * Track B-MAPEDIT — `/map-edit` route.
+   * Track B-MAPEDIT + issue#28 — `/map-edit` route.
    *
-   * Renders the active map underlay + brush surface + Apply / Discard
-   * controls. Apply path:
-   *   1. Build a PNG blob from MapMaskCanvas's `getMaskPng()`.
-   *   2. POST /api/map/edit (multipart) via `postMapEdit`.
-   *   3. On 200: show success toast, refresh the restart-pending flag,
-   *      navigate back to /map after MAP_EDIT_REDIRECT_DELAY_MS.
-   *   4. On 4xx: render the response's `err` string inline; brush state
-   *      is preserved so the operator can retry without redrawing.
+   * Hosts the segmented Edit mode switcher (Coordinate / Erase) +
+   * overlay toggle row + per-mode Apply / Discard. Apply opens the
+   * `<ApplyMemoModal>` which collects a postfix memo and POSTs to
+   * `/api/map/edit/coord` or `/api/map/edit/erase`. The modal also
+   * consumes the SSE progress channel.
    *
-   * Anonymous viewers see the page (READ-only) but the Apply button is
-   * disabled. The backend separately enforces 401 on the POST.
-   *
-   * The brush radius is held in this component (not the child) so that
-   * the slider can drive the child's brush size prop without round-trip.
-   * Mask state lives ENTIRELY inside `<MapMaskCanvas/>` per
-   * CODEBASE.md invariant (u).
+   * Mode-state ownership lives in this route; mask state still lives
+   * inside `<MapMaskCanvas>` (CODEBASE.md invariant `(u)` updated for
+   * issue#28). Mode switch does NOT auto-discard the other mode's
+   * pending state — the operator can stage XY+yaw edits in Coord mode,
+   * flip to Erase to brush a fixture, then switch back without losing
+   * the Coord work.
    */
   import { onDestroy, onMount } from 'svelte';
 
+  import ApplyMemoModal from '$components/ApplyMemoModal.svelte';
+  import EditModeSwitcher from '$components/EditModeSwitcher.svelte';
   import MapMaskCanvas from '$components/MapMaskCanvas.svelte';
   import MapUnderlay from '$components/MapUnderlay.svelte';
   import MapZoomControls from '$components/MapZoomControls.svelte';
   import OriginPicker from '$components/OriginPicker.svelte';
+  import OverlayToggleRow from '$components/OverlayToggleRow.svelte';
   import RestartPendingBanner from '$components/RestartPendingBanner.svelte';
-  import { ApiError, postMapEdit, postMapOrigin } from '$lib/api';
+  import {
+    ApiError,
+    postMapEditCoord,
+    postMapEditErase,
+    postMapOrigin,
+  } from '$lib/api';
   import {
     BRUSH_RADIUS_PX_DEFAULT,
     BRUSH_RADIUS_PX_MAX,
     BRUSH_RADIUS_PX_MIN,
-    MAP_EDIT_REDIRECT_DELAY_MS,
+    EDIT_MODE_COORD,
+    EDIT_MODE_ERASE,
     ORIGIN_PICK_REDIRECT_DELAY_MS,
   } from '$lib/constants';
   import { createMapViewport } from '$lib/mapViewport.svelte';
   import { pixelToWorld } from '$lib/originMath';
   import { drawPose } from '$lib/poseDraw';
+  import { drawGrid, drawOriginAxis, drawPickPreview } from '$lib/overlayDraw';
   import type {
-    EditResponse,
     LastPose,
     LastScan,
     MapDimensions,
+    MapEditCoordBody,
+    MapEditPipelineResult,
     OriginEditResponse,
     OriginPatchBody,
   } from '$lib/protocol';
@@ -50,13 +57,14 @@
   import { subscribeLastPose } from '$stores/lastPose';
   import { subscribeLastScan } from '$stores/lastScan';
   import { loadMapMetadata, mapMetadata } from '$stores/mapMetadata';
+  import { overlayToggles } from '$stores/overlayToggles';
   import { refresh as refreshRestartPending } from '$stores/restartPending';
-  import { scanOverlay } from '$stores/scanOverlay';
+
+  type EditMode = typeof EDIT_MODE_COORD | typeof EDIT_MODE_ERASE;
+  // Sub-mode for the canvas pointer in Coord mode: off / xy-pick / yaw-pick.
+  type CoordClickMode = 'off' | 'xy' | 'yaw';
 
   // Per-route viewport instance (Q2 — fresh per /map-edit mount).
-  // Shared between `<MapUnderlay/>`, `<MapMaskCanvas/>`, and
-  // `<MapZoomControls/>` so the buttons drive the same zoom state and
-  // the brush layer's pointer-coord conversion uses the same projection.
   const viewport = createMapViewport();
 
   let dims = $state<MapDimensions | null>(null);
@@ -68,40 +76,60 @@
   let unsubOverlay: (() => void) | null = null;
   let unsubPose: (() => void) | null = null;
   let brushRadius = $state(BRUSH_RADIUS_PX_DEFAULT);
-  let busy = $state(false);
-  let banner = $state<string | null>(null);
-  let bannerKind = $state<'info' | 'success' | 'error'>('info');
+  // Independent busy flags per mode so a coord Apply does not grey out
+  // the erase brush controls and vice versa.
+  let coordBusy = $state(false);
+  let eraseBusy = $state(false);
+  let coordBanner = $state<string | null>(null);
+  let coordBannerKind = $state<'info' | 'success' | 'error' | null>(null);
+  let eraseBanner = $state<string | null>(null);
+  let eraseBannerKind = $state<'info' | 'success' | 'error' | null>(null);
   let canvasRef: MapMaskCanvas | undefined = $state();
   let originPickerRef: OriginPicker | undefined = $state();
+  let underlayRef: MapUnderlay | undefined = $state();
   let redirectTimer: ReturnType<typeof setTimeout> | null = null;
-  // Live LiDAR overlay — shared with `/map` via the `scanOverlay` and
-  // `lastScan` stores (Rule 3 of `.claude/memory/project_map_viewport_zoom_rules.md`).
   let scan = $state<LastScan | null>(null);
-  let scanOn = $state(false);
-  // issue#27 — pose dot+heading on the Edit tab via the shared
-  // drawPose helper. No trail (trail is Overview-only).
+  let lidarOn = $state(false);
+  let originAxisOn = $state(false);
+  let gridOn = $state(false);
   let pose = $state<LastPose | null>(null);
 
-  // Track B-MAPEDIT-2 — origin pick state.
-  let originPickEnabled = $state(false);
-  let originBusy = $state(false);
-  let originBanner = $state<string | null>(null);
-  let originBannerKind = $state<'info' | 'success' | 'error' | null>(null);
-  let currentOrigin = $state<readonly [number, number, number] | null>(null);
+  // issue#28 — segmented control state. Switching does NOT auto-discard
+  // the other mode's pending state.
+  let mode = $state<EditMode>(EDIT_MODE_COORD);
+  // Coord-mode sub-state: tracks which canvas-click meaning is active.
+  // issue#28 (HIL fix) — default 'xy' so the canvas is immediately
+  // clickable when entering Coord mode. Operator-reported confusion
+  // when default 'off' silently swallowed canvas clicks.
+  let coordClickMode = $state<CoordClickMode>('xy');
+  // Apply-modal flow. The modal owns the SSE consumer; this flag drives
+  // the open prop.
+  let modalOpen = $state(false);
+  let modalScope = $state<EditMode | null>(null);
+  // issue#28 (Mode-B CR3) — captured `request_id` from the server's
+  // POST /api/map/edit/{coord,erase} response. Passed to ApplyMemoModal
+  // so its SSE consumer drops frames belonging to other sessions.
+  let sessionRequestId = $state<string | null>(null);
   // Resolution + origin captured from mapMetadata for the GUI-pick math.
   let resolution = $state<number | null>(null);
+  // Full mapMetadata mirror — needed by the viewport's worldToCanvas /
+  // canvasToWorld so the overlay-draw helpers project through the
+  // SAME transform the underlay uses.
+  let mapMeta = $state<import('$lib/protocol').MapMetadata | null>(null);
+  let currentOrigin = $state<readonly [number, number, number] | null>(null);
+  let mapDims = $state<MapDimensions | null>(null);
 
   $effect(() => {
     void mapMetadata;
   });
 
-  function fmtRedirectMs(ms: number): string {
-    return `${(ms / 1000).toFixed(0)}초`;
+  function setCoordBanner(msg: string | null, kind: 'info' | 'success' | 'error' | null): void {
+    coordBanner = msg;
+    coordBannerKind = kind;
   }
-
-  function setBanner(msg: string, kind: 'info' | 'success' | 'error'): void {
-    banner = msg;
-    bannerKind = kind;
+  function setEraseBanner(msg: string | null, kind: 'info' | 'success' | 'error' | null): void {
+    eraseBanner = msg;
+    eraseBannerKind = kind;
   }
 
   onMount(() => {
@@ -109,19 +137,19 @@
     unsubMeta = mapMetadata.subscribe((m) => {
       if (m) {
         dims = { width: m.width, height: m.height };
+        mapDims = { width: m.width, height: m.height };
         currentOrigin = m.origin;
         resolution = m.resolution;
+        mapMeta = m;
       }
     });
-    // Track D — subscribe to the LastScan store; lifecycle is managed
-    // by the store (gated on the scanOverlay flag). Mirrors `/map`.
     unsubScan = subscribeLastScan((s) => (scan = s));
-    unsubOverlay = scanOverlay.subscribe((v) => (scanOn = v));
+    unsubOverlay = overlayToggles.subscribe((s) => {
+      lidarOn = s.lidarOn;
+      originAxisOn = s.originAxisOn;
+      gridOn = s.gridOn;
+    });
     unsubPose = subscribeLastPose((p) => (pose = p));
-    // The /map page also calls loadMapMetadata; calling here too is
-    // idempotent (same store, abort-cancellable). Without this,
-    // operators landing on /map-edit directly would see "loading…"
-    // forever.
     void loadMapMetadata('/api/map/image').catch((e: unknown) => {
       const err = (e as { body?: { err?: string } })?.body?.err;
       dimsError = err || 'metadata_load_failed';
@@ -140,52 +168,45 @@
     }
   });
 
-  async function onApply(): Promise<void> {
-    if (busy || !canvasRef || role !== 'admin') return;
-    busy = true;
-    setBanner('적용 중…', 'info');
-    try {
-      const blob = await canvasRef.getMaskPng();
-      const resp = await postMapEdit<EditResponse>(blob);
-      setBanner(
-        `완료: ${resp.pixels_changed} 셀 변경 — ${fmtRedirectMs(MAP_EDIT_REDIRECT_DELAY_MS)} 후 /map으로 이동합니다. ` +
-          `적용은 godo-tracker 재시작 후 (System 탭 또는 /local).`,
-        'success',
-      );
-      void refreshRestartPending();
-      redirectTimer = setTimeout(() => {
-        navigate('/map');
-      }, MAP_EDIT_REDIRECT_DELAY_MS);
-    } catch (e) {
-      busy = false;
-      if (e instanceof ApiError) {
-        const errCode = e.body?.err || `http_${e.status}`;
-        setBanner(`적용 실패: ${errCode}`, 'error');
-      } else {
-        setBanner('적용 실패: 네트워크 오류', 'error');
-      }
-      return;
-    }
-    busy = false;
+  // --- Coord mode --------------------------------------------------------
+
+  // HIL fix 2026-05-04 KST — orange preview state. Operator's picked
+  // XY (single click) and yaw P1→P2 (two clicks) render as orange
+  // markers via `drawPickPreview` in the underlay's ondraw, so the
+  // operator can verify what they picked before Apply.
+  let xyPreview = $state<{ x: number; y: number } | null>(null);
+  let yawP1Preview = $state<{ x: number; y: number } | null>(null);
+  let yawP2Preview = $state<{ x: number; y: number } | null>(null);
+
+  function clearPickPreviews(): void {
+    xyPreview = null;
+    yawP1Preview = null;
+    yawP2Preview = null;
   }
 
-  function onDiscard(): void {
-    if (busy) return;
-    canvasRef?.clear();
-    banner = null;
-  }
-
-  // Track B-MAPEDIT-2 — GUI-pick: convert logical pixel → world coords
-  // using the active map's resolution + origin, pre-fill the picker.
   function onCanvasCoordPick(lx: number, ly: number): void {
+    if (mode !== EDIT_MODE_COORD) return;
+    if (coordClickMode === 'off') return;
     if (!dims || resolution === null || currentOrigin === null) return;
     const w = pixelToWorld(lx, ly, dims, resolution, currentOrigin);
-    originPickerRef?.setCandidate({ x_m: w.world_x, y_m: w.world_y });
+    if (coordClickMode === 'xy') {
+      originPickerRef?.setCandidate({ x_m: w.world_x, y_m: w.world_y });
+      xyPreview = { x: w.world_x, y: w.world_y };
+    } else if (coordClickMode === 'yaw') {
+      originPickerRef?.setYawClick({ x_m: w.world_x, y_m: w.world_y });
+      // First yaw click sets P1; second resolves the angle and clears
+      // the OriginPicker's internal yawP1. We mirror by tracking BOTH
+      // preview points: P1 stays visible (with arrow once P2 lands)
+      // until clearPickPreviews() runs on Apply / Discard.
+      if (yawP1Preview === null) {
+        yawP1Preview = { x: w.world_x, y: w.world_y };
+        yawP2Preview = null;
+      } else {
+        yawP2Preview = { x: w.world_x, y: w.world_y };
+      }
+    }
   }
 
-  // issue#27 — push hover-coord into the shared viewport from the mask
-  // layer's pointermove (mask captures events with pointer-events: auto
-  // and the underlay's own onMouseMove never fires). null clears.
   function onCanvasHoverMove(lx: number | null, ly?: number): void {
     if (lx === null || ly === undefined) {
       viewport.setHoverWorld(null);
@@ -196,45 +217,156 @@
     viewport.setHoverWorld(w.world_x, w.world_y);
   }
 
-  async function onOriginApply(body: OriginPatchBody): Promise<void> {
-    if (originBusy || role !== 'admin') return;
-    originBusy = true;
-    originBanner = '적용 중…';
-    originBannerKind = 'info';
+  // Legacy /api/map/origin Apply path — kept alive for the existing
+  // mapEdit.test.ts `Apply POSTs FormData with a "mask" part to /api/map/edit`
+  // and `/api/map/origin` smoke tests. The new modal flow drives
+  // `/api/map/edit/coord` instead.
+  async function onLegacyOriginApply(body: OriginPatchBody): Promise<void> {
+    if (coordBusy || role !== 'admin') return;
+    coordBusy = true;
+    setCoordBanner('적용 중…', 'info');
     try {
       const resp = await postMapOrigin<OriginEditResponse>(body);
       const px = resp.prev_origin;
       const nx = resp.new_origin;
-      originBanner =
+      setCoordBanner(
         `완료: (${px[0].toFixed(3)}, ${px[1].toFixed(3)}) → ` +
-        `(${nx[0].toFixed(3)}, ${nx[1].toFixed(3)}) — ` +
-        `${(ORIGIN_PICK_REDIRECT_DELAY_MS / 1000).toFixed(0)}초 후 /map으로 이동합니다. ` +
-        `적용은 godo-tracker 재시작 후.`;
-      originBannerKind = 'success';
+          `(${nx[0].toFixed(3)}, ${nx[1].toFixed(3)}) — ` +
+          `${(ORIGIN_PICK_REDIRECT_DELAY_MS / 1000).toFixed(0)}초 후 /map으로 이동합니다.`,
+        'success',
+      );
       void refreshRestartPending();
       redirectTimer = setTimeout(() => {
         navigate('/map');
       }, ORIGIN_PICK_REDIRECT_DELAY_MS);
     } catch (e) {
-      originBusy = false;
+      coordBusy = false;
       if (e instanceof ApiError) {
         const errCode = e.body?.err || `http_${e.status}`;
-        originBanner = `적용 실패: ${errCode}`;
+        setCoordBanner(`적용 실패: ${errCode}`, 'error');
       } else {
-        originBanner = '적용 실패: 네트워크 오류';
+        setCoordBanner('적용 실패: 네트워크 오류', 'error');
       }
-      originBannerKind = 'error';
       return;
     }
-    originBusy = false;
+    coordBusy = false;
   }
+
+  function onCoordApplyClick(): void {
+    if (coordBusy || role !== 'admin') return;
+    if (!originPickerRef) return;
+    const draft = originPickerRef.getDirtyBody();
+    if (draft === null) {
+      setCoordBanner('적용할 변경사항이 없습니다.', 'error');
+      return;
+    }
+    modalScope = EDIT_MODE_COORD;
+    modalOpen = true;
+  }
+
+  async function onModalApply(memo: string): Promise<void> {
+    if (modalScope === EDIT_MODE_COORD) {
+      await runCoordApply(memo);
+    } else if (modalScope === EDIT_MODE_ERASE) {
+      await runEraseApply(memo);
+    }
+  }
+
+  async function runCoordApply(memo: string): Promise<void> {
+    if (!originPickerRef) return;
+    const draft = originPickerRef.getDirtyBody();
+    if (draft === null) return;
+    const body: MapEditCoordBody = { ...draft, memo };
+    coordBusy = true;
+    setCoordBanner('적용 중…', 'info');
+    try {
+      const resp = await postMapEditCoord<MapEditPipelineResult>(body);
+      // issue#28 (Mode-B CR3) — pin the SSE filter to this session's id.
+      sessionRequestId = resp.request_id ?? null;
+      setCoordBanner(
+        `완료: 파생 ${resp.derived_pair.pgm}. godo-tracker 재시작 후 활성화하세요.`,
+        'success',
+      );
+      void refreshRestartPending();
+      originPickerRef.clearAll();
+      clearPickPreviews();
+      modalOpen = false;
+      modalScope = null;
+      sessionRequestId = null;
+    } catch (e) {
+      if (e instanceof ApiError) {
+        const errCode = e.body?.err || `http_${e.status}`;
+        setCoordBanner(`적용 실패: ${errCode}`, 'error');
+      } else {
+        setCoordBanner('적용 실패: 네트워크 오류', 'error');
+      }
+    } finally {
+      coordBusy = false;
+    }
+  }
+
+  function onCoordDiscardClick(): void {
+    if (coordBusy) return;
+    originPickerRef?.clearAll();
+    clearPickPreviews();
+    setCoordBanner(null, null);
+  }
+
+  // --- Erase mode --------------------------------------------------------
+
+  function onEraseApplyClick(): void {
+    if (eraseBusy || role !== 'admin' || !canvasRef) return;
+    modalScope = EDIT_MODE_ERASE;
+    modalOpen = true;
+  }
+
+  async function runEraseApply(memo: string): Promise<void> {
+    if (!canvasRef) return;
+    eraseBusy = true;
+    setEraseBanner('적용 중…', 'info');
+    try {
+      const blob = await canvasRef.getMaskPng();
+      const resp = await postMapEditErase<MapEditPipelineResult>(blob, memo);
+      // issue#28 (Mode-B CR3) — pin the SSE filter to this session's id.
+      sessionRequestId = resp.request_id ?? null;
+      setEraseBanner(
+        `완료: 파생 ${resp.derived_pair.pgm}. godo-tracker 재시작 후 활성화하세요.`,
+        'success',
+      );
+      void refreshRestartPending();
+      canvasRef.clear();
+      modalOpen = false;
+      modalScope = null;
+      sessionRequestId = null;
+    } catch (e) {
+      if (e instanceof ApiError) {
+        const errCode = e.body?.err || `http_${e.status}`;
+        setEraseBanner(`적용 실패: ${errCode}`, 'error');
+      } else {
+        setEraseBanner('적용 실패: 네트워크 오류', 'error');
+      }
+    } finally {
+      eraseBusy = false;
+    }
+  }
+
+  function onEraseDiscardClick(): void {
+    if (eraseBusy) return;
+    canvasRef?.clear();
+    setEraseBanner(null, null);
+  }
+
+  // Yaml origin in degrees for the OriginAxisOverlay; stays in sync with
+  // mapMetadata.origin[2] (radians on disk).
+  let yamlYawDeg = $derived(currentOrigin === null ? 0 : currentOrigin[2] * (180 / Math.PI));
+
+  // Note: pre-issue#28 used standalone `<canvas bind:this=...>` mounts
+  // for axis/grid overlays. HIL fix 2026-05-04 KST replaced them with
+  // `drawOriginAxis` / `drawGrid` calls inside MapUnderlay's ondraw so
+  // the overlays inherit pan/zoom transforms automatically.
 </script>
 
 <div data-testid="map-edit-page">
-  <!-- Top-level breadcrumb + h2 live on the parent Map.svelte (the
-       brush editor is now an Edit sub-tab inside the Map page). The
-       data-testid is preserved so the existing e2e + unit tests
-       continue to anchor on this container. -->
   <RestartPendingBanner />
 
   {#if dimsError}
@@ -244,48 +376,156 @@
   {:else if dims === null}
     <p class="muted" data-testid="map-edit-loading">맵을 불러오는 중…</p>
   {:else}
-    <div class="toolbar">
-      <label class="brush-slider">
-        Brush radius (px):
-        <input
-          type="range"
-          min={BRUSH_RADIUS_PX_MIN}
-          max={BRUSH_RADIUS_PX_MAX}
-          bind:value={brushRadius}
-          data-testid="map-edit-brush-slider"
-        />
-        <span class="brush-value">{brushRadius}</span>
-      </label>
-      <div class="actions">
-        <button
-          type="button"
-          class="btn-secondary"
-          onclick={onDiscard}
-          disabled={busy}
-          data-testid="map-edit-discard-btn"
-        >
-          Discard
-        </button>
-        <button
-          type="button"
-          class="btn-primary"
-          onclick={onApply}
-          disabled={busy || role !== 'admin'}
-          data-testid="map-edit-apply-btn"
-          title={role !== 'admin' ? '제어 동작은 로그인 필요' : ''}
-        >
-          {busy ? '적용 중…' : 'Apply'}
-        </button>
-      </div>
+    <div class="control-row" data-testid="map-edit-control-row">
+      <EditModeSwitcher
+        {mode}
+        onChange={(next) => {
+          // Mode switch does NOT auto-discard the other mode's pending
+          // state (operator-locked, pinned by MapEdit.test.ts).
+          mode = next;
+          // Reset coord-pick sub-mode whenever mode changes (canvas
+          // pointer behaviour belongs to the active mode).
+          coordClickMode = 'off';
+        }}
+      />
+      <OverlayToggleRow />
     </div>
+
+    {#if mode === EDIT_MODE_COORD}
+      <div class="toolbar coord-toolbar">
+        <div class="pick-toggles" role="radiogroup" aria-label="origin pick mode">
+          <label class="pick-label">
+            <input
+              type="radio"
+              name="coord-click-mode"
+              value="off"
+              checked={coordClickMode === 'off'}
+              onchange={() => (coordClickMode = 'off')}
+              data-testid="coord-pick-off"
+            />
+            Off
+          </label>
+          <label class="pick-label">
+            <input
+              type="radio"
+              name="coord-click-mode"
+              value="xy"
+              checked={coordClickMode === 'xy'}
+              onchange={() => (coordClickMode = 'xy')}
+              data-testid="coord-pick-xy"
+            />
+            원점 (XY)
+          </label>
+          <label class="pick-label">
+            <input
+              type="radio"
+              name="coord-click-mode"
+              value="yaw"
+              checked={coordClickMode === 'yaw'}
+              onchange={() => (coordClickMode = 'yaw')}
+              data-testid="coord-pick-yaw"
+            />
+            방향 (Yaw, 2-click)
+          </label>
+        </div>
+        <div class="actions">
+          <button
+            type="button"
+            class="btn-secondary"
+            onclick={onCoordDiscardClick}
+            disabled={coordBusy}
+            data-testid="map-edit-coord-discard-btn"
+          >
+            Discard
+          </button>
+          <button
+            type="button"
+            class="btn-primary"
+            onclick={onCoordApplyClick}
+            disabled={coordBusy || role !== 'admin'}
+            data-testid="map-edit-coord-apply-btn"
+            title={role !== 'admin' ? '제어 동작은 로그인 필요' : ''}
+          >
+            {coordBusy ? '적용 중…' : 'Apply'}
+          </button>
+        </div>
+      </div>
+    {:else}
+      <div class="toolbar erase-toolbar">
+        <label class="brush-slider">
+          Brush radius (px):
+          <input
+            type="range"
+            min={BRUSH_RADIUS_PX_MIN}
+            max={BRUSH_RADIUS_PX_MAX}
+            bind:value={brushRadius}
+            data-testid="map-edit-brush-slider"
+          />
+          <span class="brush-value">{brushRadius}</span>
+        </label>
+        <div class="actions">
+          <button
+            type="button"
+            class="btn-secondary"
+            onclick={onEraseDiscardClick}
+            disabled={eraseBusy}
+            data-testid="map-edit-erase-discard-btn"
+          >
+            Discard
+          </button>
+          <button
+            type="button"
+            class="btn-primary"
+            onclick={onEraseApplyClick}
+            disabled={eraseBusy || role !== 'admin'}
+            data-testid="map-edit-erase-apply-btn"
+            title={role !== 'admin' ? '제어 동작은 로그인 필요' : ''}
+          >
+            {eraseBusy ? '적용 중…' : 'Apply'}
+          </button>
+        </div>
+      </div>
+    {/if}
 
     <div class="map-stack">
       <MapUnderlay
+        bind:this={underlayRef}
         {viewport}
         mapImageUrl="/api/map/image"
         {scan}
-        scanOverlayOn={scanOn}
-        ondraw={(ctx, w2c) => drawPose(ctx, w2c, pose)}
+        scanOverlayOn={lidarOn}
+        ondraw={(ctx, w2c) => {
+          // Pose first (background layer); then world-frame overlays
+          // (axis, grid) so the operator sees them above the bitmap;
+          // then orange pick previews on top of everything.
+          drawPose(ctx, w2c, pose);
+          if (gridOn && resolution !== null && resolution > 0) {
+            // World bounds = inverse-project the canvas corners.
+            const cw = ctx.canvas.width;
+            const ch = ctx.canvas.height;
+            const [w0x, w0y] = viewport.canvasToWorld(0, 0, cw, ch, mapMeta);
+            const [w1x, w1y] = viewport.canvasToWorld(cw, ch, cw, ch, mapMeta);
+            drawGrid(ctx, w2c, {
+              pxPerMeter: viewport.zoom / resolution,
+              worldMinX: Math.min(w0x, w1x),
+              worldMaxX: Math.max(w0x, w1x),
+              worldMinY: Math.min(w0y, w1y),
+              worldMaxY: Math.max(w0y, w1y),
+              // HIL fix 2026-05-04 KST — grid follows axis rotation.
+              yawDeg: yamlYawDeg,
+            });
+          }
+          if (originAxisOn) {
+            drawOriginAxis(ctx, w2c, { yawDeg: yamlYawDeg });
+          }
+          if (xyPreview || yawP1Preview || yawP2Preview) {
+            drawPickPreview(ctx, w2c, {
+              xy: xyPreview,
+              yawP1: yawP1Preview,
+              yawP2: yawP2Preview,
+            });
+          }
+        }}
       />
       <div class="mask-overlay">
         <MapMaskCanvas
@@ -295,8 +535,9 @@
           height={dims.height}
           mapImageUrl="/api/map/image"
           {brushRadius}
-          disabled={busy || originBusy}
-          mode={originPickEnabled ? 'origin-pick' : 'paint'}
+          disabled={(mode === EDIT_MODE_COORD ? coordBusy : eraseBusy) ||
+            (mode === EDIT_MODE_COORD && coordClickMode === 'off')}
+          mode={mode === EDIT_MODE_COORD && coordClickMode !== 'off' ? 'origin-pick' : 'paint'}
           oncoordpick={onCanvasCoordPick}
           onhovermove={onCanvasHoverMove}
         />
@@ -305,33 +546,58 @@
     </div>
   {/if}
 
-  {#if banner}
-    <p class="banner banner-{bannerKind}" data-testid="map-edit-banner">{banner}</p>
+  {#if mode === EDIT_MODE_COORD && coordBanner}
+    <p
+      class="banner banner-{coordBannerKind ?? 'info'}"
+      data-testid="map-edit-coord-banner"
+    >
+      {coordBanner}
+    </p>
+  {:else if mode === EDIT_MODE_ERASE && eraseBanner}
+    <p
+      class="banner banner-{eraseBannerKind ?? 'info'}"
+      data-testid="map-edit-erase-banner"
+    >
+      {eraseBanner}
+    </p>
   {/if}
 
   {#if dims !== null}
-    <label class="pick-toggle" data-testid="origin-pick-toggle-label">
-      <input
-        type="checkbox"
-        bind:checked={originPickEnabled}
-        disabled={busy || originBusy}
-        data-testid="origin-pick-toggle"
+    <!-- OriginPicker stays mounted across mode switches so its dirty
+         state survives Coord ↔ Erase toggling (issue#28 operator-locked
+         "no auto-discard"). Hidden via CSS in Erase mode. -->
+    <div style:display={mode === EDIT_MODE_COORD ? 'block' : 'none'}>
+      <OriginPicker
+        bind:this={originPickerRef}
+        {currentOrigin}
+        {role}
+        busy={coordBusy}
+        bannerMsg={null}
+        bannerKind={null}
+        onapply={(body) => {
+          // Legacy back-compat path — only fires when the OriginPicker's
+          // own inline Apply button is clicked. The issue#28 modal flow
+          // calls runCoordApply via onModalApply instead.
+          void onLegacyOriginApply(body);
+        }}
+        resolutionMPerPx={resolution}
+        inlineApplyEnabled={false}
       />
-      Click on canvas to pre-fill (origin-pick mode)
-    </label>
-
-    <OriginPicker
-      bind:this={originPickerRef}
-      {currentOrigin}
-      {role}
-      busy={originBusy}
-      bannerMsg={originBanner}
-      bannerKind={originBannerKind}
-      onapply={(body) => {
-        void onOriginApply(body);
-      }}
-    />
+    </div>
   {/if}
+
+  <ApplyMemoModal
+    open={modalOpen}
+    sessionRequestId={sessionRequestId}
+    onApply={(memo) => {
+      void onModalApply(memo);
+    }}
+    onCancel={() => {
+      modalOpen = false;
+      modalScope = null;
+      sessionRequestId = null;
+    }}
+  />
 
   <p class="hint">
     적용 후 godo-tracker를 재시작해야 효과가 반영됩니다 — System 탭 또는 (loopback) /local에서.
@@ -339,6 +605,16 @@
 </div>
 
 <style>
+  /* issue#28 — top control row hosts both the segmented mode switcher
+     and the unified overlay-toggle row, side-by-side. */
+  .control-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin: 8px 0;
+    flex-wrap: wrap;
+  }
   .toolbar {
     display: flex;
     align-items: center;
@@ -347,16 +623,22 @@
     gap: 8px;
     flex-wrap: wrap;
   }
-  /* PR β — wraps the underlay + mask canvases so they share the same
-     box (the mask sits on top of the underlay) and `<MapZoomControls/>`
-     can absolutely-position itself in the top-left without overlapping
-     the toolbar above. The underlay drives the canvas-CSS size; the
-     mask layer is `position: absolute; inset: 0;` over the underlay. */
+  .pick-toggles {
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .pick-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 0.9em;
+    cursor: pointer;
+    user-select: none;
+  }
   .map-stack {
     position: relative;
     width: 100%;
-    /* Match PoseCanvas's wrap height for visual continuity across
-       /map ↔ /map-edit. Operators see the same box on both routes. */
     height: 600px;
     border: 1px solid var(--color-border);
     border-radius: var(--radius-md);
@@ -367,6 +649,13 @@
     position: absolute;
     inset: 0;
     pointer-events: auto;
+  }
+  .overlay-canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
   }
   .brush-slider {
     display: flex;
@@ -401,12 +690,5 @@
   }
   .error {
     color: var(--color-error, #c62828);
-  }
-  .pick-toggle {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    margin-top: 12px;
-    font-size: 0.9em;
   }
 </style>

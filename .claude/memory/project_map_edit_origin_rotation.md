@@ -1,7 +1,163 @@
 ---
 name: Map Edit feature spec — brush, origin pick, rotation
-description: B-MAPEDIT family spec — brush erase (P0), origin pick with GUI+numeric input (P1), rotation with GUI+numeric input (deferred). Covers UX, data model, and dual-input requirement.
+description: B-MAPEDIT family spec — brush erase (P0), origin pick with GUI+numeric input (P1), rotation with GUI+numeric input (B-MAPEDIT-3 issue#28). Covers UX, data model, dual-input requirement, pristine-baseline file scheme, segmented-control mode UI, and overlay toggle row.
 type: project
+---
+
+## ★ Final spec lock — issue#28 kickoff (2026-05-04 KST)
+
+OPERATOR-LOCKED in twenty-second-session opening Q&A. SUPERSEDES the
+2026-04-30 single-Apply / single-mode B-MAPEDIT-3 sketch further down.
+The "Critical pre-implementation findings — issue#27 HIL surfaced"
+subsection remains valid — both prerequisites (a) tracker plumbing
+fix and (b) coherent pose+yaw+scan rendering still apply.
+
+### Edit-tab restructure (segmented control)
+
+- The Edit sub-tab now hosts a **segmented control** at its top with
+  two top-level modes: **Coordinate Edit** and **Erase**.
+- Each mode owns its own **Apply** + **Discard** buttons. No global
+  Apply.
+- Switching modes does NOT auto-Discard the other mode's pending
+  state (operator may toggle back and forth).
+
+### Coordinate Edit mode — origin pick + yaw pick coexist
+
+- Two **independent** picks within this mode. Operator may dirty
+  only one and Apply; the other stays at its current YAML value.
+  - **Origin pick (x, y)** — single click on the map; OR numeric
+    `x_m` / `y_m` with +/- buttons (0.01 m step).
+  - **Yaw pick (theta_deg)** — **two clicks** on the map; the vector
+    P1 → P2 declares "this direction should become +x axis." Length
+    is **ignored** (direction-only). OR numeric `theta_deg` with
+    +/- buttons (0.01° step).
+- SUBTRACT semantic for both translation AND yaw: typed value names
+  the *world coord/direction in CURRENT frame that should become
+  (0, 0) / +x axis*. Backend computes
+  `new_yaml_origin = old_yaml_origin - typed`.
+- Numeric / GUI dual-input is mandatory (per dual-input rationale
+  section below).
+- Test pin extension: ROTATE#1 / ROTATE#2 sequential picks must NOT
+  drift by 2× typed offset (mirror of PICK#2 / PICK#3 from issue#27
+  — see `feedback_subtract_semantic_locked.md`).
+
+### Apply pipeline (Coordinate Edit) — bake into bitmap
+
+The user-confirmed Option B: PGM bytes are physically rotated, not
+just metadata-updated. Pristine baseline is preserved as a separate
+file so quality loss is **always 1× resample** regardless of how many
+times the operator iterates.
+
+1. Operator clicks Apply → modal dialog opens.
+2. Dialog asks for **postfix memo** (free-text input, validation
+   `[A-Za-z0-9_-]+`, no Korean / spaces / dots / slashes — file-system
+   safety).
+3. Dialog disables tracker control buttons in the SPA System tab
+   for the duration.
+4. Backend pipeline (no cancel; commit-or-fail; atomic):
+   - Load **pristine baseline PGM** from disk (never the
+     previously-rotated file).
+   - Compose transform: **translate first, then rotate** (operator
+     intent: picked origin must land where clicked even after
+     rotation).
+   - Resample with **Lanczos-3 + re-threshold** to 3-class
+     {free=254, unknown=205, occupied=0}. Time budget 30 s OK; at
+     ~500×800 typical Lanczos-3 takes ~150-300 ms.
+   - **Auto-expand canvas** to fit the rotated bounding box (long
+     studios safe).
+   - Write to `<base>.<YYYYMMDD-HHMM>-<memo>.pgm.tmp` →
+     `fsync` → atomic `rename` to
+     `<base>.<YYYYMMDD-HHMM>-<memo>.pgm` + matching `.yaml`.
+   - The pair `<base>.pgm` / `<base>.yaml` is **never modified**;
+     it is the immutable pristine baseline.
+5. **SSE progress stream** (`progress` 0.0–1.0) drives a progress
+   bar in the dialog so operator sees real-time advancement.
+6. On completion the new variant appears in the map list but is
+   **NOT auto-selected as active**.
+
+### Erase mode — same pristine + derived pattern
+
+Operator-locked Q3: Erase variants are infrequent enough (one cleanup
+per studio session at most) that keeping them as derived files is
+worth the file-system cost. Consistent UX with Coordinate Edit.
+
+- Same pristine-baseline + derived-file pattern.
+- Same postfix-memo Apply dialog.
+- Same SSE progress (typically faster — no resample, just byte
+  rewrite).
+- Apply / Discard scoped to Erase mode only.
+
+### File naming + map list UI
+
+- **Pristine pair**: `<base>.pgm` + `<base>.yaml` — immutable,
+  read-only after initial mapping.
+- **Derived pairs**: `<base>.<YYYYMMDD-HHMM>-<memo>.pgm` +
+  `<base>.<YYYYMMDD-HHMM>-<memo>.yaml` — one new pair per Apply.
+  Both Coordinate Edit and Erase produce derived pairs.
+- Map list UI is a **hybrid grouped tree**: pristine row is a parent;
+  all derived variants render as **indented child rows** under their
+  pristine parent. Each child row shows full filename + memo +
+  timestamp.
+- **Active map** carries a badge/star.
+- **Active switch is manual + confirmed**: operator clicks any row →
+  confirm dialog ("Switch active map to <name>? Tracker restart
+  required to apply.") → on confirm, restart-pending sentinel
+  touched. **Tracker is NOT auto-restarted** (operator decides when
+  to restart from System tab).
+
+### Tracker plumbing fix — prerequisite (a)
+
+- Replace `cfg.amcl_origin_yaw_deg` consumption at
+  `cold_writer.cpp:371,377,385,515,521,529,649,655,663` with reading
+  the YAML `origin[2]` value parsed by `occupancy_grid.cpp:113-130`.
+- Once wired, AMCL frame transform consumes
+  `(origin[0], origin[1], origin[2])` as the SSOT.
+- Tier-2 `amcl_origin_yaw_deg` knob is removed (cleaner SSOT path).
+- Test pin: edit YAML `origin[2]` → restart tracker → raw yaw shifts
+  by edited delta.
+
+### Overlay toggle row (UI unification)
+
+- New toggle row sits **on the same row as the segmented control** —
+  one clean row at the top of every map-rendering sub-tab.
+- Toggles available everywhere a map is rendered:
+  - **Origin/Axis overlay** (NEW) — origin dot + +x red axis +
+    +y green axis (ROS REP-103 colors). Axes extend to **screen
+    edge**. World-frame anchored.
+  - **LiDAR overlay** — migrated from existing per-tab location to
+    this unified row.
+  - **Grid overlay** (NEW) — see grid spec below.
+- **All toggle states persist via localStorage** (per LiDAR overlay
+  precedent).
+
+### Grid overlay spec
+
+- **World-frame aligned** — rotates with YAML theta (so the operator
+  sees rotation in real time as they iterate).
+- **Zoom-adaptive interval schedule** (Planner finalizes; sketch:
+  zoom <0.3 → 5 m, 0.3–1.0 → 1 m, 1.0–3.0 → 0.5 m, ≥3.0 → 0.1 m).
+- **Larger intervals slightly thicker**: e.g., 5 m → 1.5 px,
+  1 m → 1 px, 0.1 m → 0.5 px.
+- Subtle gray, low opacity to stay non-intrusive.
+
+### Coherent rendering — prerequisite (b)
+
+- Pose dot + heading arrow + LiDAR scan dots stay **coherent with
+  the rotated bitmap** throughout operator interaction.
+- Vitest pin must demonstrate "pose + scan + bitmap rotate together
+  when YAML theta changes" (per shared `MapUnderlay` +
+  `lib/poseDraw.ts` from issue#27).
+
+### Pristine-baseline rationale (operator question 2026-05-04)
+
+Operator asked whether per-pixel coordinate transformation could
+preserve the original perfectly. The pristine-baseline pattern
+*already does this*: the original PGM bytes are immutable; every
+Apply re-renders fresh from the original with cumulative
+(translate, rotate) parameters. Quality loss is always exactly **one
+resample**, never compounding. Inverse-mapping (output pixel →
+sample original) is the standard form — no holes, no scatter.
+
 ---
 
 ## Sign convention update — 2026-05-04 KST (issue#27, SUBTRACT)

@@ -1727,8 +1727,176 @@ until container exit, so no race with activate.
 
 ---
 
-## 13. Change log
+## 13. Map edit pipeline (issue#28)
 
+The Map Edit pipeline (Coord-mode + Erase-mode Apply) is a webctl-side
+mutation that produces a NEW map pair on disk and leaves the active
+map untouched until the operator manually activates the new pair AND
+restarts godo-tracker. Tracker C++ code is read-only on this path.
+
+### 13.1. Pristine vs derived file model
+
+Every map slot has a single immutable **pristine pair** plus zero or
+more **derived pairs**:
+
+```text
+maps/
+  ├─ studio_v1.pgm              ← pristine bitmap (immutable post-mapping)
+  ├─ studio_v1.yaml             ← pristine metadata (immutable)
+  ├─ studio_v1.20260504-103412-wallcal01.pgm    ← derived pair #1
+  ├─ studio_v1.20260504-103412-wallcal01.yaml
+  ├─ studio_v1.20260504-141055-tvshift.pgm      ← derived pair #2
+  └─ studio_v1.20260504-141055-tvshift.yaml
+```
+
+Filename grammar (regex `DERIVED_NAME_REGEX` in
+`godo-webctl/constants.py`):
+
+```text
+<base>.YYYYMMDD-HHMMSS-<memo>.{pgm,yaml}
+       └─ second-resolution timestamp (Mode-A M5 lock — collision near-impossible
+          with the asyncio.Lock serialising every Apply)
+                       └─ memo: ^[A-Za-z0-9_-]+$, max 32 chars (Mode-A C7 + N3)
+```
+
+Why this shape — see
+`.claude/memory/project_pristine_baseline_pattern.md`. Quality loss
+is always exactly **1× resample** regardless of how many derivations
+the operator has chained, because every Apply ALWAYS reads the
+pristine baseline.
+
+### 13.2. Translate-then-rotate composition
+
+Coord-mode Apply with both `(x_m, y_m)` and `theta_deg` set
+**translates first, rotates second**. Operator-locked spec:
+
+```text
+new_origin_xy   = pristine_origin_xy − typed_xy        (SUBTRACT)
+new_origin_yaw  = wrap_yaw_deg(pristine_origin_yaw − typed_yaw)
+new_pgm         = rotate(pristine_pgm, typed_yaw, expand_canvas=true)
+```
+
+The SUBTRACT semantic is shared with the issue#27 ADD→SUBTRACT lock
+(`.claude/memory/feedback_subtract_semantic_locked.md`): the typed
+values name what the operator wants to become the new (0, 0, 0°);
+backend subtracts to get the new YAML metadata.
+
+Composition order matters because rotate-then-translate would shift
+the rotation centre. See `godo-webctl/src/godo_webctl/map_rotate.py`
+header comment for the math derivation.
+
+### 13.3. Resample (Lanczos-3 → BICUBIC)
+
+Spec calls for **Lanczos-3** but Pillow's `Image.rotate()` does NOT
+accept `LANCZOS` as a resampling kernel — it rejects with
+`ValueError`. The implementation uses **BICUBIC** as the second-best
+quality kernel, with a 3-class re-threshold pass to keep occupancy
+semantics intact:
+
+```text
+free      = >= 254 (white)
+occupied  = == 0   (black)
+unknown   = otherwise → 205 (mid-grey)
+```
+
+Constants in `godo-webctl/constants.py`:
+`MAP_ROTATE_THRESH_FREE = 254`,
+`MAP_ROTATE_THRESH_OCC  = 0`,
+`MAP_ROTATE_THRESH_UNK  = 205`. The 3-class re-threshold is applied
+**after** BICUBIC resampling so anti-aliased edge pixels do not
+introduce phantom intermediate occupancy values.
+
+Auto-canvas-expand keeps the entire rotated bitmap inside the new
+canvas. Hard cap `MAP_ROTATE_MAX_CANVAS_PX = 4096` rejects runaway
+rotations with a 422 + SSE `rejected{reason: canvas_too_large}` frame.
+
+### 13.4. Atomic pair-write protocol
+
+Two-file atomicity is critical: a partial write that lands a new PGM
+without a matching YAML (or vice-versa) leaves the maps directory in
+a state where activation chooses an inconsistent pair. Sequence
+(implemented in `godo-webctl/src/godo_webctl/map_rotate.py` and
+`map_origin.py`):
+
+```text
+1. Write PGM to <derived>.pgm.tmp + fsync
+2. Write YAML to <derived>.yaml.tmp + fsync
+3. fsync(parent_dir)
+4. rename <derived>.pgm.tmp → <derived>.pgm
+5. rename <derived>.yaml.tmp → <derived>.yaml
+6. fsync(parent_dir)
+
+On YAML failure between steps (4) and (5):
+   unlink <derived>.pgm  (rollback)
+   propagate error
+```
+
+Stale `.tmp` files from a power loss or kill mid-Apply are swept on
+the next `list_pairs_grouped()` invocation. Tested by
+`tests/test_map_rotate.py::test_yaml_failure_unlinks_pgm` and
+`test_orphan_tmp_swept_on_list`.
+
+### 13.5. SSE progress channel
+
+A single in-process broadcaster (`godo-webctl/src/godo_webctl/sse.py`)
+emits per-frame JSON objects on `/api/map/edit/progress`:
+
+```json
+{"phase": "starting" | "yaml_rewrite" | "rotate" | "restart_pending" | "done" | "rejected",
+ "progress": 0.0..1.0,
+ "request_id": "<hex16>",
+ "reason": "<error short-tag>"      // only on phase=rejected
+}
+```
+
+Every frame carries `request_id` (hex16, server-issued per Apply
+session). The SPA captures `request_id` from the synchronous Apply
+response body and DROPS frames whose `request_id` does not match —
+prevents stale-tab leakage (Mode-B CR3 fix in
+`godo-frontend/src/components/ApplyMemoModal.svelte`,
+pinned by `tests/unit/ApplyMemoModal.test.ts`).
+
+Heartbeat every `SSE_PROGRESS_HEARTBEAT_S = 5` keeps proxies from
+killing the keep-alive.
+
+### 13.6. Concurrency guard (asyncio.Lock)
+
+`/api/map/edit/coord` and `/api/map/edit/erase` share a single
+module-scoped `asyncio.Lock` (`map_edit_pipeline_lock` in
+`godo-webctl/src/godo_webctl/app.py`). Two concurrent POSTs (e.g.,
+two SPA tabs) serialise; the second waits for the first to commit
+or fail. Combined with the second-resolution timestamp this makes
+filename collisions practically impossible.
+
+### 13.7. Restart-pending sentinel
+
+Pipeline does NOT restart godo-tracker. Final phase touches
+`/run/godo/restart_pending` (path from `cfg.restart_pending_path`).
+The SPA System tab surfaces a banner; the operator clicks Restart
+when convenient. This preserves the project rule "every cold-path
+update is operator-initiated."
+
+### 13.8. Yaw frame SSOT — `cfg.amcl_origin_yaw_deg` deprecation
+
+issue#28 made the active map's YAML `origin[2]` (parsed into
+`OccupancyGrid::origin_yaw_deg` in `occupancy_grid.cpp`) the SOLE
+source of truth for the AMCL frame yaw. The Tier-2 config field
+`amcl.origin_yaw_deg` is deprecated and ignored at the cold_writer
+seam (`production/RPi5/src/localization/cold_writer.cpp`). The
+deprecation is a two-step removal: the field still loads silently for
+back-compat with existing `tracker.toml`, but cold_writer reads only
+`grid.origin_yaw_deg`.
+
+Pinned by `production/RPi5/tests/test_cold_writer_offset_invariant.cpp::
+OffsetComputedAgainstGridYaw_NotConfigField` — asymmetric values
+(cfg=0°, grid=10°) catch any regression that re-routes the offset
+back to the deprecated cfg field.
+
+---
+
+## 14. Change log
+
+- **2026-05-04 (issue#28, B-MAPEDIT-3 cascade close)**: new §13 Map edit pipeline added (pristine vs derived file model, translate-then-rotate composition, Lanczos-3 intent + BICUBIC implementation + 3-class re-threshold, atomic pair-write protocol with PGM-rollback on YAML failure, SSE progress channel with `request_id`-tagged frames, `asyncio.Lock` concurrency guard, restart-pending sentinel handoff to operator, `cfg.amcl_origin_yaw_deg` deprecation in favour of YAML `origin[2]` SSOT). §13 Change log renumbered to §14. Cross-references new memory files `project_pristine_baseline_pattern.md` and `feedback_overlay_toggle_unification.md`.
 - **2026-04-24 (v3.1, FreeD transport pinned)**: FreeD transport is **hardware UART** on the RPi 5, not USB-CDC. Crane RS-232 → YL-128 (MAX3232) → PL011 UART0 (GPIO 14/15, 40-pin header). §6.3 gains two ops-checklist items: (a) YL-128 VCC MUST come from the Pi's 3V3 rail so both sides of the TTL link are 3.3 V — an Arduino R4 build previously suffered intermittent framing errors when resistor dividers were added "for safety"; the verified fix is identical 3.3 V rails with no divider; (b) `/boot/firmware/config.txt` needs `enable_uart=1` + `dtparam=uart0=on`, and `cmdline.txt` must drop `console=serial0,115200` so the kernel serial console does not own `/dev/ttyAMA0`. §11.2 default `FREED_PORT` updated from `/dev/ttyACM0` to `/dev/ttyAMA0`. A new Phase 4-1 doc deliverable `production/RPi5/doc/freed_wiring.md` captures the pin-by-pin wiring, config-file diff, and verification procedure.
 - **2026-04-24 (v3, post Mode-A review)**: five blocker-level findings addressed: (1) `std::atomic<T>` replaced with an explicit `Seqlock<T>` template (§6.1.1) — `Offset = {dx, dy, dyaw}` and `FreedPacket[29]` are both too wide for lock-free atomics on Cortex-A76 without LSE2. Multi-reader permitted (Thread D + webctl). (2) Smoother edge detection switched from float equality to seqlock **generation counter** (integer, exact), and ramp completion snaps `live ← target` by value-copy at `frac ≥ 1.0` (§6.4.2). (3) Phase 4-3 scope cut to three endpoints (`/health`, `/map/backup`, `/calibrate`); map editor + full React frontend moved to Phase 4.5 (§7). (4) Trigger IPC primitive unified across CLAUDE.md / §1 / §6.1.3 / §7 as `std::atomic<bool> calibrate_requested` (idempotent, queue upgrade path documented). (5) AMCL divergence clamp now compares `target_new` against `last_written` (not `live`), and explicit `calibrate_requested` bypasses the clamp — eliminates the kidnapped-recovery deadlock (§8). Additional: §6.1.2 time source pinned to `CLOCK_MONOTONIC`; §6.2 moves `mlockall` to `main()` before thread spawn, `g_running` is `std::atomic<bool>`, `clock_nanosleep` loops on `EINTR`, signals blocked process-wide; §6.3 IRQ list marked TBD-measure in Phase 4-1; §6.4.1 new cold-path deadband filter (10 mm / 0.1° default) suppresses sub-noise AMCL jitter; §6.5 removes the bogus "physical crane limit" comment, adds precondition docs + endpoint-identity / fixed-point unit tests; §11 new Runtime configuration section with two-tier constants (constexpr invariants + TOML-backed tunables) and reload classes (hot / restart / recalibrate) for future frontend editing; §12 renumbered from §11. Magic-number ban added as a code-review rule.
 - **2026-04-24**: §1 key-decisions table gains 5 rows (hot/cold split, smoother, yaw wrap, trigger UX, web plane). §6 restructured: §6.1 hot/cold boundary, §6.2 thread D skeleton (now reads target via smoother), §6.3 ops checklist, §6.4 linear-ramp smoother with A/B/C comparison and acceptance tests, §6.5 yaw wrap at two named sites with pinned unit tests. §7 Phase 4 split into 4-1/4-2/4-3. §8 gains 3 new failure rows (AMCL divergence, webctl crash, pan wrap). Q6 (trigger UX) resolved. RPi 5 hardware bring-up proven: 500-frame capture × 3 iterations, 10.02 Hz steady, byte-identical Python parity. Smoother method A chosen over EMA / rate-limit on predictability grounds. `godo-webctl` scoped as a separate FastAPI process, never inside the RT binary.

@@ -1,8 +1,11 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
+  import ConfirmDialog from '$components/ConfirmDialog.svelte';
   import LastPoseCard from '$components/LastPoseCard.svelte';
+  import MapList from '$components/MapList.svelte';
   import MapListPanel from '$components/MapListPanel.svelte';
   import MapZoomControls from '$components/MapZoomControls.svelte';
+  import OverlayToggleRow from '$components/OverlayToggleRow.svelte';
   import PoseCanvas from '$components/PoseCanvas.svelte';
   import PoseHintLayer, { type HintPose } from '$components/PoseHintLayer.svelte';
   import PoseHintNumericFields from '$components/PoseHintNumericFields.svelte';
@@ -22,7 +25,10 @@
   import { navigate, route } from '$lib/router';
   import { subscribeLastPose } from '$stores/lastPose';
   import { subscribeLastScan } from '$stores/lastScan';
+  import { mapMetadata } from '$stores/mapMetadata';
+  import { activate, mapGroups, refresh as refreshMaps, remove } from '$stores/maps';
   import { subscribeMappingStatus } from '$stores/mappingStatus';
+  import { overlayToggles } from '$stores/overlayToggles';
   import { scanOverlay } from '$stores/scanOverlay';
   import MapEdit from './MapEdit.svelte';
   import MapMapping from './MapMapping.svelte';
@@ -39,6 +45,55 @@
   let unsubScan: (() => void) | null = null;
   let unsubOverlay: (() => void) | null = null;
   let unsubRoute: (() => void) | null = null;
+
+  // issue#28 (HIL fix) — grouped map list state. `<MapList>` is the
+  // operator-locked grouped-tree renderer; activate/delete go through
+  // `<ConfirmDialog>` for safety per spec.
+  let groups = $state<typeof $mapGroups>([]);
+  let unsubGroups: (() => void) | null = null;
+  let activateOpen = $state(false);
+  let activateTarget = $state<string | null>(null);
+  let deleteOpen = $state(false);
+  let deleteTarget = $state<string | null>(null);
+  let mapListBanner = $state<{ msg: string; tone: 'info' | 'error' } | null>(null);
+
+  function openActivate(name: string): void {
+    activateTarget = name;
+    activateOpen = true;
+  }
+  function openDelete(name: string): void {
+    deleteTarget = name;
+    deleteOpen = true;
+  }
+  async function confirmActivate(): Promise<void> {
+    const name = activateTarget;
+    activateOpen = false;
+    activateTarget = null;
+    if (!name) return;
+    try {
+      await activate(name);
+      mapListBanner = {
+        msg: `'${name}' 활성화 완료. godo-tracker 재시작 후 적용됩니다.`,
+        tone: 'info',
+      };
+    } catch (e) {
+      const err = (e as { body?: { err?: string } })?.body?.err;
+      mapListBanner = { msg: err ? `활성화 실패: ${err}` : '활성화 실패', tone: 'error' };
+    }
+  }
+  async function confirmDelete(): Promise<void> {
+    const name = deleteTarget;
+    deleteOpen = false;
+    deleteTarget = null;
+    if (!name) return;
+    try {
+      await remove(name);
+      mapListBanner = { msg: `'${name}' 삭제 완료`, tone: 'info' };
+    } catch (e) {
+      const err = (e as { body?: { err?: string } })?.body?.err;
+      mapListBanner = { msg: err ? `삭제 실패: ${err}` : '삭제 실패', tone: 'error' };
+    }
+  }
 
   // Default `previewUrl` mirrors the pre-Track-E behaviour: PoseCanvas
   // fetches the active map via `/api/map/image` (resolves through the
@@ -69,6 +124,20 @@
   //   - Tooltip on the disabled Edit button.
   let mappingStatus = $state<MappingStatus | null>(null);
   let unsubMapping: (() => void) | null = null;
+
+  // issue#28 — overlay toggles + map metadata for the world-anchored
+  // grid + origin/axis overlays mounted on the Overview sub-tab.
+  let originAxisOn = $state(false);
+  let gridOn = $state(false);
+  let unsubToggles: (() => void) | null = null;
+  let mapDimsState = $state<{ width: number; height: number } | null>(null);
+  let mapResolution = $state<number | null>(null);
+  let mapOrigin = $state<readonly [number, number, number] | null>(null);
+  let unsubMeta: (() => void) | null = null;
+  // Note: pre-issue#28 used standalone overlay canvases here; HIL fix
+  // 2026-05-04 KST moved them into PoseCanvas's drawPoseLayer so they
+  // share the underlay's pan/zoom transform.
+
   let mappingActive = $derived(
     mappingStatus !== null &&
       (mappingStatus.state === MAPPING_STATE_STARTING ||
@@ -105,6 +174,27 @@
     // issue#14 — subscribe to the mapping store so the sub-tab buttons
     // can disable the Edit sub-tab while mapping is active.
     unsubMapping = subscribeMappingStatus((s) => (mappingStatus = s));
+    // issue#28 — overlay toggles + map metadata for the world-anchored
+    // overlays mounted on Overview.
+    unsubToggles = overlayToggles.subscribe((s) => {
+      originAxisOn = s.originAxisOn;
+      gridOn = s.gridOn;
+    });
+    unsubMeta = mapMetadata.subscribe((m) => {
+      if (m) {
+        mapDimsState = { width: m.width, height: m.height };
+        mapResolution = m.resolution;
+        mapOrigin = m.origin;
+      }
+    });
+    // issue#28 (HIL fix) — keep `groups` mirrored from the store so
+    // <MapList> rerenders after each refresh()/activate()/remove().
+    unsubGroups = mapGroups.subscribe((g) => (groups = g));
+    // Trigger initial fetch — MapListPanel does this too, but the
+    // grouped renderer ALSO needs the data. Idempotent.
+    void refreshMaps().catch(() => {
+      mapListBanner = { msg: '맵 목록을 가져오지 못했습니다.', tone: 'error' };
+    });
   });
 
   onDestroy(() => {
@@ -113,7 +203,12 @@
     unsubOverlay?.();
     unsubRoute?.();
     unsubMapping?.();
+    unsubToggles?.();
+    unsubMeta?.();
+    unsubGroups?.();
   });
+
+  let yamlYawDeg = $derived(mapOrigin === null ? 0 : mapOrigin[2] * (180 / Math.PI));
 </script>
 
 <div data-testid="map-page">
@@ -190,8 +285,23 @@
         ({formatMeters(pose.x_m)}, {formatMeters(pose.y_m)}) · {formatDegrees(pose.yaw_deg)}
       </div>
     {/if}
+    <!-- issue#28 — unified overlay toggle row. Mounted at the top of
+         Overview (and on the same row as the segmented control on Edit). -->
+    <div class="overlay-row" data-testid="map-overlay-row">
+      <OverlayToggleRow />
+    </div>
     <div class="canvas-stack">
-      <PoseCanvas {viewport} {pose} mapImageUrl={previewUrl} {scan} scanOverlayOn={scanOn} />
+      <PoseCanvas
+        {viewport}
+        {pose}
+        mapImageUrl={previewUrl}
+        {scan}
+        scanOverlayOn={scanOn}
+        {originAxisOn}
+        {gridOn}
+        mapMeta={$mapMetadata}
+        {yamlYawDeg}
+      />
       {#if poseHintEnabled}
         <PoseHintLayer
           {viewport}
@@ -206,7 +316,59 @@
       <PoseHintNumericFields {hint} onhintchange={onHintChange} />
     {/if}
     <!-- Operator HIL 2026-04-30 KST: "map 미리보기 블럭이 위로, 맵
-         목록 블럭이 아래로" — MapListPanel moved BELOW the canvas. -->
+         목록 블럭이 아래로" — MapListPanel moved BELOW the canvas.
+         issue#28 (HIL fix): grouped <MapList> hosted above the legacy
+         <MapListPanel>. The grouped tree is the operator-locked
+         primary view (pristine parent + indented variants); the legacy
+         flat panel stays one release for the loopback-restart prompt
+         + delete-confirm features that have not yet migrated. -->
+    <section class="map-list-section" data-testid="map-list-grouped-section">
+      <header><h3>맵 목록 (그룹 뷰)</h3></header>
+      {#if mapListBanner}
+        <div class="banner banner-{mapListBanner.tone}" role="status">
+          {mapListBanner.msg}
+        </div>
+      {/if}
+      {#if groups.length === 0}
+        <p class="empty-hint">표시할 맵이 없습니다.</p>
+      {:else}
+        <MapList
+          groups={groups.map((g) => ({
+            base: g.pristine.name,
+            pristine: g.pristine,
+            variants: g.variants,
+          }))}
+          onActivate={openActivate}
+          onDelete={openDelete}
+        />
+      {/if}
+    </section>
+    <ConfirmDialog
+      open={activateOpen}
+      title="맵 활성화"
+      message={activateTarget
+        ? `'${activateTarget}'을 활성화 할까요? godo-tracker 재시작 후 적용됩니다.`
+        : ''}
+      confirmLabel="활성화"
+      cancelLabel="취소"
+      onConfirm={confirmActivate}
+      onCancel={() => {
+        activateOpen = false;
+        activateTarget = null;
+      }}
+    />
+    <ConfirmDialog
+      open={deleteOpen}
+      title="맵 삭제"
+      message={deleteTarget ? `'${deleteTarget}'을 영구 삭제 할까요?` : ''}
+      confirmLabel="삭제"
+      cancelLabel="취소"
+      onConfirm={confirmDelete}
+      onCancel={() => {
+        deleteOpen = false;
+        deleteTarget = null;
+      }}
+    />
     <MapListPanel {onPreviewSelect} />
   {:else if activeSubtab === MAP_SUBTAB_EDIT}
     <MapEdit />
@@ -237,6 +399,19 @@
   .canvas-stack {
     position: relative;
     margin-bottom: 12px;
+  }
+  /* issue#28 — world-anchored overlays (axis, grid) live in the same
+     stacking context as PoseCanvas; pointer-events: none so they don't
+     swallow the underlay's pan/wheel/click handlers. */
+  .overlay-canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+  }
+  .overlay-row {
+    margin: 8px 0;
   }
   /* Sub-tab styling mirrors System.svelte (PR-B Processes / Extended
      resources) so the visual idiom is consistent across the SPA. */
@@ -275,5 +450,36 @@
     display: flex;
     gap: 12px;
     align-items: center;
+  }
+  /* issue#28 (HIL fix) — grouped map list section */
+  .map-list-section {
+    margin: 12px 0;
+    padding: 12px;
+    border: 1px solid var(--color-border, #cbd5e1);
+    border-radius: 6px;
+    background: var(--color-surface-alt, #f1f5f9);
+  }
+  .map-list-section header h3 {
+    margin: 0 0 8px;
+    font-size: 14px;
+  }
+  .map-list-section .banner {
+    padding: 6px 10px;
+    border-radius: 4px;
+    font-size: 13px;
+    margin-bottom: 8px;
+  }
+  .map-list-section .banner-info {
+    background: var(--color-accent-soft, #dbeafe);
+    color: var(--color-text, #0f172a);
+  }
+  .map-list-section .banner-error {
+    background: #fee2e2;
+    color: #991b1b;
+  }
+  .map-list-section .empty-hint {
+    color: var(--color-muted, #6b7280);
+    font-size: 13px;
+    margin: 4px 0;
   }
 </style>

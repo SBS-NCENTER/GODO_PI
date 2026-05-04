@@ -3230,3 +3230,204 @@ single follow-up commit on the same branch.
   banner shown when `lastPose` is null (Mode-B Maj-1 fix). Pin:
   `tests/unit/originPicker.test.ts` (16 cases incl. delta-with-pose +
   delta-without-pose + theta-UI-gated).
+
+---
+
+## 2026-05-04 — issue#28 B-MAPEDIT-3 (yaw rotation, full plumbing + UI)
+
+### Why
+
+issue#28 ships full SPA support for the new pristine/derived map flow:
+unified overlay toggle row, world-frame grid + REP-103 origin/axis
+overlays, per-mode segmented control on `/map-edit`, postfix-memo
+Apply modal with SSE progress, and a grouped-tree map list.
+
+### Added
+
+- `src/components/EditModeSwitcher.svelte` (NEW) — segmented control
+  for the MapEdit page (Coordinate / Erase). Korean tooltip pinned via
+  `EDIT_MODE_SWITCH_TOOLTIP_KO`.
+- `src/components/OverlayToggleRow.svelte` (NEW) — sole owner of the
+  three overlay toggles (Origin/Axis, LiDAR, Grid). Backed by
+  `overlayToggles` store.
+- `src/components/GridOverlay.svelte` (NEW) — world-frame zoom-
+  adaptive grid. Interval picked from `GRID_INTERVAL_SCHEDULE`; line
+  count per axis capped at `GRID_MAX_LINES_PER_AXIS`.
+- `src/components/OriginAxisOverlay.svelte` (NEW) — origin dot + REP-
+  103 +x (red) / +y (green) axis lines. World-anchored; rotates with
+  YAML `origin_yaw_deg`.
+- `src/components/ApplyMemoModal.svelte` (NEW) — postfix memo input +
+  validation + SSE-progress consumer for `/api/map/edit/progress`.
+- `src/components/MapList.svelte` (NEW) — grouped tree (pristine
+  parents + indented variants + active badge + per-row activate/delete
+  buttons). Supersedes the flat-list `MapListPanel.svelte` for
+  issue#28 callers.
+- `src/stores/overlayToggles.ts` (NEW) — localStorage-backed unified
+  toggle state. One-shot migration from the legacy v0
+  `godo:scanOverlay` sessionStorage key (M4 lock). Mirrors `lidarOn`
+  into the existing `scanOverlay` store so the lastScan SSE gate
+  stays load-bearing.
+- `src/lib/originMath.ts` — three new pure helpers `wrapYawDeg`,
+  `resolveYawDeltaFromPose`, `twoClickToYawDeg`.
+- `src/lib/constants.ts` — new constants `MEMO_REGEX_SOURCE`,
+  `MEMO_MAX_LEN_CHARS`, `AXIS_*_COLOR`, `GRID_INTERVAL_SCHEDULE` +
+  helper interface, `GRID_LINE_COLOR`, `GRID_OPACITY`,
+  `GRID_MAX_LINES_PER_AXIS`, `OVERLAY_LS_KEY`, `OVERLAY_LS_KEY_LEGACY_V0`,
+  `YAW_PICK_MIN_PIXEL_DIST_PX`, `EDIT_MODE_*`, `SSE_PROGRESS_PATH`,
+  `EDIT_MODE_SWITCH_TOOLTIP_KO`.
+
+### Tests
+
+- New: `tests/unit/EditModeSwitcher.test.ts` (3 cases — render +
+  switch + per-mode commit).
+- New: `tests/unit/GridOverlay.test.ts` (5 cases — interval schedule
+  selection per zoom).
+- New: `tests/unit/ApplyMemoModal.test.ts` (2 cases — invalid memo
+  blocks, valid memo enables + invokes onApply).
+- New: `tests/unit/MapList.test.ts` (3 cases — grouped tree render +
+  active badge + click → onActivate).
+- Extended: `tests/unit/originMath.test.ts` (+ wrap_yaw_deg cases +
+  ROTATE#1/#2 pins + twoClickToYawDeg cardinal/translation/jitter
+  cases).
+
+### Invariants
+
+- **(aj) overlay-toggle-row-sole-owner** — issue#28. The three
+  per-overlay toggles (Origin/Axis, LiDAR, Grid) live ONLY in
+  `<OverlayToggleRow>`. State is owned by the `overlayToggles` store
+  (localStorage-backed at `OVERLAY_LS_KEY`). The legacy `scanOverlay`
+  store is mirrored INTO from `overlayToggles.lidarOn` so the lastScan
+  SSE gate (subscriber count drives stream open/close) stays the
+  load-bearing path. New overlay surfaces add a key to
+  `OverlayToggleState`, NOT a new store.
+
+- **(ak) edit-mode-switcher-sole-owner** — issue#28. `<MapEdit>` mode
+  state (Coordinate vs. Erase) is owned by `<EditModeSwitcher>`. Mode
+  switch does NOT auto-discard the peer mode's pending state — the
+  Korean tooltip `EDIT_MODE_SWITCH_TOOLTIP_KO` documents this contract
+  to the operator.
+
+- **(al) world-frame-overlays-rotate-with-yaml** — issue#28.
+  `<GridOverlay>` and `<OriginAxisOverlay>` are world-frame anchored;
+  they rotate with the YAML `origin_yaw_deg` (taken as a render
+  prop). When the operator activates a derived map with a non-zero
+  yaml origin yaw, both overlays visually rotate to match — pose +
+  scan + bitmap stay coherent.
+
+- **(am) apply-memo-modal-sole-sse-consumer** — issue#28.
+  `<ApplyMemoModal>` is the SOLE SPA consumer of the
+  `/api/map/edit/progress` SSE stream. The modal opens an
+  `EventSource` on mount and closes on unmount, so a stale connection
+  from a prior cancel never bleeds. Memo validation is the same regex
+  as the backend (`MEMO_REGEX_SOURCE` mirrors webctl `MEMO_REGEX`).
+
+- **(an) map-list-grouped-tree-renderer** — issue#28. `<MapList>` is
+  the issue#28 grouped-tree renderer; legacy `<MapListPanel>` keeps
+  flat-list rendering one release for backward compat with cached SPA
+  bundles. Pristine parent + derived variants render in two-level
+  indent; active badge applies to whichever row is the current
+  `active.{pgm,yaml}` symlink target.
+
+- **(ao) overlay-toggles-storage-migration** — issue#28 M4. On first
+  read, `overlayToggles` migrates from the legacy v0 `sessionStorage`
+  key `godo:scanOverlay` to the v1 `localStorage` key
+  `godo.overlay.toggles.v1`. Migration is one-shot; the legacy key is
+  unlinked after the first successful read. SSR safety wraps every
+  storage call in a `typeof window !== 'undefined'` guard.
+
+- **(aa) origin-math-extended-yaw-helpers** — issue#28 update.
+  `originMath.ts` now owns `wrapYawDeg`, `resolveYawDeltaFromPose`,
+  and `twoClickToYawDeg` in addition to the existing pixel/world +
+  yaw-from-drag helpers. The wrap helper is a byte-mirror of webctl
+  `map_origin.wrap_yaw_deg`. The two-click yaw pick uses world-frame
+  coordinates supplied by the caller (canvas → world goes through
+  `viewport.canvasToWorld`, NOT pixelToWorld — Mode-A M5 SSOT).
+
+---
+
+## 2026-05-04 (afternoon — KST) — issue#28 part 2: SPA wire-up
+
+### Why
+
+The first issue#28 commit shipped the new components + helpers + tests
+in isolation; this follow-up wires them into the live `/map-edit` and
+`/map` routes, flips `THETA_EDIT_ENABLED=true` in `OriginPicker.svelte`,
+and lights up the modal-driven Apply pipeline that targets
+`/api/map/edit/coord` and `/api/map/edit/erase`.
+
+### Added
+
+- `src/lib/api.ts` — `postMapEditCoord<T>(body, init?)` (JSON) and
+  `postMapEditErase<T>(blob, memo, init?)` (multipart) — the two new
+  Apply gateways that the modal flow targets.
+- `src/lib/protocol.ts` — `MapEditCoordBody` and `MapEditPipelineResult`
+  wire shapes mirroring the webctl `MapEditCoordBody` Pydantic model
+  and the pipeline response.
+- `OriginPicker.svelte`:
+  - `THETA_EDIT_ENABLED = true` (was `false`).
+  - Imperative API `setYawClick({x_m, y_m})`, `isYawP1Pending()`,
+    `getDirtyBody()`, `clearAll()`.
+  - 2-click yaw state machine; coincident-click guard via
+    `YAW_PICK_MIN_PIXEL_DIST_PX` + `resolutionMPerPx` prop.
+  - SUBTRACT theta preview row (`prev → next` via
+    `resolveYawDeltaFromPose`).
+- `routes/MapEdit.svelte` (large rewrite):
+  - `<EditModeSwitcher>` mounted at top of control row.
+  - `<OverlayToggleRow>` mounted on the same row (operator-locked).
+  - `<GridOverlay>` and `<OriginAxisOverlay>` mounted in `.map-stack`
+    (gated by toggles + `mapMetadata`).
+  - Per-mode toolbar with Discard / Apply buttons; Apply opens
+    `<ApplyMemoModal>` which on confirm fires the appropriate POST.
+  - Coord-mode click sub-mode picker (`Off / 원점 (XY) / 방향 (Yaw,
+    2-click)`) routes canvas pointer clicks to either
+    `setCandidate` or `setYawClick`.
+  - OriginPicker stays MOUNTED across mode switches (CSS hide/show)
+    so dirty state survives Coord ↔ Erase toggling — operator-locked.
+- `routes/Map.svelte`:
+  - `<OverlayToggleRow>` mounted at top of Overview sub-tab.
+  - `<GridOverlay>` and `<OriginAxisOverlay>` mounted inside
+    `.canvas-stack` (gated by toggles + `mapMetadata`).
+- `tests/unit/originPicker.test.ts` — 6 new cases (two-click cardinal
+  pre-fill, coincident-click guard, dual-input parity, Discard clears
+  pending P1, `getDirtyBody()` empty + theta-only branches). Existing
+  `theta UI hidden until B-MAPEDIT-3` case repurposed as `theta UI
+  rendered (issue#28 — gate flipped on)`.
+- `tests/unit/mapEdit.test.ts` — 4 cases rewritten for the issue#28
+  flow (default mode is Coord; switching modes preserves both pending
+  states; per-mode Apply only commits its mode; Apply buttons disabled
+  for anon viewer in BOTH modes). The legacy `/api/map/edit` cases were
+  superseded by the new pipeline tests above.
+- `tests/unit/mapOverlayCoherence.test.ts` (NEW) — C7 disposition
+  3-axis split: `pose_dot_position_matches_rotated_yaml_origin`,
+  `heading_arrow_direction_matches_rotated_yaml_yaw`,
+  `scan_dots_rotate_with_bitmap`, plus an integration pin under
+  +30° YAML rotation.
+
+### Changed invariants
+
+- **(u) MapMaskCanvas sole owner of mask state** — extended for issue#28.
+  `routes/MapEdit.svelte` now owns the segmented-control mode state
+  (`mode: 'coord' | 'erase'`) AND the per-mode busy + banner state pairs
+  (`coordBusy`/`coordBanner` vs `eraseBusy`/`eraseBanner`). The mask
+  buffer remains owned exclusively by `<MapMaskCanvas>` (the sole-owner
+  rule for mask state survives byte-identical). The OriginPicker stays
+  mounted across mode switches via CSS `display:none` so the operator's
+  XY/yaw dirty state survives Coord ↔ Erase toggling — operator-locked
+  "no auto-discard" pin tested by
+  `mapEdit.test.ts::switching mode preserves both pending states`.
+
+- **(aa) origin-math-extended-yaw-helpers** — extended further. The
+  `OriginPicker` now exposes `setYawClick`, `getDirtyBody`,
+  `isYawP1Pending`, and `clearAll` as the imperative API the parent
+  `<MapEdit>` route uses to drive the 2-click yaw gesture and the
+  modal-driven Apply.
+
+### Tests
+
+- New: `tests/unit/mapOverlayCoherence.test.ts` (4 cases — C7 axis
+  pins + integration pin).
+- Extended: `tests/unit/originPicker.test.ts` (16 → 22 cases; +6 yaw
+  cases; +1 case repurposed for the gate flip).
+- Rewritten: `tests/unit/mapEdit.test.ts` (4 page-level cases redone
+  for the segmented control + modal Apply flow; mask-canvas DPR pin
+  cases preserved byte-identical).

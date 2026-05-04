@@ -21,7 +21,6 @@
 
 #include <unistd.h>
 
-#include "core/constants.hpp"
 #include "localization/occupancy_grid.hpp"
 
 #ifndef GODO_FIXTURES_MAPS_DIR
@@ -75,6 +74,28 @@ const std::string kValidYaml =
     "negate: 0\n";
 
 }  // namespace
+
+// issue#28 — origin_yaw is sourced from YAML row `origin: [a, b, c]`
+// element [2]. The pre-issue#28 path read `cfg.amcl_origin_yaw_deg`;
+// the field is now deprecated and cold_writer reads grid.origin_yaw_deg
+// directly. Pin: the value parses through the loader as RADIANS and
+// is converted to DEGREES inside `load_map`. yaml row `0.523599` (rad)
+// → grid.origin_yaw_deg ≈ 30.
+TEST_CASE("load_map — issue#28 YAML origin[2] feeds grid.origin_yaw_deg") {
+    TempDir td;
+    const std::string body =
+        "image: tiny.pgm\n"
+        "resolution: 0.05\n"
+        "origin: [1.0, -2.0, 0.523598775]\n"  // 30° in radians
+        "occupied_thresh: 0.65\n"
+        "free_thresh: 0.196\n"
+        "negate: 0\n";
+    auto pgm = make_pgm_with_yaml(td.path, body);
+    OccupancyGrid g = load_map(pgm);
+    CHECK(g.origin_x_m == doctest::Approx(1.0));
+    CHECK(g.origin_y_m == doctest::Approx(-2.0));
+    CHECK(g.origin_yaw_deg == doctest::Approx(30.0).epsilon(1e-3));
+}
 
 TEST_CASE("load_map — round-trips the synthetic_4x4 fixture") {
     OccupancyGrid g = load_map(fixture_path("synthetic_4x4.pgm"));

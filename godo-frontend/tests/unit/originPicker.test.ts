@@ -329,18 +329,19 @@ describe('OriginPicker (Track B-MAPEDIT-2)', () => {
   });
 });
 
-describe('OriginPicker (issue#27 — +/- step buttons; theta gated until B-MAPEDIT-3)', () => {
-  it('theta UI is hidden until B-MAPEDIT-3 (THETA_EDIT_ENABLED=false) — input + buttons absent, Apply body never carries theta_deg', () => {
+describe('OriginPicker (issue#27 — +/- step buttons; issue#28 theta gate flipped on)', () => {
+  it('theta UI is rendered (issue#28 — THETA_EDIT_ENABLED=true) — input + buttons present, body carries theta_deg only when typed', () => {
     let captured: OriginPatchBody | null = null;
     const { target } = mountPicker({
       onapply: (b) => (captured = b),
     });
     flushSync();
-    // Theta UI elements MUST NOT render while the gate is closed.
-    expect(target.querySelector('[data-testid="origin-theta-input"]')).toBeNull();
-    expect(target.querySelector('[data-testid="origin-theta-minus"]')).toBeNull();
-    expect(target.querySelector('[data-testid="origin-theta-plus"]')).toBeNull();
-    // Apply with x/y only — body has no theta_deg key.
+    // Theta UI elements MUST render now that the gate is open.
+    expect(target.querySelector('[data-testid="origin-theta-input"]')).not.toBeNull();
+    expect(target.querySelector('[data-testid="origin-theta-minus"]')).not.toBeNull();
+    expect(target.querySelector('[data-testid="origin-theta-plus"]')).not.toBeNull();
+    // Apply with x/y only and EMPTY theta — body has no theta_deg key
+    // (theta is opt-in; empty input keeps YAML byte-for-byte).
     const xInput = target.querySelector<HTMLInputElement>('[data-testid="origin-x-input"]');
     const yInput = target.querySelector<HTMLInputElement>('[data-testid="origin-y-input"]');
     const applyBtn = target.querySelector<HTMLButtonElement>('[data-testid="origin-apply-btn"]');
@@ -393,6 +394,153 @@ describe('OriginPicker (issue#27 — +/- step buttons; theta gated until B-MAPED
     xPlus!.click();
     flushSync();
     expect(xInput!.value).toBe('0.010');
+  });
+});
+
+describe('OriginPicker (issue#28 — 2-click yaw pick)', () => {
+  /**
+   * mountPicker variant that supplies the resolutionMPerPx prop the
+   * 2-click guard depends on. 0.05 m/px matches the studio default.
+   */
+  function mountPickerWithRes(props: {
+    role?: 'admin' | 'viewer' | null;
+    resolutionMPerPx?: number | null;
+  }): { target: HTMLDivElement; instance: ReturnType<typeof mount> } {
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const instance = mount(OriginPicker, {
+      target,
+      props: {
+        currentOrigin: [-1.5, -2.0, 0.0],
+        role: props.role ?? 'admin',
+        busy: false,
+        bannerMsg: null,
+        bannerKind: null,
+        onapply: (): void => {},
+        resolutionMPerPx: props.resolutionMPerPx ?? 0.05,
+      },
+    });
+    cleanups.push(() => {
+      unmount(instance);
+      target.remove();
+    });
+    return { target, instance };
+  }
+
+  it('two-click yaw pre-fills theta_deg (east cardinal → 0°)', () => {
+    const { target, instance } = mountPickerWithRes({});
+    flushSync();
+    const inst = instance as unknown as {
+      setYawClick: (c: { x_m: number; y_m: number }) => void;
+    };
+    inst.setYawClick({ x_m: 0, y_m: 0 });
+    inst.setYawClick({ x_m: 1, y_m: 0 });
+    flushSync();
+    const thetaInput = target.querySelector<HTMLInputElement>(
+      '[data-testid="origin-theta-input"]',
+    );
+    expect(thetaInput).not.toBeNull();
+    // 0° formatted with 1 decimal.
+    expect(thetaInput!.value).toBe('0.0');
+  });
+
+  it('second click below YAW_PICK_MIN_PIXEL_DIST_PX rejected with inline error', () => {
+    const { target, instance } = mountPickerWithRes({});
+    flushSync();
+    const inst = instance as unknown as {
+      setYawClick: (c: { x_m: number; y_m: number }) => void;
+      isYawP1Pending: () => boolean;
+    };
+    inst.setYawClick({ x_m: 0, y_m: 0 });
+    flushSync();
+    expect(inst.isYawP1Pending()).toBe(true);
+    // 0.1 m at 0.05 m/px = 2 px (below the 8 px threshold).
+    inst.setYawClick({ x_m: 0.1, y_m: 0 });
+    flushSync();
+    const banner = target.querySelector<HTMLParagraphElement>(
+      '[data-testid="origin-yaw-banner"]',
+    );
+    expect(banner).not.toBeNull();
+    expect(banner!.textContent).toMatch(/너무 가깝습니다/);
+    // P1 still pending so operator can re-click P2 without restarting.
+    expect(inst.isYawP1Pending()).toBe(true);
+  });
+
+  it('yaw via two-click equals yaw via numeric (dual-input parity)', () => {
+    // Path A — numeric typed.
+    const a = mountPickerWithRes({});
+    flushSync();
+    const aTheta = a.target.querySelector<HTMLInputElement>(
+      '[data-testid="origin-theta-input"]',
+    )!;
+    aTheta.value = '90.0';
+    aTheta.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+
+    // Path B — two-click (0,0)→(0,1) is north → 90°.
+    const b = mountPickerWithRes({});
+    flushSync();
+    const bInst = b.instance as unknown as {
+      setYawClick: (c: { x_m: number; y_m: number }) => void;
+    };
+    bInst.setYawClick({ x_m: 0, y_m: 0 });
+    bInst.setYawClick({ x_m: 0, y_m: 1 });
+    flushSync();
+    const bTheta = b.target.querySelector<HTMLInputElement>(
+      '[data-testid="origin-theta-input"]',
+    )!;
+    // Both render identically: '90.0'.
+    expect(bTheta.value).toBe(aTheta.value);
+  });
+
+  it('Discard clears pending yaw P1 + theta input', () => {
+    const { target, instance } = mountPickerWithRes({});
+    flushSync();
+    const inst = instance as unknown as {
+      setYawClick: (c: { x_m: number; y_m: number }) => void;
+      isYawP1Pending: () => boolean;
+      clearAll: () => void;
+    };
+    inst.setYawClick({ x_m: 0, y_m: 0 });
+    flushSync();
+    expect(inst.isYawP1Pending()).toBe(true);
+    inst.clearAll();
+    flushSync();
+    expect(inst.isYawP1Pending()).toBe(false);
+    const thetaInput = target.querySelector<HTMLInputElement>(
+      '[data-testid="origin-theta-input"]',
+    )!;
+    expect(thetaInput.value).toBe('');
+  });
+
+  it('getDirtyBody returns null when neither xy nor theta dirty', () => {
+    const { instance } = mountPickerWithRes({});
+    flushSync();
+    const inst = instance as unknown as {
+      getDirtyBody: () => unknown | null;
+    };
+    expect(inst.getDirtyBody()).toBeNull();
+  });
+
+  it('getDirtyBody returns x/y baseline + theta when only theta dirty', () => {
+    const { target, instance } = mountPickerWithRes({});
+    flushSync();
+    const thetaInput = target.querySelector<HTMLInputElement>(
+      '[data-testid="origin-theta-input"]',
+    )!;
+    thetaInput.value = '15.0';
+    thetaInput.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    const inst = instance as unknown as {
+      getDirtyBody: () => { x_m: number; y_m: number; theta_deg?: number } | null;
+    };
+    const body = inst.getDirtyBody();
+    expect(body).not.toBeNull();
+    // Falls back to currentOrigin = [-1.5, -2.0, 0]. Backend SUBTRACT
+    // makes those a no-op.
+    expect(body!.x_m).toBe(-1.5);
+    expect(body!.y_m).toBe(-2.0);
+    expect(body!.theta_deg).toBe(15.0);
   });
 });
 

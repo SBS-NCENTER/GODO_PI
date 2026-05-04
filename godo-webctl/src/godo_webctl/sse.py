@@ -47,6 +47,7 @@ from .config import Settings
 from .constants import (
     SSE_HEARTBEAT_S,
     SSE_PROCESSES_TICK_S,
+    SSE_PROGRESS_HEARTBEAT_S,
     SSE_RESOURCES_EXTENDED_TICK_S,
     SSE_SERVICES_TICK_S,
     SSE_TICK_S,
@@ -369,3 +370,73 @@ async def diag_stream(
         if elapsed_since_keepalive >= SSE_HEARTBEAT_S:
             yield _sse_keepalive()
             elapsed_since_keepalive = 0.0
+
+
+# --- issue#28 — map-edit progress broadcaster --------------------------
+#
+# Single-channel, in-process broadcaster. Apply pipeline (handlers in
+# app.py) calls `publish_map_edit_progress` to push frames; SSE
+# subscribers consume via `map_edit_progress_stream`. Each frame
+# carries `{"phase", "progress", "request_id"}` so a stale connection
+# from a prior Apply can ignore frames whose `request_id` does not
+# match (M9 lock).
+#
+# Only ONE in-flight Apply at a time (serialised by the asyncio.Lock
+# in app.py — C4 lock), so a single bytes-typed asyncio.Queue per
+# subscriber is sufficient. Subscribers are tracked in
+# `_progress_subscribers`; publish broadcasts to each.
+
+_progress_subscribers: list[asyncio.Queue[dict[str, Any]]] = []
+_progress_lock = asyncio.Lock()
+
+
+async def publish_map_edit_progress(frame: dict[str, Any]) -> None:
+    """Broadcast a single frame to every active subscriber. Drops
+    silently if no subscribers — the Apply pipeline is the source of
+    truth, the SPA reconnects + queries `/api/maps` to discover the
+    final state if the SSE connection was missing."""
+    async with _progress_lock:
+        subs = list(_progress_subscribers)
+    for q in subs:
+        try:
+            q.put_nowait(frame)
+        except asyncio.QueueFull:
+            # Subscriber's queue is full (slow consumer). Drop the
+            # frame — the next Apply tick will replace it. Bounded
+            # consumer never blocks the publisher.
+            logger.debug("sse.map_edit_progress_subscriber_slow")
+
+
+async def map_edit_progress_stream(
+    *, sleep: SleepCallable = asyncio.sleep,
+) -> AsyncIterator[bytes]:
+    """SSE generator. Subscribes to `_progress_subscribers` for the
+    lifetime of the request, emits each broadcast frame as `data: ...`,
+    and emits a heartbeat every `SSE_PROGRESS_HEARTBEAT_S`."""
+    queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=64)
+    async with _progress_lock:
+        _progress_subscribers.append(queue)
+    try:
+        elapsed = 0.0
+        while True:
+            try:
+                # Bounded wait so we can interleave heartbeats.
+                frame = await asyncio.wait_for(
+                    queue.get(),
+                    timeout=SSE_PROGRESS_HEARTBEAT_S,
+                )
+                yield _sse_event(frame)
+                elapsed = 0.0
+            except asyncio.TimeoutError:
+                yield _sse_keepalive()
+                elapsed = 0.0
+            except asyncio.CancelledError:
+                raise
+    finally:
+        async with _progress_lock:
+            with contextlib.suppress(ValueError):
+                _progress_subscribers.remove(queue)
+
+
+# --- imports kept here to avoid module-cycle on import-time ----------
+import contextlib  # noqa: E402  — used by the broadcaster cleanup arm only

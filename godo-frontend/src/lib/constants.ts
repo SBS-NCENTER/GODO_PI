@@ -353,6 +353,74 @@ export const ORIGIN_STEP_YAW_DEG_DEFAULT = 0.1;
 // the input rejects out-of-bound values before the backend's 400.
 export const ORIGIN_THETA_DEG_ABS_MAX = 180.0;
 
+// --- issue#28 — B-MAPEDIT-3 (yaw rotation, full plumbing) -----------
+// Memo postfix validator mirror of webctl `MEMO_REGEX`. Filesystem-safe
+// ASCII subset; used by `<ApplyMemoModal>` to gate the Apply button
+// before the backend's 422 path. 32 char cap mirror of
+// `MEMO_MAX_LEN_CHARS`.
+export const MEMO_REGEX_SOURCE = '^[A-Za-z0-9_-]+$';
+export const MEMO_MAX_LEN_CHARS = 32;
+
+// REP-103 axis colors. Red = +x, Green = +y. Used by
+// `<OriginAxisOverlay>`.
+export const AXIS_X_COLOR = '#dc2626'; // red
+export const AXIS_Y_COLOR = '#16a34a'; // green
+export const AXIS_LINE_WIDTH_PX = 2;
+export const AXIS_LABEL_FONT_PX = 12;
+
+// `<GridOverlay>` zoom-adaptive interval schedule. Each entry maps a
+// max zoom (px-per-meter) to the world-frame grid interval (m) and the
+// rendered line thickness (px). The trailing entry's `maxZoom = null`
+// is the catch-all sentinel (covers any zoom higher than the previous
+// entry's bound — N5 lock).
+export interface GridIntervalEntry {
+  maxZoom: number | null;
+  intervalM: number;
+  lineWidthPx: number;
+}
+export const GRID_INTERVAL_SCHEDULE: readonly GridIntervalEntry[] = [
+  { maxZoom: 0.3, intervalM: 5, lineWidthPx: 1.5 },
+  { maxZoom: 1, intervalM: 1, lineWidthPx: 1 },
+  { maxZoom: 3, intervalM: 0.5, lineWidthPx: 0.75 },
+  { maxZoom: null, intervalM: 0.1, lineWidthPx: 0.5 },
+];
+export const GRID_LINE_COLOR = 'rgba(120, 120, 120, 0.25)';
+export const GRID_OPACITY = 0.25;
+
+// HIL fix 2026-05-04 KST — orange preview marker for picked XY
+// (filled dot) and picked yaw vector (arrow from P1 to P2). Stays
+// visible until Apply or Discard so the operator can verify what
+// they picked before committing.
+export const PICK_PREVIEW_COLOR = '#f97316'; // orange-500
+export const PICK_PREVIEW_DOT_RADIUS_PX = 6;
+export const PICK_PREVIEW_LINE_WIDTH_PX = 2;
+export const PICK_PREVIEW_ARROW_HEAD_PX = 10;
+// Hard ceiling on grid lines per frame to avoid tab-freeze at extreme
+// zoom (M risk row "Grid overlay perf at 0.1 m intervals on max zoom").
+export const GRID_MAX_LINES_PER_AXIS = 200;
+
+// localStorage key for the unified overlay-toggle state. v1 schema
+// supersedes any pre-issue#28 LiDAR-only key (M4 — migrated once).
+export const OVERLAY_LS_KEY = 'godo.overlay.toggles.v1';
+export const OVERLAY_LS_KEY_LEGACY_V0 = 'godo.scanOverlay.v0';
+
+// Two-click yaw pick: minimum pixel separation between P1 and P2.
+// Smaller than this is treated as a double-click — `twoClickToYawDeg`
+// returns null and the OriginPicker shows "두 점이 너무 가깝습니다".
+export const YAW_PICK_MIN_PIXEL_DIST_PX = 8;
+
+// EditModeSwitcher segmented control values. Operator-locked:
+// "Coordinate" sub-mode = origin pick; "Erase" sub-mode = brush.
+export const EDIT_MODE_COORD = 'coord';
+export const EDIT_MODE_ERASE = 'erase';
+
+// SSE-progress endpoint path. Mirror of webctl `SSE_PROGRESS_PATH`.
+export const SSE_PROGRESS_PATH = '/api/map/edit/progress';
+
+// Korean tooltip — mode-switch preserves both pending states. N3 lock.
+export const EDIT_MODE_SWITCH_TOOLTIP_KO =
+  '전환해도 저장되지 않은 변경사항은 유지됩니다';
+
 // --- Track B-CONFIG PR-C — per-row apply-result marker TTL ------------
 // After Apply finishes, ✓ / ✗ glyphs render next to each row's input.
 // The markers auto-clear after this delay; 2 s is half the System

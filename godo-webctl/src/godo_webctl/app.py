@@ -63,6 +63,7 @@ from . import config_view as config_view_mod
 from . import logs as logs_mod
 from . import map_backup as map_backup_mod
 from . import map_edit as map_edit_mod
+from . import map_rotate as map_rotate_mod
 from . import map_image as map_image_mod
 from . import map_origin as map_origin_mod
 from . import mapping as mapping_mod
@@ -90,6 +91,7 @@ from .constants import (
     LOGS_TAIL_DEFAULT_N,
     LOGS_TAIL_MAX_N,
     MAP_EDIT_MASK_PNG_MAX_BYTES,
+    MAP_EDIT_PIPELINE_LOCK_TIMEOUT_S,
     MAPPING_JOURNAL_TAIL_DEFAULT_N,
     MAPPING_JOURNAL_TAIL_MAX_N,
     MAPPING_NAME_MAX_LEN,
@@ -256,6 +258,21 @@ class OriginPatchBody(BaseModel):
     y_m: float = Field(...)
     mode: Literal["absolute", "delta"] = Field(...)
     theta_deg: float | None = Field(default=None)
+
+
+class MapEditCoordBody(BaseModel):
+    """`POST /api/map/edit/coord` body (issue#28).
+
+    SUBTRACT semantics for `x_m`, `y_m` (operator names the world coord
+    that should become the new (0, 0)) and `theta_deg` (operator names
+    the rotation of the new world frame relative to the old). All
+    optional fields default such that omitting them is a no-op.
+    """
+
+    x_m: float = Field(...)
+    y_m: float = Field(...)
+    theta_deg: float | None = Field(default=None)
+    memo: str = Field(min_length=1, max_length=32)
 
 
 class MappingStartBody(BaseModel):
@@ -636,11 +653,314 @@ def _map_logs_exc_to_response(exc: Exception) -> JSONResponse:
     )
 
 
+# --- issue#28 — Map-Edit pipeline helper -----------------------------
+#
+# Sole composer of the SUBTRACT origin → rotate-PGM → atomic pair-write
+# → restart-pending sequence. Lives at module scope so the per-request
+# closures stay small and so unit tests can drive it directly.
+async def _apply_map_edit_pipeline(
+    *,
+    cfg: Settings,
+    client: uds_mod.UdsClient,  # currently unused; reserved for future tracker UDS hand-off
+    activity_log: activity_mod.ActivityLog,
+    claims: auth_mod.Claims,
+    map_edit_pipeline_lock: asyncio.Lock,
+    mode: Literal["coord", "erase"],
+    memo: str,
+    x_m: float,
+    y_m: float,
+    theta_deg: float | None,
+    mask_bytes: bytes | None,
+) -> JSONResponse:
+    import secrets as _secrets
+
+    request_id = _secrets.token_hex(8)
+    # 202-style synchronous: SPA waits for completion. SSE progress is
+    # emitted in parallel for UX feedback.
+    try:
+        # Pipeline lock — fail fast when another Apply is in flight.
+        try:
+            await asyncio.wait_for(
+                map_edit_pipeline_lock.acquire(),
+                timeout=MAP_EDIT_PIPELINE_LOCK_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            return JSONResponse(
+                {"ok": False, "err": "pipeline_busy"},
+                status_code=HTTPStatus.CONFLICT,
+            )
+
+        try:
+            await sse_mod.publish_map_edit_progress(
+                {"phase": "starting", "progress": 0.0, "request_id": request_id},
+            )
+
+            # 1. Resolve active map name + pristine path.
+            active_name = await asyncio.to_thread(
+                maps_mod.read_active_name, cfg.maps_dir,
+            )
+            if active_name is None:
+                await sse_mod.publish_map_edit_progress(
+                    {
+                        "phase": "rejected",
+                        "progress": 1.0,
+                        "request_id": request_id,
+                        "reason": "active_map_missing",
+                    },
+                )
+                return JSONResponse(
+                    {"ok": False, "err": ERR_ACTIVE_MAP_MISSING},
+                    status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+                )
+            pristine_base = maps_mod.derived_base(active_name) or active_name
+            try:
+                pristine_pgm = maps_mod.pgm_for(cfg.maps_dir, pristine_base)
+                pristine_yaml = maps_mod.yaml_for(cfg.maps_dir, pristine_base)
+            except maps_mod.InvalidName as e:
+                return _map_maps_exc_to_response(e)
+            if not pristine_pgm.is_file() or not pristine_yaml.is_file():
+                await sse_mod.publish_map_edit_progress(
+                    {
+                        "phase": "rejected",
+                        "progress": 1.0,
+                        "request_id": request_id,
+                        "reason": "pristine_missing",
+                    },
+                )
+                return JSONResponse(
+                    {"ok": False, "err": "pristine_missing"},
+                    status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+                )
+
+            # 2. Build derived names. `derive_name` validates memo and
+            # generates the second-resolution UTC timestamp.
+            try:
+                derived_name = maps_mod.derive_name(pristine_base, memo)
+            except (maps_mod.InvalidName, maps_mod.InvalidMemo) as e:
+                await sse_mod.publish_map_edit_progress(
+                    {
+                        "phase": "rejected",
+                        "progress": 1.0,
+                        "request_id": request_id,
+                        "reason": "invalid_name",
+                    },
+                )
+                return JSONResponse(
+                    {"ok": False, "err": "invalid_memo", "detail": str(e)},
+                    status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+                )
+            try:
+                derived_pgm = maps_mod.pgm_for(cfg.maps_dir, derived_name)
+                derived_yaml = maps_mod.yaml_for(cfg.maps_dir, derived_name)
+            except maps_mod.InvalidName as e:
+                return _map_maps_exc_to_response(e)
+
+            await sse_mod.publish_map_edit_progress(
+                {"phase": "yaml_rewrite", "progress": 0.2, "request_id": request_id},
+            )
+
+            # 3. Read pristine YAML, compose post-SUBTRACT YAML in memory.
+            # HIL fix 2026-05-04 KST: `theta_deg` is NOT passed through
+            # to the YAML SUBTRACT in the rotate pipeline. With Option B
+            # (bake-into-bitmap, operator-locked), the bitmap rotation
+            # IS the source of truth for yaw change; touching YAML yaw
+            # too would double-count and produce visibly mirrored
+            # rotation. Bitmap rotation in step 4 handles theta; YAML
+            # yaw stays at the pristine value (typically 0).
+            pristine_yaml_text = await asyncio.to_thread(pristine_yaml.read_text, "utf-8")
+            try:
+                if mode == "coord":
+                    new_yaml_text, edit_result = await asyncio.to_thread(
+                        map_origin_mod.apply_origin_edit_in_memory,
+                        pristine_yaml_text,
+                        x_m,
+                        y_m,
+                        "absolute",
+                        None,  # theta NOT applied to YAML — see comment above
+                    )
+                else:
+                    # Erase: no origin change; YAML stays byte-identical.
+                    new_yaml_text = pristine_yaml_text
+                    edit_result = None
+            except map_origin_mod.OriginEditError as e:
+                await sse_mod.publish_map_edit_progress(
+                    {
+                        "phase": "rejected",
+                        "progress": 1.0,
+                        "request_id": request_id,
+                        "reason": "origin_edit_failed",
+                    },
+                )
+                return _map_origin_exc_to_response(e)
+
+            # 4. Branch — coord runs map_rotate; erase runs map_edit.
+            if mode == "coord":
+                await sse_mod.publish_map_edit_progress(
+                    {"phase": "rotate", "progress": 0.5, "request_id": request_id},
+                )
+                rotate_yaw = theta_deg if theta_deg is not None else 0.0
+                try:
+                    rot = await asyncio.to_thread(
+                        map_rotate_mod.rotate_pristine_to_derived,
+                        pristine_pgm,
+                        pristine_yaml,
+                        derived_pgm,
+                        derived_yaml,
+                        new_yaml_text,
+                        rotate_yaw,
+                    )
+                except map_rotate_mod.CanvasTooLarge as e:
+                    await sse_mod.publish_map_edit_progress(
+                        {
+                            "phase": "rejected",
+                            "progress": 1.0,
+                            "request_id": request_id,
+                            "reason": "canvas_too_large",
+                        },
+                    )
+                    return JSONResponse(
+                        {"ok": False, "err": "canvas_too_large", "detail": str(e)},
+                        status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+                    )
+                except map_rotate_mod.PristineMissing:
+                    await sse_mod.publish_map_edit_progress(
+                        {
+                            "phase": "rejected",
+                            "progress": 1.0,
+                            "request_id": request_id,
+                            "reason": "pristine_missing",
+                        },
+                    )
+                    return JSONResponse(
+                        {"ok": False, "err": "pristine_missing"},
+                        status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+                    )
+                except map_rotate_mod.RotateError as e:
+                    await sse_mod.publish_map_edit_progress(
+                        {
+                            "phase": "rejected",
+                            "progress": 1.0,
+                            "request_id": request_id,
+                            "reason": "rotate_failed",
+                        },
+                    )
+                    return JSONResponse(
+                        {"ok": False, "err": "pair_write_failed", "detail": str(e)},
+                        status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                    )
+                pixels_changed = rot.new_width_px * rot.new_height_px
+            else:
+                # Erase mode: write derived PGM via map_edit on a copy
+                # of the pristine PGM bytes, then write derived YAML.
+                await sse_mod.publish_map_edit_progress(
+                    {"phase": "rotate", "progress": 0.5, "request_id": request_id},
+                )
+                if mask_bytes is None:
+                    return JSONResponse(
+                        {"ok": False, "err": ERR_MASK_DECODE_FAILED},
+                        status_code=HTTPStatus.BAD_REQUEST,
+                    )
+                pristine_pgm_bytes = await asyncio.to_thread(pristine_pgm.read_bytes)
+                # Compose a tmp pristine-copy so map_edit's atomic
+                # writer lands on the derived path.
+                try:
+                    tmp_derived = derived_pgm
+                    await asyncio.to_thread(tmp_derived.write_bytes, pristine_pgm_bytes)
+                    edit_res = await asyncio.to_thread(
+                        map_edit_mod.apply_edit, tmp_derived, mask_bytes,
+                    )
+                    # Write the (byte-identical-to-pristine) YAML beside it.
+                    await asyncio.to_thread(
+                        derived_yaml.write_bytes, new_yaml_text.encode("utf-8"),
+                    )
+                except map_edit_mod.MapEditError as e:
+                    return _map_edit_exc_to_response(e)
+                pixels_changed = edit_res.pixels_changed
+
+            # 5. Activate the new derived pair (operator may want to
+            # immediately restart). Activation is a separate user
+            # action — we DO NOT auto-activate here. Only emit the
+            # restart-pending sentinel.
+            await sse_mod.publish_map_edit_progress(
+                {"phase": "restart_pending", "progress": 0.95, "request_id": request_id},
+            )
+
+            try:
+                await asyncio.to_thread(
+                    restart_pending_mod.touch, cfg.restart_pending_path,
+                )
+            except OSError as e:
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "err": ERR_EDIT_FAILED,
+                        "detail": f"restart_pending_touch: {e}",
+                    },
+                    status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
+
+            map_image_mod.invalidate_cache()
+            activity_log.append(
+                "map_edit_pipeline",
+                f"mode={mode}, derived={derived_name}, pixels={pixels_changed}, "
+                f"by={claims.username}",
+            )
+
+            await sse_mod.publish_map_edit_progress(
+                {
+                    "phase": "done",
+                    "progress": 1.0,
+                    "request_id": request_id,
+                    "derived_name": derived_name,
+                },
+            )
+            response_body: dict[str, object] = {
+                "ok": True,
+                "request_id": request_id,
+                "derived_name": derived_name,
+                "derived_pair": {
+                    "pgm": derived_pgm.name,
+                    "yaml": derived_yaml.name,
+                },
+                "pristine_pair": {
+                    "pgm": maps_mod.pgm_for(cfg.maps_dir, pristine_base).name,
+                    "yaml": maps_mod.yaml_for(cfg.maps_dir, pristine_base).name,
+                },
+                "pixels_changed": pixels_changed,
+                "restart_required": True,
+            }
+            if edit_result is not None:
+                response_body["prev_origin"] = list(edit_result.prev_origin)
+                response_body["new_origin"] = list(edit_result.new_origin)
+            return JSONResponse(response_body, status_code=HTTPStatus.OK)
+        finally:
+            map_edit_pipeline_lock.release()
+    except Exception as e:  # noqa: BLE001 — defence-in-depth around the pipeline
+        logger.exception("map_edit_pipeline.unexpected_error: %s", e)
+        await sse_mod.publish_map_edit_progress(
+            {
+                "phase": "rejected",
+                "progress": 1.0,
+                "request_id": request_id,
+                "reason": "internal_error",
+            },
+        )
+        return JSONResponse(
+            {"ok": False, "err": "internal_error", "detail": str(e)},
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+        )
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     _ensure_logging_configured()
     cfg: Settings = settings if settings is not None else load_settings()
     client = uds_mod.UdsClient(cfg.uds_socket)
     activity_log = activity_mod.ActivityLog()
+
+    # issue#28 — C4 lock. Serialises every Map-Edit Apply (coord OR
+    # erase) so two concurrent POSTs cannot race a derived-pair write
+    # against itself OR collide on the second-resolution timestamp.
+    map_edit_pipeline_lock = asyncio.Lock()
 
     # --- auth bootstrap ---------------------------------------------------
     # Secret read once at startup; rotation = `systemctl restart`.
@@ -1209,6 +1529,155 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             status_code=HTTPStatus.OK,
         )
 
+    # ---- issue#28 — Map-Edit pipeline (coord + erase + progress SSE) ----
+    #
+    # New paired endpoints replace the in-place /api/map/edit and
+    # /api/map/origin contracts (those stay alive for backward compat
+    # one release). The new flow ALWAYS reads from the pristine pair and
+    # ALWAYS emits a NEW derived pair `<base>.YYYYMMDD-HHMMSS-<memo>`.
+    # Pristine is byte-immutable across the call. The pipeline lock
+    # serialises Apply across all paths; SSE progress is single-channel
+    # broadcast (see sse.py::publish_map_edit_progress).
+    #
+    # /api/map/edit/coord — JSON body. Re-applies SUBTRACT (x_m, y_m,
+    # theta_deg) on the pristine YAML AND rotates the pristine PGM by
+    # `-theta_deg` if non-zero, then atomic pair-writes the derived.
+    #
+    # /api/map/edit/erase — multipart/form-data with `mask` part +
+    # `memo` form field. Decodes mask, applies brush-erase to the
+    # pristine PGM, then atomic pair-writes a derived pair (PGM
+    # modified, YAML byte-identical to pristine).
+
+    @app.post("/api/map/edit/coord")
+    async def map_edit_coord_endpoint(
+        body: MapEditCoordBody,
+        claims: auth_mod.Claims = Depends(auth_mod.require_admin),
+    ) -> JSONResponse:
+        if _is_mapping_active(cfg):
+            return _mapping_lockout_response()
+
+        # Memo + bounds pre-checks BEFORE acquiring the pipeline lock so
+        # a malformed request never starves a legitimate Apply.
+        try:
+            maps_mod.validate_memo(body.memo)
+        except maps_mod.InvalidMemo as e:
+            return JSONResponse(
+                {"ok": False, "err": "invalid_memo", "detail": str(e)},
+                status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+            )
+        import math as _math
+
+        if (not _math.isfinite(body.x_m)) or (not _math.isfinite(body.y_m)):
+            return JSONResponse(
+                {"ok": False, "err": ERR_ORIGIN_BAD_VALUE, "detail": "non_finite_xy"},
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+        if abs(body.x_m) > ORIGIN_X_Y_ABS_MAX_M or abs(body.y_m) > ORIGIN_X_Y_ABS_MAX_M:
+            return JSONResponse(
+                {"ok": False, "err": ERR_ORIGIN_BAD_VALUE, "detail": "abs_value_exceeds_bound"},
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+        if body.theta_deg is not None and not _math.isfinite(body.theta_deg):
+            return JSONResponse(
+                {"ok": False, "err": ERR_ORIGIN_BAD_VALUE, "detail": "non_finite_theta"},
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+
+        return await _apply_map_edit_pipeline(
+            cfg=cfg,
+            client=client,
+            activity_log=activity_log,
+            claims=claims,
+            map_edit_pipeline_lock=map_edit_pipeline_lock,
+            mode="coord",
+            memo=body.memo,
+            x_m=body.x_m,
+            y_m=body.y_m,
+            theta_deg=body.theta_deg,
+            mask_bytes=None,
+        )
+
+    @app.post("/api/map/edit/erase")
+    async def map_edit_erase_endpoint(
+        request: Request,
+        claims: auth_mod.Claims = Depends(auth_mod.require_admin),
+    ) -> JSONResponse:
+        if _is_mapping_active(cfg):
+            return _mapping_lockout_response()
+
+        cl_header = request.headers.get("content-length")
+        if cl_header is not None:
+            try:
+                cl = int(cl_header)
+            except ValueError:
+                cl = -1
+            if cl > MAP_EDIT_MASK_PNG_MAX_BYTES:
+                return JSONResponse(
+                    {"ok": False, "err": "mask_too_large"},
+                    status_code=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                )
+
+        try:
+            form = await request.form()
+        except (OSError, ValueError) as e:
+            return JSONResponse(
+                {"ok": False, "err": ERR_MASK_DECODE_FAILED, "detail": str(e)},
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+        memo_raw = form.get("memo")
+        if not isinstance(memo_raw, str):
+            return JSONResponse(
+                {"ok": False, "err": "invalid_memo", "detail": "memo_missing"},
+                status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+            )
+        try:
+            maps_mod.validate_memo(memo_raw)
+        except maps_mod.InvalidMemo as e:
+            return JSONResponse(
+                {"ok": False, "err": "invalid_memo", "detail": str(e)},
+                status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+            )
+
+        mask_part = form.get("mask")
+        if mask_part is None:
+            return JSONResponse(
+                {"ok": False, "err": ERR_MASK_DECODE_FAILED, "detail": "missing_mask_part"},
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+        if hasattr(mask_part, "read"):
+            mask_bytes = await mask_part.read()  # type: ignore[union-attr]
+        else:
+            mask_bytes = (
+                mask_part.encode("latin-1") if isinstance(mask_part, str) else bytes(mask_part)
+            )
+        if len(mask_bytes) > MAP_EDIT_MASK_PNG_MAX_BYTES:
+            return JSONResponse(
+                {"ok": False, "err": "mask_too_large"},
+                status_code=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+            )
+
+        return await _apply_map_edit_pipeline(
+            cfg=cfg,
+            client=client,
+            activity_log=activity_log,
+            claims=claims,
+            map_edit_pipeline_lock=map_edit_pipeline_lock,
+            mode="erase",
+            memo=memo_raw,
+            x_m=0.0,
+            y_m=0.0,
+            theta_deg=None,
+            mask_bytes=mask_bytes,
+        )
+
+    @app.get("/api/map/edit/progress")
+    async def map_edit_progress_stream() -> StreamingResponse:
+        return StreamingResponse(
+            sse_mod.map_edit_progress_stream(),
+            media_type=_SSE_MEDIA_TYPE,
+            headers=sse_mod.SSE_RESPONSE_HEADERS,
+        )
+
     # ---- /api/last_pose -------------------------------------------------
     @app.get("/api/last_pose")
     async def last_pose() -> JSONResponse:
@@ -1479,17 +1948,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         return Response(content=png, media_type=_PNG_MEDIA_TYPE)
 
-    # ---- /api/maps (Track E, PR-C) -------------------------------------
+    # ---- /api/maps (Track E, PR-C; issue#28 grouped tree) ---------------
     # Anonymous-readable per Track F (read endpoints are anon, mutations
     # are admin-gated).
+    #
+    # issue#28 wire shape: response is `{"groups": [...], "flat": [...]}`
+    # where `groups` is the new grouped-tree shape (pristine parents with
+    # derived variants) and `flat` is the legacy list shape (kept one
+    # release for backward compat with pre-issue#28 SPA bundles cached
+    # in the browser). New SPA reads only `groups`.
     @app.get("/api/maps")
     async def list_maps() -> JSONResponse:
         try:
+            # Opportunistic stale-tmp sweep on every list (cheap;
+            # Mode-A C3 pin "test_orphan_tmp_swept_on_list").
+            await asyncio.to_thread(map_rotate_mod.sweep_stale_tmp, cfg.maps_dir)
             entries = await asyncio.to_thread(maps_mod.list_pairs, cfg.maps_dir)
+            groups = await asyncio.to_thread(maps_mod.list_pairs_grouped, cfg.maps_dir)
         except maps_mod.MapsDirMissing as e:
             return _map_maps_exc_to_response(e)
         return JSONResponse(
-            [e.to_dict() for e in entries],
+            {
+                "groups": [g.to_dict() for g in groups],
+                "flat": [e.to_dict() for e in entries],
+            },
             status_code=HTTPStatus.OK,
         )
 

@@ -129,3 +129,79 @@ export function yawFromDrag(
   const wrapped = ((degrees % 360) + 360) % 360;
   return wrapped;
 }
+
+/**
+ * issue#28 — wrap a yaw value into the half-open range (-180, 180].
+ *
+ * Mirror of webctl `map_origin.wrap_yaw_deg`. Used by the OriginPicker
+ * to display the SUBTRACT result and by `resolveYawDeltaFromPose` so
+ * the operator never sees a 200° badge after a 10° pick on a 190°
+ * baseline.
+ *
+ * Edge case: -180 reflects to +180 to keep the range half-open at the
+ * lower bound (matches the backend wrap precisely).
+ */
+export function wrapYawDeg(value: number): number {
+  if (!Number.isFinite(value)) return value;
+  const span = 360;
+  const min = -180;
+  const max = 180;
+  const shifted = ((value - min) % span + span) % span;
+  let wrapped = shifted + min;
+  if (wrapped === min) wrapped = max;
+  return wrapped;
+}
+
+/**
+ * issue#28 — compute the yaw the SPA should send to the backend given
+ * the operator's typed value (degrees) and the previous baseline.
+ *
+ * SUBTRACT semantic mirror of `(x_m, y_m)`: the backend computes
+ * `new_origin_yaw = wrap(prev_origin_yaw - typed_yaw_deg)`. The SPA
+ * here computes the SAME delta so the OriginPicker preview matches
+ * post-Apply state without an SSE round-trip.
+ *
+ * `prevOriginYawDeg` is the YAML's current `origin[2]` in degrees
+ * (the SPA already converts radians → degrees on the read path).
+ *
+ * Pinned by `originMath.test.ts::ROTATE#1 typed=10° on origin=5° → -5°`
+ * and `ROTATE#2 typed=20° on origin=-5° → -25°`.
+ */
+export function resolveYawDeltaFromPose(
+  prevOriginYawDeg: number,
+  typedYawDeg: number,
+): number {
+  return wrapYawDeg(prevOriginYawDeg - typedYawDeg);
+}
+
+/**
+ * issue#28 — compute the desired YAW from a 2-click yaw pick. Operator
+ * clicks point P1 (origin), then point P2 (along the desired +x axis);
+ * the angle of the (P1→P2) vector in the world frame is the new yaw.
+ *
+ * The caller MUST supply WORLD-frame coordinates (canvas → world via
+ * `viewport.canvasToWorld`). World Y increases upward (ROS map_server
+ * convention) so the vector angle is the standard atan2.
+ *
+ * Returns `null` when the two points are pixel-coincident — the caller
+ * displays the "두 점이 너무 가깝습니다" inline error.
+ */
+export function twoClickToYawDeg(
+  p1Wx: number,
+  p1Wy: number,
+  p2Wx: number,
+  p2Wy: number,
+  minPixelDistPx: number,
+  resolutionMPerPx: number,
+): number | null {
+  const dxWorld = p2Wx - p1Wx;
+  const dyWorld = p2Wy - p1Wy;
+  // Convert world distance back to pixel distance for the proximity
+  // guard. (Equivalent to the click-pixel distance because the world
+  // metric is uniform in `resolution`).
+  const distPx = Math.hypot(dxWorld, dyWorld) / resolutionMPerPx;
+  if (distPx < minPixelDistPx) return null;
+  const radians = Math.atan2(dyWorld, dxWorld);
+  const degrees = (radians * 180) / Math.PI;
+  return wrapYawDeg(degrees);
+}

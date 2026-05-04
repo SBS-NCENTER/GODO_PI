@@ -134,3 +134,61 @@ describe('originMath.yawFromDrag (issue#3 — CCW REP-103 [0, 360))', () => {
     expect(yawFromDrag(5, 5, 6, 5)).toBeCloseTo(0, 6);
   });
 });
+
+
+describe('originMath.wrapYawDeg (issue#28 — (-180, 180] half-open)', () => {
+  it('passes values already in range', async () => {
+    const { wrapYawDeg } = await import('../../src/lib/originMath');
+    expect(wrapYawDeg(0)).toBe(0);
+    expect(wrapYawDeg(45)).toBe(45);
+    expect(wrapYawDeg(180)).toBe(180);
+    expect(wrapYawDeg(-90)).toBe(-90);
+  });
+  it('wraps overflow to (-180, 180]', async () => {
+    const { wrapYawDeg } = await import('../../src/lib/originMath');
+    expect(wrapYawDeg(190)).toBe(-170);
+    expect(wrapYawDeg(360)).toBe(0);
+  });
+  it('reflects -180 to +180 (half-open at lower bound)', async () => {
+    const { wrapYawDeg } = await import('../../src/lib/originMath');
+    expect(wrapYawDeg(-180)).toBe(180);
+    expect(wrapYawDeg(-185)).toBe(175);
+  });
+});
+
+describe('originMath.resolveYawDeltaFromPose (issue#28 ROTATE pins)', () => {
+  it('ROTATE#1 typed=10° on origin=5° → new=-5°', async () => {
+    const { resolveYawDeltaFromPose } = await import('../../src/lib/originMath');
+    expect(resolveYawDeltaFromPose(5, 10)).toBeCloseTo(-5, 6);
+  });
+  it('ROTATE#2 typed=20° on origin=-5° → new=-25° (no 2x drift)', async () => {
+    const { resolveYawDeltaFromPose } = await import('../../src/lib/originMath');
+    expect(resolveYawDeltaFromPose(-5, 20)).toBeCloseTo(-25, 6);
+  });
+});
+
+describe('originMath.twoClickToYawDeg (issue#28 — 2-click yaw pick)', () => {
+  it('twoClickToYawDeg simple cardinal east → 0°', async () => {
+    const { twoClickToYawDeg } = await import('../../src/lib/originMath');
+    expect(twoClickToYawDeg(0, 0, 10, 0, 8, 0.05)).toBeCloseTo(0, 6);
+  });
+  it('twoClickToYawDeg simple cardinal north → 90°', async () => {
+    const { twoClickToYawDeg } = await import('../../src/lib/originMath');
+    expect(twoClickToYawDeg(0, 0, 0, 10, 8, 0.05)).toBeCloseTo(90, 6);
+  });
+  it('twoClickToYawDeg ignores length (scaling P1→P2 by 10× yields same yaw)', async () => {
+    const { twoClickToYawDeg } = await import('../../src/lib/originMath');
+    const a = twoClickToYawDeg(0, 0, 1, 1, 8, 0.05);
+    const b = twoClickToYawDeg(0, 0, 10, 10, 8, 0.05);
+    expect(a).toBeCloseTo(b ?? -1, 6);
+  });
+  it('twoClickToYawDeg returns null when clicks are coincident (jitter guard)', async () => {
+    const { twoClickToYawDeg } = await import('../../src/lib/originMath');
+    expect(twoClickToYawDeg(0, 0, 0, 0, 8, 0.05)).toBeNull();
+  });
+  it('twoClickToYawDeg returns null when clicks are within min pixel distance', async () => {
+    const { twoClickToYawDeg } = await import('../../src/lib/originMath');
+    // 0.1 m at 0.05 m/px = 2 px (below the 8 px threshold).
+    expect(twoClickToYawDeg(0, 0, 0.1, 0, 8, 0.05)).toBeNull();
+  });
+});

@@ -367,7 +367,16 @@ OccupancyGrid load_map(const std::string& pgm_path) {
     g.resolution_m   = y.resolution;
     g.origin_x_m     = y.origin_x;
     g.origin_y_m     = y.origin_y;
-    g.origin_yaw_deg = y.origin_yaw;
+    // issue#28 — YAML stores theta in RADIANS per ROS map_server
+    // convention. `OccupancyGrid::origin_yaw_deg` is consumed by
+    // `apply_yaw_tripwire` + `compute_offset` (cold_writer) in
+    // DEGREES, so we convert here. Pre-issue#28 cold_writer read
+    // `cfg.amcl_origin_yaw_deg` (operator-supplied degrees) and
+    // never consulted this field; issue#28 cuts cold_writer over to
+    // the YAML value, so the conversion must land here. The synthetic
+    // 4×4 fixture has `origin: [0, 0, 0]` so existing tests are
+    // unaffected. See production/RPi5/CODEBASE.md invariant (w).
+    g.origin_yaw_deg = y.origin_yaw * (180.0 / 3.14159265358979323846);
     g.cells          = std::move(cells);
     return g;
 }

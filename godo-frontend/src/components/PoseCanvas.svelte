@@ -24,6 +24,8 @@
   import { drawPose, drawTrail } from '$lib/poseDraw';
   import type { LastPose, LastScan } from '$lib/protocol';
   import MapUnderlay from './MapUnderlay.svelte';
+  import { drawGrid, drawOriginAxis } from '$lib/overlayDraw';
+  import type { MapMetadata } from '$lib/protocol';
 
   interface Props {
     pose: LastPose | null;
@@ -37,6 +39,18 @@
      * Test-only callers can omit it and rely on a private fallback.
      */
     viewport?: MapViewport;
+    /**
+     * issue#28 HIL fix 2026-05-04 KST — world-frame overlay toggles.
+     * Render origin/axis (REP-103 colors) and zoom-adaptive grid via
+     * `lib/overlayDraw`, inheriting MapUnderlay's pan/zoom transform.
+     */
+    originAxisOn?: boolean;
+    gridOn?: boolean;
+    /** Map metadata; required for the grid's world-bounds inverse
+     * projection. `null` skips the world overlays gracefully. */
+    mapMeta?: MapMetadata | null;
+    /** YAML origin yaw in degrees for the axis overlay. */
+    yamlYawDeg?: number;
   }
   let {
     pose,
@@ -44,6 +58,10 @@
     scan = null,
     scanOverlayOn = false,
     viewport,
+    originAxisOn = false,
+    gridOn = false,
+    mapMeta = null,
+    yamlYawDeg = 0,
   }: Props = $props();
 
   const _viewport: MapViewport = viewport ?? createMapViewport();
@@ -79,6 +97,26 @@
   ): void {
     drawTrail(ctx, worldToCanvas, trail);
     drawPose(ctx, worldToCanvas, pose);
+    // issue#28 HIL fix — world-frame overlays composed on the same
+    // canvas so they pick up viewport zoom/pan automatically.
+    if (gridOn && mapMeta && mapMeta.resolution > 0) {
+      const cw = ctx.canvas.width;
+      const ch = ctx.canvas.height;
+      const [w0x, w0y] = _viewport.canvasToWorld(0, 0, cw, ch, mapMeta);
+      const [w1x, w1y] = _viewport.canvasToWorld(cw, ch, cw, ch, mapMeta);
+      drawGrid(ctx, worldToCanvas, {
+        pxPerMeter: _viewport.zoom / mapMeta.resolution,
+        worldMinX: Math.min(w0x, w1x),
+        worldMaxX: Math.max(w0x, w1x),
+        worldMinY: Math.min(w0y, w1y),
+        worldMaxY: Math.max(w0y, w1y),
+        // HIL fix 2026-05-04 KST — grid follows axis rotation.
+        yawDeg: yamlYawDeg,
+      });
+    }
+    if (originAxisOn) {
+      drawOriginAxis(ctx, worldToCanvas, { yawDeg: yamlYawDeg });
+    }
   }
 </script>
 

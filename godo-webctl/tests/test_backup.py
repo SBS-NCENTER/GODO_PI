@@ -36,12 +36,12 @@ def test_happy_path_creates_dir_and_returns_path(
     backup_dir = tmp_path / "bk"
     fixed = datetime(2026, 4, 26, 14, 30, 22, tzinfo=UTC)
     out = backup_map(tmp_map_pair, backup_dir, now=fixed)
-    assert out == backup_dir / "20260426T143022Z"
+    assert out == backup_dir / "20260426T143022"
     assert out.is_dir()
     assert (out / "studio_v1.pgm").is_file()
     assert (out / "studio_v1.yaml").is_file()
     # No leftover .tmp/.
-    assert not (backup_dir / "20260426T143022Z.tmp").exists()
+    assert not (backup_dir / "20260426T143022.tmp").exists()
 
 
 def test_source_content_preserved(tmp_map_pair: Path, tmp_path: Path) -> None:
@@ -91,7 +91,7 @@ def test_clock_injected_timestamp_in_path(
 ) -> None:
     fixed = datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC)
     out = backup_map(tmp_map_pair, tmp_path / "bk", now=fixed)
-    assert out.name == "20300102T030405Z"
+    assert out.name == "20300102T030405"
 
 
 def test_two_backups_same_second_get_suffix(
@@ -102,8 +102,8 @@ def test_two_backups_same_second_get_suffix(
     bk = tmp_path / "bk"
     a = backup_map(tmp_map_pair, bk, now=fixed)
     b = backup_map(tmp_map_pair, bk, now=fixed)
-    assert a.name == "20260426T143022Z"
-    assert b.name == "20260426T143022Z_2"
+    assert a.name == "20260426T143022"
+    assert b.name == "20260426T143022_2"
     assert a.is_dir() and b.is_dir()
 
 

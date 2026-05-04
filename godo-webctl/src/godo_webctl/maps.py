@@ -587,7 +587,7 @@ def validate_memo(memo: str) -> None:
 
 def derive_name(base: str, memo: str, ts: str | None = None) -> str:
     """Build a derived map name `<base>.<ts>-<memo>`. `ts` defaults to
-    UTC `strftime(DERIVED_TS_STRFTIME)`; tests inject a fixed ts.
+    KST `strftime(DERIVED_TS_STRFTIME)`; tests inject a fixed ts.
 
     Validates `base` against `MAPS_NAME_REGEX` and `memo` against
     `MEMO_REGEX` so a malformed input cannot be silently composed
@@ -595,9 +595,9 @@ def derive_name(base: str, memo: str, ts: str | None = None) -> str:
     validate_name(base)
     validate_memo(memo)
     if ts is None:
-        import datetime as _datetime  # localised import keeps the module import graph small
+        from .timestamps import now_kst
 
-        ts = _datetime.datetime.now(_datetime.timezone.utc).strftime(DERIVED_TS_STRFTIME)
+        ts = now_kst().strftime(DERIVED_TS_STRFTIME)
     if len(ts) != 15 or ts[8] != "-":
         # Defence: caller-injected ts must look like YYYYMMDD-HHMMSS.
         raise InvalidMemo("ts_invalid_shape")

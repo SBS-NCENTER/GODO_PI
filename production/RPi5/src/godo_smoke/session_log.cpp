@@ -143,7 +143,7 @@ void write_session_log(const std::filesystem::path& path,
 
     // Field ordering mirrors the Python SessionLogWriter.write().
     out << "# GODO Phase 3 smoke capture session log\n"
-        << "timestamp_utc   : " << utc_timestamp_iso() << "\n"
+        << "timestamp_kst   : " << utc_timestamp_iso() << "\n"
         << "host            : " << hostname_or_unknown() << "\n"
         << "os              : " << os_or_unknown() << "\n"
         << "binary          : godo_smoke\n"

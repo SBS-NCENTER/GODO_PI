@@ -41,7 +41,8 @@ def test_list_dir_missing_returns_empty_list(tmp_path: Path) -> None:
 
 def test_list_returns_newest_first_by_ts(tmp_backup_dir: Path) -> None:
     """Newer backup ts comes first in the list (lexicographic == chronological
-    on canonical UTC stamps)."""
+    on canonical KST stamps; legacy UTC `Z`-suffixed dirs from before the
+    KST convention are still readable via the relaxed `_TS_REGEX`)."""
     entries = MB.list_backups(tmp_backup_dir)
     assert len(entries) == 2
     assert entries[0].ts == "20260202T020202Z"

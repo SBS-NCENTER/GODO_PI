@@ -50,10 +50,13 @@ logger = logging.getLogger("godo_webctl.map_backup")
 
 # --- Constants ---------------------------------------------------------
 
-# Canonical backup-directory name format: `YYYYMMDDTHHMMSSZ` (UTC). The
-# producer is `backup.backup_map`; the regex is the second defence layer
-# inside `restore_backup` against path-traversal.
-_TS_REGEX: Final[re.Pattern[str]] = re.compile(r"^[0-9]{8}T[0-9]{6}Z$")
+# Canonical backup-directory name format: `YYYYMMDDTHHMMSS` (KST,
+# host-local convention). Pre-KST-convention dirs used `YYYYMMDDTHHMMSSZ`
+# (UTC); the trailing `Z` is accepted for backward compatibility with
+# existing on-disk backups. The producer is `backup.backup_map`; the
+# regex is the second defence layer inside `restore_backup` against
+# path-traversal.
+_TS_REGEX: Final[re.Pattern[str]] = re.compile(r"^[0-9]{8}T[0-9]{6}Z?$")
 
 # Suffix used by `backup.backup_map` for the in-flight tmp directory.
 _TMP_SUFFIX: Final[str] = ".tmp"
@@ -61,7 +64,7 @@ _TMP_SUFFIX: Final[str] = ".tmp"
 # Per-restored-file in-flight tmp prefix inside `cfg.maps_dir`. The
 # leading dot keeps it out of `maps.list_pairs` enumeration; the random
 # token (mirror of `secrets.token_hex` discipline used by `maps.py`)
-# avoids collisions with a concurrent restore in the same UTC second.
+# avoids collisions with a concurrent restore in the same KST second.
 _RESTORE_TMP_PREFIX: Final[str] = ".restore."
 
 # 64-bit collision space — same discipline as `maps.py::_new_tmp_name`.

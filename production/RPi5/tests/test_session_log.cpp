@@ -120,7 +120,7 @@ TEST_CASE("write_session_log: emits every documented field") {
     const std::string body = slurp(log_path);
     CHECK(body.find("# GODO Phase 3 smoke capture session log")
           != std::string::npos);
-    CHECK(body.find("timestamp_utc") != std::string::npos);
+    CHECK(body.find("timestamp_kst") != std::string::npos);
     CHECK(body.find("host")          != std::string::npos);
     CHECK(body.find("os")            != std::string::npos);
     CHECK(body.find("backend         : rplidar-sdk") != std::string::npos);

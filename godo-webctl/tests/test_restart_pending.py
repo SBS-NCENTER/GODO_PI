@@ -51,10 +51,10 @@ def test_touch_creates_file(tmp_path: Path) -> None:
     assert not flag.exists()
     restart_pending.touch(flag)
     assert flag.exists()
-    # Body is informational (ISO-8601 UTC + LF). is_pending only checks
-    # presence.
+    # Body is informational (ISO-8601 KST `+09:00` + LF). is_pending only
+    # checks presence.
     body = flag.read_text("ascii")
-    assert body.endswith("Z\n")
+    assert body.endswith("+09:00\n")
 
 
 def test_touch_idempotent(tmp_path: Path) -> None:
@@ -67,7 +67,7 @@ def test_touch_idempotent(tmp_path: Path) -> None:
     second = flag.read_bytes()
     assert flag.exists()
     # Bodies differ only by timestamp; both are valid.
-    assert first.endswith(b"Z\n") and second.endswith(b"Z\n")
+    assert first.endswith(b"+09:00\n") and second.endswith(b"+09:00\n")
 
 
 def test_touch_atomic_no_partial_state(tmp_path: Path) -> None:

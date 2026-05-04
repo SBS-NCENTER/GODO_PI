@@ -3679,10 +3679,11 @@ async def test_map_edit_admin_happy_path(
     # S2 fold: literal value pin.
     assert resp["restart_required"] is True
     assert resp["pixels_changed"] == 64  # 8×8 all painted
-    # Canonical UTC stamp shape `YYYYMMDDTHHMMSSZ`.
+    # Canonical KST stamp shape `YYYYMMDDTHHMMSS` (no offset suffix; host-KST
+    # convention per `feedback_timestamp_kst_convention.md`).
     import re as _re
 
-    assert _re.match(r"^[0-9]{8}T[0-9]{6}Z$", resp["backup_ts"])
+    assert _re.match(r"^[0-9]{8}T[0-9]{6}$", resp["backup_ts"])
 
 
 async def test_map_edit_anon_returns_401(
@@ -4018,10 +4019,10 @@ async def test_post_map_origin_admin_absolute_happy_path(
     new_x, new_y, _ = resp["new_origin"]
     assert new_x == pytest.approx(-1.82)
     assert new_y == pytest.approx(-1.82)
-    # Canonical UTC stamp shape.
+    # Canonical KST stamp shape (no offset suffix; host-KST convention).
     import re as _re
 
-    assert _re.match(r"^[0-9]{8}T[0-9]{6}Z$", resp["backup_ts"])
+    assert _re.match(r"^[0-9]{8}T[0-9]{6}$", resp["backup_ts"])
 
 
 async def test_post_map_origin_admin_delta_happy_path(
@@ -4330,7 +4331,10 @@ async def test_post_map_origin_yaml_rewrite_failure_leaves_no_restart_pending(
         assert "map_origin" not in types
     # Backup snapshot still exists (step 1 succeeded).
     backups = list(s.backup_dir.iterdir())
-    assert any(b.is_dir() and b.name.endswith("Z") for b in backups)
+    assert any(
+        b.is_dir() and __import__("re").match(r"^[0-9]{8}T[0-9]{6}$", b.name)
+        for b in backups
+    )
 
 
 async def test_post_map_origin_oversize_returns_413(

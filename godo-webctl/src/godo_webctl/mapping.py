@@ -51,7 +51,6 @@ import secrets
 import shutil
 import subprocess
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -343,8 +342,13 @@ def _idle_status() -> MappingStatus:
     )
 
 
-def _utc_now_iso() -> str:
-    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+def _kst_now_iso() -> str:
+    """ISO 8601 second-resolution timestamp with explicit KST offset
+    (`2026-05-04T17:15:30+09:00`). KST convention — see
+    `.claude/memory/feedback_timestamp_kst_convention.md`."""
+    from .timestamps import kst_iso_seconds
+
+    return kst_iso_seconds()
 
 
 # --- Tracker-owned [serial] section reader -------------------------------
@@ -699,7 +703,7 @@ def start(name: str, cfg: Settings) -> MappingStatus:
             state=MappingState.STARTING,
             map_name=name,
             container_id_short=None,
-            started_at=_utc_now_iso(),  # ONLY Idle→Starting writes a fresh now()
+            started_at=_kst_now_iso(),  # ONLY Idle→Starting writes a fresh now()
             error_detail=None,
             journal_tail_available=False,
         )

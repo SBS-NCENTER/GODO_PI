@@ -27,6 +27,7 @@
   import RestartPendingBanner from '$components/RestartPendingBanner.svelte';
   import {
     ApiError,
+    apiGet,
     postMapEditCoord,
     postMapEditErase,
     postMapOrigin,
@@ -51,6 +52,8 @@
     MapEditPipelineResult,
     OriginEditResponse,
     OriginPatchBody,
+    SidecarResponse,
+    SidecarV1,
   } from '$lib/protocol';
   import { navigate } from '$lib/router';
   import { auth } from '$stores/auth';
@@ -110,6 +113,12 @@
   // POST /api/map/edit/{coord,erase} response. Passed to ApplyMemoModal
   // so its SSE consumer drops frames belonging to other sessions.
   let sessionRequestId = $state<string | null>(null);
+  // issue#30 — sidecar data for the active map (lineage + cumulative).
+  // Refreshed on mount + after each successful Apply.
+  let activeSidecar = $state<SidecarV1 | null>(null);
+  // issue#30 — onboarding tooltip for the new delta-on-top semantic.
+  let onboardingShown = $state<boolean>(true);
+
   // Resolution + origin captured from mapMetadata for the GUI-pick math.
   let resolution = $state<number | null>(null);
   // Full mapMetadata mirror — needed by the viewport's worldToCanvas /
@@ -130,6 +139,41 @@
   function setEraseBanner(msg: string | null, kind: 'info' | 'success' | 'error' | null): void {
     eraseBanner = msg;
     eraseBannerKind = kind;
+  }
+
+  async function refreshActiveSidecar(): Promise<void> {
+    // Sidecar lineage is only meaningful for the currently active map.
+    // We pull /api/maps to find which one is active; falling back to
+    // null when no active map exists yet (post-mapping pipeline).
+    try {
+      type MapsResp = { groups: Array<{ pristine: { name: string; is_active: boolean } | null; variants: Array<{ name: string; is_active: boolean }> }> };
+      const maps = await apiGet<MapsResp>('/api/maps');
+      let activeName: string | null = null;
+      for (const g of maps.groups) {
+        if (g.pristine?.is_active) {
+          activeName = g.pristine.name;
+          break;
+        }
+        for (const v of g.variants) {
+          if (v.is_active) {
+            activeName = v.name;
+            break;
+          }
+        }
+        if (activeName !== null) break;
+      }
+      if (activeName === null) {
+        activeSidecar = null;
+        return;
+      }
+      const resp = await apiGet<SidecarResponse>(
+        `/api/maps/${encodeURIComponent(activeName)}/sidecar`,
+      );
+      activeSidecar = resp.sidecar;
+    } catch {
+      // Silent — sidecar is best-effort UI affordance, not load-bearing.
+      activeSidecar = null;
+    }
   }
 
   onMount(() => {
@@ -154,7 +198,24 @@
       const err = (e as { body?: { err?: string } })?.body?.err;
       dimsError = err || 'metadata_load_failed';
     });
+    void refreshActiveSidecar();
+    // issue#30 — onboarding tooltip persisted in localStorage.
+    try {
+      const seen = window.localStorage.getItem('godo.mapedit.delta-onboarding-shown');
+      onboardingShown = seen === '1';
+    } catch {
+      onboardingShown = true;
+    }
   });
+
+  function dismissOnboarding(): void {
+    onboardingShown = true;
+    try {
+      window.localStorage.setItem('godo.mapedit.delta-onboarding-shown', '1');
+    } catch {
+      // Silent — storage may be locked down (private mode, etc.).
+    }
+  }
 
   onDestroy(() => {
     unsubAuth?.();
@@ -288,6 +349,7 @@
         'success',
       );
       void refreshRestartPending();
+      void refreshActiveSidecar();
       originPickerRef.clearAll();
       clearPickPreviews();
       modalOpen = false;
@@ -567,6 +629,37 @@
          state survives Coord ↔ Erase toggling (issue#28 operator-locked
          "no auto-discard"). Hidden via CSS in Erase mode. -->
     <div style:display={mode === EDIT_MODE_COORD ? 'block' : 'none'}>
+      {#if !onboardingShown}
+        <div
+          class="onboarding-tip"
+          data-testid="map-edit-onboarding-tip"
+          role="alert"
+        >
+          <p>
+            <strong>issue#30 — Map Edit (좌표) 사용 안내</strong>
+          </p>
+          <p>
+            캔버스에서 클릭한 점이 새 좌표계의 원점 (0, 0)이 됩니다.
+            입력값은 그 원점에서의 추가 이동/회전 입니다.
+            0 또는 빈 칸은 "추가 변경 없음"을 의미합니다.
+          </p>
+          <button
+            type="button"
+            class="btn-secondary"
+            onclick={dismissOnboarding}
+            data-testid="map-edit-onboarding-dismiss"
+          >
+            확인
+          </button>
+        </div>
+      {/if}
+      {#if activeSidecar !== null}
+        <p class="cumulative-line" data-testid="map-edit-cumulative-line">
+          현재 위치: ({activeSidecar.cumulative_from_pristine.translate_x_m.toFixed(3)},
+          {activeSidecar.cumulative_from_pristine.translate_y_m.toFixed(3)}) m,
+          회전 (typed θ 누적): {activeSidecar.cumulative_from_pristine.rotate_deg.toFixed(1)}°
+        </p>
+      {/if}
       <OriginPicker
         bind:this={originPickerRef}
         {currentOrigin}
@@ -690,5 +783,22 @@
   }
   .error {
     color: var(--color-error, #c62828);
+  }
+  .onboarding-tip {
+    margin: 12px 0;
+    padding: 10px 14px;
+    border-left: 3px solid var(--color-accent);
+    background: color-mix(in srgb, var(--color-accent) 8%, var(--color-bg));
+    border-radius: 4px;
+    font-size: 0.92em;
+  }
+  .onboarding-tip p {
+    margin: 0 0 6px 0;
+  }
+  .cumulative-line {
+    margin: 12px 0 8px 0;
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 0.88em;
+    color: var(--color-text-muted, #666);
   }
 </style>

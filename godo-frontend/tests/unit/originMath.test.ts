@@ -192,3 +192,123 @@ describe('originMath.twoClickToYawDeg (issue#28 — 2-click yaw pick)', () => {
     expect(twoClickToYawDeg(0, 0, 0.1, 0, 8, 0.05)).toBeNull();
   });
 });
+
+// --- issue#30 — pristineWorldToPixel + composeCumulative -----------------
+
+describe('issue#30 — pristineWorldToPixel (yaw-aware mirror of Python)', () => {
+  it('yaw=0 collapses to simple form', async () => {
+    const { pristineWorldToPixel } = await import('../../src/lib/originMath');
+    const r = pristineWorldToPixel(2.5, 1.0, 0.5, -0.5, 0, 100, 80, 0.05);
+    expect(r.i_p).toBeCloseTo((2.5 - 0.5) / 0.05, 10);
+    expect(r.j_p_top).toBeCloseTo(80 - 1 - (1.0 - -0.5) / 0.05, 10);
+  });
+
+  it('yaw=1.604: targeting (oxP, oyP) lands on bottom-left pixel', async () => {
+    const { pristineWorldToPixel } = await import('../../src/lib/originMath');
+    const r = pristineWorldToPixel(-9.575, -8.75, -9.575, -8.75, 1.604, 200, 200, 0.05);
+    expect(r.i_p).toBeCloseTo(0, 9);
+    expect(r.j_p_top).toBeCloseTo(199, 9);
+  });
+
+  it('mirror parity with Python — hand-computed reference values across yaw sweep [N-B3]', async () => {
+    // Hand-computed reference values pinning the math contract.
+    // Same formula as Python `godo_webctl.map_transform.pristine_world_to_pixel`:
+    //   dx = cumTx - oxP; dy = cumTy - oyP
+    //   localX = cos(-θ)·dx - sin(-θ)·dy
+    //   localY = sin(-θ)·dx + cos(-θ)·dy
+    //   i_p = localX / res; j_p_top = HP - 1 - localY / res
+    const { pristineWorldToPixel } = await import('../../src/lib/originMath');
+
+    // Fixture: 100×100 bitmap, origin (-1, -1), res=0.05, target world (0, 0).
+    // dx = 1, dy = 1.
+    const oxP = -1;
+    const oyP = -1;
+    const cumTx = 0;
+    const cumTy = 0;
+    const HP = 100;
+    const res = 0.05;
+
+    // Reference compute: with dx=dy=1,
+    //   localX = cos(-yaw) − sin(-yaw)
+    //   localY = sin(-yaw) + cos(-yaw)
+    //   i_p   = localX / res
+    //   j_p_top = (HP - 1) - localY / res
+    function ref(yaw: number): { ip: number; jp: number } {
+      const c = Math.cos(-yaw);
+      const s = Math.sin(-yaw);
+      const localX = c - s;
+      const localY = s + c;
+      return { ip: localX / res, jp: HP - 1 - localY / res };
+    }
+    const yaws = [0, 0.5, 1.604, Math.PI / 2, Math.PI, -Math.PI / 3];
+    const cases = yaws.map((y) => ({ yaw: y, ...ref(y), label: 'yaw=' + y }));
+    // Spot pin yaw=0: localX=1, localY=1 → i_p=20, j_p_top=79 (sanity).
+    expect(cases[0].ip).toBeCloseTo(20, 9);
+    expect(cases[0].jp).toBeCloseTo(79, 9);
+
+    for (const c of cases) {
+      const r = pristineWorldToPixel(cumTx, cumTy, oxP, oyP, c.yaw, 100, HP, res);
+      expect(r.i_p, c.label + ' i_p').toBeCloseTo(c.ip, 8);
+      expect(r.j_p_top, c.label + ' j_p_top').toBeCloseTo(c.jp, 8);
+    }
+  });
+});
+
+describe('issue#30 — composeCumulative algebra (mirror of webctl D3)', () => {
+  it('identity step: cumulative.translate = parent.translate when typed_delta=0 AND picked=parent', async () => {
+    const { composeCumulative } = await import('../../src/lib/originMath');
+    const result = composeCumulative(
+      { translate_x_m: 1, translate_y_m: 2, rotate_deg: 45 },
+      {
+        delta_translate_x_m: 0,
+        delta_translate_y_m: 0,
+        delta_rotate_deg: 0,
+        picked_world_x_m: 1,
+        picked_world_y_m: 2,
+      },
+    );
+    expect(result.translate_x_m).toBeCloseTo(1, 9);
+    expect(result.translate_y_m).toBeCloseTo(2, 9);
+    expect(result.rotate_deg).toBeCloseTo(45, 9);
+  });
+
+  it('typed delta absorbed: pick (5, 0) + typed (1, 0) → cumulative (4, 0)', async () => {
+    const { composeCumulative } = await import('../../src/lib/originMath');
+    const result = composeCumulative(
+      { translate_x_m: 0, translate_y_m: 0, rotate_deg: 0 },
+      {
+        delta_translate_x_m: 1,
+        delta_translate_y_m: 0,
+        delta_rotate_deg: 0,
+        picked_world_x_m: 5,
+        picked_world_y_m: 0,
+      },
+    );
+    expect(result.translate_x_m).toBeCloseTo(4, 9);
+    expect(result.translate_y_m).toBeCloseTo(0, 9);
+    expect(result.rotate_deg).toBeCloseTo(0, 9);
+  });
+
+  it('rotate accumulates with wrap into (-180, 180]', async () => {
+    const { composeCumulative } = await import('../../src/lib/originMath');
+    const result = composeCumulative(
+      { translate_x_m: 0, translate_y_m: 0, rotate_deg: 170 },
+      {
+        delta_translate_x_m: 0,
+        delta_translate_y_m: 0,
+        delta_rotate_deg: 30,
+        picked_world_x_m: 0,
+        picked_world_y_m: 0,
+      },
+    );
+    // 170 + 30 = 200 → wraps to -160.
+    expect(result.rotate_deg).toBeCloseTo(-160, 9);
+  });
+});
+
+describe('issue#30 — resolveDeltaFromPose @deprecated marker', () => {
+  it('resolveDeltaFromPose is still exported (back-compat marker)', async () => {
+    const mod = await import('../../src/lib/originMath');
+    expect(typeof mod.resolveDeltaFromPose).toBe('function');
+  });
+});

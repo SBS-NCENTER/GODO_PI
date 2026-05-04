@@ -111,6 +111,29 @@ def backup_map(
             tmp_dir.mkdir(mode=0o750)
             shutil.copy2(map_path, tmp_dir / map_path.name)
             shutil.copy2(yaml_path, tmp_dir / yaml_path.name)
+            # issue#30 — emit a kind="backup" sidecar alongside the
+            # snapshot pair. Best-effort; copy-from-source if the source
+            # has a sidecar, else synthesize.
+            from . import sidecar as sidecar_mod
+
+            src_sidecar = map_path.with_suffix(".sidecar.json")
+            if src_sidecar.is_file():
+                shutil.copy2(src_sidecar, tmp_dir / src_sidecar.name)
+            else:
+                # Synthesize a minimal kind="backup" sidecar.
+                try:
+                    sc = sidecar_mod.synthesize_for_orphan_pair(
+                        map_path,
+                        yaml_path,
+                        kind_label="backup",
+                    )
+                    sidecar_mod.write(
+                        tmp_dir / f"{map_path.stem}.sidecar.json",
+                        sc,
+                    )
+                except (OSError, ValueError):
+                    # Non-fatal — backup still succeeds without sidecar.
+                    pass
         except OSError as e:
             shutil.rmtree(tmp_dir, ignore_errors=True)
             raise BackupError(f"copy_failed: {e}") from e

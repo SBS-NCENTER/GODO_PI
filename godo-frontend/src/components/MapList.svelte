@@ -1,12 +1,12 @@
 <script lang="ts">
   /**
-   * issue#28 — grouped map list (pristine parents + indented variants).
+   * issue#28 → issue#30 — grouped map list (pristine parents +
+   * indented variants).
    *
    * Sole owner of the grouped-tree rendering for `/api/maps` results.
    * Click a row → confirm dialog → activate. Active map carries a
-   * badge. Pre-issue#28 `MapListPanel.svelte` keeps existing
-   * single-list behaviour during the migration window; new SPA pages
-   * use this component.
+   * badge. Each variant carries an optional `!` lineage button which
+   * the parent route wires to `LineageModal.svelte`.
    */
 
   export interface MapEntryView {
@@ -27,9 +27,15 @@
     groups: MapGroupView[];
     onActivate: (name: string) => void;
     onDelete?: (name: string) => void;
+    /**
+     * issue#30 — open the LineageModal for the named map. When omitted
+     * the lineage button is hidden (back-compat for callers that don't
+     * yet wire LineageModal).
+     */
+    onShowLineage?: (name: string) => void;
   }
 
-  let { groups, onActivate, onDelete }: Props = $props();
+  let { groups, onActivate, onDelete, onShowLineage }: Props = $props();
 
   function formatDims(e: MapEntryView | null): string {
     if (!e || e.width_px === null || e.height_px === null) return '';
@@ -75,6 +81,18 @@
                 <span class="dims">{formatDims(v)}</span>
                 {#if v.is_active}<span class="badge">활성</span>{/if}
               </button>
+              {#if onShowLineage}
+                <button
+                  type="button"
+                  class="lineage-btn"
+                  onclick={() => onShowLineage(v.name)}
+                  title="lineage 보기"
+                  aria-label="lineage 보기"
+                  data-testid="map-lineage-btn-{v.name}"
+                >
+                  !
+                </button>
+              {/if}
               {#if onDelete && !v.is_active}
                 <button
                   type="button"
@@ -130,5 +148,19 @@
     padding: 2px 6px;
     cursor: pointer;
     color: var(--color-muted, #6b7280);
+  }
+  .lineage-btn {
+    font-size: 13px;
+    background: transparent;
+    border: 1px solid var(--color-border, #cbd5e1);
+    border-radius: 4px;
+    padding: 2px 8px;
+    cursor: pointer;
+    color: var(--color-accent, #2563eb);
+    font-weight: 600;
+    line-height: 1;
+  }
+  .lineage-btn:hover {
+    background: var(--color-accent-soft, #dbeafe);
   }
 </style>

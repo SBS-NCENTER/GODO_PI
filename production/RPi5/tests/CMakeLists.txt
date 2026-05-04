@@ -238,6 +238,14 @@ target_compile_definitions(test_amcl_components PRIVATE
 add_test(NAME test_amcl_components COMMAND test_amcl_components)
 set_tests_properties(test_amcl_components PROPERTIES LABELS "hardware-free")
 
+# issue#30 — pin tracker tolerance for origin.yaw_deg=0 (the new
+# normalized derived YAML always carries yaw=0).
+add_executable(test_origin_yaw_zero test_origin_yaw_zero.cpp)
+target_link_libraries(test_origin_yaw_zero PRIVATE
+    doctest::doctest godo_localization godo_core)
+add_test(NAME test_origin_yaw_zero COMMAND test_origin_yaw_zero)
+set_tests_properties(test_origin_yaw_zero PROPERTIES LABELS "hardware-free")
+
 add_executable(test_cold_writer_offset_invariant
     test_cold_writer_offset_invariant.cpp)
 target_link_libraries(test_cold_writer_offset_invariant PRIVATE

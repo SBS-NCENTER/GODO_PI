@@ -21,6 +21,7 @@ dev = [
     # issue#14 — numpy needed for the godo-mapping pgm_encoder tests
     # which reuse this UV env via verify-no-hw.sh's --quick fallback.
     "numpy>=1.26",
+    "hypothesis>=6.152.4",
 ]
 
 [project.scripts]

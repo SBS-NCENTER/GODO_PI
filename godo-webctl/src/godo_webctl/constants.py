@@ -466,6 +466,31 @@ SSE_PROGRESS_HEARTBEAT_S: Final[float] = 5.0
 # Apply does not wedge the SPA forever.
 MAP_EDIT_PIPELINE_LOCK_TIMEOUT_S: Final[float] = 60.0
 
+# --- issue#30 — pick-anchored YAML normalization + sidecar SSOT --------
+# Sidecar JSON file extension. Companion to the derived `<base>.<ts>-
+# <memo>.{pgm,yaml}` pair: `<base>.<ts>-<memo>.sidecar.json`.
+SIDECAR_EXT: Final[str] = "sidecar.json"
+
+# Schema literal pinned for `godo.map.sidecar.v1`. Any future shape
+# change bumps to v2; readers reject unknown major versions.
+SIDECAR_SCHEMA: Final[str] = "godo.map.sidecar.v1"
+
+# Lineage `kind` values (mirrors §D1 2×2 grid).
+SIDECAR_LINEAGE_KIND_OPERATOR: Final[str] = "operator_apply"
+SIDECAR_LINEAGE_KIND_SYNTHESIZED: Final[str] = "synthesized"
+SIDECAR_LINEAGE_KIND_BACKUP: Final[str] = "backup"
+SIDECAR_LINEAGE_KIND_AUTO_MIGRATED: Final[str] = "auto_migrated_pre_issue30"
+
+# Generation sentinel for synthesized sidecars (lineage depth unknown).
+SIDECAR_GENERATION_UNKNOWN: Final[int] = -1
+
+# Re-export aliases so old imports keep working post-rename.
+MAP_TRANSFORM_THRESH_OCC: Final[int] = MAP_ROTATE_THRESH_OCC
+MAP_TRANSFORM_THRESH_UNK: Final[int] = MAP_ROTATE_THRESH_UNK
+MAP_TRANSFORM_THRESH_FREE: Final[int] = MAP_ROTATE_THRESH_FREE
+MAP_TRANSFORM_MAX_CANVAS_PX: Final[int] = MAP_ROTATE_MAX_CANVAS_PX
+MAP_TRANSFORM_TIME_BUDGET_S: Final[float] = MAP_ROTATE_TIME_BUDGET_S
+
 # --- issue#16 — mapping pre-check + cp210x recovery ---------------------
 # Filename written under `cfg.mapping_runtime_dir.parent` (= /run/godo)
 # by `mapping.recover_cp210x` immediately before invoking

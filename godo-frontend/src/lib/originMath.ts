@@ -56,22 +56,12 @@ export function pixelToWorld(
 }
 
 /**
- * issue#27 — SUBTRACT semantic (supersedes 2026-04-30 ADD lock).
+ * @deprecated since issue#30; remove in issue#31+. Pre-issue#30 SUBTRACT
+ *             semantic; new code should use `composeCumulative` +
+ *             `pickAnchoredPreview` instead.
  *
- * Operator's mental model: typed (x_m, y_m) names the world coord of
- * the point that should become the new (0, 0). The backend computes
- * `new_yaml_origin = old_yaml_origin - typed`. Frontend math here
- * resolves delta-mode input to the absolute-mode equivalent BEFORE
- * sending to the backend so the backend stays dumb (single SUBTRACT
- * formula, no UDS round-trip on the rename path, no stale-pose risk).
- *
- * `resolveDeltaFromPose` — the SPA's preferred path: typed (dx, dy) is
- * an offset vector from the current LiDAR-frame pose to the point that
- * should become the new (0, 0). Returns the absolute world coord that
- * the operator's typed delta resolves to. The backend then applies its
- * canonical SUBTRACT to produce the YAML origin update.
- *
- * Pinned by `tests/unit/originMath.test.ts::resolveDeltaFromPose subtracts`.
+ * Pinned by `tests/unit/originMath.test.ts::resolveDeltaFromPose subtracts`
+ * (kept as a marker test so the symbol export stays.
  */
 export function resolveDeltaFromPose(
   currentPose: { x_m: number; y_m: number },
@@ -81,6 +71,86 @@ export function resolveDeltaFromPose(
   return {
     x_m: currentPose.x_m + dx,
     y_m: currentPose.y_m + dy,
+  };
+}
+
+/**
+ * issue#30 — yaw-aware pristine world↔pixel SSOT (mirror of
+ * `godo_webctl.map_transform.pristine_world_to_pixel`).
+ *
+ * Convert pristine-frame cumulative-translate world coord
+ * (`cumTx, cumTy`) — the pristine-frame world coord that lands at
+ * derived world (0, 0) — to pristine bitmap pixel
+ * `(i_p, j_p_top)` (column-from-left, row-from-top).
+ *
+ * The yaw-aware form: when `othetaP === 0` this collapses to
+ *     `i_p = (cumTx - oxP) / res`
+ *     `j_p_top = HP - 1 - (cumTy - oyP) / res`
+ *
+ * SSOT discipline: this function lives in `originMath.ts` (TS) AND
+ * `map_transform.py` (Python). Mirror tests pin them to bit-identical
+ * outputs across yaw ∈ {0, 0.5, 1.604, π/2, π, -π/3}.
+ */
+export function pristineWorldToPixel(
+  cumTx: number,
+  cumTy: number,
+  oxP: number,
+  oyP: number,
+  othetaP: number,
+  WP: number,
+  HP: number,
+  res: number,
+): { i_p: number; j_p_top: number } {
+  const dx = cumTx - oxP;
+  const dy = cumTy - oyP;
+  const c = Math.cos(-othetaP);
+  const s = Math.sin(-othetaP);
+  const localX = c * dx - s * dy;
+  const localY = s * dx + c * dy;
+  const i_p = localX / res;
+  const j_p_top = HP - 1 - localY / res;
+  return { i_p, j_p_top };
+}
+
+/**
+ * issue#30 — sidecar `Cumulative` mirror (matches webctl
+ * `godo.map.sidecar.v1` schema).
+ */
+export interface Cumulative {
+  translate_x_m: number;
+  translate_y_m: number;
+  rotate_deg: number;
+}
+
+export interface ThisStepLocal {
+  delta_translate_x_m: number;
+  delta_translate_y_m: number;
+  delta_rotate_deg: number;
+  picked_world_x_m: number;
+  picked_world_y_m: number;
+}
+
+/**
+ * issue#30 — compose new cumulative from parent + this Apply's typed
+ * delta (mirror of `godo_webctl.sidecar.compose_cumulative`).
+ *
+ * Per the C-2.1 round-3 lock: cumulative.translate is the pristine-
+ * frame world coord that lands at derived world (0, 0) and is computed
+ * as `picked_world − R(-θ_active)·typed_delta` where standard 2D CCW
+ * rotation matrix `[c -s; s c]` applies.
+ */
+export function composeCumulative(parent: Cumulative, step: ThisStepLocal): Cumulative {
+  const thetaActive = (parent.rotate_deg * Math.PI) / 180;
+  const c = Math.cos(-thetaActive);
+  const s = Math.sin(-thetaActive);
+  const typedDx = step.delta_translate_x_m;
+  const typedDy = step.delta_translate_y_m;
+  const rotatedDx = c * typedDx - s * typedDy;
+  const rotatedDy = s * typedDx + c * typedDy;
+  return {
+    translate_x_m: step.picked_world_x_m - rotatedDx,
+    translate_y_m: step.picked_world_y_m - rotatedDy,
+    rotate_deg: wrapYawDeg(parent.rotate_deg + step.delta_rotate_deg),
   };
 }
 

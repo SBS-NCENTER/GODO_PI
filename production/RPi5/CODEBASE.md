@@ -4970,3 +4970,23 @@ operator-locked decision.
   is detected. Hard removal lands in a follow-up issue. The schema
   row `amcl.origin_yaw_deg` (config_schema.hpp:133) stays alive for
   the same release to keep the `/api/config` Round-trip honest.
+
+### 2026-05-04 KST — issue#30 verification — origin.yaw_deg = 0 path
+
+Webctl-side issue#30 introduces the pick-anchored YAML normalization,
+which always emits derived YAML with `origin: [..., ..., 0]`. Tracker
+side: NO production code change; `localization/cold_writer.cpp` (3
+call sites at 374-389 / 518-534 / 653-669) and
+`localization/amcl_result.cpp:39 compute_offset` already tolerate
+`origin.yaw_deg = 0` cleanly:
+
+- `compute_offset(current, origin)` returns
+  `dyaw = canonical_360(current.yaw_deg - 0) = canonical_360(current.yaw_deg)`.
+- `apply_yaw_tripwire(pose, 0, tripwire_deg)` uses
+  `shortest_arc_deg(0, pose.yaw_deg) = pose.yaw_deg` (when in
+  (-180, 180]).
+
+New test `tests/test_origin_yaw_zero.cpp` pins these contracts (4
+cases / 20 assertions) — runs `compute_offset` + `apply_yaw_tripwire`
+with `origin.yaw_deg = 0` across multiple yaw quadrants including the
+wrap edge.

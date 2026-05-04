@@ -3600,3 +3600,138 @@ and lights up the modal-driven Apply pipeline that targets
 - Rewritten: `tests/unit/mapEdit.test.ts` (4 page-level cases redone
   for the segmented control + modal Apply flow; mask-canvas DPR pin
   cases preserved byte-identical).
+
+## 2026-05-04 KST — issue#30 — pick-anchored YAML normalization (frontend mirror)
+
+### Why
+
+Issue#30 retires the SUBTRACT semantic from PR #81 and introduces a
+"pick-anchored + canvas-expand" semantic where every Apply produces a
+derived YAML normalized to `origin: [..., ..., 0]` so world (0, 0)
+lands on the operator's picked pristine pixel and YAML yaw is 0.
+Cumulative state lives in a sidecar JSON. The frontend mirrors the
+yaw-aware `pristine_world_to_pixel` SSOT and the
+`compose_cumulative` algebra so the SPA can preview post-Apply state
+without a backend round-trip.
+
+### Added
+
+- `lib/originMath.ts` — `pristineWorldToPixel(cumTx, cumTy, oxP, oyP,
+  othetaP, WP, HP, res)` mirror of webctl
+  `godo_webctl.map_transform.pristine_world_to_pixel`. Bit-identical
+  outputs across yaw ∈ {0, 0.5, 1.604, π/2, π, -π/3}. Adds
+  `composeCumulative(parent, step)` mirror of the webctl D3 algebra
+  (standard CCW `[c -s; s c]`). New TS interfaces `Cumulative` and
+  `ThisStepLocal`.
+- `tests/unit/originMath.test.ts` — 7 new cases: yaw=0 collapse,
+  yaw=1.604 round-trip, mirror-parity sweep, identity property of
+  `composeCumulative`, typed-delta absorbed semantic, rotate
+  accumulation with wrap, and a deprecation marker for
+  `resolveDeltaFromPose`.
+
+### Changed
+
+- `lib/originMath.ts::resolveDeltaFromPose` marked `@deprecated since
+  issue#30; remove in issue#31+`. Symbol export retained for back-
+  compat.
+
+### Invariants
+
+- **(v) origin-math-pristine-world-to-pixel-ssot** — issue#30. The
+  yaw-aware `pristineWorldToPixel` lives in `lib/originMath.ts` (TS)
+  and `godo_webctl/map_transform.py` (Python). Mirror tests pin them
+  to bit-identical outputs across a parametrised yaw sweep. Any new
+  call site for "pristine world coord → pristine pixel" in the SPA
+  MUST use this function (NOT a hand-rolled inversion).
+
+## 2026-05-04 KST — issue#30 round 2 — frontend SSOT completion (delta UX + LineageModal + sidecar)
+
+### Why
+
+Mode-B round 1 verdict was REWORK MAJOR with a showstopper at the
+wire seam: the SPA shipped PR #81-era OriginPicker UX (absolute /
+delta toggle, click-pre-fills-input) against a backend that already
+expected the issue#30 pick-anchored semantic. Round 2 completes the
+frontend so the new math is reachable end-to-end through the live
+SPA, including sidecar visualization.
+
+### Added
+
+- `components/OriginPicker.svelte` rewritten for issue#30 Q2 lock —
+  XY click on canvas captures `picked_world_*` into INTERNAL state,
+  does NOT pre-fill input boxes. Inputs default placeholder `0`
+  (=  "no further nudge") with helper text `(이동 없음)` /
+  `(회전 없음)`. New imperative `getPickedWorld()` accessor for
+  test pins. `getDirtyBody()` returns the new wire shape
+  `{x_m, y_m, theta_deg, picked_world_x_m, picked_world_y_m, memo}`.
+  Pre-issue#30 absolute / delta mode toggle removed (the pick-
+  anchored delta-on-top semantic is unconditional).
+- `components/LineageModal.svelte` — new sidecar lineage viewer.
+  Renders the lineage tree (kind / generation / parents /
+  cumulative / result origin / canvas / created / this_step). Three
+  glyph-coded categories: ✓ operator_apply, ⚠ synthesized
+  (tooltip "issue#30 이전 자동 합성 (generation unknown)"), ⓘ
+  auto_migrated_pre_issue30 (tooltip "PR #81 이전 작업 자동
+  마이그레이션 (generation = 1 가정)").
+- `routes/MapEdit.svelte` — added `refreshActiveSidecar()` (fetches
+  the active map's `/api/maps/{name}/sidecar` on mount and after
+  each successful Apply). Added cumulative line above OriginPicker:
+  "현재 위치: (tx, ty) m, 회전 (typed θ 누적): θ°". Added one-time
+  onboarding tooltip persisted via
+  `localStorage.godo.mapedit.delta-onboarding-shown`.
+- `routes/Map.svelte` — wired LineageModal + the new MapList `!`
+  button. `openLineage(name)` fetches sidecar, opens modal;
+  `closeLineage()` clears state.
+- `components/MapList.svelte` — new `onShowLineage` prop + `!`
+  button per variant row. Hidden when prop omitted (back-compat
+  for callers that don't yet wire the modal).
+- `lib/protocol.ts::SidecarV1` + `SidecarResponse` — wire-shape
+  mirrors of webctl `sidecar.Sidecar.to_dict()` and the
+  `GET /api/maps/{name}/sidecar` response. `MapEditCoordBody`
+  extended with optional `picked_world_x_m` / `picked_world_y_m`.
+- `tests/unit/originPicker.test.ts` rewritten for issue#30 — 13
+  cases pinning placeholder text, click-no-prefill, getDirtyBody
+  wire shape, Apply enable when picked-world set, NaN/comma/bound
+  guards, two-click yaw pick, Discard clears all state.
+- `tests/unit/LineageModal.test.ts` — new file, 6 cases pinning
+  the three lineage kinds + null-sidecar empty state + close
+  behavior.
+- `tests/unit/originMath.test.ts::"hand-computed reference values
+  across yaw sweep [N-B3]"` — replaced the round-1 smoke-only
+  parity test with hand-computed reference values for yaw ∈ {0,
+  0.5, 1.604, π/2, π, -π/3}.
+
+### Changed
+
+- `lib/protocol.ts::MapEditCoordBody` carries the new
+  `picked_world_x_m` / `picked_world_y_m` fields. Wire-shape
+  comment block updated for the issue#30 semantic.
+- `components/OriginPicker.svelte::onApplyClick` (legacy path) emits
+  `OriginPatchBody` with `mode: 'absolute'` for back-compat with
+  `/api/map/origin` smoke tests; the issue#30 modal flow consumes
+  `getDirtyBody()` instead.
+
+### Invariants
+
+- **(w) origin-picker-delta-ux** — issue#30 Q2 lock. The
+  OriginPicker's input boxes hold a typed DELTA on top of the
+  canvas-clicked picked point. Empty / 0 placeholder = "no further
+  nudge". XY click on canvas does NOT pre-fill input boxes. The
+  `picked_world_*` value is captured into internal $state AND
+  surfaced via `getPickedWorld()` for tests + parent route
+  marker rendering. `getDirtyBody()` is the SOLE source of truth
+  for the wire shape sent to `/api/map/edit/coord`.
+
+- **(x) lineage-modal-sidecar-visualization** — issue#30. The
+  `<LineageModal>` is the SOLE component that renders sidecar
+  lineage. Triggered by `MapList`'s `!` button (Map page) and
+  receives a typed `SidecarV1 | null` plus the map name. The
+  three glyph categories (✓ operator_apply, ⚠ synthesized, ⓘ
+  auto_migrated_pre_issue30) carry stable Korean tooltips so
+  operators can disambiguate without reading code.
+
+- **(y) sidecar-fetch-wire-shape** — `GET /api/maps/{name}/sidecar`
+  returns `SidecarResponse = {name, sidecar: SidecarV1 | null}`
+  (mirror of webctl `app.py::map_sidecar_named` and
+  `sidecar.Sidecar.to_dict()`). The SPA must consume only this
+  typed wire shape — no ad-hoc string-keyed access.

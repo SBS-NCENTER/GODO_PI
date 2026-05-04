@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from http import HTTPStatus
@@ -63,9 +64,9 @@ from . import config_view as config_view_mod
 from . import logs as logs_mod
 from . import map_backup as map_backup_mod
 from . import map_edit as map_edit_mod
-from . import map_rotate as map_rotate_mod
 from . import map_image as map_image_mod
 from . import map_origin as map_origin_mod
+from . import map_transform as map_transform_mod
 from . import mapping as mapping_mod
 from . import mapping_sse as mapping_sse_mod
 from . import maps as maps_mod
@@ -74,6 +75,7 @@ from . import resources as resources_mod
 from . import resources_extended as resources_extended_mod
 from . import restart_pending as restart_pending_mod
 from . import services as services_mod
+from . import sidecar as sidecar_mod
 from . import sse as sse_mod
 from . import system_services as system_services_mod
 from . import uds_client as uds_mod
@@ -261,18 +263,31 @@ class OriginPatchBody(BaseModel):
 
 
 class MapEditCoordBody(BaseModel):
-    """`POST /api/map/edit/coord` body (issue#28).
+    """`POST /api/map/edit/coord` body.
 
-    SUBTRACT semantics for `x_m`, `y_m` (operator names the world coord
-    that should become the new (0, 0)) and `theta_deg` (operator names
-    the rotation of the new world frame relative to the old). All
-    optional fields default such that omitting them is a no-op.
+    issue#30 wire shape — pick-anchored + delta-on-top semantics:
+    - `x_m` / `y_m`: operator's typed delta (world-frame meters, in the
+      active-at-pick frame). Empty / 0 = "no further nudge". These are
+      `delta_translate_x_m` / `delta_translate_y_m` in `sidecar.ThisStep`.
+    - `theta_deg`: operator's typed rotation delta (degrees, optional).
+    - `picked_world_x_m` / `picked_world_y_m`: the world-frame coord of
+      the operator's canvas click at time of click. The click defines
+      the new origin baseline (= world (0, 0)) before the typed delta
+      is applied on top. When omitted we treat the body as legacy
+      pre-issue#30 (round-1 wire shape) and set
+      `picked_world_* = x_m / y_m` — round-trip equivalent to the
+      pre-issue#30 collapse, so a stale SPA bundle does not silently
+      regress; the response carries the
+      `X-GODO-Deprecation: picked_world_missing` header so HIL can
+      spot regressions immediately.
     """
 
     x_m: float = Field(...)
     y_m: float = Field(...)
     theta_deg: float | None = Field(default=None)
     memo: str = Field(min_length=1, max_length=32)
+    picked_world_x_m: float | None = Field(default=None)
+    picked_world_y_m: float | None = Field(default=None)
 
 
 class MappingStartBody(BaseModel):
@@ -671,6 +686,8 @@ async def _apply_map_edit_pipeline(
     y_m: float,
     theta_deg: float | None,
     mask_bytes: bytes | None,
+    picked_world_x_m: float | None = None,
+    picked_world_y_m: float | None = None,
 ) -> JSONResponse:
     import secrets as _secrets
 
@@ -684,7 +701,7 @@ async def _apply_map_edit_pipeline(
                 map_edit_pipeline_lock.acquire(),
                 timeout=MAP_EDIT_PIPELINE_LOCK_TIMEOUT_S,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return JSONResponse(
                 {"ok": False, "err": "pipeline_busy"},
                 status_code=HTTPStatus.CONFLICT,
@@ -759,57 +776,140 @@ async def _apply_map_edit_pipeline(
                 {"phase": "yaml_rewrite", "progress": 0.2, "request_id": request_id},
             )
 
-            # 3. Read pristine YAML, compose post-SUBTRACT YAML in memory.
-            # HIL fix 2026-05-04 KST: `theta_deg` is NOT passed through
-            # to the YAML SUBTRACT in the rotate pipeline. With Option B
-            # (bake-into-bitmap, operator-locked), the bitmap rotation
-            # IS the source of truth for yaw change; touching YAML yaw
-            # too would double-count and produce visibly mirrored
-            # rotation. Bitmap rotation in step 4 handles theta; YAML
-            # yaw stays at the pristine value (typically 0).
+            # 3. issue#30 — pick-anchored pipeline replaces SUBTRACT.
+            # Coord mode: read parent's sidecar (if active map is a
+            # derived) → compose cumulative_from_pristine via
+            # sidecar.compose_cumulative → invoke
+            # map_transform.transform_pristine_to_derived which handles
+            # the YAML rewrite + C3-triple atomic write internally.
+            # Erase mode: no origin change; reuse the pristine YAML
+            # bytes byte-identically.
             pristine_yaml_text = await asyncio.to_thread(pristine_yaml.read_text, "utf-8")
-            try:
-                if mode == "coord":
-                    new_yaml_text, edit_result = await asyncio.to_thread(
-                        map_origin_mod.apply_origin_edit_in_memory,
-                        pristine_yaml_text,
-                        x_m,
-                        y_m,
-                        "absolute",
-                        None,  # theta NOT applied to YAML — see comment above
-                    )
-                else:
-                    # Erase: no origin change; YAML stays byte-identical.
-                    new_yaml_text = pristine_yaml_text
-                    edit_result = None
-            except map_origin_mod.OriginEditError as e:
-                await sse_mod.publish_map_edit_progress(
-                    {
-                        "phase": "rejected",
-                        "progress": 1.0,
-                        "request_id": request_id,
-                        "reason": "origin_edit_failed",
-                    },
-                )
-                return _map_origin_exc_to_response(e)
+            edit_result = None
+            new_yaml_text = pristine_yaml_text  # default — erase mode
 
-            # 4. Branch — coord runs map_rotate; erase runs map_edit.
+            # 4. Branch — coord runs map_transform (issue#30); erase runs map_edit.
             if mode == "coord":
                 await sse_mod.publish_map_edit_progress(
                     {"phase": "rotate", "progress": 0.5, "request_id": request_id},
                 )
-                rotate_yaw = theta_deg if theta_deg is not None else 0.0
+
+                # 4a. Read parent's sidecar to compose cumulative.
+                # active_name may equal pristine_base when active is the
+                # pristine itself (PICK#1) — parent_cumulative defaults
+                # to identity in that case.
+                parent_cumulative = sidecar_mod.Cumulative(0.0, 0.0, 0.0)
+                parent_lineage: list[str] = []
+                active_sidecar_path = sidecar_mod.sidecar_path_for(cfg.maps_dir, active_name)
+                if active_name != pristine_base and active_sidecar_path.is_file():
+                    try:
+                        parent_sc = await asyncio.to_thread(
+                            sidecar_mod.read, active_sidecar_path,
+                        )
+                        # Verify integrity if the active is a derived
+                        # — operator hand-edit between PICKs surfaces
+                        # as 422 sidecar_sha_mismatch.
+                        active_pgm_path = maps_mod.pgm_for(cfg.maps_dir, active_name)
+                        active_yaml_path = maps_mod.yaml_for(cfg.maps_dir, active_name)
+                        ok = await asyncio.to_thread(
+                            sidecar_mod.verify_integrity,
+                            parent_sc,
+                            active_pgm_path,
+                            active_yaml_path,
+                        )
+                        if not ok:
+                            return JSONResponse(
+                                {
+                                    "ok": False,
+                                    "err": "sidecar_sha_mismatch",
+                                    "detail": (
+                                        "Map files were modified outside the "
+                                        "Apply pipeline. Treating active map as "
+                                        "a new pristine baseline."
+                                    ),
+                                },
+                                status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+                            )
+                        parent_cumulative = parent_sc.cumulative_from_pristine
+                        parent_lineage = list(parent_sc.lineage_parents) + [active_name]
+                    except sidecar_mod.SidecarError as e:
+                        logger.warning(
+                            "map_edit.sidecar_read_failed: %s — proceeding with identity",
+                            e,
+                        )
+                # NOTE [MI-B1]: a missing sidecar for an active derived
+                # is impossible at this point — the startup recovery_sweep
+                # synthesized one (auto_migrated_pre_issue30 for PR #81-era
+                # files). The opportunistic in-list sweep is belt-and-braces.
+                # The pre-round-2 slow-path fallback (`parent_lineage =
+                # [active_name]` when active is a derived without sidecar)
+                # was removed because the startup invariant guarantees a
+                # sidecar exists on disk before any Apply runs.
+
+                # 4b. Compose this Apply's typed step + cumulative.
+                # Per Q2 + C-2.1 lock: SPA sends typed delta in
+                # `x_m`/`y_m`/`theta_deg` AND the canvas-clicked world
+                # coord in `picked_world_x_m`/`picked_world_y_m`. A
+                # legacy SPA bundle (pre-issue#30) omits the picked
+                # fields → treat as `picked_world = typed_delta`
+                # (round-1 collapse, equivalent to pristine pivot) and
+                # surface `X-GODO-Deprecation: picked_world_missing` on
+                # the response so HIL spots stale-bundle regressions.
+                effective_picked_x = (
+                    picked_world_x_m if picked_world_x_m is not None else x_m
+                )
+                effective_picked_y = (
+                    picked_world_y_m if picked_world_y_m is not None else y_m
+                )
+                this_step_local = sidecar_mod.ThisStep(
+                    delta_translate_x_m=x_m,
+                    delta_translate_y_m=y_m,
+                    delta_rotate_deg=theta_deg if theta_deg is not None else 0.0,
+                    picked_world_x_m=effective_picked_x,
+                    picked_world_y_m=effective_picked_y,
+                )
+                cumulative = await asyncio.to_thread(
+                    sidecar_mod.compose_cumulative,
+                    sidecar_mod.Cumulative(
+                        parent_cumulative.translate_x_m,
+                        parent_cumulative.translate_y_m,
+                        parent_cumulative.rotate_deg,
+                    ),
+                    this_step_local,
+                )
+
+                # 4c. Convert sidecar.Cumulative → map_transform.Cumulative.
+                mt_cumulative = map_transform_mod.Cumulative(
+                    translate_x_m=cumulative.translate_x_m,
+                    translate_y_m=cumulative.translate_y_m,
+                    rotate_deg=cumulative.rotate_deg,
+                )
+                mt_this_step = map_transform_mod.ThisStep(
+                    delta_translate_x_m=this_step_local.delta_translate_x_m,
+                    delta_translate_y_m=this_step_local.delta_translate_y_m,
+                    delta_rotate_deg=this_step_local.delta_rotate_deg,
+                    picked_world_x_m=this_step_local.picked_world_x_m,
+                    picked_world_y_m=this_step_local.picked_world_y_m,
+                )
+                derived_sidecar_path = sidecar_mod.sidecar_path_for(
+                    cfg.maps_dir, derived_name,
+                )
+
                 try:
                     rot = await asyncio.to_thread(
-                        map_rotate_mod.rotate_pristine_to_derived,
+                        map_transform_mod.transform_pristine_to_derived,
                         pristine_pgm,
                         pristine_yaml,
                         derived_pgm,
                         derived_yaml,
-                        new_yaml_text,
-                        rotate_yaw,
+                        derived_sidecar_path,
+                        mt_cumulative,
+                        mt_this_step,
+                        parent_lineage,
+                        memo=memo,
+                        reason="operator_apply",
                     )
-                except map_rotate_mod.CanvasTooLarge as e:
+                except map_transform_mod.CanvasTooLarge as e:
                     await sse_mod.publish_map_edit_progress(
                         {
                             "phase": "rejected",
@@ -822,7 +922,7 @@ async def _apply_map_edit_pipeline(
                         {"ok": False, "err": "canvas_too_large", "detail": str(e)},
                         status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
                     )
-                except map_rotate_mod.PristineMissing:
+                except map_transform_mod.PristineMissing:
                     await sse_mod.publish_map_edit_progress(
                         {
                             "phase": "rejected",
@@ -835,13 +935,13 @@ async def _apply_map_edit_pipeline(
                         {"ok": False, "err": "pristine_missing"},
                         status_code=HTTPStatus.SERVICE_UNAVAILABLE,
                     )
-                except map_rotate_mod.RotateError as e:
+                except map_transform_mod.RotateError as e:
                     await sse_mod.publish_map_edit_progress(
                         {
                             "phase": "rejected",
                             "progress": 1.0,
                             "request_id": request_id,
-                            "reason": "rotate_failed",
+                            "reason": "transform_failed",
                         },
                     )
                     return JSONResponse(
@@ -849,6 +949,29 @@ async def _apply_map_edit_pipeline(
                         status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
                     )
                 pixels_changed = rot.new_width_px * rot.new_height_px
+                # Compose an OriginEditResult-like tuple for the
+                # response body (prev/new origin display). prev_origin
+                # comes from the pristine YAML; new_origin from the
+                # transform result.
+                pristine_origin = (
+                    map_origin_mod._find_unique_origin_line(
+                        pristine_yaml_text.splitlines(keepends=True),
+                    )[1]
+                )
+                edit_result = map_origin_mod.OriginEditResult(
+                    prev_origin=(
+                        float(pristine_origin.group(4)),
+                        float(pristine_origin.group(6)),
+                        float(pristine_origin.group(8)),
+                    ),
+                    new_origin=(
+                        rot.new_yaml_origin_xy_yaw[0],
+                        rot.new_yaml_origin_xy_yaw[1],
+                        # YAML stores yaw in radians; new_yaml_origin
+                        # carries deg=0 → convert.
+                        math.radians(rot.new_yaml_origin_xy_yaw[2]),
+                    ),
+                )
             else:
                 # Erase mode: write derived PGM via map_edit on a copy
                 # of the pristine PGM bytes, then write derived YAML.
@@ -932,7 +1055,20 @@ async def _apply_map_edit_pipeline(
             if edit_result is not None:
                 response_body["prev_origin"] = list(edit_result.prev_origin)
                 response_body["new_origin"] = list(edit_result.new_origin)
-            return JSONResponse(response_body, status_code=HTTPStatus.OK)
+            response_headers: dict[str, str] = {}
+            if (
+                mode == "coord"
+                and (picked_world_x_m is None or picked_world_y_m is None)
+            ):
+                # issue#30 wire-shape deprecation — legacy SPA bundle
+                # omitted picked_world_*. Surface so HIL operators can
+                # spot stale-bundle regressions.
+                response_headers["X-GODO-Deprecation"] = "picked_world_missing"
+            return JSONResponse(
+                response_body,
+                status_code=HTTPStatus.OK,
+                headers=response_headers,
+            )
         finally:
             map_edit_pipeline_lock.release()
     except Exception as e:  # noqa: BLE001 — defence-in-depth around the pipeline
@@ -1002,6 +1138,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             spa_label,
         )
         _run_legacy_migration()
+        # issue#30 [MI-B1] — startup-time sidecar recovery sweep so
+        # PR #81-era derived maps are auto-migrated to lineage-bearing
+        # sidecars BEFORE the first list_maps call. The opportunistic
+        # in-list sweep is now belt-and-braces; the startup sweep is
+        # the load-bearing invariant.
+        try:
+            sidecar_mod.recovery_sweep(cfg.maps_dir)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("startup.recovery_sweep_failed: %s", e)
         # Per Q-OQ-E4: warn EVERY boot until GODO_WEBCTL_MAP_PATH is
         # unset. Operators read journals selectively; one-shot warnings
         # are easy to miss.
@@ -1582,6 +1727,43 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 {"ok": False, "err": ERR_ORIGIN_BAD_VALUE, "detail": "non_finite_theta"},
                 status_code=HTTPStatus.BAD_REQUEST,
             )
+        # issue#30 wire-shape — picked_world_* are optional but if
+        # provided must be finite. Bound check is identical to x/y
+        # (operator's click is a world coord in the same active frame).
+        if body.picked_world_x_m is not None and not _math.isfinite(body.picked_world_x_m):
+            return JSONResponse(
+                {"ok": False, "err": ERR_ORIGIN_BAD_VALUE, "detail": "non_finite_picked_x"},
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+        if body.picked_world_y_m is not None and not _math.isfinite(body.picked_world_y_m):
+            return JSONResponse(
+                {"ok": False, "err": ERR_ORIGIN_BAD_VALUE, "detail": "non_finite_picked_y"},
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+        if (
+            body.picked_world_x_m is not None
+            and abs(body.picked_world_x_m) > ORIGIN_X_Y_ABS_MAX_M
+        ):
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "err": ERR_ORIGIN_BAD_VALUE,
+                    "detail": "picked_x_abs_value_exceeds_bound",
+                },
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+        if (
+            body.picked_world_y_m is not None
+            and abs(body.picked_world_y_m) > ORIGIN_X_Y_ABS_MAX_M
+        ):
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "err": ERR_ORIGIN_BAD_VALUE,
+                    "detail": "picked_y_abs_value_exceeds_bound",
+                },
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
 
         return await _apply_map_edit_pipeline(
             cfg=cfg,
@@ -1595,6 +1777,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             y_m=body.y_m,
             theta_deg=body.theta_deg,
             mask_bytes=None,
+            picked_world_x_m=body.picked_world_x_m,
+            picked_world_y_m=body.picked_world_y_m,
         )
 
     @app.post("/api/map/edit/erase")
@@ -1962,7 +2146,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             # Opportunistic stale-tmp sweep on every list (cheap;
             # Mode-A C3 pin "test_orphan_tmp_swept_on_list").
-            await asyncio.to_thread(map_rotate_mod.sweep_stale_tmp, cfg.maps_dir)
+            await asyncio.to_thread(map_transform_mod.sweep_stale_tmp, cfg.maps_dir)
+            # issue#30 — also run sidecar recovery sweep so PR #81-era
+            # derived maps get auto-migrated lineage on first list.
+            await asyncio.to_thread(sidecar_mod.recovery_sweep, cfg.maps_dir)
             entries = await asyncio.to_thread(maps_mod.list_pairs, cfg.maps_dir)
             groups = await asyncio.to_thread(maps_mod.list_pairs_grouped, cfg.maps_dir)
         except maps_mod.MapsDirMissing as e:
@@ -2007,6 +2194,41 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except OSError:
             return _map_maps_exc_to_response(maps_mod.MapNotFound(name))
         return Response(content=text, media_type=_YAML_MEDIA_TYPE)
+
+    @app.get("/api/maps/{name}/sidecar")
+    async def map_sidecar_named(name: str) -> JSONResponse:
+        """issue#30 — return the `godo.map.sidecar.v1` JSON for a derived
+        map. 404 when the map pair is absent; 200 with `{"sidecar": null}`
+        when the pair exists but no sidecar is on disk yet (legacy /
+        pristine map)."""
+        try:
+            maps_mod.validate_name(name)
+        except maps_mod.InvalidName as e:
+            return _map_maps_exc_to_response(e)
+        if not maps_mod.is_pair_present(cfg.maps_dir, name):
+            return _map_maps_exc_to_response(maps_mod.MapNotFound(name))
+        sidecar_path = sidecar_mod.sidecar_path_for(cfg.maps_dir, name)
+        if not sidecar_path.is_file():
+            return JSONResponse(
+                {"sidecar": None, "name": name},
+                status_code=HTTPStatus.OK,
+            )
+        try:
+            sc = await asyncio.to_thread(sidecar_mod.read, sidecar_path)
+        except sidecar_mod.SidecarMissing:
+            return JSONResponse(
+                {"sidecar": None, "name": name},
+                status_code=HTTPStatus.OK,
+            )
+        except sidecar_mod.SidecarSchemaMismatch as e:
+            return JSONResponse(
+                {"ok": False, "err": "sidecar_schema_mismatch", "detail": str(e)},
+                status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+            )
+        return JSONResponse(
+            {"sidecar": sc.to_dict(), "name": name},
+            status_code=HTTPStatus.OK,
+        )
 
     @app.get("/api/maps/{name}/dimensions")
     async def map_dimensions_named(name: str) -> JSONResponse:

@@ -2,8 +2,8 @@
 Atomic ``.pgm + .yaml`` map backup.
 
 Two-phase rename for crash-safety:
-  1. ``shutil.copy2`` both files into ``<backup_dir>/<UTC ts>.tmp/``.
-  2. ``os.rename`` to ``<backup_dir>/<UTC ts>/`` (atomic on the same FS).
+  1. ``shutil.copy2`` both files into ``<backup_dir>/<KST ts>.tmp/``.
+  2. ``os.rename`` to ``<backup_dir>/<KST ts>/`` (atomic on the same FS).
 
 Same-FS guarantee: ``<ts>.tmp/`` and ``<ts>/`` are both children of
 ``backup_dir``, so ``os.rename`` is always atomic by construction.
@@ -11,7 +11,7 @@ Same-FS guarantee: ``<ts>.tmp/`` and ``<ts>/`` are both children of
 Concurrency invariant: ``backup_map`` is single-writer at runtime
 (uvicorn ``workers=1`` + handler single-await). Concurrent invocation is
 undefined; collision retry exists only for back-to-back calls in the
-same UTC second by a SINGLE writer.
+same KST second by a SINGLE writer.
 
 The ``.yaml`` path is derived from the ``.pgm`` path via the same rule the
 tracker uses (``occupancy_grid.cpp::yaml_path_for`` at L253-258): strip
@@ -26,7 +26,7 @@ import errno
 import fcntl
 import os
 import shutil
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 
 from .constants import BACKUP_LOCK_FILENAME, MAX_RENAME_ATTEMPTS
@@ -52,7 +52,7 @@ def backup_map(
 ) -> Path:
     """
     Copy ``map_path`` (the ``.pgm``) and its sibling ``.yaml`` into
-    ``backup_dir/<UTC ts>/``. Returns the final directory path on success.
+    ``backup_dir/<KST ts>/``. Returns the final directory path on success.
 
     Raises ``BackupError`` with one of:
       - ``map_path_not_found``       — either source file is missing
@@ -93,8 +93,13 @@ def backup_map(
             raise BackupError("concurrent_backup_in_progress") from e
 
         if now is None:
-            now = datetime.now(UTC)
-        stamp = now.strftime("%Y%m%dT%H%M%SZ")
+            from .timestamps import now_kst
+
+            now = now_kst()
+        # KST convention (host-local, no offset suffix). Existing UTC-suffixed
+        # backup directories from before the convention switch (`...Z`) remain
+        # readable via `map_backup._TS_REGEX` which accepts both forms.
+        stamp = now.strftime("%Y%m%dT%H%M%S")
         base = backup_dir / stamp
         tmp_dir = backup_dir / f"{stamp}.tmp"
 

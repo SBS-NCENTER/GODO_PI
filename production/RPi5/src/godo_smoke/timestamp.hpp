@@ -13,12 +13,16 @@ namespace godo::smoke {
 // Nanoseconds since an unspecified monotonic epoch. Never decreases.
 std::int64_t monotonic_ns();
 
-// UTC timestamp formatted as "YYYYMMDDThhmmssZ" (no punctuation).
-// Used to build output filenames: `<ts>_<tag>.csv` / `<ts>_<tag>.txt`.
+// KST timestamp formatted as "YYYYMMDDThhmmss" (no punctuation, no
+// offset suffix — host-KST convention). Used to build output filenames:
+// `<ts>_<tag>.csv` / `<ts>_<tag>.txt`. Function name retained for ABI
+// stability; payload is KST per project convention (see
+// `.claude/memory/feedback_timestamp_kst_convention.md`).
 std::string utc_timestamp_compact();
 
-// UTC timestamp formatted per ISO-8601, second precision, e.g.
-// "2026-04-23T15:04:05+00:00". Used inside the session log header.
+// KST timestamp formatted per ISO-8601, second precision with explicit
+// offset, e.g. "2026-04-23T15:04:05+09:00". Used inside the session log
+// header. Function name retained for ABI stability.
 std::string utc_timestamp_iso();
 
 }  // namespace godo::smoke

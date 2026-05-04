@@ -79,13 +79,14 @@ def touch(flag_path: Path) -> None:
     fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _FLAG_FILE_MODE)
     try:
         try:
-            # Body is informational. Mirror of the tracker's payload
-            # shape ("ISO-8601 UTC + LF") so an operator who `cat`s the
+            # Body is informational. ISO 8601 with explicit KST offset
+            # (`2026-05-04T17:15:30+09:00`) so an operator who `cat`s the
             # file sees a meaningful stamp regardless of which writer
-            # touched it last.
-            from datetime import UTC, datetime
+            # touched it last. KST convention — see
+            # `.claude/memory/feedback_timestamp_kst_convention.md`.
+            from .timestamps import kst_iso_seconds
 
-            stamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ\n")
+            stamp = kst_iso_seconds() + "\n"
             with os.fdopen(fd, "wb", closefd=True) as f:
                 f.write(stamp.encode("ascii"))
                 f.flush()

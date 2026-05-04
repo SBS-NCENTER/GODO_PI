@@ -760,6 +760,13 @@ async def _apply_map_edit_pipeline(
             )
 
             # 3. Read pristine YAML, compose post-SUBTRACT YAML in memory.
+            # HIL fix 2026-05-04 KST: `theta_deg` is NOT passed through
+            # to the YAML SUBTRACT in the rotate pipeline. With Option B
+            # (bake-into-bitmap, operator-locked), the bitmap rotation
+            # IS the source of truth for yaw change; touching YAML yaw
+            # too would double-count and produce visibly mirrored
+            # rotation. Bitmap rotation in step 4 handles theta; YAML
+            # yaw stays at the pristine value (typically 0).
             pristine_yaml_text = await asyncio.to_thread(pristine_yaml.read_text, "utf-8")
             try:
                 if mode == "coord":
@@ -769,7 +776,7 @@ async def _apply_map_edit_pipeline(
                         x_m,
                         y_m,
                         "absolute",
-                        theta_deg,
+                        None,  # theta NOT applied to YAML — see comment above
                     )
                 else:
                     # Erase: no origin change; YAML stays byte-identical.

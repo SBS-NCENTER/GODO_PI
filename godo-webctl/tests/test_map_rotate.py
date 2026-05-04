@@ -129,6 +129,53 @@ def test_auto_canvas_expand_45deg(tmp_path: Path) -> None:
     assert 138 <= res.new_height_px <= 144
 
 
+def test_rotation_direction_negates_typed_yaw(tmp_path: Path) -> None:
+    """HIL fix 2026-05-04 KST — pin the rotation sign convention.
+
+    Operator's typed +θ means "the world frame rotates +θ CCW" so that
+    the picked direction at +θ becomes the new +x. Bitmap content
+    therefore moves -θ relative to the source (visually CW under PIL's
+    image-frame Y-down).
+
+    To pin this without depending on Pillow's anti-aliasing, we make
+    a pristine PGM with a single dark cell off-center, rotate by 90°
+    typed, and assert the cell ends up where -90° (i.e. CW 90°) would
+    place it — NOT where +90° (CCW) would.
+    """
+    pristine_pgm = tmp_path / "pristine.pgm"
+    pristine_yaml = tmp_path / "pristine.yaml"
+    # 21×21 odd size → integer center at (10, 10). Place a 0 at (10, 4)
+    # — straight ABOVE the center (visually). After CW 90° (= img.rotate(-90)),
+    # the cell should land RIGHT of center: roughly (16, 10).
+    width = height = 21
+    body = bytearray([254] * (width * height))
+    body[4 * width + 10] = 0  # row 4, col 10 — top-center
+    pristine_pgm.write_bytes(f"P5\n{width} {height}\n255\n".encode("ascii") + bytes(body))
+    pristine_yaml.write_text(_VALID_YAML)
+    derived_pgm = tmp_path / "pristine.20260504-120099-rotpin.pgm"
+    MR.rotate_pristine_to_derived(
+        pristine_pgm,
+        pristine_yaml,
+        derived_pgm,
+        tmp_path / "pristine.20260504-120099-rotpin.yaml",
+        _VALID_YAML,
+        typed_yaw_deg=90.0,
+    )
+    out = Image.open(derived_pgm)
+    assert out.size == (21, 21), out.size
+    px = out.load()
+    # The dark cell must be RIGHT of center (col > 10), confirming CW
+    # visual rotation. Allow ±1 for Pillow's BICUBIC anti-aliasing.
+    dark_cells = [(c, r) for r in range(21) for c in range(21) if px[c, r] < 128]
+    assert dark_cells, "expected at least one dark cell to survive re-quantise"
+    avg_col = sum(c for c, _ in dark_cells) / len(dark_cells)
+    avg_row = sum(r for _, r in dark_cells) / len(dark_cells)
+    # CW 90°: top-center (10, 4) → right-center (16, 10).
+    # Reverse (CCW, the bug) would give left-center (4, 10).
+    assert avg_col > 13, f"expected dark cells RIGHT of center; got avg_col={avg_col:.1f}"
+    assert 8 <= avg_row <= 12, f"row should stay near center; got avg_row={avg_row:.1f}"
+
+
 def test_max_canvas_rejects_oversized(tmp_path: Path) -> None:
     """4096-px cap: a 3000-px map at 45° produces ~4242 px which is
     above the cap and must raise `CanvasTooLarge`."""

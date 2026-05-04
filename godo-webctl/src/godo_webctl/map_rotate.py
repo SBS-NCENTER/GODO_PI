@@ -213,8 +213,15 @@ def rotate_pristine_to_derived(
     # outside the source bbox are "unknown" — not "free", which would
     # invent passable cells the operator never saw, and not "occupied",
     # which would brick the AMCL likelihood field with phantom walls.
+    # HIL fix 2026-05-04 KST: pass `-typed_yaw_deg` per the module
+    # docstring intent. Operator's typed +θ means "rotate the world
+    # frame by +θ"; equivalently, the bitmap content rotates by -θ
+    # relative to the source so that a wall at +θ in pristine ends up
+    # at 0° (the new +x) in derived. Pillow's positive `angle` parameter
+    # rotates content visually CCW; we want CW so the picked direction
+    # becomes horizontal — hence the negation.
     rotated = img.rotate(
-        typed_yaw_deg,
+        -typed_yaw_deg,
         resample=resample,
         expand=True,
         fillcolor=MAP_ROTATE_THRESH_UNK,

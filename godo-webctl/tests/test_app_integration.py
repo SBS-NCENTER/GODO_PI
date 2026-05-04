@@ -4708,6 +4708,49 @@ async def test_post_map_edit_coord_full_pipeline(
     }
 
 
+async def test_post_map_edit_coord_with_theta_does_not_double_count(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    tmp_maps_dir: Path,
+) -> None:
+    """HIL fix 2026-05-04 KST — Option B (bake-into-bitmap) means the
+    bitmap rotation is the SOURCE OF TRUTH for yaw change; YAML yaw
+    must NOT also be SUBTRACT'd or the operator sees mirrored
+    rotation. This pin asserts the derived YAML's origin[2] equals the
+    pristine's origin[2] verbatim when theta_deg is non-zero."""
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        maps_dir=tmp_maps_dir,
+    )
+    pristine_yaml_path = tmp_maps_dir / "studio_v1.yaml"
+    pristine_yaml_text = pristine_yaml_path.read_text("utf-8")
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post(
+            "/api/map/edit/coord",
+            json={"x_m": 0.0, "y_m": 0.0, "theta_deg": 30.0, "memo": "rot30"},
+            headers=_auth(token),
+        )
+    assert r.status_code == HTTPStatus.OK, r.text
+    derived_name = r.json()["derived_name"]
+    derived_yaml_text = (tmp_maps_dir / f"{derived_name}.yaml").read_text("utf-8")
+    # Extract `origin: [...]` lines from both files. The third element
+    # (theta) must match — bitmap rotation handled the yaw change.
+    import re
+
+    def get_origin_third(text: str) -> str:
+        m = re.search(r"^origin:\s*\[([^\]]*)\]", text, re.MULTILINE)
+        assert m is not None
+        parts = [p.strip() for p in m.group(1).split(",")]
+        return parts[2]
+
+    assert get_origin_third(pristine_yaml_text) == get_origin_third(derived_yaml_text), (
+        "derived YAML origin[2] must equal pristine origin[2] in Option B"
+    )
+
+
 async def test_post_map_edit_coord_invalid_memo_422(
     tmp_path: Path,
     tmp_map_pair: Path,

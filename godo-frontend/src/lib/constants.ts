@@ -386,6 +386,15 @@ export const GRID_INTERVAL_SCHEDULE: readonly GridIntervalEntry[] = [
 ];
 export const GRID_LINE_COLOR = 'rgba(120, 120, 120, 0.25)';
 export const GRID_OPACITY = 0.25;
+
+// HIL fix 2026-05-04 KST — orange preview marker for picked XY
+// (filled dot) and picked yaw vector (arrow from P1 to P2). Stays
+// visible until Apply or Discard so the operator can verify what
+// they picked before committing.
+export const PICK_PREVIEW_COLOR = '#f97316'; // orange-500
+export const PICK_PREVIEW_DOT_RADIUS_PX = 6;
+export const PICK_PREVIEW_LINE_WIDTH_PX = 2;
+export const PICK_PREVIEW_ARROW_HEAD_PX = 10;
 // Hard ceiling on grid lines per frame to avoid tab-freeze at extreme
 // zoom (M risk row "Grid overlay perf at 0.1 m intervals on max zoom").
 export const GRID_MAX_LINES_PER_AXIS = 200;

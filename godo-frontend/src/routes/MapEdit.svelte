@@ -19,11 +19,9 @@
 
   import ApplyMemoModal from '$components/ApplyMemoModal.svelte';
   import EditModeSwitcher from '$components/EditModeSwitcher.svelte';
-  import GridOverlay from '$components/GridOverlay.svelte';
   import MapMaskCanvas from '$components/MapMaskCanvas.svelte';
   import MapUnderlay from '$components/MapUnderlay.svelte';
   import MapZoomControls from '$components/MapZoomControls.svelte';
-  import OriginAxisOverlay from '$components/OriginAxisOverlay.svelte';
   import OriginPicker from '$components/OriginPicker.svelte';
   import OverlayToggleRow from '$components/OverlayToggleRow.svelte';
   import RestartPendingBanner from '$components/RestartPendingBanner.svelte';
@@ -44,6 +42,7 @@
   import { createMapViewport } from '$lib/mapViewport.svelte';
   import { pixelToWorld } from '$lib/originMath';
   import { drawPose } from '$lib/poseDraw';
+  import { drawGrid, drawOriginAxis, drawPickPreview } from '$lib/overlayDraw';
   import type {
     LastPose,
     LastScan,
@@ -113,6 +112,10 @@
   let sessionRequestId = $state<string | null>(null);
   // Resolution + origin captured from mapMetadata for the GUI-pick math.
   let resolution = $state<number | null>(null);
+  // Full mapMetadata mirror — needed by the viewport's worldToCanvas /
+  // canvasToWorld so the overlay-draw helpers project through the
+  // SAME transform the underlay uses.
+  let mapMeta = $state<import('$lib/protocol').MapMetadata | null>(null);
   let currentOrigin = $state<readonly [number, number, number] | null>(null);
   let mapDims = $state<MapDimensions | null>(null);
 
@@ -137,6 +140,7 @@
         mapDims = { width: m.width, height: m.height };
         currentOrigin = m.origin;
         resolution = m.resolution;
+        mapMeta = m;
       }
     });
     unsubScan = subscribeLastScan((s) => (scan = s));
@@ -166,6 +170,20 @@
 
   // --- Coord mode --------------------------------------------------------
 
+  // HIL fix 2026-05-04 KST — orange preview state. Operator's picked
+  // XY (single click) and yaw P1→P2 (two clicks) render as orange
+  // markers via `drawPickPreview` in the underlay's ondraw, so the
+  // operator can verify what they picked before Apply.
+  let xyPreview = $state<{ x: number; y: number } | null>(null);
+  let yawP1Preview = $state<{ x: number; y: number } | null>(null);
+  let yawP2Preview = $state<{ x: number; y: number } | null>(null);
+
+  function clearPickPreviews(): void {
+    xyPreview = null;
+    yawP1Preview = null;
+    yawP2Preview = null;
+  }
+
   function onCanvasCoordPick(lx: number, ly: number): void {
     if (mode !== EDIT_MODE_COORD) return;
     if (coordClickMode === 'off') return;
@@ -173,8 +191,19 @@
     const w = pixelToWorld(lx, ly, dims, resolution, currentOrigin);
     if (coordClickMode === 'xy') {
       originPickerRef?.setCandidate({ x_m: w.world_x, y_m: w.world_y });
+      xyPreview = { x: w.world_x, y: w.world_y };
     } else if (coordClickMode === 'yaw') {
       originPickerRef?.setYawClick({ x_m: w.world_x, y_m: w.world_y });
+      // First yaw click sets P1; second resolves the angle and clears
+      // the OriginPicker's internal yawP1. We mirror by tracking BOTH
+      // preview points: P1 stays visible (with arrow once P2 lands)
+      // until clearPickPreviews() runs on Apply / Discard.
+      if (yawP1Preview === null) {
+        yawP1Preview = { x: w.world_x, y: w.world_y };
+        yawP2Preview = null;
+      } else {
+        yawP2Preview = { x: w.world_x, y: w.world_y };
+      }
     }
   }
 
@@ -260,6 +289,7 @@
       );
       void refreshRestartPending();
       originPickerRef.clearAll();
+      clearPickPreviews();
       modalOpen = false;
       modalScope = null;
       sessionRequestId = null;
@@ -278,6 +308,7 @@
   function onCoordDiscardClick(): void {
     if (coordBusy) return;
     originPickerRef?.clearAll();
+    clearPickPreviews();
     setCoordBanner(null, null);
   }
 
@@ -329,11 +360,10 @@
   // mapMetadata.origin[2] (radians on disk).
   let yamlYawDeg = $derived(currentOrigin === null ? 0 : currentOrigin[2] * (180 / Math.PI));
 
-  // Overlay canvases. Bound via `bind:this` and consumed by the
-  // <GridOverlay> / <OriginAxisOverlay> components which paint via
-  // `$effect`.
-  let axisCanvas: HTMLCanvasElement | null = $state(null);
-  let gridCanvas: HTMLCanvasElement | null = $state(null);
+  // Note: pre-issue#28 used standalone `<canvas bind:this=...>` mounts
+  // for axis/grid overlays. HIL fix 2026-05-04 KST replaced them with
+  // `drawOriginAxis` / `drawGrid` calls inside MapUnderlay's ondraw so
+  // the overlays inherit pan/zoom transforms automatically.
 </script>
 
 <div data-testid="map-edit-page">
@@ -464,7 +494,36 @@
         mapImageUrl="/api/map/image"
         {scan}
         scanOverlayOn={lidarOn}
-        ondraw={(ctx, w2c) => drawPose(ctx, w2c, pose)}
+        ondraw={(ctx, w2c) => {
+          // Pose first (background layer); then world-frame overlays
+          // (axis, grid) so the operator sees them above the bitmap;
+          // then orange pick previews on top of everything.
+          drawPose(ctx, w2c, pose);
+          if (gridOn && resolution !== null && resolution > 0) {
+            // World bounds = inverse-project the canvas corners.
+            const cw = ctx.canvas.width;
+            const ch = ctx.canvas.height;
+            const [w0x, w0y] = viewport.canvasToWorld(0, 0, cw, ch, mapMeta);
+            const [w1x, w1y] = viewport.canvasToWorld(cw, ch, cw, ch, mapMeta);
+            drawGrid(ctx, w2c, {
+              pxPerMeter: viewport.zoom / resolution,
+              worldMinX: Math.min(w0x, w1x),
+              worldMaxX: Math.max(w0x, w1x),
+              worldMinY: Math.min(w0y, w1y),
+              worldMaxY: Math.max(w0y, w1y),
+            });
+          }
+          if (originAxisOn) {
+            drawOriginAxis(ctx, w2c, { yawDeg: yamlYawDeg });
+          }
+          if (xyPreview || yawP1Preview || yawP2Preview) {
+            drawPickPreview(ctx, w2c, {
+              xy: xyPreview,
+              yawP1: yawP1Preview,
+              yawP2: yawP2Preview,
+            });
+          }
+        }}
       />
       <div class="mask-overlay">
         <MapMaskCanvas
@@ -481,41 +540,6 @@
           onhovermove={onCanvasHoverMove}
         />
       </div>
-      {#if originAxisOn && currentOrigin !== null && mapDims !== null}
-        <canvas
-          class="overlay-canvas"
-          width={mapDims.width}
-          height={mapDims.height}
-          data-testid="map-edit-axis-overlay"
-          bind:this={axisCanvas}
-        ></canvas>
-        <OriginAxisOverlay
-          canvas={axisCanvas ?? null}
-          zoomPxPerMeter={resolution !== null && resolution > 0 ? 1 / resolution : 1}
-          worldOriginX={currentOrigin[0]}
-          worldOriginY={currentOrigin[1]}
-          yamlOriginX={0}
-          yamlOriginY={0}
-          yamlOriginYawDeg={yamlYawDeg}
-        />
-      {/if}
-      {#if gridOn && currentOrigin !== null && mapDims !== null}
-        <canvas
-          class="overlay-canvas"
-          width={mapDims.width}
-          height={mapDims.height}
-          data-testid="map-edit-grid-overlay"
-          bind:this={gridCanvas}
-        ></canvas>
-        <GridOverlay
-          canvas={gridCanvas ?? null}
-          zoomPxPerMeter={resolution !== null && resolution > 0 ? 1 / resolution : 1}
-          worldOriginX={currentOrigin[0]}
-          worldOriginY={currentOrigin[1]}
-          worldWidthM={mapDims.width * (resolution ?? 0)}
-          worldHeightM={mapDims.height * (resolution ?? 0)}
-        />
-      {/if}
       <MapZoomControls {viewport} />
     </div>
   {/if}

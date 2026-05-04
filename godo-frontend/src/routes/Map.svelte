@@ -1,12 +1,10 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
   import ConfirmDialog from '$components/ConfirmDialog.svelte';
-  import GridOverlay from '$components/GridOverlay.svelte';
   import LastPoseCard from '$components/LastPoseCard.svelte';
   import MapList from '$components/MapList.svelte';
   import MapListPanel from '$components/MapListPanel.svelte';
   import MapZoomControls from '$components/MapZoomControls.svelte';
-  import OriginAxisOverlay from '$components/OriginAxisOverlay.svelte';
   import OverlayToggleRow from '$components/OverlayToggleRow.svelte';
   import PoseCanvas from '$components/PoseCanvas.svelte';
   import PoseHintLayer, { type HintPose } from '$components/PoseHintLayer.svelte';
@@ -136,8 +134,10 @@
   let mapResolution = $state<number | null>(null);
   let mapOrigin = $state<readonly [number, number, number] | null>(null);
   let unsubMeta: (() => void) | null = null;
-  let axisCanvas = $state<HTMLCanvasElement | null>(null);
-  let gridCanvas = $state<HTMLCanvasElement | null>(null);
+  // Note: pre-issue#28 used standalone overlay canvases here; HIL fix
+  // 2026-05-04 KST moved them into PoseCanvas's drawPoseLayer so they
+  // share the underlay's pan/zoom transform.
+
   let mappingActive = $derived(
     mappingStatus !== null &&
       (mappingStatus.state === MAPPING_STATE_STARTING ||
@@ -291,48 +291,23 @@
       <OverlayToggleRow />
     </div>
     <div class="canvas-stack">
-      <PoseCanvas {viewport} {pose} mapImageUrl={previewUrl} {scan} scanOverlayOn={scanOn} />
+      <PoseCanvas
+        {viewport}
+        {pose}
+        mapImageUrl={previewUrl}
+        {scan}
+        scanOverlayOn={scanOn}
+        {originAxisOn}
+        {gridOn}
+        mapMeta={$mapMetadata}
+        {yamlYawDeg}
+      />
       {#if poseHintEnabled}
         <PoseHintLayer
           {viewport}
           enabled={poseHintEnabled}
           {hint}
           onhintchange={onHintChange}
-        />
-      {/if}
-      {#if originAxisOn && mapOrigin !== null && mapDimsState !== null}
-        <canvas
-          class="overlay-canvas"
-          width={mapDimsState.width}
-          height={mapDimsState.height}
-          data-testid="map-axis-overlay"
-          bind:this={axisCanvas}
-        ></canvas>
-        <OriginAxisOverlay
-          canvas={axisCanvas}
-          zoomPxPerMeter={mapResolution !== null && mapResolution > 0 ? 1 / mapResolution : 1}
-          worldOriginX={mapOrigin[0]}
-          worldOriginY={mapOrigin[1]}
-          yamlOriginX={0}
-          yamlOriginY={0}
-          yamlOriginYawDeg={yamlYawDeg}
-        />
-      {/if}
-      {#if gridOn && mapOrigin !== null && mapDimsState !== null}
-        <canvas
-          class="overlay-canvas"
-          width={mapDimsState.width}
-          height={mapDimsState.height}
-          data-testid="map-grid-overlay"
-          bind:this={gridCanvas}
-        ></canvas>
-        <GridOverlay
-          canvas={gridCanvas}
-          zoomPxPerMeter={mapResolution !== null && mapResolution > 0 ? 1 / mapResolution : 1}
-          worldOriginX={mapOrigin[0]}
-          worldOriginY={mapOrigin[1]}
-          worldWidthM={mapDimsState.width * (mapResolution ?? 0)}
-          worldHeightM={mapDimsState.height * (mapResolution ?? 0)}
         />
       {/if}
       <MapZoomControls {viewport} />

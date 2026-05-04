@@ -3595,3 +3595,129 @@ for the CP2102N USB CDC stale-state race observed during issue#14 HIL):
   `(x_m, y_m)` names the world coord that should become the new
   `(0, 0)`. Backend computes `new_yaml_origin = old_yaml_origin -
   typed`. SPA always sends absolute; delta resolves frontend-side.
+
+---
+
+## 2026-05-04 — issue#28 B-MAPEDIT-3 (yaw rotation, derived-pair pipeline)
+
+### Why
+
+B-MAPEDIT-3 ships full yaw-rotation plumbing, restructures the
+Map-Edit Apply path to ALWAYS read from a pristine baseline + emit a
+NEW derived pair (`<base>.YYYYMMDD-HHMMSS-<memo>`), and centralises
+overlay toggles. Pristine pairs become byte-immutable post-mapping;
+quality loss is exactly one resample regardless of how many times the
+operator iterates.
+
+### Added
+
+- `src/godo_webctl/map_rotate.py` (NEW) — sole owner of PGM rotation +
+  derived-pair atomic write. Reads pristine, applies translate-then-
+  rotate, runs Pillow `rotate` with BICUBIC (Lanczos-3 is `resize`-
+  only in Pillow), 3-class re-quantises to {0, 205, 254}, atomic-pair-
+  writes derived. Helper-injection via `_RotateDeps` for testability.
+- `src/godo_webctl/maps.py` — new functions `is_pristine`,
+  `derived_base`, `validate_memo`, `derive_name`, `list_pairs_grouped`
+  + new `MapGroup` dataclass + `InvalidMemo` exception.
+- `src/godo_webctl/map_origin.py` — new `apply_origin_edit_in_memory`
+  (returns rewritten YAML text without disk write) + `wrap_yaw_deg`
+  helper. Theta SUBTRACT semantic: `new_origin_yaw = wrap(prev - typed)`.
+- `src/godo_webctl/sse.py` — new `publish_map_edit_progress` +
+  `map_edit_progress_stream` (single-channel broadcaster + SSE consumer).
+- `src/godo_webctl/app.py` — three new endpoints:
+  `POST /api/map/edit/coord` (JSON body), `POST /api/map/edit/erase`
+  (multipart with mask), `GET /api/map/edit/progress` (SSE).
+  `_apply_map_edit_pipeline` module-level helper composes the
+  pristine→derived flow under an `asyncio.Lock` (C4) with SSE
+  progress emit at every phase boundary. `GET /api/maps` shape changed
+  to `{groups: [...], flat: [...]}` (grouped tree with backward-compat
+  flat list one release).
+- `src/godo_webctl/constants.py` — new constants `DERIVED_NAME_REGEX`,
+  `MEMO_REGEX`, `MEMO_MAX_LEN_CHARS`, `LANCZOS_FILTER_NAME`,
+  `MAP_ROTATE_THRESH_*`, `MAP_ROTATE_MAX_CANVAS_PX`,
+  `MAP_ROTATE_TIME_BUDGET_S`, `YAW_WRAP_*_DEG`,
+  `SSE_PROGRESS_HEARTBEAT_S`, `MAP_EDIT_PIPELINE_LOCK_TIMEOUT_S`,
+  `DERIVED_TS_STRFTIME`.
+- `src/godo_webctl/protocol.py` — new error codes `ERR_INVALID_MEMO`,
+  `ERR_PRISTINE_MISSING`, `ERR_CANVAS_TOO_LARGE`, `ERR_PIPELINE_BUSY`,
+  `ERR_PAIR_WRITE_FAILED`.
+
+### Changed
+
+- `GET /api/maps` wire shape — flat list → `{groups, flat}` dict
+  (backward-compat key one release).
+- 3 existing list_maps integration tests updated for new shape.
+
+### Tests
+
+- New: `tests/test_map_rotate.py` (~10 cases).
+- Extended: `tests/test_maps.py` (+~14 cases for pristine/derived
+  classification + grouped list).
+- Extended: `tests/test_map_origin.py` (+~10 cases for ROTATE#1/#2,
+  wrap_yaw, in-memory variant).
+- Extended: `tests/test_app_integration.py` (+ coord pipeline + memo
+  422 + grouped /api/maps shape).
+
+### Invariants
+
+- **(ag) map_rotate-sole-owner-discipline** — issue#28. The PGM
+  rotation kernel + derived-pair atomic write live ONLY in
+  `src/godo_webctl/map_rotate.py`. The module ALWAYS reads from the
+  pristine baseline `<base>.{pgm,yaml}` (never from a previously-
+  derived path) so quality loss is exactly one resample regardless of
+  iteration count. Pillow's `Image.rotate` only accepts NEAREST,
+  BILINEAR, BICUBIC — LANCZOS is `resize`-only — so we use BICUBIC and
+  let the 3-class re-quantise pass absorb the tiny edge-pixel
+  difference vs. a true Lanczos-3 pipeline. Auto-canvas-expand is
+  capped at `MAP_ROTATE_MAX_CANVAS_PX = 4096` per side (raises
+  `CanvasTooLarge`). Atomic pair-write protocol (C3): PGM tmp → YAML
+  tmp → fsync both → fsync dir → rename PGM → rename YAML → fsync
+  dir; on YAML failure the PGM tmp/final is unlinked so the operator
+  never sees a half-committed pair. Stale `*.tmp` sweep is
+  opportunistically called from `GET /api/maps`.
+
+- **(ah) pristine-vs-derived-classification** — issue#28. The
+  pristine pair is `<base>.{pgm,yaml}` produced once by mapping;
+  every Map-Edit Apply emits a derived pair `<base>.YYYYMMDD-HHMMSS-
+  <memo>.{pgm,yaml}` (second-resolution UTC timestamp, ASCII memo
+  postfix). `maps.is_pristine(name)` is the SOLE classifier, backed
+  by `DERIVED_NAME_REGEX` in `constants.py`. `maps.derived_base`
+  recovers the pristine root. Pristine pairs are byte-immutable
+  post-mapping; the `_apply_map_edit_pipeline` helper enforces the
+  read-only-pristine contract by always resolving paths through
+  `maps.pgm_for(maps_dir, derived_base(active_name) or active_name)`
+  before invoking `map_rotate`.
+
+- **(ai) map-edit-pipeline-asyncio-lock-discipline** — issue#28 C4.
+  All Map-Edit Apply calls (coord + erase) acquire a single
+  `asyncio.Lock` for the lifetime of the request. Lock acquisition has
+  a 60 s timeout (`MAP_EDIT_PIPELINE_LOCK_TIMEOUT_S`); contention
+  responds 409 `pipeline_busy`. The lock prevents two simultaneous
+  POSTs from racing the second-resolution timestamp AND from
+  half-writing a pristine→derived sequence. Combined with the
+  second-resolution timestamp (M5 lock) collision is near-impossible.
+
+- **(aj) sse-map-edit-progress-broadcaster** — issue#28. The
+  `/api/map/edit/progress` SSE channel is a single in-process
+  broadcaster (`sse.publish_map_edit_progress` +
+  `map_edit_progress_stream`). Each frame carries `{phase, progress,
+  request_id}` so a stale subscriber connection from a prior Apply
+  can ignore frames whose `request_id` does not match (M9 lock).
+  Heartbeat every `SSE_PROGRESS_HEARTBEAT_S = 5 s`. Subscriber
+  queues are bounded (maxsize=64); slow consumers drop frames rather
+  than block the publisher.
+
+- **(ak) maps-grouped-tree-wire-shape** — issue#28. `GET /api/maps`
+  returns `{groups: MapGroup[], flat: MapEntry[]}`. `groups` is the
+  new authoritative tree (pristine parents with derived variants);
+  `flat` is the legacy list shape, kept one release for backward
+  compat with pre-issue#28 cached SPA bundles. Drop `flat` in a
+  follow-up.
+
+- **(ab) origin-yaml-theta-passthrough — issue#28 update.** Extended
+  contract: when `theta_deg` is supplied via `apply_origin_edit_in_memory`
+  the new yaw is `wrap_yaw_deg(prev - theta_deg)` (SUBTRACT mirror of
+  the (x_m, y_m) semantic). Wrap range is `(-180, 180]`; -180
+  reflects to +180 (half-open at the lower bound). The legacy
+  `apply_origin_edit` (in-place rewrite) keeps the older semantic for
+  backward compat; the in-memory variant is the issue#28 path.

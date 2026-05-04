@@ -375,3 +375,94 @@ def test_apply_origin_edit_theta_deg_non_finite_raises(tmp_path: Path) -> None:
         map_origin.apply_origin_edit(
             yaml, 0.0, 0.0, "absolute", theta_deg=float("inf"),
         )
+
+
+# --- issue#28 — wrap_yaw_deg ------------------------------------------
+
+
+def test_wrap_yaw_deg_pass_through_in_range() -> None:
+    assert map_origin.wrap_yaw_deg(0.0) == 0.0
+    assert map_origin.wrap_yaw_deg(45.0) == 45.0
+    assert map_origin.wrap_yaw_deg(-90.0) == -90.0
+    assert map_origin.wrap_yaw_deg(180.0) == 180.0
+
+
+def test_wrap_yaw_deg_wraps_overflow() -> None:
+    assert map_origin.wrap_yaw_deg(190.0) == -170.0
+    assert map_origin.wrap_yaw_deg(360.0) == 0.0
+    assert map_origin.wrap_yaw_deg(540.0) == 180.0
+
+
+def test_wrap_yaw_deg_wraps_underflow() -> None:
+    # -180 reflects to +180 (half-open at the lower bound).
+    assert map_origin.wrap_yaw_deg(-180.0) == 180.0
+    assert map_origin.wrap_yaw_deg(-185.0) == 175.0
+    assert map_origin.wrap_yaw_deg(-360.0) == 0.0
+
+
+# --- issue#28 — apply_origin_edit_in_memory + theta SUBTRACT ----------
+
+
+_PRISTINE_YAML = (
+    "image: chroma.pgm\n"
+    "resolution: 0.05\n"
+    "origin: [1.5, -2.0, 0.08726646]\n"  # theta = 5° in radians
+    "occupied_thresh: 0.65\n"
+    "free_thresh: 0.196\n"
+    "negate: 0\n"
+)
+
+
+def test_apply_origin_edit_in_memory_xy_subtract_basic() -> None:
+    new_text, res = map_origin.apply_origin_edit_in_memory(
+        _PRISTINE_YAML, 0.5, 1.0, "absolute", theta_deg=None,
+    )
+    assert res.prev_origin[0] == pytest.approx(1.5)
+    assert res.new_origin[0] == pytest.approx(1.0)  # 1.5 - 0.5
+    assert res.new_origin[1] == pytest.approx(-3.0)  # -2.0 - 1.0
+    # Theta byte-identical when theta_deg is None.
+    assert "0.08726646" in new_text
+
+
+def test_apply_origin_edit_subtracts_theta_rotate_1() -> None:
+    """Mode-A C6 lock — ROTATE#1: old=5°, typed=10° → new=-5°."""
+    _, res = map_origin.apply_origin_edit_in_memory(
+        _PRISTINE_YAML, 0.0, 0.0, "absolute", theta_deg=10.0,
+    )
+    new_yaw_deg = res.new_origin[2] * (180.0 / 3.141592653589793)
+    assert new_yaw_deg == pytest.approx(-5.0, abs=1e-3)
+
+
+def test_apply_origin_edit_subtracts_theta_rotate_2() -> None:
+    """Mode-A C6 lock — ROTATE#2: old=-5°, typed=20° → new=-25°. Drift
+    catch — mirrors PICK#2/#3."""
+    yaml_neg5 = _PRISTINE_YAML.replace("0.08726646", "-0.08726646")
+    _, res = map_origin.apply_origin_edit_in_memory(
+        yaml_neg5, 0.0, 0.0, "absolute", theta_deg=20.0,
+    )
+    new_yaw_deg = res.new_origin[2] * (180.0 / 3.141592653589793)
+    assert new_yaw_deg == pytest.approx(-25.0, abs=1e-3)
+
+
+def test_apply_origin_edit_subtracts_theta_wraps_at_180() -> None:
+    """Mode-A C5 pin — wrap-around: old=170°, typed=−20° → +170° (not
+    +190°)."""
+    yaml_170 = _PRISTINE_YAML.replace("0.08726646", "2.96705973")  # 170° rad
+    _, res = map_origin.apply_origin_edit_in_memory(
+        yaml_170, 0.0, 0.0, "absolute", theta_deg=-20.0,
+    )
+    new_yaw_deg = res.new_origin[2] * (180.0 / 3.141592653589793)
+    # 170 - (-20) = 190 → wrap → -170
+    assert new_yaw_deg == pytest.approx(-170.0, abs=1e-3)
+
+
+def test_apply_origin_edit_in_memory_does_not_touch_disk(tmp_path: Path) -> None:
+    """The in-memory variant returns a string and never writes; the
+    pristine YAML on disk is byte-identical after the call."""
+    pristine = tmp_path / "chroma.yaml"
+    pristine.write_text(_PRISTINE_YAML)
+    before = pristine.read_bytes()
+    map_origin.apply_origin_edit_in_memory(
+        pristine.read_text(), 0.5, 1.0, "absolute", theta_deg=10.0,
+    )
+    assert pristine.read_bytes() == before

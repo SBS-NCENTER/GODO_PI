@@ -670,3 +670,117 @@ def test_read_pgm_dimensions_caps_read_at_pgm_header_max_bytes(
     assert M.read_pgm_dimensions(p) == (200, 100)
     # Exactly one read() call, capped at PGM_HEADER_MAX_BYTES.
     assert read_sizes == [PGM_HEADER_MAX_BYTES]
+
+
+# --- issue#28 — pristine vs derived classification --------------------
+
+
+def test_is_pristine_classifies_basic_name() -> None:
+    assert M.is_pristine("chroma") is True
+    assert M.is_pristine("studio_v1") is True
+
+
+def test_is_pristine_classifies_derived_name() -> None:
+    assert M.is_pristine("chroma.20260504-143012-foo") is False
+    assert M.is_pristine("studio_v1.20260101-000000-bar") is False
+
+
+def test_is_pristine_rejects_derived_lookalike() -> None:
+    """C7-adjacent: a hand-edited name that LOOKS derived but lacks the
+    full 8-6-memo triple stays classified as pristine. Critical because
+    the operator might name a manual experimental save `chroma.notes`
+    — that should be treated as its own pristine, not a phantom variant
+    of `chroma`."""
+    assert M.is_pristine("chroma.notes") is True
+    assert M.is_pristine("chroma.2026") is True
+    assert M.is_pristine("chroma.20260504-foo") is True
+
+
+def test_derived_base_returns_pristine_root() -> None:
+    assert M.derived_base("chroma.20260504-143012-foo") == "chroma"
+
+
+def test_derived_base_returns_none_for_pristine() -> None:
+    assert M.derived_base("chroma") is None
+
+
+def test_validate_memo_accepts_letters_digits_dash_underscore() -> None:
+    M.validate_memo("foo")
+    M.validate_memo("foo_bar")
+    M.validate_memo("foo-bar-1")
+    M.validate_memo("a")
+
+
+def test_validate_memo_rejects_dot() -> None:
+    with pytest.raises(M.InvalidMemo):
+        M.validate_memo("foo.bar")
+
+
+def test_validate_memo_rejects_spaces() -> None:
+    with pytest.raises(M.InvalidMemo):
+        M.validate_memo("foo bar")
+
+
+def test_validate_memo_rejects_empty() -> None:
+    with pytest.raises(M.InvalidMemo):
+        M.validate_memo("")
+
+
+def test_validate_memo_rejects_too_long() -> None:
+    with pytest.raises(M.InvalidMemo):
+        M.validate_memo("a" * 33)
+
+
+def test_derive_name_uses_provided_ts() -> None:
+    name = M.derive_name("chroma", "wallcal01", ts="20260504-143000")
+    assert name == "chroma.20260504-143000-wallcal01"
+
+
+def test_derive_name_validates_memo() -> None:
+    with pytest.raises(M.InvalidMemo):
+        M.derive_name("chroma", "bad memo", ts="20260504-143000")
+
+
+def test_derive_name_validates_base() -> None:
+    with pytest.raises(M.InvalidName):
+        M.derive_name(".hidden", "memo", ts="20260504-143000")
+
+
+# --- issue#28 — list_pairs_grouped ------------------------------------
+
+
+def test_list_pairs_grouped_pristine_with_no_variants(tmp_path: Path) -> None:
+    """Zero-children case (test-gap fold)."""
+    _make_pair(tmp_path, "chroma")
+    groups = M.list_pairs_grouped(tmp_path)
+    assert len(groups) == 1
+    assert groups[0].base == "chroma"
+    assert groups[0].pristine is not None
+    assert groups[0].variants == []
+
+
+def test_list_pairs_grouped_indents_variants(tmp_path: Path) -> None:
+    _make_pair(tmp_path, "chroma")
+    _make_pair(tmp_path, "chroma.20260504-143000-wallcal01")
+    _make_pair(tmp_path, "chroma.20260504-150000-wallcal02")
+    groups = M.list_pairs_grouped(tmp_path)
+    assert len(groups) == 1
+    g = groups[0]
+    assert g.base == "chroma"
+    assert g.pristine is not None
+    assert [v.name for v in g.variants] == [
+        "chroma.20260504-143000-wallcal01",
+        "chroma.20260504-150000-wallcal02",
+    ]
+
+
+def test_list_pairs_grouped_orphan_variant_is_listed(tmp_path: Path) -> None:
+    """If the operator hand-removed the pristine but kept derived,
+    surface the group with `pristine=None` so the SPA can warn."""
+    _make_pair(tmp_path, "chroma.20260504-143000-foo")
+    groups = M.list_pairs_grouped(tmp_path)
+    assert len(groups) == 1
+    g = groups[0]
+    assert g.base == "chroma"
+    assert g.pristine is None
+    assert [v.name for v in g.variants] == ["chroma.20260504-143000-foo"]

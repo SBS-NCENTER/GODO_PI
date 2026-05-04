@@ -4848,3 +4848,55 @@ introducing inotify watchers or namespace shrinks.
   rationale + Roll convention note. Spec memory:
   `.claude/memory/feedback_subtract_semantic_locked.md` (separate axis,
   cross-referenced for the broader sign-direction discipline).
+
+---
+
+## 2026-05-04 — issue#28 yaw frame SSOT (B-MAPEDIT-3 tracker plumbing)
+
+### Why
+
+issue#27 wired theta editing through `cfg.amcl_origin_yaw_deg` as a
+stop-gap. The right SSOT for the AMCL frame yaw is the active map's
+YAML `origin: [x, y, theta]` third element (already parsed into
+`OccupancyGrid::origin_yaw_deg` by `localization/occupancy_grid.cpp`).
+issue#28 rewires cold_writer to read `grid.origin_yaw_deg` directly and
+deprecates the Config field; one-release deprecation window per the
+operator-locked decision.
+
+### Changed
+
+- `src/localization/cold_writer.cpp` — three call sites (OneShot, Live
+  legacy, Live pipelined) now read `grid.origin_yaw_deg` for both the
+  yaw tripwire and the `compute_offset` origin pose. Nine literal field
+  references replaced.
+- `src/core/config.hpp` — `amcl_origin_yaw_deg` field annotated as
+  DEPRECATED; one-release retention so existing `tracker.toml` files
+  do not refuse to parse.
+- `src/core/config.cpp` — `Config::load` emits `[DEPRECATED]` stderr
+  warning when the field's value is non-zero on startup.
+
+### Tests
+
+- New: `tests/test_occupancy_grid.cpp::"load_map — issue#28 YAML
+  origin[2] feeds grid.origin_yaw_deg"` — pin that the YAML row
+  `origin: [a, b, c]` element [2] (radians) is parsed into
+  `grid.origin_yaw_deg` (degrees).
+- Existing `tests/test_cold_writer_*.cpp` fixtures continue to set
+  `cfg.amcl_origin_yaw_deg = 0.0`; they now pick up `grid.origin_yaw_deg`
+  from the loaded map (also 0.0 in the synthetic_4x4 fixture), so
+  behaviour is unchanged on the test path.
+
+### Invariants
+
+- **(w) yaw-frame-ssot-via-yaml-origin** — issue#28. The AMCL frame
+  yaw SSOT is the active map's YAML `origin: [x, y, theta]` third
+  element (radians), parsed into `OccupancyGrid::origin_yaw_deg`
+  (degrees) by `localization/occupancy_grid.cpp`. `cold_writer.cpp`
+  reads `grid.origin_yaw_deg` directly at all three iteration sites
+  (OneShot, Live legacy, Live pipelined). `cfg.amcl_origin_yaw_deg`
+  is deprecated and ignored; the field is retained for one release so
+  pre-issue#28 `tracker.toml` files do not refuse to parse, and the
+  tracker emits a `[DEPRECATED]` stderr warning when a non-zero value
+  is detected. Hard removal lands in a follow-up issue. The schema
+  row `amcl.origin_yaw_deg` (config_schema.hpp:133) stays alive for
+  the same release to keep the `/api/config` Round-trip honest.

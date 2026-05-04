@@ -1352,6 +1352,8 @@ async def test_list_maps_anon_returns_two_entries(
     tmp_map_pair: Path,
     tmp_maps_dir: Path,
 ) -> None:
+    # issue#28 wire shape: response is a dict with `groups` (new tree)
+    # and `flat` (legacy list, kept one release for backward compat).
     s = _settings_for(
         uds_socket=tmp_path / "u.sock",
         map_path=tmp_map_pair,
@@ -1362,11 +1364,19 @@ async def test_list_maps_anon_returns_two_entries(
         r = await cl.get("/api/maps")
     assert r.status_code == HTTPStatus.OK
     body = r.json()
-    assert isinstance(body, list)
-    names = sorted(e["name"] for e in body)
+    assert isinstance(body, dict)
+    flat = body["flat"]
+    assert isinstance(flat, list)
+    names = sorted(e["name"] for e in flat)
     assert names == ["studio_v1", "studio_v2"]
-    actives = [e["is_active"] for e in body if e["name"] == "studio_v1"]
+    actives = [e["is_active"] for e in flat if e["name"] == "studio_v1"]
     assert actives == [True]
+    # Grouped tree: two pristine bases, no derived variants.
+    groups = body["groups"]
+    assert sorted(g["base"] for g in groups) == ["studio_v1", "studio_v2"]
+    for g in groups:
+        assert g["pristine"] is not None
+        assert g["variants"] == []
 
 
 async def test_list_maps_admin_token_also_works(
@@ -1402,7 +1412,8 @@ async def test_list_maps_empty_dir_returns_empty_list(
     async with _client(s) as cl:
         r = await cl.get("/api/maps")
     assert r.status_code == HTTPStatus.OK
-    assert r.json() == []
+    body = r.json()
+    assert body == {"groups": [], "flat": []}
 
 
 # ---- GET /api/maps/<name>/image -----------------------------------------
@@ -4649,3 +4660,64 @@ async def test_post_map_origin_during_mapping_returns_409_mapping_active(
         )
     assert r.status_code == HTTPStatus.CONFLICT
     assert r.json()["err"] == "mapping_active"
+
+
+# ---- issue#28 — POST /api/map/edit/coord (admin) ----------------------
+
+
+async def test_post_map_edit_coord_full_pipeline(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    tmp_maps_dir: Path,
+) -> None:
+    """End-to-end pin: derived pair lands on disk + restart-pending
+    sentinel touched. studio_v1 is the active pristine."""
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        maps_dir=tmp_maps_dir,
+    )
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post(
+            "/api/map/edit/coord",
+            json={"x_m": 0.1, "y_m": 0.2, "theta_deg": 0.0, "memo": "wallcal01"},
+            headers=_auth(token),
+        )
+    assert r.status_code == HTTPStatus.OK, r.text
+    body = r.json()
+    assert body["ok"] is True
+    derived_name = body["derived_name"]
+    assert derived_name.startswith("studio_v1.")
+    assert derived_name.endswith("-wallcal01")
+    assert (tmp_maps_dir / f"{derived_name}.pgm").is_file()
+    assert (tmp_maps_dir / f"{derived_name}.yaml").is_file()
+    # Pristine untouched.
+    assert (tmp_maps_dir / "studio_v1.pgm").is_file()
+
+
+async def test_post_map_edit_coord_invalid_memo_422(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    tmp_maps_dir: Path,
+) -> None:
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        maps_dir=tmp_maps_dir,
+    )
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post(
+            "/api/map/edit/coord",
+            json={"x_m": 0.0, "y_m": 0.0, "memo": "bad memo"},
+            headers=_auth(token),
+        )
+    assert r.status_code == HTTPStatus.UNPROCESSABLE_ENTITY, r.text
+    body = r.json()
+    # Either FastAPI's own 422 shape (`detail: [{...}]`) or our handler's
+    # explicit `{ok, err: invalid_memo}`. Both surface the operator-
+    # actionable failure; SPA handles either.
+    assert body.get("err") == "invalid_memo" or "detail" in body

@@ -299,6 +299,13 @@ ERR_ORIGIN_YAML_PARSE_FAILED: Final[str] = "origin_yaml_parse_failed"
 ERR_ORIGIN_EDIT_FAILED: Final[str] = "origin_edit_failed"
 ERR_ACTIVE_YAML_MISSING: Final[str] = "active_yaml_missing"
 
+# --- issue#28 — POST /api/map/edit/{coord,erase} error codes ------------
+ERR_INVALID_MEMO: Final[str] = "invalid_memo"
+ERR_PRISTINE_MISSING: Final[str] = "pristine_missing"
+ERR_CANVAS_TOO_LARGE: Final[str] = "canvas_too_large"
+ERR_PIPELINE_BUSY: Final[str] = "pipeline_busy"
+ERR_PAIR_WRITE_FAILED: Final[str] = "pair_write_failed"
+
 # `POST /api/map/origin` success response field order. SOLE Python mirror
 # of the JSON keys emitted by `app.py::map_origin_endpoint` on the 200
 # path. `prev_origin` and `new_origin` are 3-element JSON arrays

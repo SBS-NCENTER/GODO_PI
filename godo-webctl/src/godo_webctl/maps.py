@@ -50,9 +50,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .constants import (
+    DERIVED_NAME_REGEX,
+    DERIVED_TS_STRFTIME,
     MAPS_ACTIVATE_LOCK_BASENAME,
     MAPS_ACTIVE_BASENAME,
     MAPS_NAME_REGEX,
+    MEMO_MAX_LEN_CHARS,
+    MEMO_REGEX,
     PGM_HEADER_MAX_BYTES,
     YAML_HEADER_MAX_BYTES,
 )
@@ -541,3 +545,119 @@ def migrate_legacy_active(maps_dir: Path, legacy_pgm: Path) -> bool:
         legacy_stem,
     )
     return True
+
+
+# --- issue#28 — pristine vs derived classification --------------------
+
+
+class InvalidMemo(ValueError):
+    """Memo postfix fails `MEMO_REGEX` or exceeds `MEMO_MAX_LEN_CHARS`."""
+
+
+def is_pristine(name: str) -> bool:
+    """Return True iff `name` does NOT match the derived-name regex.
+
+    The derived form is `<base>.YYYYMMDD-HHMMSS-<memo>`; the second-
+    resolution timestamp + memo postfix together make the regex match
+    unambiguous (a hand-edited map name like `chroma.foo` does not
+    match because no timestamp triple is present). This function is
+    the SOLE classifier — never re-implement the regex elsewhere.
+    """
+    return DERIVED_NAME_REGEX.match(name) is None
+
+
+def derived_base(name: str) -> str | None:
+    """Return the base (= pristine) name for a derived map name, or
+    None when `name` is itself pristine. Pure-string operation; does
+    NOT touch the filesystem."""
+    m = DERIVED_NAME_REGEX.match(name)
+    if m is None:
+        return None
+    return m.group("base")
+
+
+def validate_memo(memo: str) -> None:
+    """Raise `InvalidMemo` if `memo` fails the project's regex or
+    length cap. Surfaced through app.py as 422."""
+    if not memo or len(memo) > MEMO_MAX_LEN_CHARS:
+        raise InvalidMemo("memo_length_out_of_range")
+    if not MEMO_REGEX.match(memo):
+        raise InvalidMemo("memo_invalid_chars")
+
+
+def derive_name(base: str, memo: str, ts: str | None = None) -> str:
+    """Build a derived map name `<base>.<ts>-<memo>`. `ts` defaults to
+    UTC `strftime(DERIVED_TS_STRFTIME)`; tests inject a fixed ts.
+
+    Validates `base` against `MAPS_NAME_REGEX` and `memo` against
+    `MEMO_REGEX` so a malformed input cannot be silently composed
+    into a pair on disk."""
+    validate_name(base)
+    validate_memo(memo)
+    if ts is None:
+        import datetime as _datetime  # localised import keeps the module import graph small
+
+        ts = _datetime.datetime.now(_datetime.timezone.utc).strftime(DERIVED_TS_STRFTIME)
+    if len(ts) != 15 or ts[8] != "-":
+        # Defence: caller-injected ts must look like YYYYMMDD-HHMMSS.
+        raise InvalidMemo("ts_invalid_shape")
+    return f"{base}.{ts}-{memo}"
+
+
+# --- issue#28 — grouped tree listing ----------------------------------
+
+
+@dataclass(frozen=True)
+class MapGroup:
+    """One pristine + its derived variants. `pristine` may be None when
+    a base lacks an on-disk pristine pair (e.g. operator hand-removed
+    it but kept derivatives) — surfaced as `pristine: null` in JSON
+    so the SPA can warn the operator."""
+
+    base: str
+    pristine: MapEntry | None
+    variants: list[MapEntry]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "base": self.base,
+            "pristine": self.pristine.to_dict() if self.pristine else None,
+            "variants": [v.to_dict() for v in self.variants],
+        }
+
+
+def list_pairs_grouped(maps_dir: Path) -> list[MapGroup]:
+    """Group `list_pairs(maps_dir)` results into pristine-parent
+    rows + derived-child rows. Sort: groups by pristine name, variants
+    by full name (= chronological because timestamp is the leading
+    discriminator after the base prefix).
+
+    Pristine/derived classification uses `is_pristine`; the regex is
+    the SSOT (do not re-implement)."""
+    flat = list_pairs(maps_dir)
+    groups: dict[str, MapGroup] = {}
+    # Pass 1 — pristines.
+    for e in flat:
+        if is_pristine(e.name):
+            groups[e.name] = MapGroup(base=e.name, pristine=e, variants=[])
+    # Pass 2 — variants. A derived whose base lacks an on-disk pristine
+    # entry still gets surfaced (with pristine=None) so the operator
+    # can see the orphan.
+    for e in flat:
+        if is_pristine(e.name):
+            continue
+        base = derived_base(e.name)
+        if base is None:
+            continue  # defensive — is_pristine returning False guarantees a base
+        grp = groups.get(base)
+        if grp is None:
+            groups[base] = MapGroup(base=base, pristine=None, variants=[e])
+        else:
+            grp.variants.append(e)
+    # Stable order: groups by base name; variants by full name.
+    ordered: list[MapGroup] = []
+    for base in sorted(groups):
+        grp = groups[base]
+        grp.variants.sort(key=lambda v: v.name)
+        ordered.append(grp)
+    return ordered

@@ -48,6 +48,13 @@ struct Config {
     std::string   amcl_map_path;
     double        amcl_origin_x_m{};
     double        amcl_origin_y_m{};
+    // issue#28 — DEPRECATED. The AMCL origin yaw SSOT is now the third
+    // element of the `origin: [x, y, theta]` row in the active map's YAML
+    // (parsed into `OccupancyGrid::origin_yaw_deg`). The cold writer reads
+    // `grid.origin_yaw_deg` directly. This field is kept for one release
+    // so existing `tracker.toml` files do not refuse to parse; if a non-
+    // zero value is set on startup the tracker emits a `[DEPRECATED]`
+    // warning to stderr. Hard-removal is tracked as a follow-up issue.
     double        amcl_origin_yaw_deg{};
     int           amcl_particles_global_n{};
     int           amcl_particles_local_n{};

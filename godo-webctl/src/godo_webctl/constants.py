@@ -403,6 +403,69 @@ MAPPING_DOCKER_INSPECT_TIMEOUT_S: Final[float] = 2.0
 # `du -sb` subprocess timeout for the in-progress preview PGM size.
 MAPPING_DU_TIMEOUT_S: Final[float] = 2.0
 
+# --- issue#28 — B-MAPEDIT-3 (yaw rotation, derived-pair pipeline) -------
+# Pristine vs derived classification. The pristine pair is `<base>.{pgm,
+# yaml}` produced once by mapping; every Map-Edit Apply emits a NEW
+# derived pair `<base>.YYYYMMDD-HHMMSS-<memo>.{pgm,yaml}` and never
+# touches the pristine. `is_pristine(name)` is the sole classifier; it
+# returns False iff `name` matches the derived regex below.
+#
+# M5 lock (Mode-A 2026-05-04 KST): second-resolution timestamp
+# `\d{8}-\d{6}` (no `-N` dedup); collision is near-impossible because
+# the Apply pipeline is serialised by an asyncio.Lock (C4) so two
+# requests cannot land in the same UTC second.
+DERIVED_NAME_REGEX: Final[re.Pattern[str]] = re.compile(
+    r"^(?P<base>[A-Za-z0-9_()\-]+(?:\.[A-Za-z0-9_()\-]+)*?)"
+    r"\.(?P<ts>\d{8}-\d{6})-(?P<memo>[A-Za-z0-9_-]+)$",
+)
+
+# Memo postfix validator — filesystem-safe ASCII subset. 32 chars caps
+# the total derived name length (base + ".YYYYMMDD-HHMMSS-" + memo) at
+# something a human can read at a glance.
+MEMO_REGEX: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9_-]+$")
+MEMO_MAX_LEN_CHARS: Final[int] = 32
+
+# Derived-name timestamp format. `strftime` directive matches
+# `\d{8}-\d{6}` exactly — UTC, second resolution.
+DERIVED_TS_STRFTIME: Final[str] = "%Y%m%d-%H%M%S"
+
+# Pillow ≥ 10 modern enum (M6 lock). The deprecated `Image.LANCZOS`
+# constant emits DeprecationWarning on Pillow 10. Bound at runtime so
+# `map_rotate.py` does not import Pillow at module-collection time
+# (matches `map_edit.py` discipline).
+LANCZOS_FILTER_NAME: Final[str] = "LANCZOS"
+
+# 3-class threshold for re-quantising the resampled PGM back to
+# {free, unknown, occupied}. Mirrors the slam_toolbox / map_server
+# convention: occupied=0, unknown=205, free=254.
+MAP_ROTATE_THRESH_OCC: Final[int] = 0
+MAP_ROTATE_THRESH_UNK: Final[int] = 205
+MAP_ROTATE_THRESH_FREE: Final[int] = 254
+
+# Hard upper bound on the auto-expanded canvas dimensions (per side).
+# A 45° rotation of a 2048-px map needs ~2896 px; 4096 covers
+# anything reasonable. Larger requests are rejected as operator typo
+# or runaway rotation.
+MAP_ROTATE_MAX_CANVAS_PX: Final[int] = 4096
+
+# Soft per-call wall-clock budget for the rotation kernel. Lanczos-3 +
+# auto-expand on 2048×2048 takes ~6-8 s on RPi 5 stock Pillow; 30 s
+# gives ~3× headroom against worst-case SD-thrash.
+MAP_ROTATE_TIME_BUDGET_S: Final[float] = 30.0
+
+# YAW SUBTRACT wrap range (C5 lock). After `new = old - typed` we wrap
+# back into (-180, 180]. 180 is included; -180 is reflected to +180.
+YAW_WRAP_MIN_EXCL_DEG: Final[float] = -180.0
+YAW_WRAP_MAX_INCL_DEG: Final[float] = 180.0
+
+# SSE progress channel constants (M9 lock — request_id in every frame).
+SSE_PROGRESS_HEARTBEAT_S: Final[float] = 5.0
+
+# Map-edit pipeline asyncio.Lock timeout (C4 lock). 60 s ceiling: a
+# rotation that runs over budget should release the lock so a second
+# Apply does not wedge the SPA forever.
+MAP_EDIT_PIPELINE_LOCK_TIMEOUT_S: Final[float] = 60.0
+
 # --- issue#16 — mapping pre-check + cp210x recovery ---------------------
 # Filename written under `cfg.mapping_runtime_dir.parent` (= /run/godo)
 # by `mapping.recover_cp210x` immediately before invoking

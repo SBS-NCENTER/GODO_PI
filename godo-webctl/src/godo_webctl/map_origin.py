@@ -67,7 +67,11 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from .constants import ORIGIN_X_Y_ABS_MAX_M
+from .constants import (
+    ORIGIN_X_Y_ABS_MAX_M,
+    YAW_WRAP_MAX_INCL_DEG,
+    YAW_WRAP_MIN_EXCL_DEG,
+)
 
 logger = logging.getLogger("godo_webctl.map_origin")
 
@@ -283,6 +287,117 @@ def apply_origin_edit(
 
 
 # --- helpers -----------------------------------------------------------
+
+
+def wrap_yaw_deg(value: float) -> float:
+    """Wrap `value` into the half-open range
+    ``(YAW_WRAP_MIN_EXCL_DEG, YAW_WRAP_MAX_INCL_DEG]`` = ``(-180, 180]``.
+
+    issue#28 C5 lock — SUBTRACT theta can leave the natural ±180° box
+    (e.g. old=170°, typed=−20° → naive=190°). The wrap normalises
+    back into a single canonical representation. Frontend mirror is
+    `originMath.wrapYawDeg`.
+    """
+    if not math.isfinite(value):
+        return value
+    span = YAW_WRAP_MAX_INCL_DEG - YAW_WRAP_MIN_EXCL_DEG  # 360.0
+    # Move into [0, 360) by shifting by the lower bound's magnitude,
+    # mod, then shift back.
+    shifted = (value - YAW_WRAP_MIN_EXCL_DEG) % span
+    # Result lands in [0, 360); maps to (-180, 180].
+    wrapped = shifted + YAW_WRAP_MIN_EXCL_DEG
+    # Edge case: wrapped == -180.0 must reflect to +180.0 to stay
+    # half-open at the lower end.
+    if wrapped == YAW_WRAP_MIN_EXCL_DEG:
+        wrapped = YAW_WRAP_MAX_INCL_DEG
+    return wrapped
+
+
+def apply_origin_edit_in_memory(
+    yaml_text: str,
+    x_m: float,
+    y_m: float,
+    mode: str,
+    theta_deg: float | None = None,
+) -> tuple[str, OriginEditResult]:
+    """Pure-function variant of `apply_origin_edit` — returns the
+    rewritten YAML text + `OriginEditResult` without touching disk.
+
+    Used by `app.py` to compose the rotation pipeline (issue#28):
+    the rotated PGM lands at a derived path, and we need the SAME
+    SUBTRACT-applied YAML text to land at the SIBLING derived YAML
+    path under the C3 atomic-pair-write. Re-reading + re-writing the
+    pristine YAML twice would race itself.
+
+    Theta SUBTRACT semantic (issue#28): when ``theta_deg`` is supplied
+    AND mode is `"absolute"`, ``new_origin_yaw = wrap(prev_origin_yaw
+    - theta_deg)``. This mirrors the (x_m, y_m) SUBTRACT contract
+    operator-locked 2026-05-04 KST.
+    """
+    if mode not in ("absolute", "delta"):
+        raise BadOriginValue("bad_mode")
+
+    lines_with_ends = yaml_text.splitlines(keepends=True)
+    origin_idx, m = _find_unique_origin_line(lines_with_ends)
+
+    x_str = m.group(4)
+    y_str = m.group(6)
+    theta_str = m.group(8)
+
+    try:
+        prev_x = float(x_str)
+        prev_y = float(y_str)
+    except ValueError as e:
+        raise OriginYamlParseFailed(f"non_numeric_origin_xy: {e}") from e
+    try:
+        prev_theta_rad = float(theta_str)
+    except ValueError as e:
+        raise OriginYamlParseFailed(f"non_numeric_origin_theta: {e}") from e
+
+    new_x = prev_x - x_m
+    new_y = prev_y - y_m
+
+    _validate_finite_and_bounded(new_x, "x_m")
+    _validate_finite_and_bounded(new_y, "y_m")
+
+    if theta_deg is None:
+        theta_token = theta_str
+        new_theta_rad = prev_theta_rad
+    else:
+        if not math.isfinite(theta_deg):
+            raise BadOriginValue("non_finite_theta_deg")
+        prev_theta_deg = prev_theta_rad * (180.0 / math.pi)
+        # issue#28 SUBTRACT theta + wrap into (-180, 180].
+        new_theta_deg = wrap_yaw_deg(prev_theta_deg - theta_deg)
+        new_theta_rad = new_theta_deg * (math.pi / 180.0)
+        theta_token = repr(new_theta_rad)
+
+    new_x_repr = repr(new_x)
+    new_y_repr = repr(new_y)
+
+    leading = m.group(1)
+    after_colon_ws = m.group(2)
+    inside_lead_ws = m.group(3)
+    xy_sep = m.group(5)
+    y_theta_sep = m.group(7)
+    inside_trail_ws = m.group(9)
+    tail = m.group(10)
+    new_line_ending = _line_ending_of(lines_with_ends[origin_idx])
+    new_line = (
+        f"{leading}{after_colon_ws}["
+        f"{inside_lead_ws}{new_x_repr}{xy_sep}{new_y_repr}{y_theta_sep}{theta_token}"
+        f"{inside_trail_ws}]{tail}{new_line_ending}"
+    )
+
+    new_lines = list(lines_with_ends)
+    new_lines[origin_idx] = new_line
+    return (
+        "".join(new_lines),
+        OriginEditResult(
+            prev_origin=(prev_x, prev_y, prev_theta_rad),
+            new_origin=(new_x, new_y, new_theta_rad),
+        ),
+    )
 
 
 def _decode_yaml_text(raw_bytes: bytes) -> str:

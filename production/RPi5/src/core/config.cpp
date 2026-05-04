@@ -1060,6 +1060,22 @@ Config Config::load(int argc, char** argv, char** envp) {
     validate_amcl(c);
     validate_gpio(c);
     validate_webctl_mapping_ladder(c);
+
+    // issue#28 — `amcl.origin_yaw_deg` is deprecated. The active map's
+    // YAML `origin: [x, y, theta]` third element is the SSOT for AMCL
+    // frame yaw and is read by cold_writer via `grid.origin_yaw_deg`.
+    // Keep the field one release so existing tracker.toml files do not
+    // refuse to parse; emit a stderr warning if the operator left a
+    // non-zero value behind. Hard-removal lands in a follow-up.
+    if (c.amcl_origin_yaw_deg != 0.0) {
+        std::fprintf(stderr,
+            "[DEPRECATED] cfg.amcl_origin_yaw_deg=%.3f is ignored; "
+            "the active map's YAML origin[2] is the SSOT. "
+            "Strip the key from /var/lib/godo/tracker.toml — see "
+            "issue#28.\n",
+            c.amcl_origin_yaw_deg);
+    }
+
     return c;
 }
 

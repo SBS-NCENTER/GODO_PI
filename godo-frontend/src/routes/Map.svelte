@@ -252,8 +252,8 @@
           zoomPxPerMeter={mapResolution !== null && mapResolution > 0 ? 1 / mapResolution : 1}
           worldOriginX={mapOrigin[0]}
           worldOriginY={mapOrigin[1]}
-          yamlOriginX={mapOrigin[0]}
-          yamlOriginY={mapOrigin[1]}
+          yamlOriginX={0}
+          yamlOriginY={0}
           yamlOriginYawDeg={yamlYawDeg}
         />
       {/if}

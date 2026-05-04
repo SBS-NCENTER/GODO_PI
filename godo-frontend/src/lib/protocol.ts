@@ -465,10 +465,22 @@ export interface MapEntry {
   resolution_m: number | null;
 }
 
-// GET /api/maps response = array of MapEntry. The store keeps the array
-// in `Writable<MapEntry[]>` directly; this type alias documents the
-// wire shape without a wrapper object.
-export type MapListResponse = MapEntry[];
+// issue#28 — pristine + variants tree node. Mirror of
+// `godo_webctl.maps.MapGroup.to_dict()`.
+export interface MapGroup {
+  pristine: MapEntry;
+  variants: MapEntry[];
+}
+
+// GET /api/maps response. issue#28 added the grouped-tree shape;
+// `flat` is retained one release for backward compatibility with
+// pre-issue#28 SPA bundles cached in browsers. New consumers read
+// `groups` for the tree view; legacy consumers (MapListPanel) read
+// `flat` (extracted in `stores/maps::refresh`).
+export interface MapListResponse {
+  groups: MapGroup[];
+  flat: MapEntry[];
+}
 
 // POST /api/maps/<name>/activate response shape.
 export interface ActivateResponse {

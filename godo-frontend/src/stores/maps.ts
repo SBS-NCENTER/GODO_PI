@@ -43,9 +43,15 @@ function assertValidName(name: string): void {
 }
 
 export async function refresh(): Promise<MapEntry[]> {
-  const list = await apiGet<MapListResponse>('/api/maps');
-  maps.set(list);
-  return list;
+  // issue#28 (HIL fix) — server response shape changed from `MapEntry[]`
+  // to `{groups: MapGroup[], flat: MapEntry[]}`. The legacy MapListPanel
+  // consumes `MapEntry[]` directly, so we extract `flat` here. The new
+  // grouped-tree consumer (`<MapList>`) gets it via a separate field
+  // when wired in.
+  const resp = await apiGet<MapListResponse>('/api/maps');
+  const flat: MapEntry[] = Array.isArray(resp) ? resp : (resp.flat ?? []);
+  maps.set(flat);
+  return flat;
 }
 
 export async function activate(name: string): Promise<ActivateResponse> {

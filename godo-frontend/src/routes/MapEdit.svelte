@@ -99,7 +99,10 @@
   // the other mode's pending state.
   let mode = $state<EditMode>(EDIT_MODE_COORD);
   // Coord-mode sub-state: tracks which canvas-click meaning is active.
-  let coordClickMode = $state<CoordClickMode>('off');
+  // issue#28 (HIL fix) — default 'xy' so the canvas is immediately
+  // clickable when entering Coord mode. Operator-reported confusion
+  // when default 'off' silently swallowed canvas clicks.
+  let coordClickMode = $state<CoordClickMode>('xy');
   // Apply-modal flow. The modal owns the SSE consumer; this flag drives
   // the open prop.
   let modalOpen = $state(false);
@@ -491,8 +494,8 @@
           zoomPxPerMeter={resolution !== null && resolution > 0 ? 1 / resolution : 1}
           worldOriginX={currentOrigin[0]}
           worldOriginY={currentOrigin[1]}
-          yamlOriginX={currentOrigin[0]}
-          yamlOriginY={currentOrigin[1]}
+          yamlOriginX={0}
+          yamlOriginY={0}
           yamlOriginYawDeg={yamlYawDeg}
         />
       {/if}

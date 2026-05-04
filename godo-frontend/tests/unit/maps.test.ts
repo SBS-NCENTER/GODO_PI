@@ -48,6 +48,32 @@ describe('maps store', () => {
     expect(url).toBe('/api/maps');
   });
 
+  // issue#28 (HIL fix) — server response shape changed from `MapEntry[]`
+  // to `{groups, flat}`. Operator HIL on PR #81 caught the SPA showing
+  // an empty map list because the store assigned the entire object to
+  // a `Writable<MapEntry[]>`. This pin guards the new extraction path.
+  it('refresh() extracts `flat` from issue#28 grouped response shape', async () => {
+    const flat = [
+      { name: 'studio_v1', size_bytes: 1024, mtime_unix: 1.0, is_active: true },
+      {
+        name: 'studio_v1.20260504-1430-wallcal',
+        size_bytes: 1024,
+        mtime_unix: 2.0,
+        is_active: false,
+      },
+    ];
+    const groupedResp = {
+      groups: [{ pristine: flat[0], variants: [flat[1]] }],
+      flat,
+    };
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResp(groupedResp));
+
+    const list = await refresh();
+
+    expect(list).toEqual(flat);
+    expect(get(maps)).toEqual(flat);
+  });
+
   it('activate(name) POSTs to /api/maps/<name>/activate and triggers refresh', async () => {
     const fakeList = [
       { name: 'studio_v1', size_bytes: 1024, mtime_unix: 1.0, is_active: false },

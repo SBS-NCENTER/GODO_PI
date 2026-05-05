@@ -728,3 +728,118 @@ async def test_resources_extended_stream_cancellation_propagates() -> None:
             sleep=cancel_immediately,
         ):
             pass
+
+
+# ---- issue#28.1 — map_edit_progress_stream invariants -------------------
+# Pins for the shared broadcaster channel that drives the SPA's
+# <ApplyMemoModal> progress indicator. Each frame carries
+# `{"phase", "progress", "request_id"}`; SPA filters by `request_id` so
+# stale connections from a previous Apply ignore foreign frames.
+
+
+async def _drain_progress_with_publishes(
+    frames: list[dict[str, object]],
+) -> list[bytes]:
+    """Spawn `map_edit_progress_stream`, publish a sequence of frames,
+    then cancel. Returns every emitted byte chunk in order."""
+    out: list[bytes] = []
+
+    async def consume() -> None:
+        async for chunk in sse.map_edit_progress_stream():
+            out.append(chunk)
+
+    task = asyncio.create_task(consume())
+    # Yield once so the consumer's queue is registered with the
+    # broadcaster before publishes go out.
+    await asyncio.sleep(0)
+    for frame in frames:
+        await sse.publish_map_edit_progress(frame)
+    # Yield enough times for the consumer to drain its queue.
+    for _ in range(len(frames) + 2):
+        await asyncio.sleep(0)
+    task.cancel()
+    import contextlib
+
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    return out
+
+
+async def test_sse_progress_emits_monotonic_floats() -> None:
+    """B2 — `progress` field is a float in [0.0, 1.0] and never
+    decreases across a single request_id's frame sequence."""
+    import json as _json
+
+    rid = "abc12345"
+    frames = [
+        {"phase": "starting", "progress": 0.0, "request_id": rid},
+        {"phase": "yaml_rewrite", "progress": 0.2, "request_id": rid},
+        {"phase": "rotate", "progress": 0.5, "request_id": rid},
+        {"phase": "restart_pending", "progress": 0.95, "request_id": rid},
+        {"phase": "done", "progress": 1.0, "request_id": rid},
+    ]
+    chunks = await _drain_progress_with_publishes(frames)
+    data_chunks = [c for c in chunks if c.startswith(b"data:")]
+    assert len(data_chunks) == len(frames)
+    progresses: list[float] = []
+    for chunk in data_chunks:
+        body = _json.loads(chunk.removeprefix(b"data: ").rstrip(b"\n"))
+        assert isinstance(body["progress"], float), body
+        assert 0.0 <= body["progress"] <= 1.0, body
+        assert body["request_id"] == rid
+        progresses.append(body["progress"])
+    # Monotonically non-decreasing — strictly increasing in this trace.
+    assert progresses == sorted(progresses)
+    assert progresses[0] == 0.0 and progresses[-1] == 1.0
+
+
+async def test_sse_emits_rejected_on_canvas_overflow() -> None:
+    """B3 — when the pipeline rejects with `canvas_too_large`, the
+    last frame carries `phase: "rejected"`, `progress: 1.0`, and a
+    `reason: "canvas_too_large"` tag for the SPA to surface."""
+    import json as _json
+
+    rid = "rej00001"
+    frames = [
+        {"phase": "starting", "progress": 0.0, "request_id": rid},
+        {"phase": "yaml_rewrite", "progress": 0.2, "request_id": rid},
+        {
+            "phase": "rejected",
+            "progress": 1.0,
+            "request_id": rid,
+            "reason": "canvas_too_large",
+        },
+    ]
+    chunks = await _drain_progress_with_publishes(frames)
+    data_chunks = [c for c in chunks if c.startswith(b"data:")]
+    assert len(data_chunks) == 3
+    last = _json.loads(data_chunks[-1].removeprefix(b"data: ").rstrip(b"\n"))
+    assert last["phase"] == "rejected"
+    assert last["progress"] == 1.0
+    assert last["reason"] == "canvas_too_large"
+    assert last["request_id"] == rid
+
+
+async def test_sse_progress_frames_carry_request_id() -> None:
+    """B4 — every emitted frame carries the `request_id` tag (M9 lock).
+    The SPA uses this to discard frames from a stale prior Apply."""
+    import json as _json
+
+    rid = "deadbeef"
+    frames = [
+        {"phase": "starting", "progress": 0.0, "request_id": rid},
+        {"phase": "rotate", "progress": 0.5, "request_id": rid},
+        {
+            "phase": "done",
+            "progress": 1.0,
+            "request_id": rid,
+            "derived_name": "studio_v1.20260505-141500-abc",
+        },
+    ]
+    chunks = await _drain_progress_with_publishes(frames)
+    data_chunks = [c for c in chunks if c.startswith(b"data:")]
+    assert len(data_chunks) == 3
+    for chunk in data_chunks:
+        body = _json.loads(chunk.removeprefix(b"data: ").rstrip(b"\n"))
+        assert "request_id" in body, body
+        assert body["request_id"] == rid

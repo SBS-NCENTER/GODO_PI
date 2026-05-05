@@ -20,8 +20,8 @@ using godo::core::config_schema::reload_class_to_string;
 using godo::core::config_schema::ValueType;
 using godo::core::config_schema::value_type_to_string;
 
-TEST_CASE("CONFIG_SCHEMA has exactly 68 rows (issue#27 added 12 output_transform.* + 3 origin_step.*)") {
-    CHECK(CONFIG_SCHEMA.size() == 68);
+TEST_CASE("CONFIG_SCHEMA has exactly 67 rows (issue#28.1 hard-removed amcl.origin_yaw_deg)") {
+    CHECK(CONFIG_SCHEMA.size() == 67);
 }
 
 TEST_CASE("CONFIG_SCHEMA rows are alphabetically ordered by name") {

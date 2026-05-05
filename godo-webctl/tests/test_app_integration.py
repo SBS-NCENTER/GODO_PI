@@ -1352,8 +1352,8 @@ async def test_list_maps_anon_returns_two_entries(
     tmp_map_pair: Path,
     tmp_maps_dir: Path,
 ) -> None:
-    # issue#28 wire shape: response is a dict with `groups` (new tree)
-    # and `flat` (legacy list, kept one release for backward compat).
+    # issue#28.1 wire shape: response is `{"groups": [...]}` only —
+    # the legacy `flat` key was hard-removed.
     s = _settings_for(
         uds_socket=tmp_path / "u.sock",
         map_path=tmp_map_pair,
@@ -1365,15 +1365,15 @@ async def test_list_maps_anon_returns_two_entries(
     assert r.status_code == HTTPStatus.OK
     body = r.json()
     assert isinstance(body, dict)
-    flat = body["flat"]
-    assert isinstance(flat, list)
-    names = sorted(e["name"] for e in flat)
-    assert names == ["studio_v1", "studio_v2"]
-    actives = [e["is_active"] for e in flat if e["name"] == "studio_v1"]
-    assert actives == [True]
+    assert "flat" not in body  # issue#28.1 — legacy key is gone.
     # Grouped tree: two pristine bases, no derived variants.
     groups = body["groups"]
     assert sorted(g["base"] for g in groups) == ["studio_v1", "studio_v2"]
+    pristines = [g["pristine"] for g in groups]
+    names = sorted(p["name"] for p in pristines if p is not None)
+    assert names == ["studio_v1", "studio_v2"]
+    actives = [p["is_active"] for p in pristines if p is not None and p["name"] == "studio_v1"]
+    assert actives == [True]
     for g in groups:
         assert g["pristine"] is not None
         assert g["variants"] == []
@@ -1413,7 +1413,7 @@ async def test_list_maps_empty_dir_returns_empty_list(
         r = await cl.get("/api/maps")
     assert r.status_code == HTTPStatus.OK
     body = r.json()
-    assert body == {"groups": [], "flat": []}
+    assert body == {"groups": []}
 
 
 # ---- GET /api/maps/<name>/image -----------------------------------------
@@ -2490,13 +2490,13 @@ async def test_get_config_returns_projected_dict(
     assert body["network.ue_port"] == 6666
 
 
-async def test_get_config_schema_returns_68_rows(
+async def test_get_config_schema_returns_67_rows(
     tmp_path: Path,
     tmp_map_pair: Path,
 ) -> None:
     """The schema is mirrored from C++; the endpoint serves the local
-    parse cache, not a UDS round-trip. issue#27 added 12 output_transform.*
-    + 3 origin_step.* rows on top of issue#10.1's 53 — count 53 → 68."""
+    parse cache, not a UDS round-trip. issue#28.1 hard-removed
+    `amcl.origin_yaw_deg` — count 68 → 67."""
     s = _settings_for(
         uds_socket=tmp_path / "u.sock",
         map_path=tmp_map_pair,
@@ -2507,7 +2507,7 @@ async def test_get_config_schema_returns_68_rows(
     assert r.status_code == HTTPStatus.OK
     rows = r.json()
     assert isinstance(rows, list)
-    assert len(rows) == 68
+    assert len(rows) == 67
     # Each row has the documented keys.
     for row in rows:
         assert {
@@ -5272,7 +5272,13 @@ async def test_get_map_sidecar_endpoint_returns_lineage_tree(
     # /api/maps wire-shape: lineage_kind populated per row (issue#30.1).
     assert maps_resp.status_code == HTTPStatus.OK, maps_resp.text
     maps_body = maps_resp.json()
-    flat_by_name = {e["name"]: e for e in maps_body["flat"]}
+    # issue#28.1 — `flat` was removed; flatten `groups` for lookup.
+    flat_by_name: dict[str, dict[str, object]] = {}
+    for g in maps_body["groups"]:
+        if g["pristine"] is not None:
+            flat_by_name[g["pristine"]["name"]] = g["pristine"]
+        for v in g["variants"]:
+            flat_by_name[v["name"]] = v
     # Pristine row has no sidecar on disk → lineage_kind = None.
     assert flat_by_name["studio_v1"]["lineage_kind"] is None
     # Derived rows produced by the Apply pipeline carry operator_apply.

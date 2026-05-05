@@ -476,10 +476,10 @@ The tripwire fires ONCE on the final result of `converge_anneal` (intermediate-p
 
 ### Yaw safety tripwire
 
-Lives in the cold-writer wrapper, NOT in `Amcl` itself. Anchor is `cfg.amcl_origin_yaw_deg` (the calibration origin), not the previous AMCL output:
+Lives in the cold-writer wrapper, NOT in `Amcl` itself. Anchor is `grid.origin_yaw_deg` (the YAML `origin[2]` parsed at map load — see §13.8 for the SSOT migration), not the previous AMCL output:
 
 ```
-if shortest_arc(pose.yaw_deg, cfg.amcl_origin_yaw_deg) > amcl_yaw_tripwire_deg:
+if shortest_arc(pose.yaw_deg, grid.origin_yaw_deg) > amcl_yaw_tripwire_deg:
     log("yaw_drift", ...)   # Phase 4-3 wires a UDP warning bit
 ```
 
@@ -2012,21 +2012,23 @@ The SPA System tab surfaces a banner; the operator clicks Restart
 when convenient. This preserves the project rule "every cold-path
 update is operator-initiated."
 
-### 13.8. Yaw frame SSOT — `cfg.amcl_origin_yaw_deg` deprecation
+### 13.8. Yaw frame SSOT — YAML `origin[2]` is the SOLE source of truth
 
 issue#28 made the active map's YAML `origin[2]` (parsed into
 `OccupancyGrid::origin_yaw_deg` in `occupancy_grid.cpp`) the SOLE
 source of truth for the AMCL frame yaw. The Tier-2 config field
-`amcl.origin_yaw_deg` is deprecated and ignored at the cold_writer
-seam (`production/RPi5/src/localization/cold_writer.cpp`). The
-deprecation is a two-step removal: the field still loads silently for
-back-compat with existing `tracker.toml`, but cold_writer reads only
-`grid.origin_yaw_deg`.
+`amcl.origin_yaw_deg` was deprecated for one release and **hard-removed
+in issue#28.1 (2026-W19)**: field, schema row, TOML/env/CLI readers,
+defaults entry, and apply_get/apply_set rows all deleted. Existing
+`/var/lib/godo/tracker.toml` files that still carry the key must
+have it stripped before installing the issue#28.1+ binary
+(`sudo sed -i '/^amcl\.origin_yaw_deg/d' /var/lib/godo/tracker.toml`)
+because the schema validator rejects unknown keys.
 
 Pinned by `production/RPi5/tests/test_cold_writer_offset_invariant.cpp::
 OffsetComputedAgainstGridYaw_NotConfigField` — asymmetric values
-(cfg=0°, grid=10°) catch any regression that re-routes the offset
-back to the deprecated cfg field.
+(grid=10°, hypothetical fallback=0°) catch any regression that
+re-anchors the offset to a 0-degree path that ignores the grid.
 
 ---
 

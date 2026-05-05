@@ -4,7 +4,7 @@ Track B-CONFIG (PR-CONFIG-β, TB1 fold) — cross-language schema parity.
 Loads `production/RPi5/src/core/config_schema.hpp` BY REAL PATH (mirrors
 `tests/test_protocol.py`'s LAST_POSE_FIELDS pattern) and asserts:
 
-  - row count == 68 (issue#27 pin: 53 + 12 output_transform.* + 3 origin_step.*),
+  - row count == 67 (issue#28.1: 68 - amcl.origin_yaw_deg hard-removed),
   - every row's `reload_class` is one of the 3 known strings,
   - every row's `type` is one of the 3 known strings,
   - the default_repr is non-empty.
@@ -33,16 +33,17 @@ def test_real_source_exists() -> None:
     assert _CPP_SCHEMA_HPP.exists(), f"C++ schema source missing: {_CPP_SCHEMA_HPP}"
 
 
-def test_row_count_pinned_at_68() -> None:
-    """issue#27 pin: schema row count is 68 (53 + 12 output_transform.* + 3 origin_step.*)."""
+def test_row_count_pinned_at_67() -> None:
+    """issue#28.1 pin: schema row count is 67 (was 68; amcl.origin_yaw_deg
+    hard-removed)."""
     rows = schema_mod.load_schema()
-    assert len(rows) == 68
+    assert len(rows) == 67
 
 
-def test_static_assert_in_cpp_says_68_too() -> None:
+def test_static_assert_in_cpp_says_67_too() -> None:
     """Cross-pin: the C++ static_assert text contains the count."""
     text = _CPP_SCHEMA_HPP.read_text(encoding="utf-8")
-    assert "CONFIG_SCHEMA.size() == 68" in text
+    assert "CONFIG_SCHEMA.size() == 67" in text
 
 
 def test_lidar_udev_serial_row_present() -> None:

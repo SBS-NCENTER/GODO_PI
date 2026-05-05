@@ -56,7 +56,6 @@ const std::set<std::string>& allowed_keys() {
         "amcl.map_path",
         "amcl.origin_x_m",
         "amcl.origin_y_m",
-        "amcl.origin_yaw_deg",
         "amcl.particles_global_n",
         "amcl.particles_local_n",
         "amcl.max_iters",
@@ -186,7 +185,6 @@ void apply_toml_file(Config& c, const std::filesystem::path& path) {
     if (auto v = tbl["amcl"]["map_path"].value<std::string>();        v) c.amcl_map_path           = *v;
     if (auto v = tbl["amcl"]["origin_x_m"].value<double>();           v) c.amcl_origin_x_m         = *v;
     if (auto v = tbl["amcl"]["origin_y_m"].value<double>();           v) c.amcl_origin_y_m         = *v;
-    if (auto v = tbl["amcl"]["origin_yaw_deg"].value<double>();       v) c.amcl_origin_yaw_deg     = *v;
     if (auto v = tbl["amcl"]["particles_global_n"].value<int64_t>();  v) c.amcl_particles_global_n = static_cast<int>(*v);
     if (auto v = tbl["amcl"]["particles_local_n"].value<int64_t>();   v) c.amcl_particles_local_n  = static_cast<int>(*v);
     if (auto v = tbl["amcl"]["max_iters"].value<int64_t>();           v) c.amcl_max_iters          = static_cast<int>(*v);
@@ -483,7 +481,6 @@ void apply_env(Config& c, char** envp) {
     if (auto v = env_get(envp, "GODO_AMCL_MAP_PATH"))             c.amcl_map_path           = *v;
     if (auto v = env_get(envp, "GODO_AMCL_ORIGIN_X_M"))           c.amcl_origin_x_m         = parse_double_or_throw(*v, "GODO_AMCL_ORIGIN_X_M");
     if (auto v = env_get(envp, "GODO_AMCL_ORIGIN_Y_M"))           c.amcl_origin_y_m         = parse_double_or_throw(*v, "GODO_AMCL_ORIGIN_Y_M");
-    if (auto v = env_get(envp, "GODO_AMCL_ORIGIN_YAW_DEG"))       c.amcl_origin_yaw_deg     = parse_double_or_throw(*v, "GODO_AMCL_ORIGIN_YAW_DEG");
     if (auto v = env_get(envp, "GODO_AMCL_PARTICLES_GLOBAL_N"))   c.amcl_particles_global_n = parse_int_or_throw(*v, "GODO_AMCL_PARTICLES_GLOBAL_N");
     if (auto v = env_get(envp, "GODO_AMCL_PARTICLES_LOCAL_N"))    c.amcl_particles_local_n  = parse_int_or_throw(*v, "GODO_AMCL_PARTICLES_LOCAL_N");
     if (auto v = env_get(envp, "GODO_AMCL_MAX_ITERS"))            c.amcl_max_iters          = parse_int_or_throw(*v, "GODO_AMCL_MAX_ITERS");
@@ -629,7 +626,6 @@ void apply_cli(Config& c, int argc, char** argv) {
         {"amcl-map-path",            [](Config& cc, const std::string& v){ cc.amcl_map_path           = v; }},
         {"amcl-origin-x-m",          [](Config& cc, const std::string& v){ cc.amcl_origin_x_m         = parse_double_or_throw(v, "--amcl-origin-x-m"); }},
         {"amcl-origin-y-m",          [](Config& cc, const std::string& v){ cc.amcl_origin_y_m         = parse_double_or_throw(v, "--amcl-origin-y-m"); }},
-        {"amcl-origin-yaw-deg",      [](Config& cc, const std::string& v){ cc.amcl_origin_yaw_deg     = parse_double_or_throw(v, "--amcl-origin-yaw-deg"); }},
         {"amcl-particles-global-n",  [](Config& cc, const std::string& v){ cc.amcl_particles_global_n = parse_int_or_throw(v, "--amcl-particles-global-n"); }},
         {"amcl-particles-local-n",   [](Config& cc, const std::string& v){ cc.amcl_particles_local_n  = parse_int_or_throw(v, "--amcl-particles-local-n"); }},
         {"amcl-max-iters",           [](Config& cc, const std::string& v){ cc.amcl_max_iters          = parse_int_or_throw(v, "--amcl-max-iters"); }},
@@ -954,7 +950,6 @@ Config Config::make_default() {
     c.amcl_map_path             = std::string(cfg_defaults::AMCL_MAP_PATH);
     c.amcl_origin_x_m           = cfg_defaults::AMCL_ORIGIN_X_M;
     c.amcl_origin_y_m           = cfg_defaults::AMCL_ORIGIN_Y_M;
-    c.amcl_origin_yaw_deg       = cfg_defaults::AMCL_ORIGIN_YAW_DEG;
     c.amcl_particles_global_n   = cfg_defaults::AMCL_PARTICLES_GLOBAL_N;
     c.amcl_particles_local_n    = cfg_defaults::AMCL_PARTICLES_LOCAL_N;
     c.amcl_max_iters            = cfg_defaults::AMCL_MAX_ITERS;
@@ -1060,21 +1055,6 @@ Config Config::load(int argc, char** argv, char** envp) {
     validate_amcl(c);
     validate_gpio(c);
     validate_webctl_mapping_ladder(c);
-
-    // issue#28 — `amcl.origin_yaw_deg` is deprecated. The active map's
-    // YAML `origin: [x, y, theta]` third element is the SSOT for AMCL
-    // frame yaw and is read by cold_writer via `grid.origin_yaw_deg`.
-    // Keep the field one release so existing tracker.toml files do not
-    // refuse to parse; emit a stderr warning if the operator left a
-    // non-zero value behind. Hard-removal lands in a follow-up.
-    if (c.amcl_origin_yaw_deg != 0.0) {
-        std::fprintf(stderr,
-            "[DEPRECATED] cfg.amcl_origin_yaw_deg=%.3f is ignored; "
-            "the active map's YAML origin[2] is the SSOT. "
-            "Strip the key from /var/lib/godo/tracker.toml — see "
-            "issue#28.\n",
-            c.amcl_origin_yaw_deg);
-    }
 
     return c;
 }

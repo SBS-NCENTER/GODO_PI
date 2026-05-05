@@ -209,7 +209,6 @@ TEST_CASE("Config::make_default — wires AMCL Tier-2 defaults") {
     CHECK(c.amcl_map_path             == std::string(godo::config::defaults::AMCL_MAP_PATH));
     CHECK(c.amcl_origin_x_m           == godo::config::defaults::AMCL_ORIGIN_X_M);
     CHECK(c.amcl_origin_y_m           == godo::config::defaults::AMCL_ORIGIN_Y_M);
-    CHECK(c.amcl_origin_yaw_deg       == godo::config::defaults::AMCL_ORIGIN_YAW_DEG);
     CHECK(c.amcl_particles_global_n   == godo::config::defaults::AMCL_PARTICLES_GLOBAL_N);
     CHECK(c.amcl_particles_local_n    == godo::config::defaults::AMCL_PARTICLES_LOCAL_N);
     CHECK(c.amcl_max_iters            == godo::config::defaults::AMCL_MAX_ITERS);
@@ -234,7 +233,6 @@ TEST_CASE("Config::load — AMCL TOML round-trip (positive)") {
         "map_path = \"/tmp/godo/maps/test.pgm\"\n"
         "origin_x_m = 1.25\n"
         "origin_y_m = -2.5\n"
-        "origin_yaw_deg = 30.0\n"
         "particles_global_n = 2000\n"
         "particles_local_n = 200\n"
         "max_iters = 10\n"
@@ -258,7 +256,6 @@ TEST_CASE("Config::load — AMCL TOML round-trip (positive)") {
     CHECK(c.amcl_map_path             == "/tmp/godo/maps/test.pgm");
     CHECK(c.amcl_origin_x_m           == 1.25);
     CHECK(c.amcl_origin_y_m           == -2.5);
-    CHECK(c.amcl_origin_yaw_deg       == 30.0);
     CHECK(c.amcl_particles_global_n   == 2000);
     CHECK(c.amcl_particles_local_n    == 200);
     CHECK(c.amcl_max_iters            == 10);

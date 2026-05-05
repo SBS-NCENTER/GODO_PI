@@ -68,7 +68,6 @@ inline constexpr std::string_view TRACKER_PIDFILE_DEFAULT =
 inline constexpr std::string_view AMCL_MAP_PATH            = "/etc/godo/maps/studio_v1.pgm";  // map files installed by ops
 inline constexpr double           AMCL_ORIGIN_X_M          = 0.0;     // calibration origin, X
 inline constexpr double           AMCL_ORIGIN_Y_M          = 0.0;     // calibration origin, Y
-inline constexpr double           AMCL_ORIGIN_YAW_DEG      = 0.0;     // calibration origin yaw; tripwire anchor
 inline constexpr int              AMCL_PARTICLES_GLOBAL_N  = 5000;    // first-run global localization
 inline constexpr int              AMCL_PARTICLES_LOCAL_N   = 500;     // subsequent runs around last_pose
 inline constexpr int              AMCL_MAX_ITERS           = 25;      // converge() upper bound for OneShot

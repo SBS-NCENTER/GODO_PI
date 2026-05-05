@@ -348,9 +348,10 @@ export const ORIGIN_STEP_X_M_DEFAULT = 0.01;
 export const ORIGIN_STEP_Y_M_DEFAULT = 0.01;
 export const ORIGIN_STEP_YAW_DEG_DEFAULT = 0.1;
 
-// issue#27 — theta input bound mirror. The schema's
-// `amcl.origin_yaw_deg` row bounds [-180, 180]; mirror in the SPA so
-// the input rejects out-of-bound values before the backend's 400.
+// issue#27 — picked-yaw input bound (degrees). Pre-issue#28.1 this
+// mirrored the schema row `amcl.origin_yaw_deg` (now hard-removed);
+// the SPA still bounds Map-Edit picked-yaw input to ±180° so out-of-
+// range values fail client-side before the backend's 400.
 export const ORIGIN_THETA_DEG_ABS_MAX = 180.0;
 
 // --- issue#28 — B-MAPEDIT-3 (yaw rotation, full plumbing) -----------
@@ -362,17 +363,17 @@ export const MEMO_REGEX_SOURCE = '^[A-Za-z0-9_-]+$';
 export const MEMO_MAX_LEN_CHARS = 32;
 
 // REP-103 axis colors. Red = +x, Green = +y. Used by
-// `<OriginAxisOverlay>`.
+// `drawOriginAxis` in `lib/overlayDraw.ts`.
 export const AXIS_X_COLOR = '#dc2626'; // red
 export const AXIS_Y_COLOR = '#16a34a'; // green
 export const AXIS_LINE_WIDTH_PX = 2;
 export const AXIS_LABEL_FONT_PX = 12;
 
-// `<GridOverlay>` zoom-adaptive interval schedule. Each entry maps a
-// max zoom (px-per-meter) to the world-frame grid interval (m) and the
-// rendered line thickness (px). The trailing entry's `maxZoom = null`
-// is the catch-all sentinel (covers any zoom higher than the previous
-// entry's bound — N5 lock).
+// `drawGrid` (in `lib/overlayDraw.ts`) zoom-adaptive interval schedule.
+// Each entry maps a max zoom (px-per-meter) to the world-frame grid
+// interval (m) and the rendered line thickness (px). The trailing
+// entry's `maxZoom = null` is the catch-all sentinel (covers any zoom
+// higher than the previous entry's bound — N5 lock).
 export interface GridIntervalEntry {
   maxZoom: number | null;
   intervalM: number;

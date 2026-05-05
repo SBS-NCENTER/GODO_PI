@@ -7,6 +7,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  backupMapNames,
   backupTsToUnix,
   formatBytesBinaryShort,
   formatDateTime,
@@ -157,5 +158,41 @@ describe('backupTsToUnix (issue#32)', () => {
     expect(backupTsToUnix('not-a-stamp')).toBeNaN();
     expect(backupTsToUnix('20260101010101Z')).toBeNaN(); // missing T
     expect(backupTsToUnix('')).toBeNaN();
+  });
+});
+
+describe('backupMapNames (issue#33)', () => {
+  it('extracts shared stem from pgm + yaml + sidecar.json triple', () => {
+    expect(
+      backupMapNames([
+        'chroma.20260504-143000-wallcal01.pgm',
+        'chroma.20260504-143000-wallcal01.yaml',
+        'chroma.20260504-143000-wallcal01.sidecar.json',
+      ]),
+    ).toEqual(['chroma.20260504-143000-wallcal01']);
+  });
+  it('handles legacy pre-issue#30 backup with only pgm + yaml (no sidecar)', () => {
+    expect(backupMapNames(['studio_v1.pgm', 'studio_v1.yaml'])).toEqual(['studio_v1']);
+  });
+  it('checks .sidecar.json suffix BEFORE .yaml/.pgm so the .sidecar segment is preserved', () => {
+    // Regression guard: a naive `f.slice(0, f.lastIndexOf('.'))` would
+    // strip only `.json` and leave `chroma.sidecar` in the stem. The
+    // helper must strip `.sidecar.json` as one unit.
+    expect(backupMapNames(['chroma.sidecar.json'])).toEqual(['chroma']);
+  });
+  it('returns sorted unique stems for a multi-map backup directory', () => {
+    expect(
+      backupMapNames([
+        'beta.pgm',
+        'alpha.pgm',
+        'beta.yaml',
+        'alpha.yaml',
+        'alpha.sidecar.json',
+      ]),
+    ).toEqual(['alpha', 'beta']);
+  });
+  it('returns empty array for empty file list or unknown extensions', () => {
+    expect(backupMapNames([])).toEqual([]);
+    expect(backupMapNames(['README.txt', 'note.md'])).toEqual([]);
   });
 });

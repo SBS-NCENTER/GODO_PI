@@ -800,9 +800,15 @@ async def _apply_map_edit_pipeline(
                 # 4a. Read parent's sidecar to compose cumulative.
                 # active_name may equal pristine_base when active is the
                 # pristine itself (PICK#1) — parent_cumulative defaults
-                # to identity in that case.
+                # to identity in that case, and parent_lineage is the
+                # single-entry list [pristine_base] so the resulting
+                # derived sidecar gets `generation: 1` + `parents:
+                # [pristine_base]` (issue#33 fix; pre-fix this stayed
+                # at [] which produced `generation: 0` + `parents: []`
+                # — surfaced as misleading lineage display in
+                # `<LineageModal>` for first-Apply derivatives).
                 parent_cumulative = sidecar_mod.Cumulative(0.0, 0.0, 0.0)
-                parent_lineage: list[str] = []
+                parent_lineage: list[str] = [pristine_base]
                 active_sidecar_path = sidecar_mod.sidecar_path_for(cfg.maps_dir, active_name)
                 if active_name != pristine_base and active_sidecar_path.is_file():
                     try:

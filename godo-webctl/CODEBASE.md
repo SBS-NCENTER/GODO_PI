@@ -4246,3 +4246,48 @@ post-PR-#83 backup 422'd at the FastAPI validation layer BEFORE
   Existing invariant `(g) backup-ts-canonical-utc-stamp` (if present)
   to be re-read; the `Z?` form is the post-PR-#83 lock per
   `feedback_timestamp_kst_convention.md`.
+
+## 2026-05-05 12:04 KST — issue#33 — Apply-on-pristine lineage init fix
+
+### Why
+
+Pre-existing bug surfaced during issue#30.1 HIL. When the operator
+applied directly on a pristine map (the common case for the FIRST
+derivative of any base), `app.py:801-802` initialized
+`parent_lineage: list[str] = []` and only populated it inside the
+`if active_name != pristine_base and active_sidecar_path.is_file():`
+branch. Result: first-Apply derivatives wrote sidecars with
+`generation: 0` + `parents: []` despite the source being the
+pristine — `<LineageModal>` rendered "Generation: 0 / Parents:
+(none)" for every operator's first edit, contradicting the lineage-
+chain invariant. Subsequent edits on the same chain continued to
+mis-count generation by 1 because each step appended `active_name`
+to a list that started with the wrong baseline.
+
+### Changed
+
+- `app.py:801-810` — `parent_lineage: list[str] = []` →
+  `parent_lineage: list[str] = [pristine_base]`. Comment expanded
+  to document the lineage-chain invariant the init now satisfies.
+  When active is the pristine itself, this default stands; when
+  active is a derived, the existing
+  `parent_lineage = list(parent_sc.lineage_parents) + [active_name]`
+  overwrite still applies, so generation 2+ behavior is unchanged.
+- `tests/test_app_integration.py::test_apply_on_pristine_writes_generation_1_with_pristine_in_parents`
+  — new pin: post-Apply sidecar has `lineage.generation == 1` and
+  `lineage.parents == [pristine_base]`. Without the fix this test
+  would assert against the bug (generation=0, parents=[]).
+
+### Tests
+
+- New: 1 pytest case (`test_apply_on_pristine_writes_generation_1_with_pristine_in_parents`).
+- Existing `test_post_map_edit_coord_*` tests untouched (they pin the
+  on-disk file shape + activity log, not the sidecar lineage chain).
+- All prior tests still green.
+
+### Invariants
+
+- No new invariant. The fix restores the lineage-chain invariant
+  `len(parents) == generation` which was already implied by
+  `sidecar.py` and `<LineageModal>` rendering but silently violated
+  for the pristine-pivot case.

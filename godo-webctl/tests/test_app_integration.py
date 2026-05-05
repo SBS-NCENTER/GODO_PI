@@ -4757,6 +4757,49 @@ async def test_post_map_edit_coord_full_pipeline(
     }
 
 
+async def test_apply_on_pristine_writes_generation_1_with_pristine_in_parents(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    tmp_maps_dir: Path,
+) -> None:
+    """issue#33 — Apply-on-pristine sidecar lineage init. Pre-fix, the
+    `parent_lineage` initializer at app.py was `[]` and only got
+    populated when the active map was a derived. Result: first-Apply
+    derivatives wrote sidecars with `generation: 0` + `parents: []`
+    even though the SOURCE was the pristine; the SPA's <LineageModal>
+    rendered "(none)" parents and "Generation: 0" — operator
+    confusion. Fix: initialize `parent_lineage = [pristine_base]` so
+    first Apply produces `generation: 1` + `parents: [pristine_base]`,
+    matching the design's lineage-chain invariant."""
+    import json as _json
+
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        maps_dir=tmp_maps_dir,
+    )
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post(
+            "/api/map/edit/coord",
+            json={"x_m": 0.5, "y_m": 0.3, "theta_deg": 0.0, "memo": "first_apply"},
+            headers=_auth(token),
+        )
+    assert r.status_code == HTTPStatus.OK, r.text
+    derived_name = r.json()["derived_name"]
+    sidecar_path = tmp_maps_dir / f"{derived_name}.sidecar.json"
+    assert sidecar_path.is_file()
+    body = _json.loads(sidecar_path.read_text("utf-8"))
+    # Contract: first Apply on pristine "studio_v1" → generation 1,
+    # parents == ["studio_v1"]. The lineage chain shape stays well-
+    # formed for downstream Apply on this derived (which would write
+    # generation 2 + parents [studio_v1, derived_name]).
+    assert body["lineage"]["generation"] == 1, body["lineage"]
+    assert body["lineage"]["parents"] == ["studio_v1"], body["lineage"]
+    assert body["lineage"]["kind"] == "operator_apply"
+
+
 async def test_post_map_edit_coord_with_theta_does_not_double_count(
     tmp_path: Path,
     tmp_map_pair: Path,

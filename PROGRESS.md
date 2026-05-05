@@ -174,6 +174,60 @@ All host-side bring-up steps complete. See per-step session log entry below. The
 
 ## Session log
 
+### 2026-05-05 (morning — 10:30 KST → 13:00 KST, twenty-fifth-session — issue#30.1 / #32 / #33 cleanup batch ships; HIL surfaces three pre-existing bugs adjacent to the issue#30 fold)
+
+Twenty-fifth-session opened immediately off the twenty-fourth-session close (PR #86 docs at `6f6ce6d` 10:13 KST → main). Operator brief: TL;DR #1 (issue#30.1 — Mode-B round 2 backlog) and TL;DR #2 (issue#28.1 — B-MAPEDIT-3 follow-ups) were the queued priorities. Operator chose option 1 (issue#30.1 first, smaller batch with PR #84 context still fresh). Net result: **3 merged PRs in 2.5 hours** — the planned issue#30.1 cleanup, PLUS two emergent bug fixes (issue#32 + issue#33) discovered during operator HIL of the prior PR. issue#28.1 deferred to next session per operator scope decision.
+
+**Notable structural revelation #1 — `_TS_REGEX` two-layer drift**. `map_backup._TS_REGEX = r"^[0-9]{8}T[0-9]{6}Z?$"` (the actual FS-touching regex) had been updated for the post-PR-#83 KST timestamp transition, accepting BOTH legacy `Z`-suffix and new no-suffix forms. But the sister regex `app._BACKUP_TS_PATTERN = r"^[0-9]{8}T[0-9]{6}Z$"` (the FastAPI Path validator, the FIRST defence layer that runs BEFORE the handler) was not updated. Result: every backup created on/after 2026-05-04 returned 422 at the FastAPI layer BEFORE `restore_backup` could even run. Operators saw "복원 실패" on every recent backup. Lesson: when relaxing/transitioning a regex/format, audit ALL parser sites for the same format — defence-in-depth layers can drift independently. (Memory candidate for Parent — pattern adjacent to but distinct from `feedback_relaxed_validator_strict_installer.md`.)
+
+**Notable structural revelation #2 — Apply-on-pristine lineage chain invariant silently violated**. `app.py:801` initialized `parent_lineage: list[str] = []` and only populated it inside the `if active_name != pristine_base and active_sidecar_path.is_file():` branch (the derived case). Result: when the operator applied directly on a pristine map (the FIRST derivative case — by far the most common), the resulting derived sidecar wrote `lineage.generation = 0` + `lineage.parents = []` despite the source clearly being the pristine. Subsequent edits on the chain mis-counted generation by 1 because each `parent_sc.lineage_parents + [active_name]` step started from the wrong baseline. The lineage-chain invariant `len(parents) == generation` was implied by the design but never test-pinned. The operator caught it by reading `<LineageModal>` content during PR #87 HIL — "Generation: 0 / Parents: (none) / Cumulative: (-1.723, 0.521) m" — and recognising the contradiction. Fix: initialize `parent_lineage = [pristine_base]`. New pytest pin makes the invariant explicit going forward.
+
+**Notable structural revelation #3 — manual maps_dir snapshot is a complementary safety net to SPA per-pair backup**. Operator-locked the rule mid-session (during issue#30.1 HIL prep): "앞으로도 간간히 SPA의 백업 기능 말고 이렇게 수동 백업을 하는 것이 좋겠어요". The SPA's Backup tab takes per-pair snapshots at operator request, which is great for routine ops but doesn't capture the entire `maps_dir` shape (orphan PGMs, unmatched sidecars, in-flight derivatives) atomically. A wholesale `rsync -a /var/lib/godo/maps/ /home/ncenter/maps_backup_<YYYY-MM-DD>_<context>/` gives a known-good rollback target distinct from the per-pair feature. Two snapshots taken this session as proof: `maps_backup_2026-05-05_tue_pre_issue30.1_hil/` (71 files) and `maps_backup_2026-05-05_pre_issue33_hil/` (38 files; reduced count reflects HIL-time cleanup). Memory entry committed in PR #88: `feedback_manual_maps_backup_pre_hil.md` with the trigger condition (PR touches `maps_dir`-mutating code) + naming convention + verify step.
+
+**Process choice — pipeline short-circuit applied to issue#32**. Per `feedback_pipeline_short_circuit.md` (≤200 LOC fully-SSOT-specified work), issue#32 ran direct-writer (no Planner / no Reviewer Mode-A or Mode-B) — the regex change was 1 character (`Z$` → `Z?$`), the frontend formatter was a 16-LOC pure function with clear contract, and the column-header swap was trivial. Total surface: 9 files / +246 / -22. Operator HIL pass + merge in under 30 minutes. Confirmed third application of the rule (Phase 4-2 C, Phase 4-2 systemd, now issue#32). issue#33 was similarly small in code (~5 LOC core fix) but had two coupled changes (lineage init + backup map-name display) so direct-writer pipeline was retained without explicit short-circuit framing.
+
+**3 PRs landed this session**:
+
+| PR | Issue | Title | State |
+|---|---|---|---|
+| #87 | issue#30.1 | chore(issue#30.1): PR #84 Mode-B round 2 backlog — tautological test removal + inline lineage glyph + LineageModal a11y fix | merged `837d3f2` (squash, 5 commits → 1) |
+| #88 | issue#32 | fix(issue#32): backup TS regex + frontend formatter accept post-PR #83 KST stamps | merged `6ad4112` (squash, 2 commits → 1) |
+| #89 | issue#33 | fix(issue#33): Apply-on-pristine lineage init + backup table 맵 이름 column | merged `af5b1bc` (squash, 1 commit → 1) |
+
+PR #87 internal commits (squashed):
+1. `8734b43` — remove tautological D3↔D4 cross-check test (sister coverage at `test_typed_delta_shifts_picked_point_off_origin` pins the contract)
+2. `b8a9cf9` — emit `lineage_kind` on `/api/maps` rows (additive `MapEntry` field; `_read_lineage_kind` graceful-degradation helper)
+3. `070ccbb` — inline lineage glyph in `<MapList>` + `<LineageModal>` a11y split (DOM split for `role="dialog"` to live off the click/keydown-handler-bearing backdrop)
+4. `a9075f6` — per-stack CODEBASE change-log entries
+5. `e9fae2b` — Mode-B fold: 4th `LINEAGE_GLYPHS` entry for `backup` value (Mode-B caught webctl SSOT had 4 lineage_kind values but inline mapping covered only 3)
+
+PR #88 internal commits (squashed):
+1. `6d9e04f` — docs: capture manual maps_dir snapshot convention (carryover memory from issue#30.1 session)
+2. `d4fb109` — fix(issue#32): backup TS regex + frontend formatter accept post-PR #83 KST stamps
+
+PR #89 (single commit, merged as-is via squash):
+1. `b8c4688` — fix(issue#33): Apply-on-pristine lineage init + backup table 맵 이름 column
+
+**Test counts**:
+
+- godo-webctl: 1049 (start) → 1051 (end) — net +2 (new: `test_backup_restore_kst_stamp_no_z_suffix_returns_200`, `test_apply_on_pristine_writes_generation_1_with_pristine_in_parents`); test_sidecar.py dropped 1 (tautological deletion), test_maps.py added 2 (lineage_kind sidecar present + malformed graceful-None), test_app_integration.py extended 1 existing.
+- godo-frontend: 464 (start, post-PR #84) → 479 (end) — net +15 (new: `MapList.test.ts` 3 cases incl. backup glyph; `LineageModal.test.ts` 1 case; `format.test.ts` 11 cases incl. `backupTsToUnix` 4 + `backupMapNames` 5 + 2 sanity).
+- All builds clean of LineageModal a11y warnings (PR #87 outcome).
+
+**Open queue for next session** (priority order, operator-locked):
+
+1. **issue#28.1** — B-MAPEDIT-3 follow-ups (half-day batch carryover from twenty-second-session): MA1 (4 missing pytests around asyncio.Lock + SSE protocol), MA2 (smoke→integration test promotion), MA3-9 (docstring fixes, unused constant removal, HIL tests, kRadToDeg promotion), Cleanup (standalone overlay component file deletion, `cfg.amcl_origin_yaw_deg` hard-removal, `flat` backward-compat key removal).
+2. issue#26 — measurement tool round 2 + Writer + HIL (half-day at broadcasting-room wired LAN).
+3. issue#11 — Live pipelined-parallel (PAUSED awaiting issue#26 first capture).
+4. issue#13 — distance-weighted AMCL likelihood.
+5. issue#4 — AMCL silent-converge diagnostic.
+6. issue#29 — SHOTOKU base-move (issue#30 dependency now resolved).
+7. issue#17 — GPIO UART migration (perma-deferred).
+8. Bug B — Live mode standstill jitter.
+9. issue#7 — boom-arm angle masking (contingent on issue#4).
+
+**Next free issue integer: `issue#34`** (`#30` MERGED, `#30.1` MERGED, `#31` candidate = vector map perma-defer, `#32` MERGED, `#33` MERGED).
+
 ### 2026-05-05 (cross-day — 02:00 KST → 12:00 KST, twenty-third + twenty-fourth-session — issue#30 pick-anchored YAML normalization ships with 3 HIL fold rounds, including driver-fix migration from sed-patch to `flip_x_axis` runtime parameter)
 
 Twenty-third-session opened 02:00-ish KST, ran the issue#30 pipeline to completion (Planner R1→R3 + Mode-A R1→R3 APPROVE + Writer R1→R2 + Mode-B R1→R2 APPROVE WITH MINOR), pushed commit `640b420` to PR #84, deployed to news-pi01 for HIL. Operator HIL surfaced 3 findings; operator chose to defer all to twenty-fourth-session for clean coupled fix rather than partial fix that "더 꼬일 수도". Twenty-third-session closed with PR #85 (handoff: NEXT_SESSION rewrite + new memory `project_issue30_hil_findings_2026-05-05.md`) merged at `6973167`.

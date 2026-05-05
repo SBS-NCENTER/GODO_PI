@@ -10,6 +10,77 @@
 
 ---
 
+## 2026-05-05 (오전 — 10:30 KST → 13:00 KST, 스물 다섯 번째 세션 — issue#30.1 / #32 / #33 cleanup batch ship, HIL이 issue#30 fold 인접부에서 3개 pre-existing 버그 surface)
+
+### 한 줄 요약
+
+스물 네 번째 세션 close 직후 (PR #86 docs at `6f6ce6d` 10:13 KST) 바로 이어진 오전 세션. 운영자 브리프: TL;DR #1 (issue#30.1 — Mode-B round 2 backlog) 우선. 옵션 1로 진행 — issue#30.1 작은 batch부터 시작 (PR #84 컨텍스트 fresh할 때). 결과: **2.5시간에 3개 PR 머지** — 계획된 issue#30.1 cleanup + 운영자 HIL이 발견한 인접 pre-existing 버그 2개 (issue#32 + issue#33). issue#28.1은 다음 세션으로 운영자 결정 보류.
+
+### 3개 PR
+
+| PR | issue# | 제목 | 결과 |
+|---|---|---|---|
+| #87 | issue#30.1 | chore(issue#30.1): PR #84 Mode-B round 2 backlog — tautological test 제거 + inline lineage glyph + LineageModal a11y fix | merged `837d3f2` (squash, 5 commit → 1) |
+| #88 | issue#32 | fix(issue#32): backup TS regex + frontend formatter가 post-PR #83 KST stamp 받아들이도록 | merged `6ad4112` (squash, 2 commit → 1) |
+| #89 | issue#33 | fix(issue#33): Apply-on-pristine lineage init + backup table 맵 이름 컬럼 | merged `af5b1bc` (squash, 1 commit → 1) |
+
+### 핵심 구조 발견 #1 — `_TS_REGEX` 두 레이어 drift
+
+`map_backup._TS_REGEX = r"^[0-9]{8}T[0-9]{6}Z?$"` (실제 FS-touching regex)는 post-PR-#83 KST timestamp transition을 위해 이미 업데이트되어 있어서 legacy `Z`-suffix와 새 no-suffix 양쪽을 모두 받아들이는 상태였다. 그런데 sister regex `app._BACKUP_TS_PATTERN = r"^[0-9]{8}T[0-9]{6}Z$"` (FastAPI Path validator, 핸들러보다 먼저 도는 FIRST defence layer)는 업데이트가 누락. 결과: 2026-05-04 이후 생성된 백업은 모두 `restore_backup`이 실행되기도 전에 FastAPI 레이어에서 422 거부. 운영자가 PR #87 HIL 중 발견 — "복원 실패가 떠".
+
+운영자 발화: "복원 기능이 잘 안되는 것 같아. restore 탭에서 복원 버튼 누를시 복원 실패 발생."
+
+수정: 1글자 변경 (`Z$` → `Z?$`)으로 FastAPI validator를 실제 implementation regex와 일치시킴. 부수적으로 frontend `tsToUnix`도 같은 root cause를 공유하고 있어서 (`Date.parse`가 KST stamp를 UTC로 해석해 +9시간 오차) `lib/format.ts`의 새 pure helper `backupTsToUnix`로 추출, optional `Z` suffix 감지해 UTC vs KST(`+09:00`) 오프셋 선택. 컬럼 헤더 `시점 (UTC)` → `시점 (raw)` (양쪽 form이 공존).
+
+교훈: regex/format을 transition할 때 **모든 parser 사이트를 audit해야 한다** — defence-in-depth 레이어가 독립적으로 drift할 수 있다. (메모리 후보 — `feedback_relaxed_validator_strict_installer.md`와 인접하지만 별개의 패턴.)
+
+### 핵심 구조 발견 #2 — Apply-on-pristine lineage chain invariant silent 위반
+
+`app.py:801`이 `parent_lineage: list[str] = []`로 초기화하고 `if active_name != pristine_base and active_sidecar_path.is_file():` 분기 (derived 케이스) 안에서만 채움. 결과: 운영자가 pristine 위에 직접 Apply할 때 (FIRST derivative case — 가장 흔한 경로), 결과 derived의 sidecar에 `lineage.generation = 0` + `lineage.parents = []`가 기록됨. 명백히 source가 pristine인데도. 그 chain 위에 추가 Apply가 있으면 `parent_sc.lineage_parents + [active_name]` step이 잘못된 baseline에서 시작해 generation을 1씩 mis-count.
+
+`len(parents) == generation` invariant는 design상 implied였지만 테스트로 pin되어 있지 않았음. 운영자가 PR #87 HIL 중 `<LineageModal>` 내용 읽다가 발견 — "Generation: 0 / Parents: (none) / Cumulative: (-1.723, 0.521) m" — 모순을 인지.
+
+운영자 발화: "느낌표로 뜨는 lineage 확인 모달 창에서 parent가 안나오고 generation도 0으로 떠."
+
+수정: `parent_lineage = [pristine_base]`로 초기화. 첫 Apply가 generation=1 + parents=[pristine_base]를 produce. 새 pytest pin (`test_apply_on_pristine_writes_generation_1_with_pristine_in_parents`)으로 invariant 명시화.
+
+### 핵심 구조 발견 #3 — 수동 maps_dir 스냅샷이 SPA per-pair backup의 보완 안전망
+
+운영자가 issue#30.1 HIL 준비 중 lock: "앞으로도 간간히 SPA의 백업 기능 말고 이렇게 수동 백업을 하는 것이 좋겠어요." SPA Backup tab은 운영자 요청 시 per-pair 스냅샷을 만들어주지만 `maps_dir` 전체 shape (orphan PGM, unmatched sidecar, in-flight derivative)을 atomically 캡처하지는 못함. wholesale `rsync -a /var/lib/godo/maps/ /home/ncenter/maps_backup_<YYYY-MM-DD>_<context>/`은 per-pair feature와 별개의 known-good rollback target을 제공.
+
+이번 세션 동안 두 번 수동 스냅샷:
+- `maps_backup_2026-05-05_tue_pre_issue30.1_hil/` — 71 files (issue#30.1 HIL 직전)
+- `maps_backup_2026-05-05_pre_issue33_hil/` — 38 files (issue#33 HIL 직전; 파일 수 줄어든 건 HIL 도중 정리 반영)
+
+복원이 필요하면 source ↔ dest를 swap한 동일 명령어 (운영자 관찰: "복원이랑 명령어가 정 반대네"):
+```
+sudo rsync -a --delete /home/ncenter/maps_backup_<…>/ /var/lib/godo/maps/
+```
+
+메모리 entry committed in PR #88: `feedback_manual_maps_backup_pre_hil.md` — 트리거 조건 (PR이 `maps_dir` mutating 코드 건드릴 때) + naming convention + verify step + cleanup policy.
+
+### Process 선택 — issue#32에 pipeline short-circuit 적용
+
+`feedback_pipeline_short_circuit.md` (≤200 LOC + fully-SSOT-specified work) 룰 적용. issue#32는 regex 1글자 변경 + frontend formatter (16 LOC pure function) + 컬럼 헤더 swap만 — 명확한 contract + small surface. Planner / Reviewer Mode-A / Mode-B 모두 skip, direct-writer + Parent self-verify + commit. 9 files / +246 / -22로 운영자 HIL pass + merge까지 30분 미만. 룰의 세 번째 적용 사례 (Phase 4-2 C, Phase 4-2 systemd, 그리고 이번 issue#32).
+
+issue#33은 코드 surface 자체는 작았지만 (5-LOC 핵심 fix) lineage init과 backup map-name display 두 변경이 coupled되어 있어서 short-circuit framing 없이 direct-writer만 적용.
+
+### 다음 세션 큐 (운영자 lock 우선순위)
+
+1. **issue#28.1** — B-MAPEDIT-3 follow-ups (half-day batch, 스물 두 번째 세션부터 carryover): MA1 (4개 누락 pytests), MA2, MA3-9, cleanup.
+2. issue#26 — measurement tool round 2 + Writer + HIL.
+3. issue#11 — Live pipelined-parallel (PAUSED).
+4. issue#13 — distance-weighted likelihood.
+5. issue#4 — AMCL silent-converge.
+6. issue#29 — SHOTOKU base-move.
+7. issue#17 — GPIO UART (perma-deferred).
+8. Bug B — Live standstill jitter.
+9. issue#7 — boom-arm masking.
+
+**다음 free issue 번호: `issue#34`** (`#30` / `#30.1` / `#32` / `#33` MERGED, `#31` candidate = vector map perma-defer).
+
+---
+
 ## 2026-05-05 (날짜 횡단 — 02:00 KST → 12:00 KST, 스물 세 번째 + 스물 네 번째 세션 — issue#30 pick-anchored YAML normalization ship + HIL 3라운드 fold, driver fix는 sed-patch에서 `flip_x_axis` 런타임 파라미터로 마이그레이션)
 
 ### 한 줄 요약

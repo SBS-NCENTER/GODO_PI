@@ -4121,3 +4121,80 @@ operator-usable feature.
   derived has a sidecar on disk by the time `_apply_map_edit_pipeline`
   reads `parent_cumulative`. Pinned by
   `tests/test_app_integration.py::test_pr81_legacy_derived_auto_migration`.
+
+## 2026-05-05 10:50 KST — issue#30.1 — PR #84 Mode-B round 2 backlog
+
+### Why
+
+Three Mode-B round-2 follow-ups deferred from issue#30 (PR #84,
+MERGED 2026-05-05). All three are scoped local cleanups, not new
+behaviour. No invariant added — `MapEntry.lineage_kind` is an
+additive wire-shape field; the locked semantic lives in
+`.claude/memory/project_pick_anchored_yaml_normalization_locked.md`.
+
+### Removed
+
+- `tests/test_sidecar.py::test_compose_matches_d4_affine_pivot_rotation`
+  (lines 446-546). Mode-B round 2 flagged the test as
+  tautological — Path A and Path B both invoked
+  `transform_pristine_to_derived` with IDENTICAL `cum_b` + `step_b`
+  arguments, so the assertion was structurally guaranteed and could
+  never fail. Sister coverage is sufficient and was verified before
+  deletion:
+  - `test_typed_delta_shifts_picked_point_off_origin`
+    (test_map_transform.py:363) binds D3 (`compose_cumulative`) to
+    D4 (`transform_pristine_to_derived`) and asserts the picked
+    pixel lands at derived world `typed_delta`.
+  - `test_pick_cascade_associativity` (test_sidecar.py:380) covers
+    D3 two-step cascade with explicit re-derivation via the SSOT
+    formula.
+  No replacement test; the deleted lines now carry a comment block
+  citing the sister coverage so future readers don't try to
+  re-add it.
+
+### Added
+
+- `MapEntry.lineage_kind: str | None` field (after `resolution_m`)
+  + `to_dict()` exposes it. Mirrors `<name>.sidecar.json ::
+  lineage.kind` (`operator_apply` / `synthesized` /
+  `auto_migrated_pre_issue30`). Lets the SPA Map list render an
+  inline kind-coded glyph next to each variant row WITHOUT opening
+  LineageModal.
+- Private helper `maps._read_lineage_kind(maps_dir, name) -> str |
+  None` reads `<name>.sidecar.json` and returns
+  `body.lineage.kind`. Pattern matches `read_yaml_resolution` —
+  graceful degradation, returns `None` on missing file / malformed
+  JSON / missing key / wrong-type value (NEVER raises). Bypasses
+  `sidecar.read()`'s schema validation because callers under
+  `list_pairs` only need this one field; failed schema validation
+  should not prevent the row from being listed. The
+  `recovery_sweep` invariant (af) guarantees every active derived
+  on disk has a validated sidecar by the time `list_pairs` runs.
+- `tests/test_maps.py::test_list_pairs_includes_lineage_kind_when_sidecar_present`
+  (1 case, mixed pristine + derived).
+- `tests/test_maps.py::test_list_pairs_lineage_kind_none_on_malformed_sidecar`
+  (1 case, truncated JSON → graceful None).
+
+### Changed
+
+- `tests/test_maps.py::test_map_entry_to_dict_uses_mtime_unix_float`
+  strict-shape assertion expanded to include `"lineage_kind"` in
+  the expected key set (without this update the test would flip
+  red the moment `MapEntry` gained the field — Mode-A Critical fix).
+- `tests/test_app_integration.py::test_get_map_sidecar_endpoint_returns_lineage_tree`
+  extended (NOT a new test) — after building a 2-step cascade,
+  also calls `/api/maps` and asserts pristine has `lineage_kind:
+  null` while both derived rows carry `"operator_apply"`.
+
+### Tests
+
+- New: 2 unit tests in `tests/test_maps.py` (sidecar present, sidecar
+  malformed).
+- Changed: 1 strict-shape update + 1 extension to integration test.
+- All 1049 prior tests still green.
+
+### Invariants
+
+- No new invariant. `MapEntry.lineage_kind` is an additive wire-shape
+  field on top of invariant (af); the locked semantic is in
+  `.claude/memory/project_pick_anchored_yaml_normalization_locked.md`.

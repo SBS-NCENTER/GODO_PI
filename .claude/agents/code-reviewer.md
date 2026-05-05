@@ -143,7 +143,8 @@ You receive the Writer's files and tests after implementation.
 - [ ] Logs carry operationally useful context (not just "entered function X").
 
 ### Documentation
-- [ ] Target folder's `CODEBASE.md` updated.
+- [ ] Dated change-log entry appended to the matching weekly archive `<stack>/CODEBASE/YYYY-W##.md` (NOT the master). Master `CODEBASE.md` keeps invariants + Index only (operator-locked Option (b), issue#34 2026-W19).
+- [ ] If a new invariant `(a)..(z)..` was introduced, its text was added to the **master** `CODEBASE.md` (invariants are master-resident).
 - [ ] `README.md` updated if public API changed.
 - [ ] Design-level shifts reported to Parent (upstream docs are Parent's to update).
 

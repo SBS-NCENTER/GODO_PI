@@ -17,23 +17,31 @@ unit files had already shipped in earlier PRs but the docs still said
 they needed to be written. Stale CODEBASE.md content has the same
 failure mode: future sessions plan against a fictional state.
 
-**How to apply:**
+**How to apply** (post-issue#34 weekly-archive structure, 2026-W19 lock):
 
 1. Backend changes (C++ tracker, RT path, systemd, scripts under
-   `production/RPi5/`) → update `production/RPi5/CODEBASE.md`. Add a
-   dated section in the `## YYYY-MM-DD HH:MM KST — <feature>` style
-   already present, and tighten/add `### Invariants` letters as needed.
-2. Webctl backend changes (Python FastAPI under `godo-webctl/`) →
-   update `godo-webctl/CODEBASE.md` likewise. Letter the new invariants
-   continuing from the existing tail (currently (x) → (y), (z), …).
-3. Frontend changes (Vite + Svelte under `godo-frontend/`) → update
-   `godo-frontend/CODEBASE.md`. The H-Q numbering for FRONT_DESIGN.md
-   §H Map viewer is the established pattern for sub-features.
-4. Pure config / docs changes still warrant a one-line CODEBASE.md
-   change-log entry pointing at the affected paths so the doc trail
-   matches the commit trail.
+   `production/RPi5/`) → append a dated entry to the matching weekly
+   archive `production/RPi5/CODEBASE/2026-W##.md` (compute the ISO 8601
+   KST week from today's date; create the archive file with standard
+   header if the week is new, and add a row to the master Index).
+   Tighten/add `### Invariants` letters in the **master**
+   `production/RPi5/CODEBASE.md` (invariants stay master-resident; only
+   dated entries live in archives).
+2. Webctl backend changes (Python FastAPI under `godo-webctl/`) → same
+   pattern: dated entry to `godo-webctl/CODEBASE/2026-W##.md`,
+   invariants in master.
+3. Frontend changes (Vite + Svelte under `godo-frontend/`) → same
+   pattern: dated entry to `godo-frontend/CODEBASE/2026-W##.md`,
+   invariants in master.
+4. Pure config / docs changes still warrant a one-line dated entry in
+   the matching weekly archive so the doc trail matches the commit
+   trail.
 
-If a task touches multiple surfaces, ALL three CODEBASE.md files get
+The master per-stack `CODEBASE.md` keeps invariants + Index of weekly
+archives only — no inline most-recent dated entry (operator-locked
+Option (b), issue#34 2026-W19).
+
+If a task touches multiple surfaces, ALL three weekly archives get
 updated in the same PR.
 
 The CLAUDE.md §6 "Context maintenance" rule already states this; the
@@ -50,7 +58,9 @@ The doc tree is now hierarchical:
 - Root `CODEBASE.md` = scaffold + module roles + cross-stack data flow.
 - Per-stack `production/RPi5/CODEBASE.md`, `godo-webctl/CODEBASE.md`,
   `godo-frontend/CODEBASE.md`, `prototype/Python/CODEBASE.md` = invariants
-  + change log (the load-bearing SSOT).
+  + Index of weekly archives (the load-bearing SSOT). Dated change-log
+  entries live under `<stack>/CODEBASE/YYYY-W##.md` per the issue#34
+  2026-W19 weekly-archive lock.
 
 The same hierarchy applies to design docs:
 

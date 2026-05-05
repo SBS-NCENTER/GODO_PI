@@ -71,7 +71,7 @@ Register each item via TaskCreate, then summarize here:
 ## Definition of Done
 - [ ] All unit tests pass
 - [ ] Reviewer Mode-B approval
-- [ ] CODEBASE.md updated
+- [ ] Dated change-log entry appended to `<stack>/CODEBASE/YYYY-W##.md` weekly archive (per CLAUDE.md §6 weekly-archive rotation rule); master `CODEBASE.md` updated only if a new invariant is introduced
 - [ ] ... (task-specific)
 ```
 

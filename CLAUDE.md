@@ -154,7 +154,8 @@ The smoother + 60 Hz hot path was designed around mode (4) — its 60 Hz interpo
 ├─ DESIGN.md                     ← Design-doc TOC (links SYSTEM + FRONT)
 ├─ SYSTEM_DESIGN.md              ← Backend + RT + AMCL + FreeD design SSOT
 ├─ FRONT_DESIGN.md               ← Frontend / page / component design SSOT
-├─ PROGRESS.md                   ← Cross-session progress log (English, technical)
+├─ PROGRESS.md                   ← Lean: Current state + Decisions + Open Q + index of weekly archives
+├─ /PROGRESS                     ← Weekly session-log archives (YYYY-W##.md, ISO 8601 KST Mon–Sun)
 ├─ NEXT_SESSION.md               ← Cold-start cache (throwaway, prune-on-absorption)
 ├─ /.claude
 │    ├─ /agents                  ← Agent definitions (planner / writer / reviewer)
@@ -162,7 +163,8 @@ The smoother + 60 Hz hot path was designed around mode (4) — its 60 Hz interpo
 │         ├─ MEMORY.md
 │         └─ *.md                ← user / feedback / project / reference entries
 ├─ /doc                          ← Reference documents
-│    ├─ history.md                 Cross-session narrative (Korean)
+│    ├─ history.md                 Cross-session narrative (Korean) — lean: 인트로 + 주차 인덱스
+│    ├─ /history                ← Weekly Korean session-narrative archives (YYYY-W##.md)
 │    ├─ Embedded_CheckPoint.md     Embedded reliability checklist (reference)
 │    ├─ /hardware                ← Hardware decision / measurement reports
 │    │    ├─ floor_tilt_survey_TS5.md
@@ -177,14 +179,17 @@ The smoother + 60 Hz hot path was designed around mode (4) — its 60 Hz interpo
 ├─ /production                   ← Production deployment stacks
 │    └─ /RPi5                    ← C++ tracker (godo_tracker_rt, Phase 3+)
 │         ├─ README.md
-│         └─ CODEBASE.md         ← Invariants (a)..(o) + change log
+│         ├─ CODEBASE.md         ← Invariants (a)..(w) + index of weekly archives
+│         └─ /CODEBASE           ← Weekly change-log archives (YYYY-W##.md)
 ├─ /godo-webctl                  ← Operator web control plane (Python FastAPI, Phase 4-3+)
 │    ├─ README.md                  drives godo-tracker via UDS at /run/godo/ctl.sock
-│    ├─ CODEBASE.md                Invariants (a)..(aa) + change log
+│    ├─ CODEBASE.md                Invariants (a)..(af) + index of weekly archives
+│    ├─ /CODEBASE                  Weekly change-log archives
 │    └─ pyproject.toml             UV-managed; FastAPI + bcrypt + pyjwt + pillow + python-multipart
 ├─ /godo-frontend                ← Operator SPA (Vite + Svelte 5 + TS, Phase 4.5)
 │    ├─ README.md                  served by godo-webctl when GODO_WEBCTL_SPA_DIST is set
-│    ├─ CODEBASE.md                Invariants (a)..(u) + change log
+│    ├─ CODEBASE.md                Invariants (a)..(an) + index of weekly archives
+│    ├─ /CODEBASE                  Weekly change-log archives
 │    └─ package.json               Pages: Dashboard, Map (with Edit sub-tab), Diag, Config, System (with sub-tabs), Backup, Local, Login
 └─ /XR_FreeD_to_UDP              ← Legacy Arduino firmware (rollback card, read-only reference)
      ├─ README.md
@@ -194,17 +199,18 @@ The smoother + 60 Hz hot path was designed around mode (4) — its 60 Hz interpo
 
 **Hierarchy quick-reference:**
 - `CODEBASE.md` (root) and `DESIGN.md` (root) are scaffold/index files. They do NOT duplicate per-stack invariant text or design-doc bodies.
-- Per-stack `CODEBASE.md` files own their invariants `(a)..(z)..` and change log; this is the SSOT for "what is built and why each rule exists."
+- Per-stack `CODEBASE.md` files own their invariants `(a)..(z)..` (the SSOT for "what is built and why each rule exists"). Dated change-log entries live under `<stack>/CODEBASE/YYYY-W##.md` (ISO 8601 KST Mon–Sun weeks). The master keeps invariants + Index only — **no inline most-recent entry** (operator-locked Option (b), 2026-W19).
 - `SYSTEM_DESIGN.md` + `FRONT_DESIGN.md` own design narrative; the root `DESIGN.md` is just their TOC.
+- `PROGRESS.md` keeps current state + Decisions + Open Q + Index; per-week session blocks under `PROGRESS/YYYY-W##.md`. Same pattern for `doc/history.md` (Korean) → `doc/history/YYYY-W##.md`.
 
 ### New-session entry procedure (Mac / Windows alike)
 
 1. Read `CLAUDE.md` (this file) for operating rules.
 2. Read `NEXT_SESSION.md` for what's queued (cold-start cache; prune-on-absorption — see §6).
 3. Check `.claude/memory/MEMORY.md` and load relevant entries.
-4. Open `CODEBASE.md` (root) for "where does X live"; follow into the relevant per-stack `CODEBASE.md` for invariants and recent change log.
+4. Open `CODEBASE.md` (root) for "where does X live"; follow into the relevant per-stack `CODEBASE.md` for invariants. For "what just shipped", open the most recent week's archive at `<stack>/CODEBASE/YYYY-W##.md`.
 5. Open `DESIGN.md` (root) for "why does X work this way"; follow into `SYSTEM_DESIGN.md` or `FRONT_DESIGN.md`.
-6. `PROGRESS.md` / `doc/history.md` for "what happened in the last few sessions" narrative.
+6. `PROGRESS.md` / `doc/history.md` for current state + most-recent-week narrative; older sessions under `PROGRESS/YYYY-W##.md` and `doc/history/YYYY-W##.md`.
 
 > Automatic memory loading depends on per-host caches, so **explicitly reading `.claude/memory/MEMORY.md` at the start of each session** is recommended. This folder is all you need to continue work on any machine.
 
@@ -232,7 +238,7 @@ These rules apply to the Parent orchestrator and all subagents. They are non-neg
 
 ### Context maintenance
 
-- Code or feature changes → update the relevant per-stack `CODEBASE.md` in the same change. Per-stack files own invariants `(a)..(z)..` and change log; the root `CODEBASE.md` is updated only when the *family shape* shifts (new stack added, cross-stack data flow changes). See `.claude/memory/feedback_codebase_md_freshness.md` for the cascade rule and the operator's lock-in.
+- Code or feature changes → write the dated change-log entry directly into the matching weekly archive `<stack>/CODEBASE/YYYY-W##.md` (compute the ISO 8601 KST week from today's date). The master per-stack `CODEBASE.md` keeps invariants `(a)..(z)..` + Index of archives; do NOT add inline dated entries to the master. The root `CODEBASE.md` is updated only when the *family shape* shifts (new stack added, cross-stack data flow changes). See `.claude/memory/feedback_codebase_md_freshness.md` for the cascade rule and the operator's lock-in, and the weekly archive rotation rule under §6 below.
 - Design decisions → update `SYSTEM_DESIGN.md` (backend) or `FRONT_DESIGN.md` (frontend). The root `DESIGN.md` is a TOC; update it only when the design-doc split itself changes.
 - Project state / decision changes → update `PROGRESS.md` + `doc/history.md` (Parent's responsibility).
 - Global behavioral preferences → update `.claude/memory/` (Parent's responsibility).
@@ -249,6 +255,7 @@ These rules apply to the Parent orchestrator and all subagents. They are non-neg
 - A change in a leaf (per-stack CODEBASE.md, SYSTEM_DESIGN, FRONT_DESIGN) is its own complete update — the leaf is the SSOT.
 - A change that genuinely shifts the *shape* of the family (new stack, renamed module, changed cross-stack arrow, new top-level design doc) updates every affected level in the same commit. No half-cascade.
 - Reviewers (Mode-B) should treat a root-level update without a leaf counterpart, OR a leaf update that contradicts the root scaffold, as a Critical finding.
+- **Weekly archive rotation** (issue#34, 2026-W19 lock): per-stack `CODEBASE.md`, root `PROGRESS.md`, and `doc/history.md` keep ONLY their scaffold/invariants + Index of weekly archives. Dated entries live in `<stem>/YYYY-W##.md`. When writing a new dated entry during a session, append it directly to the matching weekly archive (compute ISO 8601 KST week from today's date — e.g., 2026-05-05 → `2026-W19.md`). If the week's archive does not yet exist, create it with the standard header (`# <stack>/CODEBASE.md — 2026-W## (YYYY-MM-DD → YYYY-MM-DD KST)` + `Archived weekly. Master: [../<file>.md](../<file>.md).` + `---`) and add the row to the master Index. This is a **leaf-only** routine operation — no root cascade.
 
 ### Date + time stamps in date-bearing SSOT entries
 

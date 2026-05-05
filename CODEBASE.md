@@ -163,18 +163,7 @@ Key invariants this picture enforces:
 
 ## 4. Where invariants live (do not duplicate here)
 
-Each stack's CODEBASE.md owns a lettered invariant list `(a)..(z)..(aa)..` plus a chronological change log. **Do not copy invariant text into this file.** When a behavior is established, the canonical text lives in the per-stack CODEBASE.md and this root file at most points to it by section name.
-
-Current invariant tail per stack (as of 2026-05-01):
-
-| Stack | Invariants tail |
-|---|---|
-| `production/RPi5/CODEBASE.md` | `(o) godo-systemctl-polkit-discipline` |
-| `godo-webctl/CODEBASE.md` | `(af) issue#14 mapping preview path SSOT + PNG re-encode` |
-| `godo-frontend/CODEBASE.md` | `(ad) issue#14 mode-aware UI gating via mappingStatus` |
-| `godo-mapping/CODEBASE.md` | `(j) issue#14 LIDAR_DEV env-var SSOT chain` |
-
-The tail letter is just a quick orientation hint — letters do not increment monotonically (some have been retired or skipped). Always read the per-stack file for the canonical list.
+Each stack's CODEBASE.md owns a lettered invariant list `(a)..(z)..(aa)..`. Dated change-log entries live in weekly archives at `<stack>/CODEBASE/YYYY-W##.md` (ISO 8601 KST Mon–Sun); the master keeps invariants + Index of archives only (operator-locked Option (b), 2026-W19). **Do not copy invariant text into this file.** When a behavior is established, the canonical text lives in the per-stack CODEBASE.md and this root file at most points to it by section name. Always read the per-stack file for the canonical list — letters do not increment monotonically (some are retired or skipped).
 
 Cascade rule: when a structural change spans two or more stacks (e.g., a new wire shape in webctl that the SPA must consume), update the relevant invariants in **every** affected CODEBASE.md AND, if the high-level role/data-flow changes, update §1–§3 of this root file. Invariants stay in their per-stack home; the root file is updated only when the scaffold or data flow itself shifts.
 
@@ -184,13 +173,18 @@ Cascade rule: when a structural change spans two or more stacks (e.g., a new wir
 
 ```text
 CLAUDE.md                                ← Operating rules (golden rules + agent pipeline)
-├── PROGRESS.md                          ← Cross-session log, English (Parent maintains)
-├── doc/history.md                       ← Cross-session log, Korean narrative
+├── PROGRESS.md                          ← Lean: current state + Decisions + Open Q + index
+│   └── PROGRESS/YYYY-W##.md             ← Weekly session-log archives (English)
+├── doc/history.md                       ← Lean: 인트로 + 주차 인덱스 (Korean)
+│   └── doc/history/YYYY-W##.md          ← Weekly session-narrative archives (Korean)
 ├── NEXT_SESSION.md                      ← Cache (cold-start aid; throwaway, prune-on-absorption)
 ├── CODEBASE.md                          ← THIS FILE (cross-stack scaffold + module roles)
-│   ├── production/RPi5/CODEBASE.md      ← C++ tracker invariants + change log
-│   ├── godo-webctl/CODEBASE.md          ← Python webctl invariants + change log
-│   ├── godo-frontend/CODEBASE.md        ← Svelte SPA invariants + change log
+│   ├── production/RPi5/CODEBASE.md      ← C++ tracker invariants + index
+│   │   └── production/RPi5/CODEBASE/YYYY-W##.md   ← Weekly tracker change-log archives
+│   ├── godo-webctl/CODEBASE.md          ← Python webctl invariants + index
+│   │   └── godo-webctl/CODEBASE/YYYY-W##.md       ← Weekly webctl change-log archives
+│   ├── godo-frontend/CODEBASE.md        ← Svelte SPA invariants + index
+│   │   └── godo-frontend/CODEBASE/YYYY-W##.md     ← Weekly frontend change-log archives
 │   ├── godo-mapping/CODEBASE.md         ← SLAM container invariants + change log (issue#14)
 │   └── prototype/Python/CODEBASE.md     ← Prototype change log
 └── DESIGN.md                            ← Design-doc TOC (links SYSTEM + FRONT)
@@ -211,5 +205,5 @@ On a fresh session, the recommended read order is:
 3. `.claude/memory/MEMORY.md` — index of in-repo memory entries.
 4. **This file** — for "where does X live" questions.
 5. `DESIGN.md` — for "why does X work this way" questions; follow into SYSTEM_DESIGN or FRONT_DESIGN as needed.
-6. The relevant per-stack `CODEBASE.md` — for invariants + recent change log on the area you're touching.
+6. The relevant per-stack `CODEBASE.md` — for invariants. For recent shipping context, open the most recent week's archive at `<stack>/CODEBASE/YYYY-W##.md`.
 7. `PROGRESS.md` / `doc/history.md` — for "what happened in the last few sessions" narrative.

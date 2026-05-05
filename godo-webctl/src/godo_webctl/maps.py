@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import json
 import logging
 import os
 import secrets
@@ -115,7 +116,15 @@ class MapEntry:
     — useful since the project switched from 0.05 m/cell to 0.025 m/cell
     defaults and operators need to see at-a-glance which maps are
     high-resolution. Any field is `None` if the corresponding header is
-    missing/malformed (graceful degradation, NOT a list-skip)."""
+    missing/malformed (graceful degradation, NOT a list-skip).
+
+    issue#30.1 (2026-05-05 KST): `lineage_kind` mirrors
+    `<name>.sidecar.json :: lineage.kind` (`operator_apply` /
+    `synthesized` / `auto_migrated_pre_issue30`) so the SPA Map list
+    can render a kind-coded glyph next to each variant row WITHOUT
+    opening LineageModal. `None` for pristine maps (no sidecar) or
+    when the sidecar is missing / malformed (graceful degradation,
+    matches the `read_yaml_resolution` precedent)."""
 
     name: str
     pgm_path: Path
@@ -126,6 +135,7 @@ class MapEntry:
     width_px: int | None
     height_px: int | None
     resolution_m: float | None
+    lineage_kind: str | None
 
     def to_dict(self) -> dict[str, object]:
         """JSON wire shape (per Mode-A N3): epoch-seconds float, NOT
@@ -138,6 +148,7 @@ class MapEntry:
             "width_px": self.width_px,
             "height_px": self.height_px,
             "resolution_m": self.resolution_m,
+            "lineage_kind": self.lineage_kind,
         }
 
 
@@ -319,6 +330,38 @@ def read_yaml_resolution(yaml_path: Path) -> float | None:
     return None
 
 
+def _read_lineage_kind(maps_dir: Path, name: str) -> str | None:
+    """Read `<name>.sidecar.json` and return `body.lineage.kind`, or
+    `None` on any failure mode (missing file / malformed JSON / missing
+    key / non-string value).
+
+    issue#30.1: pattern matches `read_yaml_resolution` above — graceful
+    degradation, NEVER raises. The SPA shows no glyph for `None`. We
+    bypass `sidecar.read()` (which validates the full schema) because
+    callers under `list_pairs` only need this one field; failed schema
+    validation should NOT prevent the row from being listed.
+    """
+    p = maps_dir / f"{name}.sidecar.json"
+    try:
+        with p.open("rb") as f:
+            raw = f.read()
+    except OSError:
+        return None
+    try:
+        body = json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(body, dict):
+        return None
+    lineage = body.get("lineage")
+    if not isinstance(lineage, dict):
+        return None
+    kind = lineage.get("kind")
+    if not isinstance(kind, str):
+        return None
+    return kind
+
+
 def list_pairs(maps_dir: Path) -> list[MapEntry]:
     """Enumerate every `<stem>.pgm` + `<stem>.yaml` pair under `maps_dir`.
     Filenames not matching `MAPS_NAME_REGEX` (e.g. `active.pgm` is
@@ -372,6 +415,10 @@ def list_pairs(maps_dir: Path) -> list[MapEntry]:
             width_px = None
             height_px = None
         resolution_m = read_yaml_resolution(yaml)
+        # issue#30.1 (2026-05-05 KST): opportunistic sidecar read for
+        # the inline lineage glyph. None for pristines (no sidecar)
+        # and for malformed/missing sidecars (graceful degradation).
+        lineage_kind = _read_lineage_kind(maps_dir, stem)
         entries.append(
             MapEntry(
                 name=stem,
@@ -383,6 +430,7 @@ def list_pairs(maps_dir: Path) -> list[MapEntry]:
                 width_px=width_px,
                 height_px=height_px,
                 resolution_m=resolution_m,
+                lineage_kind=lineage_kind,
             ),
         )
     entries.sort(key=lambda e: e.name)

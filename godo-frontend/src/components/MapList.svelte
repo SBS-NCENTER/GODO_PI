@@ -9,12 +9,22 @@
    * the parent route wires to `LineageModal.svelte`.
    */
 
+  import { LINEAGE_GLYPHS, LINEAGE_GLYPH_FALLBACK } from '$lib/constants';
+
   export interface MapEntryView {
     name: string;
     is_active: boolean;
     width_px: number | null;
     height_px: number | null;
     resolution_m: number | null;
+    /**
+     * issue#30.1 — sidecar `lineage.kind` mirror. Drives the inline
+     * glyph rendered to the LEFT of the variant row's `.name`.
+     * `null` for pristines (no sidecar) — pristine rows render NO
+     * glyph. Unmapped values fall back to `?` + generic tooltip via
+     * `LINEAGE_GLYPH_FALLBACK`.
+     */
+    lineage_kind?: string | null;
   }
 
   export interface MapGroupView {
@@ -45,6 +55,16 @@
         : '';
     return `${e.width_px}×${e.height_px} px${meters}`;
   }
+
+  // issue#30.1 — `LINEAGE_GLYPHS` is the SSOT for kind→glyph mapping
+  // (shared with `<LineageModal>`). `null` lineage_kind = no glyph
+  // (pristine rows). Unmapped non-null values fall back to `?`.
+  function lineageGlyph(
+    kind: string | null | undefined,
+  ): { glyph: string; tooltip: string } | null {
+    if (kind === null || kind === undefined) return null;
+    return LINEAGE_GLYPHS[kind] ?? LINEAGE_GLYPH_FALLBACK;
+  }
 </script>
 
 <ul class="map-list">
@@ -70,6 +90,7 @@
       {#if group.variants.length > 0}
         <ul class="variants">
           {#each group.variants as v (v.name)}
+            {@const glyph = lineageGlyph(v.lineage_kind)}
             <li class="variant-cell" class:active={v.is_active}>
               <button
                 type="button"
@@ -77,6 +98,9 @@
                 class:active={v.is_active}
                 onclick={() => onActivate(v.name)}
               >
+                {#if glyph}
+                  <span class="lineage-glyph" title={glyph.tooltip}>{glyph.glyph}</span>
+                {/if}
                 <span class="name">{v.name.slice(group.base.length + 1)}</span>
                 <span class="dims">{formatDims(v)}</span>
                 {#if v.is_active}<span class="badge">활성</span>{/if}
@@ -162,5 +186,12 @@
   }
   .lineage-btn:hover {
     background: var(--color-accent-soft, #dbeafe);
+  }
+  /* issue#30.1 — inline lineage glyph (LEFT of .name on variant rows). */
+  .lineage-glyph {
+    font-size: 12px;
+    margin-right: 4px;
+    cursor: help;
+    opacity: 0.85;
   }
 </style>

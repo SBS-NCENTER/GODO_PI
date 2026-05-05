@@ -455,6 +455,12 @@ export interface RestartPendingResponse {
 // may be null if the corresponding header is malformed (graceful
 // degradation — the row still appears, the SPA shows '—' for unknown
 // dimensions).
+//
+// issue#30.1 (2026-05-05 KST): `lineage_kind` mirrors the sidecar's
+// `lineage.kind` (`operator_apply` / `synthesized` /
+// `auto_migrated_pre_issue30`) so the SPA can render an inline glyph
+// per row. `null` for pristines (no sidecar) or for malformed
+// sidecars (graceful degradation).
 export interface MapEntry {
   name: string;
   size_bytes: number;
@@ -463,6 +469,7 @@ export interface MapEntry {
   width_px: number | null;
   height_px: number | null;
   resolution_m: number | null;
+  lineage_kind: string | null;
 }
 
 // issue#28 — pristine + variants tree node. Mirror of

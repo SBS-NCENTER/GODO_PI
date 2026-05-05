@@ -32,6 +32,7 @@ const sampleGroups = [
       width_px: 200,
       height_px: 100,
       resolution_m: 0.05,
+      lineage_kind: null,
     },
     variants: [
       {
@@ -40,6 +41,7 @@ const sampleGroups = [
         width_px: 200,
         height_px: 100,
         resolution_m: 0.05,
+        lineage_kind: 'operator_apply',
       },
     ],
   },
@@ -84,6 +86,36 @@ describe('MapList', () => {
     pristineBtn.click();
     flushSync();
     expect(onActivate).toHaveBeenCalledWith('chroma');
+    unmount(inst);
+  });
+
+  // issue#30.1 — inline lineage glyph next to variant rows.
+  it('variant row with operator_apply lineage renders ✓ glyph', () => {
+    const onActivate = vi.fn();
+    const inst = mount(MapList, {
+      target,
+      props: { groups: sampleGroups, onActivate },
+    });
+    flushSync();
+    const variantRow = target.querySelector('.variant-row')!;
+    const glyph = variantRow.querySelector('.lineage-glyph')!;
+    expect(glyph).not.toBeNull();
+    expect(glyph.textContent).toBe('✓');
+    expect(glyph.getAttribute('title')).toContain('운영자 Apply');
+    // Symmetric assertion: pristine + variant = 1 visible glyph total.
+    // Catches a regression that paints the glyph on `.pristine-row`.
+    expect(target.querySelectorAll('.lineage-glyph').length).toBe(1);
+    unmount(inst);
+  });
+
+  it('pristine row with no lineage_kind renders no glyph', () => {
+    const onActivate = vi.fn();
+    const inst = mount(MapList, {
+      target,
+      props: { groups: sampleGroups, onActivate },
+    });
+    flushSync();
+    expect(target.querySelector('.pristine-row .lineage-glyph')).toBeNull();
     unmount(inst);
   });
 });

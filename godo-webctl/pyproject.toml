@@ -37,10 +37,15 @@ packages = ["src/godo_webctl"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-addopts = "-ra"
+# `not hardware_tracker` excludes the live-tracker smoke test from the
+# default `pytest` invocation. Run with `uv run pytest -m
+# hardware_tracker` on a host whose godo_tracker_rt is up AND whose
+# operator has authorised the Live→OneShot→Idle transition the test
+# triggers (issue#28.2 cleanup, 2026-05-05).
+addopts = "-ra -m 'not hardware_tracker'"
 asyncio_mode = "auto"
 markers = [
-    "hardware_tracker: integration test that requires a live godo_tracker_rt UDS socket at /run/godo/ctl.sock (skipped by default)",
+    "hardware_tracker: integration test that requires a live godo_tracker_rt UDS socket at /run/godo/ctl.sock (excluded from default `pytest` via `addopts -m 'not hardware_tracker'`; opt-in with `-m hardware_tracker`)",
 ]
 
 [tool.ruff]

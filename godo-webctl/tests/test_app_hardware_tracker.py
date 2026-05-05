@@ -7,6 +7,14 @@ Hardware-required smoke test. Runs ONLY on a host with a live
 Strategy (S9): after ``POST /api/calibrate``, poll ``GET /api/health`` every
 200 ms for up to 5 s. We MUST observe at least one ``OneShot`` reading
 (the latch took effect) AND a subsequent ``Idle`` (converge() returned).
+
+Note (issue#28.2 cleanup, 2026-05-05): /api/calibrate is admin-protected;
+the test logs in via /api/auth/login and attaches the Bearer token. The
+production host's seeded admin (`ncenter`/`ncenter`, FRONT_DESIGN §3.F)
+is the credential. The marker is auto-excluded from the default
+`pytest` run (see `pyproject.toml addopts`), so the live-tracker
+side-effect (Live→OneShot→Idle transition) only fires when the
+operator explicitly invokes `-m hardware_tracker`.
 """
 
 from __future__ import annotations
@@ -41,6 +49,15 @@ def hardware_client():
     )
 
 
+async def _login_admin(cl: httpx.AsyncClient) -> str:
+    r = await cl.post(
+        "/api/auth/login",
+        json={"username": "ncenter", "password": "ncenter"},
+    )
+    assert r.status_code == HTTPStatus.OK, r.text
+    return r.json()["token"]
+
+
 async def test_calibrate_round_trip_observes_oneshot_then_idle(
     hardware_client,
 ) -> None:
@@ -50,8 +67,11 @@ async def test_calibrate_round_trip_observes_oneshot_then_idle(
         assert h.status_code == HTTPStatus.OK
         assert h.json()["tracker"] == "ok", h.json()
 
+        token = await _login_admin(cl)
+        auth = {"Authorization": f"Bearer {token}"}
+
         # Latch OneShot.
-        c = await cl.post("/api/calibrate")
+        c = await cl.post("/api/calibrate", headers=auth)
         assert c.status_code == HTTPStatus.OK, c.text
         assert c.json() == {"ok": True}
 

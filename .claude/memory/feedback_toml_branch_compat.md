@@ -31,6 +31,29 @@ Before deploying a branch on news-pi01, **align the runtime TOML with the branch
    - Or stage the deploy: rebase / merge the missing branch first so the keys become recognised.
 3. Restart `godo-tracker` and confirm `Active: active (running)` plus `journalctl ... | grep "unknown TOML key"` returns nothing.
 
+### TOML table-syntax sed regex trap (issue#28.1 PR #93 incident, 2026-05-05 16:13 KST)
+
+When writing the strip command, the regex MUST match TOML table syntax, not the dotted form. The `/var/lib/godo/tracker.toml` file uses TOML tables:
+
+```toml
+[amcl]
+origin_yaw_deg = 0
+```
+
+NOT the dotted-key form `amcl.origin_yaw_deg = 0`. So:
+
+- ❌ WRONG: `sudo sed -i '/^amcl\.origin_yaw_deg/d' /var/lib/godo/tracker.toml` — matches zero lines.
+- ✅ CORRECT: `sudo sed -i '/^origin_yaw_deg = /d' /var/lib/godo/tracker.toml` — matches the bare key inside the `[amcl]` section.
+
+Verify the schema for the key in question is unique to a single TOML section before stripping by bare key. If two sections share the same key name (e.g., `[origin_step].yaw_deg` vs `[amcl].origin_yaw_deg`), use a more specific anchor:
+
+```bash
+# Strip ONLY the line inside [amcl] section (sed range pattern)
+sudo sed -i '/^\[amcl\]/,/^\[/{/^origin_yaw_deg = /d}' /var/lib/godo/tracker.toml
+```
+
+PR body authors: when documenting a preflight strip command, *test it first* by reading the actual `/var/lib/godo/tracker.toml` shape (which is table-form, not dotted). The PR #93 incident put news-pi01 in a 70+ restart-counter auto-restart loop because the published preflight command silently matched zero lines.
+
 ## Why operator-applied PATCHes are at higher risk
 
 The webctl-driven PATCH path writes to TOML on success. If the operator uses the SPA Config tab to set a Tier-2 key on branch X, then later deploys branch Y which lacks that key in its `Config` struct, branch Y's tracker fails to start. The TOML becomes a "branch lock-in" artifact unless explicitly cleaned.

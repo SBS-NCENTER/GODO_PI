@@ -7,6 +7,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  backupTsToUnix,
   formatBytesBinaryShort,
   formatDateTime,
   formatDegrees,
@@ -129,5 +130,32 @@ describe('formatBytesBinaryShort (Track B-SYSTEM PR-2)', () => {
   });
   it('renders 2 GiB with 2 decimals', () => {
     expect(formatBytesBinaryShort(2 * 1024 * 1024 * 1024)).toBe('2.00 GiB');
+  });
+});
+
+describe('backupTsToUnix (issue#32)', () => {
+  // Pin both legacy UTC and post-PR #83 KST forms — the 9-hour offset
+  // between them is what made operators notice the bug.
+  it('parses Z-suffixed stamp as UTC', () => {
+    // 2026-01-01T01:01:01Z → known unix-seconds.
+    const expected = Date.UTC(2026, 0, 1, 1, 1, 1) / 1000;
+    expect(backupTsToUnix('20260101T010101Z')).toBe(expected);
+  });
+  it('parses no-suffix stamp as KST (+09:00)', () => {
+    // 2026-05-05T11:26:00+09:00 = 2026-05-05T02:26:00Z.
+    const expected = Date.UTC(2026, 4, 5, 2, 26, 0) / 1000;
+    expect(backupTsToUnix('20260505T112600')).toBe(expected);
+  });
+  it('Z and no-Z forms differing by 9 hours represent the SAME wall time', () => {
+    // `20260505T112600Z` (UTC 11:26) ↔ `20260505T202600` (KST 20:26).
+    // Both denote the same instant. This is the contract that makes the
+    // operator-facing display correct on both legacy and post-PR-#83
+    // backups.
+    expect(backupTsToUnix('20260505T112600Z')).toBe(backupTsToUnix('20260505T202600'));
+  });
+  it('returns NaN on malformed stamp', () => {
+    expect(backupTsToUnix('not-a-stamp')).toBeNaN();
+    expect(backupTsToUnix('20260101010101Z')).toBeNaN(); // missing T
+    expect(backupTsToUnix('')).toBeNaN();
   });
 });

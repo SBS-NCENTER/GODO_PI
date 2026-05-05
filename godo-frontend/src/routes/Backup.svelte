@@ -19,7 +19,7 @@
   import ConfirmDialog from '$components/ConfirmDialog.svelte';
   import { ApiError, apiGet, apiPost } from '$lib/api';
   import { BACKUP_RESTORE_OVERWRITE_WARNING, BACKUP_RESTORE_SUCCESS_TOAST } from '$lib/constants';
-  import { formatDateTime } from '$lib/format';
+  import { backupTsToUnix, formatDateTime } from '$lib/format';
   import type { BackupEntry, BackupListResponse, RestoreResponse } from '$lib/protocol';
   import { auth } from '$stores/auth';
 
@@ -36,20 +36,13 @@
     bannerKind = kind;
   }
 
-  // `<ts>` arrives as `20260101T010101Z`. Operators read a localised
-  // "YYYY-MM-DD HH:MM" string more readily than the canonical UTC
-  // stamp, so we hand the unix-seconds form to `format.ts::formatDateTime`
-  // (added 2026-05-01 for cross-day disambiguation in list views) rather
-  // than rolling another formatter. The raw stamp stays visible alongside
-  // (for debugging + audit).
-  function tsToUnix(ts: string): number {
-    // Build an ISO-8601 string from the canonical stamp:
-    // 20260101T010101Z → 2026-01-01T01:01:01Z
-    const isoLike =
-      `${ts.slice(0, 4)}-${ts.slice(4, 6)}-${ts.slice(6, 11)}` +
-      `:${ts.slice(11, 13)}:${ts.slice(13, 15)}Z`;
-    return Date.parse(isoLike) / 1000;
-  }
+  // `<ts>` arrives in one of two forms (issue#32):
+  //  - Legacy UTC: `20260101T010101Z` (pre-PR #83).
+  //  - KST (post-PR #83): `20260505T112600` (no suffix).
+  // `backupTsToUnix` in `lib/format.ts` parses both correctly so the
+  // human-readable "YYYY-MM-DD HH:MM" displayed via `formatDateTime`
+  // matches the operator's wall clock regardless of which form a
+  // given backup carries.
 
   async function refresh(): Promise<void> {
     try {
@@ -110,7 +103,7 @@
       <table data-testid="backup-table">
         <thead>
           <tr>
-            <th>시점 (UTC)</th>
+            <th>시점 (raw)</th>
             <th>로컬 시각</th>
             <th>파일 수</th>
             <th>총 크기 (B)</th>
@@ -121,7 +114,7 @@
           {#each entries as entry (entry.ts)}
             <tr data-testid={`backup-row-${entry.ts}`}>
               <td><code>{entry.ts}</code></td>
-              <td>{formatDateTime(tsToUnix(entry.ts))}</td>
+              <td>{formatDateTime(backupTsToUnix(entry.ts))}</td>
               <td>{entry.files.length}</td>
               <td>{entry.size_bytes}</td>
               <td>

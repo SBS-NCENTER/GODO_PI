@@ -117,3 +117,27 @@ export function formatBytesBinaryShort(n: number | null): string {
   if (n < GIB) return `${Math.round(n / MIB)} MiB`;
   return `${(n / GIB).toFixed(2)} GiB`;
 }
+
+/**
+ * Parse a backup directory timestamp into unix-seconds.
+ *
+ * Two forms coexist on disk per the issue#32 / PR #83 transition:
+ *  - Legacy UTC: `20260101T010101Z` (trailing `Z` = UTC interpretation)
+ *  - Post-PR #83 KST: `20260505T112600` (no suffix; KST per
+ *    `feedback_timestamp_kst_convention.md`).
+ *
+ * Both forms are accepted; the trailing `Z` selects the offset
+ * (`Z` = UTC, none = `+09:00` KST). Returns `NaN` if the stamp is
+ * malformed (caller decides how to render).
+ */
+export function backupTsToUnix(ts: string): number {
+  const hasZ = ts.endsWith('Z');
+  const stem = hasZ ? ts.slice(0, -1) : ts;
+  // Stem must match `YYYYMMDDTHHMMSS` (15 chars).
+  if (stem.length !== 15 || stem[8] !== 'T') return Number.NaN;
+  const offset = hasZ ? 'Z' : '+09:00';
+  const isoLike =
+    `${stem.slice(0, 4)}-${stem.slice(4, 6)}-${stem.slice(6, 11)}` +
+    `:${stem.slice(11, 13)}:${stem.slice(13, 15)}${offset}`;
+  return Date.parse(isoLike) / 1000;
+}

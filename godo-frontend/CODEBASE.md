@@ -3832,3 +3832,45 @@ to a single const.
 
 - No new invariant. `<MapList>` glyph rendering is a UX layer on
   top of invariant (x); the kind-coded category list is unchanged.
+
+## 2026-05-05 11:48 KST — issue#32 — Backup TS frontend interpretation accepts both forms
+
+### Why
+
+Pre-existing bug surfaced during issue#30.1 HIL. `Backup.svelte`'s
+local `tsToUnix` always appended `Z` and let `Date.parse` interpret
+the stamp as UTC, then `formatDateTime` rendered the local-time
+column. Combined with the post-PR-#83 KST stamps (no suffix), this
+caused the "로컬 시각" column to show wall-clock 9 hours later than
+the actual backup creation moment, and the column header `시점 (UTC)`
+mislabelled the canonical column for the new KST form. Sister fix
+to webctl issue#32 that updates the FastAPI Path-pattern regex.
+
+### Added
+
+- `lib/format.ts::backupTsToUnix(ts: string): number` — public
+  helper extracted out of `Backup.svelte`. Detects optional trailing
+  `Z`; UTC-interprets when present, KST-interprets (`+09:00`) when
+  absent. Returns `NaN` on malformed inputs (caller's
+  responsibility to render). 16-LOC pure function.
+- `tests/unit/format.test.ts::backupTsToUnix (issue#32)` — 4 cases:
+  Z-suffixed UTC, no-suffix KST, equivalence (Z + KST stamps that
+  denote the same instant), malformed → NaN.
+
+### Changed
+
+- `routes/Backup.svelte` — replaced local `tsToUnix` with the
+  exported `backupTsToUnix`. Comment expanded to note both forms.
+  Column header `시점 (UTC)` → `시점 (raw)` (canonical column now
+  carries either form; the human-readable "로컬 시각" column is
+  the operator-facing one).
+
+### Tests
+
+- New: 4 vitest cases (`format.test.ts`).
+- All 469 prior cases still green.
+
+### Invariants
+
+- No new invariant. `backupTsToUnix` is a stateless pure function
+  shared across consumers; no module-level rule added.

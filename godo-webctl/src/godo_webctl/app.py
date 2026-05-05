@@ -151,11 +151,14 @@ from .protocol import (
     RESOURCES_FIELDS,
 )
 
-# Track B-BACKUP — `<ts>` path constraint for the restore route. Same
-# canonical-UTC-stamp regex `map_backup._TS_REGEX` enforces internally;
-# this is the FIRST defence layer (FastAPI returns 422 before the
-# handler runs).
-_BACKUP_TS_PATTERN = r"^[0-9]{8}T[0-9]{6}Z$"
+# Track B-BACKUP — `<ts>` path constraint for the restore route.
+# Mirrors `map_backup._TS_REGEX` (the second defence layer) which
+# accepts both legacy UTC-stamp form (`...Z` suffix) and the
+# post-PR #83 KST-stamp form (no suffix). FastAPI returns 422 BEFORE
+# the handler runs when the path doesn't match. issue#32: prior
+# pattern was `Z$` (UTC-only), which 422'd every backup created after
+# the PR #83 KST timestamp lock.
+_BACKUP_TS_PATTERN = r"^[0-9]{8}T[0-9]{6}Z?$"
 
 _LOG_FORMAT = "%(asctime)s %(levelname)s [godo-webctl] %(message)s"
 _SSE_MEDIA_TYPE = "text/event-stream"

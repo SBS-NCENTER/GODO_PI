@@ -4207,3 +4207,42 @@ additive wire-shape field; the locked semantic lives in
 - No new invariant. `MapEntry.lineage_kind` is an additive wire-shape
   field on top of invariant (af); the locked semantic is in
   `.claude/memory/project_pick_anchored_yaml_normalization_locked.md`.
+
+## 2026-05-05 11:48 KST — issue#32 — backup TS regex accepts post-PR #83 KST stamps
+
+### Why
+
+Pre-existing bug surfaced during issue#30.1 HIL. `/var/lib/godo/map-backups/`
+now holds two timestamp forms: legacy UTC (`...Z` suffix, pre-PR #83)
+and KST (no suffix, per `feedback_timestamp_kst_convention.md`'s lock).
+The actual restore implementation `map_backup._TS_REGEX` already accepts
+both via `Z?$`, but the FastAPI Path-pattern regex
+`app._BACKUP_TS_PATTERN` was still `Z$` (UTC-only). Result: every
+post-PR-#83 backup 422'd at the FastAPI validation layer BEFORE
+`restore_backup` ran. Operator could not restore anything from
+2026-05-04 onwards via the SPA.
+
+### Changed
+
+- `app.py:158` — `_BACKUP_TS_PATTERN: r"^[0-9]{8}T[0-9]{6}Z$"` →
+  `r"^[0-9]{8}T[0-9]{6}Z?$"`. Single-character fix bringing the FastAPI
+  Path-pattern in line with `map_backup._TS_REGEX`. Comment expanded
+  to document the dual-form acceptance + reason.
+- `tests/test_app_integration.py` — added
+  `test_backup_restore_kst_stamp_no_z_suffix_returns_200` which builds
+  a fixture-augmented backup directory containing a no-Z entry
+  (`20260505T112600`) and asserts the full restore round-trip succeeds.
+
+### Tests
+
+- New: 1 pytest case (`test_backup_restore_kst_stamp_no_z_suffix_returns_200`).
+- All prior `test_backup_restore_*` tests still green (Z-suffix path
+  unchanged).
+
+### Invariants
+
+- No new invariant. The `Z?$` regex relaxation aligns the validator
+  with the implementation's pre-existing dual-form acceptance.
+  Existing invariant `(g) backup-ts-canonical-utc-stamp` (if present)
+  to be re-read; the `Z?` form is the post-PR-#83 lock per
+  `feedback_timestamp_kst_convention.md`.

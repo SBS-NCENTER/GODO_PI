@@ -2781,6 +2781,51 @@ async def test_backup_restore_unauth_returns_401(
     assert r.json()["err"] == "auth_required"
 
 
+async def test_backup_restore_kst_stamp_no_z_suffix_returns_200(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+    tmp_backup_dir: Path,
+) -> None:
+    """issue#32: post-PR #83 backups carry KST stamps without `Z`
+    suffix (e.g. `20260505T112600`); the FastAPI Path-pattern regex
+    must accept BOTH forms (`Z?$`) so restore-button POSTs succeed.
+
+    Pre-fix the path pattern was `Z$` which 422'd the no-Z form
+    BEFORE the handler ran, so every post-PR-#83 backup was un-
+    restorable from the SPA."""
+    maps_dir = tmp_path / "maps"
+    maps_dir.mkdir()
+    # Add a third backup directory using the KST (no-Z) form on top
+    # of the fixture's two Z-suffixed entries.
+    kst_dir = tmp_backup_dir / "20260505T112600"
+    kst_dir.mkdir()
+    (kst_dir / "studio_kst.pgm").write_bytes(b"P5\n4 4\n255\n" + bytes([30] * 16))
+    (kst_dir / "studio_kst.yaml").write_text(
+        "image: studio_kst.pgm\nresolution: 0.05\norigin: [0,0,0]\n"
+        "occupied_thresh: 0.65\nfree_thresh: 0.196\nnegate: 0\n",
+    )
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_backup_dir,
+        maps_dir=maps_dir,
+    )
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post(
+            "/api/map/backup/20260505T112600/restore",
+            headers=_auth(token),
+        )
+    assert r.status_code == HTTPStatus.OK, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert body["ts"] == "20260505T112600"
+    assert sorted(body["restored"]) == ["studio_kst.pgm", "studio_kst.yaml"]
+    # Files actually present in maps_dir.
+    assert (maps_dir / "studio_kst.pgm").is_file()
+    assert (maps_dir / "studio_kst.yaml").is_file()
+
+
 async def test_backup_restore_unknown_ts_returns_404(
     tmp_path: Path,
     tmp_map_pair: Path,

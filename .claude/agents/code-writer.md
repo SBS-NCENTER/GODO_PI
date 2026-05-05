@@ -123,26 +123,28 @@ Reviewer Mode-B will fail you on missing items here; fill them in up front.
 
 ## 4. CODEBASE.md update (mandatory on completion)
 
-Append a dated block to the target folder's `CODEBASE.md`:
+Append a dated block to the matching weekly archive `<stack>/CODEBASE/YYYY-W##.md` (NOT the master `CODEBASE.md`). Compute the ISO 8601 KST week from today's date — e.g., 2026-05-05 → `2026-W19.md`.
 
 ```markdown
-## YYYY-MM-DD — <task name>
+### YYYY-MM-DD HH:MM KST — <task name>
 
-### Added
+#### Added
 - `src/foo.cpp::bar()` — ...
 
-### Changed
+#### Changed
 - `src/baz.cpp::qux()` — ... (reason: ...)
 
-### Removed
+#### Removed
 - (if any)
 
-### Tests
+#### Tests
 - New: `tests/bar_test.cpp` (5 cases)
 - Changed: ...
 ```
 
-Create the file if it does not exist.
+If the weekly archive does not yet exist, create it with the standard header (`# <stack>/CODEBASE.md — 2026-W## (YYYY-MM-DD → YYYY-MM-DD KST)` + `Archived weekly. Master: [../CODEBASE.md](../CODEBASE.md).` + `---`) and add the row to the master's Index table (newest-first). Update any per-stack invariant `(a)..(z)..` text in the **master** if your change adds a new invariant — invariants live in the master, dated entries live in the archive.
+
+Operator-locked rule (issue#34, 2026-W19): the master `CODEBASE.md` keeps invariants + Index only — **no inline most-recent dated entry**.
 
 ---
 

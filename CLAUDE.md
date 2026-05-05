@@ -81,41 +81,7 @@ The smoother + 60 Hz hot path was designed around mode (4) — its 60 Hz interpo
 
 ## 3. Phases
 
-```text
-┌─────────────────────────────────────────────────────────────┐
-│ Phase 0. Deep analysis of RPLIDAR C1           ✅ done       │
-│   └─ Deliverable: doc/RPLIDAR/RPLIDAR_C1.md                  │
-├─────────────────────────────────────────────────────────────┤
-│ Phase 1. Data normalization (Python prototype) ✅ scaffold   │
-│   └─ Replaced in production by Phase 4-2 in-process pipeline │
-├─────────────────────────────────────────────────────────────┤
-│ Phase 2. Localization algorithm                ✅ done       │
-│   └─ Pre-built map + AMCL (Track D family closed Phase 4-2) │
-├─────────────────────────────────────────────────────────────┤
-│ Phase 3. Port to target hardware               ✅ done       │
-│   └─ RPi 5 C++ scaffold + godo_smoke 2026-04-23             │
-├─────────────────────────────────────────────────────────────┤
-│ Phase 4-1. RT hot path closeout                ✅ done       │
-│   └─ SCHED_FIFO + CPU 3 isolation, p99=12.7 µs measured     │
-├─────────────────────────────────────────────────────────────┤
-│ Phase 4-2. LiDAR + AMCL + cold-path           ✅ done       │
-│   ├─ AMCL one-shot + Live (Track D-1..D-5)                  │
-│   └─ Sigma annealing solved convergence (PR #32)            │
-├─────────────────────────────────────────────────────────────┤
-│ Phase 4-3. webctl + UDS bridge                 ✅ done       │
-│   └─ FastAPI + 14+ endpoints + 4 SSE streams                │
-├─────────────────────────────────────────────────────────────┤
-│ Phase 4.5. Operator SPA + Map editor          ◄ current     │
-│   ├─ P0 SPA scaffold ✅                                      │
-│   ├─ P1 Track-B family (config / diag / backup) ✅           │
-│   ├─ P2 System tab + process monitor ✅ (PR #36)             │
-│   ├─ P2 Map editor brush-erase ✅ (PR #39)                   │
-│   ├─ P2 Map editor origin pick ◄ next                       │
-│   └─ P2 Map editor rotation (deferred)                       │
-├─────────────────────────────────────────────────────────────┤
-│ Phase 5. Field integration test (Unreal Engine)             │
-└─────────────────────────────────────────────────────────────┘
-```
+Phases 0–4-3 closed. **Currently in Phase 4.5** (Operator SPA + Map editor); **Phase 5** (Unreal Engine field integration) is the open final phase. Live phase status, in-flight work, and what just shipped are tracked in [`PROGRESS.md`](./PROGRESS.md) (current state + index) → `PROGRESS/YYYY-W##.md` (per-week session blocks).
 
 ---
 
@@ -129,10 +95,7 @@ The smoother + 60 Hz hot path was designed around mode (4) — its 60 Hz interpo
 | Arduino R4 WiFi | Backup FreeD→UDP (rollback card) | standby |
 | Existing XR_FreeD_to_UDP firmware | Reference + rollback | retained, never modified |
 
-### Current hardware connection
-
-- The RPLIDAR C1 connects over USB through a **CP2102N-based 4-pin-to-USB-C module** (3.3 V TTL UART @ 460,800 bps internally).
-- MCU-direct connection details: see [doc/RPLIDAR/RPLIDAR_C1.md §6](./doc/RPLIDAR/RPLIDAR_C1.md#6-mcu--sbc-direct-connection).
+RPLIDAR C1 connects via USB (CP2102N module → `/dev/rplidar` udev symlink, 460,800 bps internal UART). MCU-direct details + udev rule rationale: [doc/RPLIDAR/RPLIDAR_C1.md §6](./doc/RPLIDAR/RPLIDAR_C1.md#6-mcu--sbc-direct-connection).
 
 ---
 
@@ -145,63 +108,20 @@ The smoother + 60 Hz hot path was designed around mode (4) — its 60 Hz interpo
 | Existing crane FreeD converter | Arduino C/C++ | PlatformIO (VSCode extension) |
 | Unreal Engine integration | FreeD over UDP | — |
 
-### Directory structure
+### Doc hierarchy at a glance
 
-```text
-/                                ← GODO workspace root
-├─ CLAUDE.md                     ← Operating rules (this file)
-├─ CODEBASE.md                   ← Cross-stack scaffold + module roles (root index)
-├─ DESIGN.md                     ← Design-doc TOC (links SYSTEM + FRONT)
-├─ SYSTEM_DESIGN.md              ← Backend + RT + AMCL + FreeD design SSOT
-├─ FRONT_DESIGN.md               ← Frontend / page / component design SSOT
-├─ PROGRESS.md                   ← Lean: Current state + Decisions + Open Q + index of weekly archives
-├─ /PROGRESS                     ← Weekly session-log archives (YYYY-W##.md, ISO 8601 KST Mon–Sun)
-├─ NEXT_SESSION.md               ← Cold-start cache (throwaway, prune-on-absorption)
-├─ /.claude
-│    ├─ /agents                  ← Agent definitions (planner / writer / reviewer)
-│    └─ /memory                  ← Project persistent memory (portable)
-│         ├─ MEMORY.md
-│         └─ *.md                ← user / feedback / project / reference entries
-├─ /doc                          ← Reference documents
-│    ├─ history.md                 Cross-session narrative (Korean) — lean: 인트로 + 주차 인덱스
-│    ├─ /history                ← Weekly Korean session-narrative archives (YYYY-W##.md)
-│    ├─ Embedded_CheckPoint.md     Embedded reliability checklist (reference)
-│    ├─ /hardware                ← Hardware decision / measurement reports
-│    │    ├─ floor_tilt_survey_TS5.md
-│    │    └─ leveling_mount.md
-│    └─ /RPLIDAR                 ← RPLIDAR reference docs
-│         ├─ RPLIDAR_C1.md       ← C1 deep dive (Phase 0 output)
-│         └─ /sources            ← Original datasheets (PDF, read-only)
-├─ /prototype                    ← Prototyping / research stacks
-│    └─ /Python                  ← Phase 1~2 algorithm prototype (UV)
-│         ├─ README.md
-│         └─ CODEBASE.md         ← Structural / functional change log
-├─ /production                   ← Production deployment stacks
-│    └─ /RPi5                    ← C++ tracker (godo_tracker_rt, Phase 3+)
-│         ├─ README.md
-│         ├─ CODEBASE.md         ← Invariants (a)..(w) + index of weekly archives
-│         └─ /CODEBASE           ← Weekly change-log archives (YYYY-W##.md)
-├─ /godo-webctl                  ← Operator web control plane (Python FastAPI, Phase 4-3+)
-│    ├─ README.md                  drives godo-tracker via UDS at /run/godo/ctl.sock
-│    ├─ CODEBASE.md                Invariants (a)..(af) + index of weekly archives
-│    ├─ /CODEBASE                  Weekly change-log archives
-│    └─ pyproject.toml             UV-managed; FastAPI + bcrypt + pyjwt + pillow + python-multipart
-├─ /godo-frontend                ← Operator SPA (Vite + Svelte 5 + TS, Phase 4.5)
-│    ├─ README.md                  served by godo-webctl when GODO_WEBCTL_SPA_DIST is set
-│    ├─ CODEBASE.md                Invariants (a)..(an) + index of weekly archives
-│    ├─ /CODEBASE                  Weekly change-log archives
-│    └─ package.json               Pages: Dashboard, Map (with Edit sub-tab), Diag, Config, System (with sub-tabs), Backup, Local, Login
-└─ /XR_FreeD_to_UDP              ← Legacy Arduino firmware (rollback card, read-only reference)
-     ├─ README.md
-     ├─ platformio.ini
-     └─ src/main.cpp             ← FreeD D1 parser + UDP send reference
-```
+The full repo layout lives in [`CODEBASE.md`](./CODEBASE.md) (root scaffold + module roles + cross-stack data flow). Each per-stack folder owns its own `CODEBASE.md` (invariants + Index) and `CODEBASE/YYYY-W##.md` weekly archives.
 
-**Hierarchy quick-reference:**
-- `CODEBASE.md` (root) and `DESIGN.md` (root) are scaffold/index files. They do NOT duplicate per-stack invariant text or design-doc bodies.
-- Per-stack `CODEBASE.md` files own their invariants `(a)..(z)..` (the SSOT for "what is built and why each rule exists"). Dated change-log entries live under `<stack>/CODEBASE/YYYY-W##.md` (ISO 8601 KST Mon–Sun weeks). The master keeps invariants + Index only — **no inline most-recent entry** (operator-locked Option (b), 2026-W19).
-- `SYSTEM_DESIGN.md` + `FRONT_DESIGN.md` own design narrative; the root `DESIGN.md` is just their TOC.
-- `PROGRESS.md` keeps current state + Decisions + Open Q + Index; per-week session blocks under `PROGRESS/YYYY-W##.md`. Same pattern for `doc/history.md` (Korean) → `doc/history/YYYY-W##.md`.
+- **Operating rules** (this file `CLAUDE.md`) — golden rules + agent pipeline + deploy. Lean by design.
+- **Cross-stack scaffold**: [`CODEBASE.md`](./CODEBASE.md) (root) — module roles, cross-stack data flow, per-stack pointers.
+- **Per-stack invariants + recent shipping**: `<stack>/CODEBASE.md` (master, lean) → `<stack>/CODEBASE/YYYY-W##.md` (weekly dated entries). Stacks: `production/RPi5/`, `godo-webctl/`, `godo-frontend/`, `prototype/Python/`, `godo-mapping/`.
+- **Design SSOTs**: [`DESIGN.md`](./DESIGN.md) (TOC) → [`SYSTEM_DESIGN.md`](./SYSTEM_DESIGN.md) (backend / RT / AMCL / FreeD) + [`FRONT_DESIGN.md`](./FRONT_DESIGN.md) (SPA / page / component).
+- **Cross-session state**: [`PROGRESS.md`](./PROGRESS.md) (English; current state + index) → `PROGRESS/YYYY-W##.md`. Korean narrative: [`doc/history.md`](./doc/history.md) → `doc/history/YYYY-W##.md`.
+- **Cold-start cache**: [`NEXT_SESSION.md`](./NEXT_SESSION.md) — what's queued for the next session, prune-on-absorption.
+- **Memory**: [`.claude/memory/MEMORY.md`](./.claude/memory/MEMORY.md) — index of in-repo persistent memory entries.
+- **Read-only references**: `doc/RPLIDAR/`, `doc/Embedded_CheckPoint.md`, `doc/hardware/`, `XR_FreeD_to_UDP/`.
+
+**Hierarchy ownership rule**: a file at level N never duplicates content from a file at level N+1. Master per-stack `CODEBASE.md` keeps invariants + Index only — **no inline most-recent dated entry** (operator-locked Option (b), issue#34 2026-W19). Dated change-log entries land in `<stack>/CODEBASE/YYYY-W##.md`.
 
 ### New-session entry procedure (Mac / Windows alike)
 
@@ -417,22 +337,14 @@ Each PR's commit message / PR body documents the golden-path HIL scenario. Gener
 
 ---
 
-## 9. Open questions
+## 9. Open questions + invariants
 
-| # | Question | Status | Blocks |
-| --- | --- | --- | --- |
-| Q4 | How much do chroma-studio fixtures (walls, TV trolleys, chairs, speakers) affect ICP/AMCL accuracy | To be measured empirically in Phase 1 | Phase 2 |
-| Q5 | Final UE-side error bound (target ≤ 1–2 cm) | Determined by integration test | Phase 5 |
-| Q6 | Trigger UX (physical button vs. network command) | **Resolved (2026-04-24)**: both sources, single `std::atomic<bool>` primitive — details in [SYSTEM_DESIGN.md §6.1.3](./SYSTEM_DESIGN.md) | — |
-| Q7 | FreeD merge location | **Resolved (2026-04-21)**: unified inside the RPi 5 C++ binary | — |
-| B | Coordinate-setup method | **Resolved (Phase 0)**: pre-built map + AMCL, see [SYSTEM_DESIGN.md §5](./SYSTEM_DESIGN.md) | — |
-| C | Compute pipeline | **Resolved (Phase 0)**: RPi 5 native C++ | — |
+In-flight work and live open issues track via [`NEXT_SESSION.md`](./NEXT_SESSION.md) (cold-start cache) and the GitHub issue list (`gh issue list`). Resolved Q4–Q7 / B / C from earlier phases live in [`SYSTEM_DESIGN.md`](./SYSTEM_DESIGN.md) §6 and §5 — open issues today are: **Q5** (UE-side error bound, settled by Phase 5 integration) and **Q4** (chroma-studio fixture impact on AMCL, measured empirically as we progress).
 
-### Confirmed facts (for reference)
-
-- **The base does not rotate.** Only the LiDAR rotates (with the pan head). The dolly wheels are always parallel, making physical base rotation very hard.
-- **Origin = base position at calibration**; must be re-settable.
-- People move below LiDAR height; dynamic objects visible to the LiDAR are mainly the crane itself and the studio doors.
+**Confirmed physical invariants** (operator-locked, do not relitigate):
+- The crane base does NOT rotate (dolly wheels always parallel; physical base rotation is impractical). Only the LiDAR rotates with the pan head.
+- Origin = base position at calibration; must be re-settable as a 2D translation offset.
+- Dynamic objects visible to the LiDAR: the crane itself + studio doors. People move below LiDAR height.
 
 ---
 

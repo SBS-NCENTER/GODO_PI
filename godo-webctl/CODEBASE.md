@@ -1032,3 +1032,17 @@ Entries are archived weekly under [`CODEBASE/`](./CODEBASE/) (ISO 8601 weeks, KS
 | 2026-W19 | 2026-05-04 → 2026-05-10 | [CODEBASE/2026-W19.md](./CODEBASE/2026-W19.md) |
 | 2026-W18 | 2026-04-27 → 2026-05-03 | [CODEBASE/2026-W18.md](./CODEBASE/2026-W18.md) |
 | 2026-W17 | 2026-04-20 → 2026-04-26 | [CODEBASE/2026-W17.md](./CODEBASE/2026-W17.md) |
+
+---
+
+## Quick reference links
+
+- Project guide: [`CLAUDE.md`](../CLAUDE.md) — operating rules + agent pipeline + deploy.
+- Cross-stack scaffold: [`CODEBASE.md`](../CODEBASE.md) (root) — module roles + cross-stack data flow.
+- Backend design SSOT: [`SYSTEM_DESIGN.md`](../SYSTEM_DESIGN.md) — RT path / AMCL / FreeD / UDS bridge.
+- Sibling stacks:
+  - C++ tracker: [`production/RPi5/CODEBASE.md`](../production/RPi5/CODEBASE.md) — webctl drives via UDS at `/run/godo/ctl.sock`.
+  - SPA: [`godo-frontend/CODEBASE.md`](../godo-frontend/CODEBASE.md) — webctl serves the built bundle via `StaticFiles` and exposes `/api/*` + SSE.
+- Project state: [`PROGRESS.md`](../PROGRESS.md) (English) · [`doc/history.md`](../doc/history.md) (Korean).
+- Most recent shipping: [`CODEBASE/2026-W19.md`](./CODEBASE/2026-W19.md).
+- README (deploy + dev runbook): [`README.md`](./README.md).

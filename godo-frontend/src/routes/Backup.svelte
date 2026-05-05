@@ -19,7 +19,7 @@
   import ConfirmDialog from '$components/ConfirmDialog.svelte';
   import { ApiError, apiGet, apiPost } from '$lib/api';
   import { BACKUP_RESTORE_OVERWRITE_WARNING, BACKUP_RESTORE_SUCCESS_TOAST } from '$lib/constants';
-  import { backupTsToUnix, formatDateTime } from '$lib/format';
+  import { backupMapNames, backupTsToUnix, formatDateTime } from '$lib/format';
   import type { BackupEntry, BackupListResponse, RestoreResponse } from '$lib/protocol';
   import { auth } from '$stores/auth';
 
@@ -105,6 +105,7 @@
           <tr>
             <th>시점 (raw)</th>
             <th>로컬 시각</th>
+            <th>맵 이름</th>
             <th>파일 수</th>
             <th>총 크기 (B)</th>
             <th>작업</th>
@@ -115,6 +116,9 @@
             <tr data-testid={`backup-row-${entry.ts}`}>
               <td><code>{entry.ts}</code></td>
               <td>{formatDateTime(backupTsToUnix(entry.ts))}</td>
+              <td class="map-names" data-testid={`backup-map-names-${entry.ts}`}>
+                {backupMapNames(entry.files).join(', ') || '—'}
+              </td>
               <td>{entry.files.length}</td>
               <td>{entry.size_bytes}</td>
               <td>
@@ -172,6 +176,11 @@
   code {
     font-family: ui-monospace, monospace;
     font-size: 0.92em;
+  }
+  .map-names {
+    font-family: ui-monospace, monospace;
+    font-size: 0.92em;
+    word-break: break-all;
   }
   button[disabled] {
     opacity: 0.5;

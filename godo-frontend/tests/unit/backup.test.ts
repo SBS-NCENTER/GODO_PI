@@ -46,6 +46,23 @@ const STUB_LIST_BODY = {
   ],
 };
 
+// issue#33 — derived map snapshot with sidecar; pins that the map-name
+// column extracts the SHARED stem (not three separate entries) and
+// renders the operator-facing identifier.
+const STUB_LIST_BODY_WITH_DERIVED = {
+  items: [
+    {
+      ts: '20260505T112600',
+      files: [
+        'chroma.20260504-143000-wallcal01.pgm',
+        'chroma.20260504-143000-wallcal01.yaml',
+        'chroma.20260504-143000-wallcal01.sidecar.json',
+      ],
+      size_bytes: 8192,
+    },
+  ],
+};
+
 function jsonResp(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -234,6 +251,22 @@ describe('Backup page (Track B-BACKUP)', () => {
     // If a future writer hard-codes a new toast string in
     // `Backup.svelte` without updating the constant, this test fails.
     expect(banner.textContent).toContain(BACKUP_RESTORE_SUCCESS_TOAST);
+  });
+
+  // issue#33 — operator can identify which map a backup is for at a
+  // glance. The 맵 이름 column renders the unique stem(s) extracted
+  // from `entry.files` via `backupMapNames`. Without this, backups
+  // were only distinguishable by timestamp + file count.
+  it('renders 맵 이름 column extracted from entry.files (issue#33)', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResp(STUB_LIST_BODY_WITH_DERIVED));
+
+    const target = await mountPage();
+    const cell = await waitFor<HTMLElement>(
+      () =>
+        target.querySelector<HTMLElement>('[data-testid="backup-map-names-20260505T112600"]'),
+      'map-name cell',
+    );
+    expect(cell.textContent?.trim()).toBe('chroma.20260504-143000-wallcal01');
   });
 
   it('400/404 surfaces inline error from response body.err', async () => {

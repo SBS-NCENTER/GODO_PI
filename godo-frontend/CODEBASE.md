@@ -3874,3 +3874,47 @@ to webctl issue#32 that updates the FastAPI Path-pattern regex.
 
 - No new invariant. `backupTsToUnix` is a stateless pure function
   shared across consumers; no module-level rule added.
+
+## 2026-05-05 12:04 KST — issue#33 — Backup table renders 맵 이름 column
+
+### Why
+
+Operator HIL on PR #88 (issue#32) — restoring works, but the table
+showed only `시점 (raw) | 로컬 시각 | 파일 수 | 총 크기 | 작업`,
+making it impossible to tell which map a backup is for at a glance.
+Operator-locked 2026-05-05 12:04 KST: surface the map name(s) so
+each row is self-identifying. Companion to webctl-side
+`issue#33` Apply-on-pristine lineage init fix in the same PR (the
+lineage modal that motivated this also feeds operator confusion
+about backup contents).
+
+### Added
+
+- `lib/format.ts::backupMapNames(files) -> string[]` — pure helper
+  extracting unique map basenames from a backup snapshot's file list.
+  Strips `.sidecar.json` BEFORE `.yaml` / `.pgm` so the `.sidecar`
+  segment isn't lost when only the JSON ext is matched. Returns
+  sorted unique stems; usually a singleton (one map per backup).
+- `routes/Backup.svelte` — new `<th>맵 이름</th>` column rendered
+  via `backupMapNames(entry.files).join(', ') || '—'`. CSS:
+  `.map-names { font-family: ui-monospace; font-size: 0.92em;
+  word-break: break-all }` so long derived names (pristine + ISO
+  postfix + memo) wrap inside the cell instead of stretching the
+  table.
+- `tests/unit/format.test.ts::backupMapNames (issue#33)` — 5 cases
+  (full triple, legacy pgm+yaml only, .sidecar.json suffix-order
+  guard, multi-map sorted, empty/unknown-extensions return []).
+- `tests/unit/backup.test.ts::renders 맵 이름 column extracted from
+  entry.files (issue#33)` — component-level pin on the rendered
+  cell text via `data-testid="backup-map-names-<ts>"`.
+
+### Tests
+
+- New: 6 vitest cases (5 unit + 1 component).
+- All 473 prior cases still green; build clean.
+
+### Invariants
+
+- No new invariant. `backupMapNames` is a stateless pure function;
+  the column is a UX layer on top of the existing
+  `BackupEntry.files` wire shape.

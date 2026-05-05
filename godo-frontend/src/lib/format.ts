@@ -141,3 +141,41 @@ export function backupTsToUnix(ts: string): number {
     `:${stem.slice(11, 13)}:${stem.slice(13, 15)}${offset}`;
   return Date.parse(isoLike) / 1000;
 }
+
+/**
+ * Extract the unique map basenames from a backup snapshot's file list.
+ *
+ * `BackupEntry.files` carries the directory listing of one backup
+ * snapshot, e.g. `["chroma.20260504-143000-wallcal01.pgm",
+ * "chroma.20260504-143000-wallcal01.yaml",
+ * "chroma.20260504-143000-wallcal01.sidecar.json"]`. The shared stem
+ * (`chroma.20260504-143000-wallcal01` here) IS the map name —
+ * pristine basename plus optional `.<derived-postfix>` segment per
+ * `project_pristine_baseline_pattern.md`. issue#33: rendered in the
+ * backup table so operators can identify which map each snapshot is
+ * for at a glance instead of just seeing the timestamp + file count.
+ *
+ * Strips three known suffixes; `.sidecar.json` MUST be checked first
+ * so the `.sidecar` segment isn't dropped via the `.json` tail.
+ * Returns sorted unique stems; usually a singleton (one map per
+ * backup), but could be 2+ if a future bulk-backup workflow
+ * snapshots multiple pairs into one directory.
+ */
+const SIDECAR_JSON_SUFFIX = '.sidecar.json';
+const PGM_SUFFIX = '.pgm';
+const YAML_SUFFIX = '.yaml';
+export function backupMapNames(files: readonly string[]): string[] {
+  const stems = new Set<string>();
+  for (const f of files) {
+    let stem: string | null = null;
+    if (f.endsWith(SIDECAR_JSON_SUFFIX)) {
+      stem = f.slice(0, -SIDECAR_JSON_SUFFIX.length);
+    } else if (f.endsWith(PGM_SUFFIX)) {
+      stem = f.slice(0, -PGM_SUFFIX.length);
+    } else if (f.endsWith(YAML_SUFFIX)) {
+      stem = f.slice(0, -YAML_SUFFIX.length);
+    }
+    if (stem !== null && stem.length > 0) stems.add(stem);
+  }
+  return Array.from(stems).sort();
+}

@@ -85,6 +85,24 @@ def generate_launch_description() -> LaunchDescription:
     # value at container-start time. Falls back to the C1 default
     # `/dev/ttyUSB0` for the legacy run-mapping.sh path that does not set
     # LIDAR_DEV explicitly.
+    # 2026-05-05 KST update — `flip_x_axis: True` added to compensate the
+    # 180° offset that the upstream `M_PI - angle` formula in
+    # `publish_scan` (rplidar_node.cpp:247-251) introduces between raw
+    # SLAMTEC angles and published /scan angles. SLAMTEC's datasheet
+    # (sources/SLAMTEC_rplidar_datasheet_C1_v1.2_en.pdf p.11 Figure 2-4)
+    # defines ▲ marker = +x = scanner forward, θ CW from +x, left-handed.
+    # Correct REP-103 conversion is `ψ = -θ` (single negation handling
+    # both handedness flip and CW→CCW direction). The upstream
+    # `M_PI - θ` adds an extra 180° rotation. The runtime
+    # `flip_x_axis` parameter shifts `apply_index` by `scan_midpoint`
+    # (= n/2) in the data fill loop, which compose with `M_PI - θ` to
+    # produce physically-correct beam endpoints in the conventional
+    # `[-π, π]` published angle range that rf2o + slam_toolbox expect.
+    # An earlier source patch replaced `M_PI - θ` with `-θ` directly,
+    # but that shifted the published range to `[-2π, 0]` which broke
+    # rf2o's scan-to-scan registration (operator HIL: "moving creates
+    # new walls — ghosting"). Reverted; using the runtime parameter
+    # composition instead.
     rplidar = Node(
         package='rplidar_ros',
         executable='rplidar_node',
@@ -98,6 +116,7 @@ def generate_launch_description() -> LaunchDescription:
             'inverted': False,
             'angle_compensate': True,
             'scan_mode': 'Standard',          # C1 primary mode (~5,000 SPS)
+            'flip_x_axis': True,              # SLAMTEC sign correction; see comment above
         }],
     )
 

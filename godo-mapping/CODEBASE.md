@@ -247,7 +247,7 @@ but does NOT add them to `WebctlSection` (PR #63 lock-in). When two
 stacks own different facets of the same concept, the SSOT lives where
 the value originates.
 
-### (k) `rplidar_ros` driver patched at build time (PR #84)
+### (k) SLAMTEC angle convention via `flip_x_axis: True` parameter (PR #84)
 
 The upstream `Slamtec/rplidar_ros` driver's `src/rplidar_node.cpp:247-251`
 publishes `/scan` with `angle_min/max = M_PI - angle_in/out`. Per
@@ -256,30 +256,55 @@ page 11, Figure 2-4) the correct REP-103 conversion is `ψ = -θ` (single
 negation handles both left-handed → right-handed handedness flip and
 CW → CCW direction). The upstream `M_PI - θ` adds an extra 180°
 rotation, mapping every beam endpoint to the origin-symmetric
-position. A `test_180check_left_obstacle` HIL on 2026-05-05 KST
+position. HIL on 2026-05-05 KST (`test_180check_left_obstacle`)
 verified the fingerprint: a 1 m wall physically in front of the LIDAR
-appeared in the resulting PGM at `-x_world` (origin point reflection).
+appeared at PGM `-x_world` (origin point reflection).
 
-The `Dockerfile` `RUN` block that builds the rplidar_ros overlay
-(lines 46–90) MUST keep:
+**Operational fix (chosen 2026-05-05 KST after the sed-only fix broke
+rf2o)**:
 
-1. `git clone https://github.com/Slamtec/rplidar_ros.git` (no `--depth 1`
-   so a specific commit checkout is possible).
-2. `git checkout 24cc9b6dea97e045bda1408eaa867ce730fd3fc3` — pinned
-   commit hash for reproducibility (ros2 HEAD as of 2026-04-27).
-3. `sed -i 's|M_PI - angle_max|-angle_max|g; s|M_PI - angle_min|-angle_min|g' src/rplidar_node.cpp` —
-   the 4 site replacements correcting the upstream sign bug.
+The `Dockerfile` `RUN` block uses the upstream driver as-is (no
+source patch), pinned to commit `24cc9b6` for reproducibility. The
+180° correction is applied via the existing `flip_x_axis: True`
+runtime parameter in `launch/map.launch.py`. This parameter shifts
+`apply_index` by `scan_midpoint` (= n/2) in the publish_scan data
+fill loop:
 
-The `rf2o_laser_odometry` overlay below uses the same `git clone +
-git checkout + sed` pattern (already pinned to `b38c68e`), so the
-operator-side cognitive cost is one pattern, not two.
+```cpp
+if (flip_X_axis) {
+    if (apply_index >= scan_midpoint)
+        apply_index = apply_index - scan_midpoint;
+    else
+        apply_index = apply_index + scan_midpoint;
+}
+```
 
-A reviewer who removes the sed line OR drops the commit pin MUST
-either (a) document an upstream commit that lands the fix at `M_PI
-- θ → -θ`, OR (b) replace it with a `tf_static` 180° workaround in
-`launch/map.launch.py` and explain why the source patch is no longer
-preferred. Re-introducing the `--depth 1` shallow-clone form is a
-hard violation because it makes commit-pinning + sed-patching impossible.
+Composed with `M_PI - θ`, this gives physically-correct beam
+endpoints AND keeps the published angle range in the conventional
+`[-π, π]` band that rf2o + slam_toolbox internal logic expects.
+
+**Why the sed-only path was reverted**: an earlier sed patch replaced
+`M_PI - angle_min/max` with `-angle_min/max` directly. This produced
+physically-correct beam endpoints but shifted the published angle
+range to `[-2π, 0]`. The shifted range broke rf2o's scan-to-scan
+registration logic — operator HIL observed "지도가 잔상처럼 남아있어
+… 움직이면 계속 새로 그리는 듯해" (ghosting / failure to recognise
+the same wall across consecutive scans). Reverting to upstream +
+flip_x_axis preserves the conventional range AND the orientation.
+
+**Invariants the operator + reviewer must keep**:
+
+1. `git checkout 24cc9b6dea97e045bda1408eaa867ce730fd3fc3` — keep
+   the commit pin for reproducibility.
+2. The rplidar Node parameter block in `launch/map.launch.py` MUST
+   include `'flip_x_axis': True`. Removing it re-introduces the
+   180° physical-orientation bug.
+3. Do NOT re-introduce the `M_PI - angle → -angle` sed patch on top
+   of `flip_x_axis: True`; the two compose into a different
+   transformation (visual mirror) and double-flip the orientation.
+
+A reviewer adding a `tf_static` workaround instead must explain why
+the parameter-based composition is no longer preferred.
 
 Live tracker path is unaffected: `production/RPi5/src/lidar/lidar_source_rplidar.cpp`
 uses the vendored `rplidar_sdk` directly and `production/RPi5/src/localization/scan_ops.cpp:53`
@@ -340,9 +365,39 @@ for the full 5-path angle-convention SSOT.
 
 ## Change log
 
-### 2026-05-05 KST — PR #84 issue#30 Finding 2: rplidar_ros driver patched
+### 2026-05-05 KST (afternoon) — PR #84 issue#30 Finding 2 v2: flip_x_axis composition
 
 #### Changed
+
+- `Dockerfile` — removed the `sed` patch, restored upstream driver
+  source. Kept `git checkout 24cc9b6` commit pin for reproducibility.
+- `launch/map.launch.py` — added `'flip_x_axis': True` to the rplidar
+  Node parameters. This composes with the upstream `M_PI - angle`
+  formula to produce physically-correct orientation while keeping
+  the published angle range in conventional `[-π, π]` (which the
+  earlier sed-only fix had shifted to `[-2π, 0]`, breaking rf2o
+  scan-to-scan registration).
+
+#### Updated
+
+- Invariant `(k)` rewritten to describe the parameter-composition
+  approach and the deletion-resistance rules (commit pin,
+  `flip_x_axis: True`, no double-fix).
+
+#### Why
+
+Operator HIL on the morning's sed-only fix showed correct
+single-frame orientation but BROKEN cumulative mapping: "지도가
+잔상처럼 남아있어 … 움직이면 계속 새로 그리는 듯해". Diagnosed as
+the unconventional `[-2π, 0]` published angle range breaking rf2o's
+scan-to-scan registration. The upstream driver already exposes
+`flip_x_axis` (a `n/2` shift in `apply_index`) which composes
+exactly with `M_PI - angle` to give correct orientation in
+conventional range. Container rebuild required after deploy.
+
+### 2026-05-05 KST (morning) — PR #84 issue#30 Finding 2 v1: rplidar_ros sed patch (REVERTED)
+
+#### Changed (later reverted, see "afternoon" entry above)
 
 - `Dockerfile` (lines 46–90) — replaced `git clone --depth 1 --branch ros2`
   with `git clone` + `git checkout 24cc9b6dea97e045bda1408eaa867ce730fd3fc3`
@@ -350,20 +405,15 @@ for the full 5-path angle-convention SSOT.
   to fix the upstream `Slamtec/rplidar_ros` sign bug (extra 180° rotation
   on the published `/scan` topic).
 
-#### Added
+#### Why reverted
 
-- New invariant `(k) rplidar_ros driver patched at build time (PR #84)`
-  documenting the upstream bug evidence (HIL `test_180check_left_obstacle`
-  PGM fingerprint), the SLAMTEC datasheet derivation, the three required
-  `Dockerfile` blocks, and the deletion-resistance rule.
-
-#### Why
-
-Operator HIL on PR #84 (issue#30) on 2026-05-05 KST showed every beam
-endpoint at the origin-symmetric position relative to physical reality.
-Root-caused to `Slamtec/rplidar_ros` upstream `src/rplidar_node.cpp:247-251`
-using `M_PI - angle` where SLAMTEC's own datasheet defines the correct
-REP-103 conversion as `-angle`. Container rebuild required after deploy.
+The sed-only fix produced correct single-frame orientation but
+shifted the published angle range to `[-2π, 0]` (out of conventional
+`[-π, π]` bound). rf2o_laser_odometry's scan-to-scan registration
+silently degraded — visible in cumulative mapping as wall-ghosting
+during operator motion. See "afternoon" entry above for the
+parameter-composition replacement that keeps both correct
+orientation AND conventional range.
 
 ### 2026-05-01 23:21 KST — issue#14: preview node + LIDAR_DEV env chain
 

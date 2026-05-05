@@ -37,51 +37,40 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # layer to avoid a separate pip install (which would invalidate the
 # colcon-overlay layer below).
 
-# Build upstream Slamtec/rplidar_ros (ros2 branch) into a colcon overlay,
-# patched for SLAMTEC's documented coordinate convention. The Debian
-# package version (2.1.0) is missing rplidar_node + rplidar_c1_launch.py;
-# the C1's modern firmware rejects rplidar_composition's deprecated
-# checkExpressScanSupported() path with 0x80008002.
+# Build upstream Slamtec/rplidar_ros (ros2 branch) into a colcon overlay.
+# The Debian package version (2.1.0) is missing rplidar_node +
+# rplidar_c1_launch.py; the C1's modern firmware rejects
+# rplidar_composition's deprecated checkExpressScanSupported() path
+# with 0x80008002.
 #
-# Pinned to commit 24cc9b6 (ros2 HEAD as of 2026-04-27) for reproducibility.
+# Pinned to commit 24cc9b6 (ros2 HEAD as of 2026-04-27) for
+# reproducibility. The driver source itself is NOT patched (see
+# launch/map.launch.py for the operational fix to the SLAMTEC sign
+# convention).
 #
-# UPSTREAM SIGN BUG (2026-05-05 HIL — issue#30 Finding 2): the upstream
-# `src/rplidar_node.cpp:247-251` converts raw RPLIDAR angles via
-# `M_PI - angle` for both angle_min and angle_max. This adds an
-# extra 180° rotation on top of the correct CW→CCW conversion and
-# produces a /scan whose every beam endpoint is the origin-symmetric
-# (point-reflected) version of the true REP-103 position.
-#
-# Per SLAMTEC's own datasheet (sources/SLAMTEC_rplidar_datasheet_C1_v1.2_en.pdf
-# page 11 + RPLIDAR_C1.md §3 Figure 2-4):
-#   - SLAMTEC frame: LEFT-handed, ▲ marker = +x = scanner forward,
-#     +y = device's right side, θ measured CW from +x.
-#   - REP-103 frame: right-handed, +x = forward, +y = LEFT, θ CCW.
-#   - Correct conversion is `ψ = -θ` (single negation handles both
-#     handedness flip + CW→CCW direction).
-#
-# Empirically verified 2026-05-05 KST via `test_180check_left_obstacle`
-# (godo-mapping pristine): a wall placed physically at +x_forward 1m
-# appeared in the resulting PGM at -x_world (LIDAR's left side), with
-# left-side obstacles appearing at -y_world (LIDAR's south side). Every
-# beam endpoint reflected through the LIDAR origin — the fingerprint
-# of `M_PI - θ` (origin point-reflection).
-#
-# The two `sed` lines below replace `M_PI - angle_min` and
-# `M_PI - angle_max` with their correct `-angle_*` forms (4 site
-# replacements, all in publish_scan() lines 247-251).
+# CONTEXT (2026-05-05 HIL — issue#30 Finding 2): the upstream
+# `src/rplidar_node.cpp:247-251` `M_PI - angle` formula adds a 180°
+# offset to the published `/scan` angles relative to physical reality.
+# An earlier sed patch replaced this with `-angle` to make /scan
+# angles physically correct, but that produced an unconventional
+# angle range `[-2π, 0]` which broke `rf2o_laser_odometry`'s
+# scan-to-scan registration (operator HIL: "moving creates new walls
+# instead of recognising existing ones — looks like ghosting").
+# Reverted to upstream + use the existing `flip_x_axis` runtime
+# parameter (launch.py) which shifts apply_index by n/2 in the
+# data fill loop. Combined with `M_PI - angle`, this composes to
+# physically-correct orientation while preserving the conventional
+# `[-π, π]` angle range that downstream nodes expect.
 #
 # Live tracker path is unaffected: it uses the vendored rplidar_sdk
 # directly + production/RPi5/src/localization/scan_ops.cpp's correct
-# `-angle` negation. Only the docker mapping pipeline (which goes
-# through rplidar_ros → /scan → slam_toolbox) was buggy.
+# `-angle` negation. Only the docker mapping pipeline goes through
+# this driver.
 RUN mkdir -p /opt/ros_overlay/src \
     && cd /opt/ros_overlay/src \
     && git clone https://github.com/Slamtec/rplidar_ros.git \
     && cd rplidar_ros \
     && git checkout 24cc9b6dea97e045bda1408eaa867ce730fd3fc3 \
-    && sed -i 's|M_PI - angle_max|-angle_max|g; s|M_PI - angle_min|-angle_min|g' \
-       src/rplidar_node.cpp \
     && cd /opt/ros_overlay \
     && /bin/bash -c 'set +u; source /opt/ros/jazzy/setup.bash; set -u; colcon build --merge-install --cmake-args -DCMAKE_BUILD_TYPE=Release' \
     && rm -rf /opt/ros_overlay/build /opt/ros_overlay/log /opt/ros_overlay/src/rplidar_ros/.git

@@ -114,18 +114,45 @@ scan_msg->angle_max =  M_PI - angle_min;
 The `M_PI -` adds a 180° offset on top of the correct CW→CCW conversion.
 Per SLAMTEC datasheet `sources/SLAMTEC_rplidar_datasheet_C1_v1.2_en.pdf` page 11 (Figure 2-4): ▲ marker = +x = scanner forward, θ CW from +x, left-handed. Correct conversion to REP-103 is `ψ = -θ` (single negation).
 
-### Fix
+### Fix v1 — sed patch (REVERTED 2026-05-05 KST afternoon)
 
-`godo-mapping/Dockerfile` patches the driver source before `colcon build`:
+Initial fix attempted: `godo-mapping/Dockerfile` sed-patched the
+driver source before `colcon build`:
 ```dockerfile
-&& git clone https://github.com/Slamtec/rplidar_ros.git \
-&& cd rplidar_ros \
-&& git checkout 24cc9b6dea97e045bda1408eaa867ce730fd3fc3 \
 && sed -i 's|M_PI - angle_max|-angle_max|g; s|M_PI - angle_min|-angle_min|g' \
-   src/rplidar_node.cpp \
+   src/rplidar_node.cpp
 ```
 
-Same `git clone` + commit-pin + sed pattern as `rf2o_laser_odometry` (existing precedent in same Dockerfile). Container rebuild required (`docker build -t godo-mapping:dev .`, ~8 min).
+**Reverted same day** because: while it produced correct single-frame
+orientation (`test_180check_after_fix` HIL: wall at correct +x_world),
+it shifted the published `/scan` angle range from conventional
+`[-π, π]` to `[-2π, 0]`. Operator HIL on cumulative mapping
+(`05.05_v4`, `05.05_v6`) showed walls ghosting / not recognised
+across consecutive scans during motion — diagnosed as rf2o's
+scan-to-scan registration silently degrading on the non-standard
+angle range.
+
+### Fix v2 — `flip_x_axis: True` runtime parameter (chosen)
+
+`godo-mapping/launch/map.launch.py` rplidar Node now sets:
+```python
+parameters=[{
+    ...
+    'flip_x_axis': True,  # SLAMTEC sign correction
+}],
+```
+
+`flip_x_axis` triggers an existing `n/2` shift in `apply_index`
+inside upstream `publish_scan`. Composing `M_PI - angle` (180°
+rotation in published angle values) with `flip_x_axis` (180° rotation
+in array indices) gives identity in published-vs-physical
+correspondence — i.e., correct orientation. AND both pieces preserve
+the conventional `[-π, π]` published angle range.
+
+The Dockerfile keeps `git checkout 24cc9b6` for reproducibility but
+does NOT patch the source. Container rebuild required (`docker build
+-t godo-mapping:dev .`, ~8 min — apt layer remains cached, only
+rplidar_ros + rf2o overlay rebuild).
 
 ### Live tracker unaffected
 

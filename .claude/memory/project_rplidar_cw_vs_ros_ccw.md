@@ -1,6 +1,6 @@
 ---
 name: RPLIDAR CW vs ROS CCW angle convention — full pipeline status
-description: SSOT for LIDAR angle convention across all 5 GODO paths (live driver, live AMCL, live overlay, mapping driver, mapping rf2o). Live paths fixed 2026-04-29; mapping driver fixed 2026-05-05 via Dockerfile sed patch (PR #84 Finding 2). All five paths now CCW-correct.
+description: SSOT for LIDAR angle convention across all 5 GODO paths (live driver, live AMCL, live overlay, mapping driver, mapping rf2o). Live paths fixed 2026-04-29; mapping driver fixed 2026-05-05 via `flip_x_axis: True` runtime parameter (composes with upstream `M_PI - angle` for correct orientation + conventional range). All five paths now CCW-correct end-to-end.
 type: project
 ---
 
@@ -28,7 +28,7 @@ A driver/library that uses `M_PI - θ` instead of `-θ` adds an extra 180° rota
 | Live driver (raw output) | `production/RPi5/src/lidar/lidar_source_rplidar.cpp:152-154` | Raw CW pass-through (downstream handles). ✅ |
 | Live AMCL | `production/RPi5/src/localization/scan_ops.cpp:53` | `b.angle_rad = -s.angle_deg * kDegToRad`. ✅ Fixed 2026-04-29. |
 | Live frontend overlay | `godo-frontend/src/lib/scanTransform.ts:58` | `const a = -(scan.angles_deg[i]) * DEG_TO_RAD`. ✅ Fixed 2026-04-29. |
-| Mapping driver | `Slamtec/rplidar_ros` upstream `src/rplidar_node.cpp:247-251` | Upstream had `M_PI - angle` (extra 180°). ✅ Fixed 2026-05-05 via `godo-mapping/Dockerfile` sed patch + commit pin to `24cc9b6`. |
+| Mapping driver | `Slamtec/rplidar_ros` upstream `src/rplidar_node.cpp:247-251` | Upstream had `M_PI - angle` (extra 180°). ✅ Fixed 2026-05-05 via `'flip_x_axis': True` runtime parameter in `godo-mapping/launch/map.launch.py` (composes with upstream `M_PI - angle` to give physically-correct orientation in conventional `[-π, π]` published range). Earlier sed patch (replace `M_PI - angle` → `-angle` directly) was reverted same day after operator HIL showed it broke rf2o scan-to-scan registration via the resulting `[-2π, 0]` non-standard range. |
 | Mapping rf2o | `MAPIRlab/rf2o_laser_odometry` (commit pin `b38c68e`) | No own sign manipulation; consumes `/scan` via standard `cos(θ)/sin(θ)` projection. Self-consistent with whatever angles the driver publishes — driver fix is sufficient. ✅ |
 
 **Live and mapping pipelines are now both CCW-correct end-to-end.**
@@ -50,21 +50,38 @@ Fingerprint: every beam endpoint at `(x, y) → (−x, −y)` = origin point-ref
 
 The 180° rotation on its own is direction-preserving (it's a rotation, not a reflection), so a static scene looks "rotated 180°". When LIDAR rotates physically by Δθ, the rotated published scan also rotates by Δθ in the same direction → slam_toolbox's per-session world-frame anchor inherits this → map appears to rotate the same direction as LIDAR (against the standard convention).
 
-## Driver fix (Dockerfile sed patch)
+## Driver fix — `flip_x_axis: True` runtime parameter (chosen)
 
-`godo-mapping/Dockerfile` patches the cloned `rplidar_node.cpp` before `colcon build`:
+`godo-mapping/launch/map.launch.py` sets the runtime parameter on the rplidar Node:
 
-```dockerfile
-RUN ... \
-    && git clone https://github.com/Slamtec/rplidar_ros.git \
-    && cd rplidar_ros \
-    && git checkout 24cc9b6dea97e045bda1408eaa867ce730fd3fc3 \
-    && sed -i 's|M_PI - angle_max|-angle_max|g; s|M_PI - angle_min|-angle_min|g' \
-       src/rplidar_node.cpp \
-    && ...
+```python
+rplidar = Node(
+    package='rplidar_ros',
+    parameters=[{
+        ...
+        'flip_x_axis': True,  # SLAMTEC sign correction
+    }],
+)
 ```
 
-The 4 site replacements all live in `publish_scan()` lines 247-251. Same `git clone` + commit-pin + sed pattern as `rf2o_laser_odometry` (existing precedent in the same Dockerfile).
+`flip_x_axis: True` triggers an existing block in `publish_scan` that shifts `apply_index` by `scan_midpoint` (= n/2):
+
+```cpp
+if (flip_X_axis) {
+    if (apply_index >= scan_midpoint)
+        apply_index = apply_index - scan_midpoint;
+    else
+        apply_index = apply_index + scan_midpoint;
+}
+```
+
+A shift by n/2 in array index = 180° rotation in angle space. Composes EXACTLY with the upstream `M_PI - angle` (also 180° rotation, in the published angle values) to give physically-correct beam endpoints AND keep the conventional `[-π, π]` published angle range that downstream rf2o + slam_toolbox internal logic expects.
+
+The Dockerfile keeps `git checkout 24cc9b6` for build reproducibility but does NOT patch the source.
+
+### Why not source patch instead
+
+An earlier sed patch (`s|M_PI - angle|-angle|g'` in `src/rplidar_node.cpp:247-251`) was attempted on 2026-05-05 KST morning. It produced correct single-frame orientation but shifted the published `angle_min/angle_max` to `[-2π, 0]` (out of conventional `[-π, π]`). Operator HIL same day afternoon showed cumulative mapping was BROKEN: walls would ghost / not be re-recognised across consecutive scans during motion ("지도가 잔상처럼 남아있어 … 움직이면 계속 새로 그리는 듯해"). Diagnosed as rf2o's scan-to-scan registration silently degrading on the non-standard range. Sed patch reverted; `flip_x_axis: True` parameter chosen as the operationally-equivalent fix that preserves both orientation AND conventional range.
 
 ## Why mapping vs live used different driver paths
 

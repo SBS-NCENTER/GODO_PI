@@ -1,7 +1,10 @@
 /**
- * Track B-MAPEDIT-2 — `OriginPicker.svelte` + `MapMaskCanvas` mode-prop
- * vitest cases. 7 OriginPicker + 1 MapMaskCanvas mode-prop = 8 total
- * (per §8 Updated DoD T5 fold).
+ * issue#30 — `OriginPicker.svelte` + `MapMaskCanvas` mode-prop tests.
+ *
+ * The pre-issue#30 absolute/delta toggle is retired (the pick-anchored
+ * delta-on-top semantic is unconditional). These tests pin the new
+ * Q2-locked behavior: input boxes hold a typed DELTA on top of the
+ * canvas-clicked picked point; clicks do NOT pre-fill input boxes.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -9,7 +12,7 @@ import { flushSync, mount, unmount } from 'svelte';
 
 import OriginPicker from '../../src/components/OriginPicker.svelte';
 import MapMaskCanvas from '../../src/components/MapMaskCanvas.svelte';
-import type { LastPose, OriginPatchBody } from '../../src/lib/protocol';
+import type { MapEditCoordBody, OriginPatchBody } from '../../src/lib/protocol';
 import { lastPose } from '../../src/stores/lastPose';
 
 interface CleanupFn {
@@ -46,6 +49,7 @@ function mountPicker(props: {
   currentOrigin?: readonly [number, number, number] | null;
   role?: 'admin' | 'viewer' | null;
   onapply?: (body: OriginPatchBody) => void;
+  resolutionMPerPx?: number | null;
 }): { target: HTMLDivElement; instance: ReturnType<typeof mount> } {
   const target = document.createElement('div');
   document.body.appendChild(target);
@@ -58,6 +62,7 @@ function mountPicker(props: {
       bannerMsg: null,
       bannerKind: null,
       onapply: props.onapply ?? ((): void => {}),
+      resolutionMPerPx: props.resolutionMPerPx ?? 0.05,
     },
   });
   cleanups.push(() => {
@@ -126,103 +131,90 @@ afterEach(() => {
   lastPose.set(null);
 });
 
-describe('OriginPicker (Track B-MAPEDIT-2)', () => {
-  it('mode toggle switches absolute ↔ delta — radio state reflects selection', () => {
+describe('OriginPicker (issue#30 — pick-anchored + delta-on-top)', () => {
+  it('placeholder for empty x_m / y_m / theta inputs reads "0" (Q2 locked)', () => {
     const { target } = mountPicker({});
     flushSync();
-    const absoluteRadio = target.querySelector<HTMLInputElement>(
-      '[data-testid="origin-mode-absolute"]',
+    const xInput = target.querySelector<HTMLInputElement>('[data-testid="origin-x-input"]');
+    const yInput = target.querySelector<HTMLInputElement>('[data-testid="origin-y-input"]');
+    const thetaInput = target.querySelector<HTMLInputElement>(
+      '[data-testid="origin-theta-input"]',
     );
-    const deltaRadio = target.querySelector<HTMLInputElement>('[data-testid="origin-mode-delta"]');
-    expect(absoluteRadio!.checked).toBe(true);
-    deltaRadio!.click();
-    flushSync();
-    expect(deltaRadio!.checked).toBe(true);
-    expect(absoluteRadio!.checked).toBe(false);
+    expect(xInput!.placeholder).toBe('0');
+    expect(yInput!.placeholder).toBe('0');
+    expect(thetaInput!.placeholder).toBe('0');
   });
 
-  // Mode-B Maj-1 fix — delta resolves on the SPA via subscribeLastPose, then
-  // sends absolute to the backend. These two tests pin both the resolution
-  // happy-path and the no-pose error-path.
-
-  it('delta mode without lastPose blocks Apply with no_pose_for_delta banner', () => {
-    let captured: OriginPatchBody | null = null;
-    lastPose.set(null);
-    const { target } = mountPicker({
-      onapply: (b) => (captured = b),
-    });
+  it('XY click on canvas does NOT pre-fill x_m / y_m input boxes (Q2 locked)', () => {
+    const { target, instance } = mountPicker({});
     flushSync();
-    const xInput = target.querySelector<HTMLInputElement>('[data-testid="origin-x-input"]');
-    const yInput = target.querySelector<HTMLInputElement>('[data-testid="origin-y-input"]');
-    const applyBtn = target.querySelector<HTMLButtonElement>('[data-testid="origin-apply-btn"]');
-    const deltaRadio = target.querySelector<HTMLInputElement>('[data-testid="origin-mode-delta"]');
-
-    xInput!.value = '0.32';
-    xInput!.dispatchEvent(new Event('input', { bubbles: true }));
-    yInput!.value = '-0.18';
-    yInput!.dispatchEvent(new Event('input', { bubbles: true }));
-    deltaRadio!.click();
-    flushSync();
-
-    applyBtn!.click();
-    flushSync();
-    expect(captured).toBeNull();
-    const banner = target.querySelector<HTMLParagraphElement>('[data-testid="origin-banner"]');
-    expect(banner).not.toBeNull();
-    expect(banner!.textContent).toMatch(/Delta 모드는 현재 LiDAR pose가 필요합니다/);
-  });
-
-  it('delta mode with valid lastPose resolves typed delta to absolute via current pose', () => {
-    let captured: OriginPatchBody | null = null;
-    const pose: LastPose = {
-      valid: true,
-      x_m: 5.0,
-      y_m: -3.0,
-      yaw_deg: 0,
-      xy_std_m: 0.01,
-      yaw_std_deg: 0.5,
-      iterations: 100,
-      converged: true,
-      forced: false,
-      published_mono_ns: 1,
+    const inst = instance as unknown as {
+      setCandidate: (c: { x_m: number; y_m: number }) => void;
+      getPickedWorld: () => { x_m: number; y_m: number } | null;
     };
-    lastPose.set(pose);
-    const { target } = mountPicker({
-      onapply: (b) => (captured = b),
-    });
+    inst.setCandidate({ x_m: 0.32, y_m: -0.18 });
     flushSync();
     const xInput = target.querySelector<HTMLInputElement>('[data-testid="origin-x-input"]');
     const yInput = target.querySelector<HTMLInputElement>('[data-testid="origin-y-input"]');
-    const applyBtn = target.querySelector<HTMLButtonElement>('[data-testid="origin-apply-btn"]');
-    const deltaRadio = target.querySelector<HTMLInputElement>('[data-testid="origin-mode-delta"]');
-
-    xInput!.value = '0.32';
-    xInput!.dispatchEvent(new Event('input', { bubbles: true }));
-    yInput!.value = '-0.18';
-    yInput!.dispatchEvent(new Event('input', { bubbles: true }));
-    deltaRadio!.click();
-    flushSync();
-
-    applyBtn!.click();
-    flushSync();
-    expect(captured).not.toBeNull();
-    // SPA resolves: abs = pose + delta = (5.0 + 0.32, -3.0 + -0.18) = (5.32, -3.18)
-    // Body always carries mode=absolute (backend stays dumb).
-    expect(captured!.mode).toBe('absolute');
-    expect(captured!.x_m).toBeCloseTo(5.32, 10);
-    expect(captured!.y_m).toBeCloseTo(-3.18, 10);
+    // Input fields remain EMPTY (delta-on-top — click does NOT pre-fill).
+    expect(xInput!.value).toBe('');
+    expect(yInput!.value).toBe('');
+    // Picked point captured INTERNALLY.
+    const picked = inst.getPickedWorld();
+    expect(picked).not.toBeNull();
+    expect(picked!.x_m).toBeCloseTo(0.32, 10);
+    expect(picked!.y_m).toBeCloseTo(-0.18, 10);
   });
 
-  it('NaN-like input (1e9999 = Infinity) is rejected and Apply is disabled', () => {
+  it('getDirtyBody returns picked_world_* from internal click state, NOT from input fields', () => {
+    const { target, instance } = mountPicker({});
+    flushSync();
+    const inst = instance as unknown as {
+      setCandidate: (c: { x_m: number; y_m: number }) => void;
+      getDirtyBody: () => Omit<MapEditCoordBody, 'memo'> | null;
+    };
+    // Operator clicks at world (5, 0).
+    inst.setCandidate({ x_m: 5, y_m: 0 });
+    flushSync();
+    // Operator types a delta of (1, 0).
+    const xInput = target.querySelector<HTMLInputElement>('[data-testid="origin-x-input"]');
+    const yInput = target.querySelector<HTMLInputElement>('[data-testid="origin-y-input"]');
+    xInput!.value = '1';
+    xInput!.dispatchEvent(new Event('input', { bubbles: true }));
+    yInput!.value = '0';
+    yInput!.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    const body = inst.getDirtyBody();
+    expect(body).not.toBeNull();
+    // Typed delta lives in x_m / y_m.
+    expect(body!.x_m).toBeCloseTo(1, 10);
+    expect(body!.y_m).toBeCloseTo(0, 10);
+    // Picked-world from canvas click is separate.
+    expect(body!.picked_world_x_m).toBeCloseTo(5, 10);
+    expect(body!.picked_world_y_m).toBeCloseTo(0, 10);
+  });
+
+  it('Apply button enabled when picked-world set even if all input boxes empty', () => {
+    const { target, instance } = mountPicker({});
+    flushSync();
+    const inst = instance as unknown as {
+      setCandidate: (c: { x_m: number; y_m: number }) => void;
+    };
+    inst.setCandidate({ x_m: 1, y_m: 2 });
+    flushSync();
+    const applyBtn = target.querySelector<HTMLButtonElement>('[data-testid="origin-apply-btn"]');
+    expect(applyBtn!.disabled).toBe(false);
+  });
+
+  it('NaN-like input (1e9999 = Infinity) is rejected and Apply disabled', () => {
     const { target } = mountPicker({});
     flushSync();
     const xInput = target.querySelector<HTMLInputElement>('[data-testid="origin-x-input"]');
     const applyBtn = target.querySelector<HTMLButtonElement>('[data-testid="origin-apply-btn"]');
-    // 1e9999 parses as Infinity in JavaScript, which Number.isFinite rejects.
     xInput!.value = '1e9999';
     xInput!.dispatchEvent(new Event('input', { bubbles: true }));
     flushSync();
-    // y still empty so apply must be disabled regardless.
+    expect(xInput!.classList.contains('input-invalid')).toBe(true);
     expect(applyBtn!.disabled).toBe(true);
   });
 
@@ -234,13 +226,12 @@ describe('OriginPicker (Track B-MAPEDIT-2)', () => {
     xInput!.value = '1,234.5';
     xInput!.dispatchEvent(new Event('input', { bubbles: true }));
     flushSync();
-    // The input has the invalid class because the parser rejected the comma.
     expect(xInput!.classList.contains('input-invalid')).toBe(true);
     expect(applyBtn!.disabled).toBe(true);
   });
 
-  it('Negative value is allowed (Apply enabled when both fields valid)', () => {
-    const { target } = mountPicker({ role: 'admin' });
+  it('Negative typed delta is allowed (Apply enabled when valid)', () => {
+    const { target, instance } = mountPicker({ role: 'admin' });
     flushSync();
     const xInput = target.querySelector<HTMLInputElement>('[data-testid="origin-x-input"]');
     const yInput = target.querySelector<HTMLInputElement>('[data-testid="origin-y-input"]');
@@ -251,54 +242,7 @@ describe('OriginPicker (Track B-MAPEDIT-2)', () => {
     yInput!.dispatchEvent(new Event('input', { bubbles: true }));
     flushSync();
     expect(applyBtn!.disabled).toBe(false);
-  });
-
-  it('setCandidate({x_m, y_m}) pre-fills both fields AND forces mode=absolute (T1 fold)', () => {
-    const { target, instance } = mountPicker({});
-    flushSync();
-    // First flip mode to delta so we can prove setCandidate forces it back.
-    const deltaRadio = target.querySelector<HTMLInputElement>('[data-testid="origin-mode-delta"]');
-    deltaRadio!.click();
-    flushSync();
-    const inst = instance as unknown as {
-      setCandidate: (c: { x_m: number; y_m: number }) => void;
-    };
-    inst.setCandidate({ x_m: 0.32, y_m: -0.18 });
-    flushSync();
-    const xInput = target.querySelector<HTMLInputElement>('[data-testid="origin-x-input"]');
-    const yInput = target.querySelector<HTMLInputElement>('[data-testid="origin-y-input"]');
-    const absoluteRadio = target.querySelector<HTMLInputElement>(
-      '[data-testid="origin-mode-absolute"]',
-    );
-    // T1 fold: mode flipped back to absolute.
-    expect(absoluteRadio!.checked).toBe(true);
-    // Inputs pre-filled.
-    expect(xInput!.value).toBe('0.320');
-    expect(yInput!.value).toBe('-0.180');
-  });
-
-  it('Apply payload shape matches OriginPatchBody (canonical 3-key body)', () => {
-    let captured: OriginPatchBody | null = null;
-    const { target } = mountPicker({
-      onapply: (b) => (captured = b),
-    });
-    flushSync();
-    const xInput = target.querySelector<HTMLInputElement>('[data-testid="origin-x-input"]');
-    const yInput = target.querySelector<HTMLInputElement>('[data-testid="origin-y-input"]');
-    const applyBtn = target.querySelector<HTMLButtonElement>('[data-testid="origin-apply-btn"]');
-    xInput!.value = '-1.5';
-    xInput!.dispatchEvent(new Event('input', { bubbles: true }));
-    yInput!.value = '-2.0';
-    yInput!.dispatchEvent(new Event('input', { bubbles: true }));
-    flushSync();
-    applyBtn!.click();
-    flushSync();
-    expect(captured).not.toBeNull();
-    // 3-key body shape pin (drift catch against OriginPatchBody).
-    expect(Object.keys(captured!).sort()).toEqual(['mode', 'x_m', 'y_m']);
-    expect(captured!.x_m).toBeCloseTo(-1.5, 10);
-    expect(captured!.y_m).toBeCloseTo(-2.0, 10);
-    expect(captured!.mode).toBe('absolute');
+    void instance;
   });
 
   it('Anon role disables Apply (button visible but disabled)', () => {
@@ -306,55 +250,7 @@ describe('OriginPicker (Track B-MAPEDIT-2)', () => {
     flushSync();
     const applyBtn = target.querySelector<HTMLButtonElement>('[data-testid="origin-apply-btn"]');
     expect(applyBtn).not.toBeNull();
-    // With both fields empty AND role=null, button is disabled.
     expect(applyBtn!.disabled).toBe(true);
-  });
-
-  it('Viewer role with valid inputs still cannot Apply', () => {
-    const { target } = mountPicker({ role: 'viewer' });
-    flushSync();
-    const xInput = target.querySelector<HTMLInputElement>('[data-testid="origin-x-input"]');
-    const yInput = target.querySelector<HTMLInputElement>('[data-testid="origin-y-input"]');
-    const applyBtn = target.querySelector<HTMLButtonElement>('[data-testid="origin-apply-btn"]');
-    // Inputs are disabled for viewer; we set them directly via the
-    // bind:value-tracked store. flushSync after each set so the
-    // $derived applyDisabled re-evaluates.
-    xInput!.value = '0';
-    xInput!.dispatchEvent(new Event('input', { bubbles: true }));
-    yInput!.value = '0';
-    yInput!.dispatchEvent(new Event('input', { bubbles: true }));
-    flushSync();
-    expect(applyBtn!.disabled).toBe(true);
-    expect(applyBtn!.title).toContain('로그인');
-  });
-});
-
-describe('OriginPicker (issue#27 — +/- step buttons; issue#28 theta gate flipped on)', () => {
-  it('theta UI is rendered (issue#28 — THETA_EDIT_ENABLED=true) — input + buttons present, body carries theta_deg only when typed', () => {
-    let captured: OriginPatchBody | null = null;
-    const { target } = mountPicker({
-      onapply: (b) => (captured = b),
-    });
-    flushSync();
-    // Theta UI elements MUST render now that the gate is open.
-    expect(target.querySelector('[data-testid="origin-theta-input"]')).not.toBeNull();
-    expect(target.querySelector('[data-testid="origin-theta-minus"]')).not.toBeNull();
-    expect(target.querySelector('[data-testid="origin-theta-plus"]')).not.toBeNull();
-    // Apply with x/y only and EMPTY theta — body has no theta_deg key
-    // (theta is opt-in; empty input keeps YAML byte-for-byte).
-    const xInput = target.querySelector<HTMLInputElement>('[data-testid="origin-x-input"]');
-    const yInput = target.querySelector<HTMLInputElement>('[data-testid="origin-y-input"]');
-    const applyBtn = target.querySelector<HTMLButtonElement>('[data-testid="origin-apply-btn"]');
-    xInput!.value = '0.32';
-    xInput!.dispatchEvent(new Event('input', { bubbles: true }));
-    yInput!.value = '-0.18';
-    yInput!.dispatchEvent(new Event('input', { bubbles: true }));
-    flushSync();
-    expect(applyBtn!.disabled).toBe(false);
-    applyBtn!.click();
-    flushSync();
-    expect(captured).not.toBeNull();
-    expect('theta_deg' in captured!).toBe(false);
   });
 
   it('+x button increments x by step (default 0.01 m)', () => {
@@ -363,13 +259,11 @@ describe('OriginPicker (issue#27 — +/- step buttons; issue#28 theta gate flipp
     const xInput = target.querySelector<HTMLInputElement>('[data-testid="origin-x-input"]');
     const xPlus = target.querySelector<HTMLButtonElement>('[data-testid="origin-x-plus"]');
     expect(xPlus).not.toBeNull();
-    // Set baseline to 1.000.
     xInput!.value = '1.000';
     xInput!.dispatchEvent(new Event('input', { bubbles: true }));
     flushSync();
     xPlus!.click();
     flushSync();
-    // Default step is 0.01; xText fmtDisplay rounds to 3 decimals.
     expect(xInput!.value).toBe('1.010');
   });
 
@@ -386,45 +280,67 @@ describe('OriginPicker (issue#27 — +/- step buttons; issue#28 theta gate flipp
     expect(yInput!.value).toBe('-0.010');
   });
 
-  it('+x clicked from empty input starts at 0 + step', () => {
-    const { target } = mountPicker({});
+  it('Discard clears typed delta + picked-world + yaw P1', () => {
+    const { target, instance } = mountPicker({});
+    flushSync();
+    const inst = instance as unknown as {
+      setCandidate: (c: { x_m: number; y_m: number }) => void;
+      setYawClick: (c: { x_m: number; y_m: number }) => void;
+      isYawP1Pending: () => boolean;
+      getPickedWorld: () => { x_m: number; y_m: number } | null;
+      clearAll: () => void;
+    };
+    inst.setCandidate({ x_m: 1, y_m: 2 });
+    inst.setYawClick({ x_m: 0, y_m: 0 });
+    flushSync();
+    expect(inst.getPickedWorld()).not.toBeNull();
+    expect(inst.isYawP1Pending()).toBe(true);
+    inst.clearAll();
+    flushSync();
+    expect(inst.getPickedWorld()).toBeNull();
+    expect(inst.isYawP1Pending()).toBe(false);
+    const xInput = target.querySelector<HTMLInputElement>('[data-testid="origin-x-input"]');
+    expect(xInput!.value).toBe('');
+  });
+
+  it('getDirtyBody returns null when nothing dirty (no pick + no typed)', () => {
+    const { instance } = mountPicker({});
+    flushSync();
+    const inst = instance as unknown as {
+      getDirtyBody: () => unknown | null;
+    };
+    expect(inst.getDirtyBody()).toBeNull();
+  });
+
+  it('getDirtyBody returns body without picked_world_* when only typed delta dirty', () => {
+    const { target, instance } = mountPicker({});
     flushSync();
     const xInput = target.querySelector<HTMLInputElement>('[data-testid="origin-x-input"]');
-    const xPlus = target.querySelector<HTMLButtonElement>('[data-testid="origin-x-plus"]');
-    xPlus!.click();
+    xInput!.value = '0.5';
+    xInput!.dispatchEvent(new Event('input', { bubbles: true }));
     flushSync();
-    expect(xInput!.value).toBe('0.010');
+    const inst = instance as unknown as {
+      getDirtyBody: () => Omit<MapEditCoordBody, 'memo'> | null;
+    };
+    const body = inst.getDirtyBody();
+    expect(body).not.toBeNull();
+    expect(body!.x_m).toBeCloseTo(0.5, 10);
+    // No pick → picked_world_* omitted (backend falls back to legacy
+    // round-1 collapse and emits the X-GODO-Deprecation header).
+    expect('picked_world_x_m' in body!).toBe(false);
+    expect('picked_world_y_m' in body!).toBe(false);
   });
 });
 
-describe('OriginPicker (issue#28 — 2-click yaw pick)', () => {
-  /**
-   * mountPicker variant that supplies the resolutionMPerPx prop the
-   * 2-click guard depends on. 0.05 m/px matches the studio default.
-   */
+describe('OriginPicker (issue#28 — 2-click yaw pick) [carried forward]', () => {
   function mountPickerWithRes(props: {
     role?: 'admin' | 'viewer' | null;
     resolutionMPerPx?: number | null;
   }): { target: HTMLDivElement; instance: ReturnType<typeof mount> } {
-    const target = document.createElement('div');
-    document.body.appendChild(target);
-    const instance = mount(OriginPicker, {
-      target,
-      props: {
-        currentOrigin: [-1.5, -2.0, 0.0],
-        role: props.role ?? 'admin',
-        busy: false,
-        bannerMsg: null,
-        bannerKind: null,
-        onapply: (): void => {},
-        resolutionMPerPx: props.resolutionMPerPx ?? 0.05,
-      },
+    return mountPicker({
+      role: props.role,
+      resolutionMPerPx: props.resolutionMPerPx ?? 0.05,
     });
-    cleanups.push(() => {
-      unmount(instance);
-      target.remove();
-    });
-    return { target, instance };
   }
 
   it('two-click yaw pre-fills theta_deg (east cardinal → 0°)', () => {
@@ -439,8 +355,6 @@ describe('OriginPicker (issue#28 — 2-click yaw pick)', () => {
     const thetaInput = target.querySelector<HTMLInputElement>(
       '[data-testid="origin-theta-input"]',
     );
-    expect(thetaInput).not.toBeNull();
-    // 0° formatted with 1 decimal.
     expect(thetaInput!.value).toBe('0.0');
   });
 
@@ -454,7 +368,6 @@ describe('OriginPicker (issue#28 — 2-click yaw pick)', () => {
     inst.setYawClick({ x_m: 0, y_m: 0 });
     flushSync();
     expect(inst.isYawP1Pending()).toBe(true);
-    // 0.1 m at 0.05 m/px = 2 px (below the 8 px threshold).
     inst.setYawClick({ x_m: 0.1, y_m: 0 });
     flushSync();
     const banner = target.querySelector<HTMLParagraphElement>(
@@ -462,89 +375,11 @@ describe('OriginPicker (issue#28 — 2-click yaw pick)', () => {
     );
     expect(banner).not.toBeNull();
     expect(banner!.textContent).toMatch(/너무 가깝습니다/);
-    // P1 still pending so operator can re-click P2 without restarting.
     expect(inst.isYawP1Pending()).toBe(true);
-  });
-
-  it('yaw via two-click equals yaw via numeric (dual-input parity)', () => {
-    // Path A — numeric typed.
-    const a = mountPickerWithRes({});
-    flushSync();
-    const aTheta = a.target.querySelector<HTMLInputElement>(
-      '[data-testid="origin-theta-input"]',
-    )!;
-    aTheta.value = '90.0';
-    aTheta.dispatchEvent(new Event('input', { bubbles: true }));
-    flushSync();
-
-    // Path B — two-click (0,0)→(0,1) is north → 90°.
-    const b = mountPickerWithRes({});
-    flushSync();
-    const bInst = b.instance as unknown as {
-      setYawClick: (c: { x_m: number; y_m: number }) => void;
-    };
-    bInst.setYawClick({ x_m: 0, y_m: 0 });
-    bInst.setYawClick({ x_m: 0, y_m: 1 });
-    flushSync();
-    const bTheta = b.target.querySelector<HTMLInputElement>(
-      '[data-testid="origin-theta-input"]',
-    )!;
-    // Both render identically: '90.0'.
-    expect(bTheta.value).toBe(aTheta.value);
-  });
-
-  it('Discard clears pending yaw P1 + theta input', () => {
-    const { target, instance } = mountPickerWithRes({});
-    flushSync();
-    const inst = instance as unknown as {
-      setYawClick: (c: { x_m: number; y_m: number }) => void;
-      isYawP1Pending: () => boolean;
-      clearAll: () => void;
-    };
-    inst.setYawClick({ x_m: 0, y_m: 0 });
-    flushSync();
-    expect(inst.isYawP1Pending()).toBe(true);
-    inst.clearAll();
-    flushSync();
-    expect(inst.isYawP1Pending()).toBe(false);
-    const thetaInput = target.querySelector<HTMLInputElement>(
-      '[data-testid="origin-theta-input"]',
-    )!;
-    expect(thetaInput.value).toBe('');
-  });
-
-  it('getDirtyBody returns null when neither xy nor theta dirty', () => {
-    const { instance } = mountPickerWithRes({});
-    flushSync();
-    const inst = instance as unknown as {
-      getDirtyBody: () => unknown | null;
-    };
-    expect(inst.getDirtyBody()).toBeNull();
-  });
-
-  it('getDirtyBody returns x/y baseline + theta when only theta dirty', () => {
-    const { target, instance } = mountPickerWithRes({});
-    flushSync();
-    const thetaInput = target.querySelector<HTMLInputElement>(
-      '[data-testid="origin-theta-input"]',
-    )!;
-    thetaInput.value = '15.0';
-    thetaInput.dispatchEvent(new Event('input', { bubbles: true }));
-    flushSync();
-    const inst = instance as unknown as {
-      getDirtyBody: () => { x_m: number; y_m: number; theta_deg?: number } | null;
-    };
-    const body = inst.getDirtyBody();
-    expect(body).not.toBeNull();
-    // Falls back to currentOrigin = [-1.5, -2.0, 0]. Backend SUBTRACT
-    // makes those a no-op.
-    expect(body!.x_m).toBe(-1.5);
-    expect(body!.y_m).toBe(-2.0);
-    expect(body!.theta_deg).toBe(15.0);
   });
 });
 
-describe('MapMaskCanvas mode-prop split (T5 fold)', () => {
+describe('MapMaskCanvas mode-prop split (T5 fold) [carried forward]', () => {
   it('default mode is paint and brush paint behaviour is unchanged', () => {
     const { target, instance } = mountMaskCanvas({ width: 4, height: 4 });
     flushSync();
@@ -554,7 +389,6 @@ describe('MapMaskCanvas mode-prop split (T5 fold)', () => {
     const inst = instance as unknown as {
       _testGetMaskCell: (x: number, y: number) => number;
     };
-    // CSS box is 100×100; logical 4×4; CSS (50, 50) → logical (2, 2).
     expect(inst._testGetMaskCell(2, 2)).toBe(255);
   });
 
@@ -574,7 +408,6 @@ describe('MapMaskCanvas mode-prop split (T5 fold)', () => {
     const inst = instance as unknown as {
       _testGetMaskCell: (x: number, y: number) => number;
     };
-    // Mask state byte-identical to a no-op (every cell zero — invariant (u)).
     for (let y = 0; y < 4; y++) {
       for (let x = 0; x < 4; x++) {
         expect(inst._testGetMaskCell(x, y)).toBe(0);

@@ -1765,25 +1765,90 @@ is always exactly **1× resample** regardless of how many derivations
 the operator has chained, because every Apply ALWAYS reads the
 pristine baseline.
 
-### 13.2. Translate-then-rotate composition
+### 13.2. Coord-mode Apply — pick-anchored + delta-on-top (issue#30)
 
-Coord-mode Apply with both `(x_m, y_m)` and `theta_deg` set
-**translates first, rotates second**. Operator-locked spec:
+> **Supersedes the SUBTRACT semantic from PR #79 (issue#27) and PR #81
+> (issue#28).** The operator's mental model — "맵을 새로 정렬했으니
+> origin은 (0, 0, 0°)이 되어야 한다" — surfaced in twenty-third-session
+> opening discussion and is now the operator-locked behavior. SSOT:
+> `/doc/issue30_yaml_normalization_design_analysis.md` +
+> `.claude/memory/project_pick_anchored_yaml_normalization_locked.md`.
+
+Per Apply, the operator picks a point on the canvas (the
+**picked-world** coord) AND optionally types a numeric delta on top.
+The picked point — possibly nudged by the typed delta — becomes world
+**(0, 0)** in the new (derived) frame, and the derived YAML's yaw is
+**0**:
 
 ```text
-new_origin_xy   = pristine_origin_xy − typed_xy        (SUBTRACT)
-new_origin_yaw  = wrap_yaw_deg(pristine_origin_yaw − typed_yaw)
-new_pgm         = rotate(pristine_pgm, typed_yaw, expand_canvas=true)
+# Inputs
+picked_world  = (canvas-clicked world coord at time of click)
+typed_delta   = (x_m, y_m, theta_deg)  # 0 / empty = no further nudge
+parent_cum    = previous derived's `cumulative_from_pristine` (identity for PICK#1)
+
+# Compose this Apply's cumulative against pristine
+cum.translate = picked_world − R(-θ_active)·typed_delta_xy
+cum.rotate    = wrap(parent_cum.rotate + typed_theta)         # in (-180, 180]
+
+# Bitmap pivot (pristine-frame pixel coord) — yaw-aware
+i_p, j_p_top  = pristine_world_to_pixel(cum.translate, ox_p, oy_p, oθ_p, W_p, H_p, res)
+
+# Off-center bbox of pristine corners after rotating by -θ around (i_p, j_p_top)
+W_d, H_d, x_min, y_min = off_center_bbox(W_p, H_p, i_p, j_p_top, -θ)
+i_p_new = i_p     - x_min
+j_p_new = j_p_top - y_min
+
+# Derived YAML origin: world (0, 0) lands at (i_p_new, j_p_new) in derived bitmap
+new_origin_x_m   = -i_p_new · res
+new_origin_y_m   = -((H_d - 1) - j_p_new) · res
+new_origin_yaw_deg = 0.0
 ```
 
-The SUBTRACT semantic is shared with the issue#27 ADD→SUBTRACT lock
-(`.claude/memory/feedback_subtract_semantic_locked.md`): the typed
-values name what the operator wants to become the new (0, 0, 0°);
-backend subtracts to get the new YAML metadata.
+Cumulative tracking lives in a per-derived sidecar JSON file (see
+§13.5 below). Every Apply ALWAYS reads pristine and applies the
+composed cumulative — **image quality stays at 1× resample regardless
+of cascade depth**, preserving
+`.claude/memory/project_pristine_baseline_pattern.md`.
 
-Composition order matters because rotate-then-translate would shift
-the rotation centre. See `godo-webctl/src/godo_webctl/map_rotate.py`
-header comment for the math derivation.
+**Q1 lock (informational pristine yaw)**: pristine YAML yaw `oθ_p`
+MAY be non-zero (e.g. test_v4 has 1.604 rad). It enters
+`pristine_world_to_pixel` for the world↔pixel transform, but
+`cumulative.rotate_deg` accumulates ONLY the operator's typed θ —
+NOT pristine yaw — so the operator's mental cumulative matches the
+JSON exactly.
+
+**Q2 lock (delta-on-top UX)**: SPA input boxes for x_m / y_m / θ
+default placeholder `0` / empty meaning "no further nudge". The XY
+click on the canvas captures `picked_world_*` into INTERNAL state and
+does NOT pre-fill the input boxes. The operator's typed values are
+the delta on top.
+
+**C-2.1 lock (algebra)**: `cumulative.translate = picked_world −
+R(-θ_active)·typed_delta`. With `θ_active = 0` and `typed_delta = 0`,
+`cumulative.translate = picked_world` so the picked point lands at
+derived world (0, 0). With `typed_delta ≠ 0`, the picked-world is
+shifted by `typed_delta` (in the active-at-pick frame) before
+becoming the new origin.
+
+The YAML yaw normalization aligns naturally with AMCL's
+yaw-blind likelihood-field cell mapping
+(`.claude/memory/project_amcl_yaw_metadata_only.md`): `dyaw =
+current.yaw_deg − 0 = current.yaw_deg`, so the operator's FreeD-output
+dyaw reads cleanly in the new frame with no hidden divergence.
+
+Wire shape (POST `/api/map/edit/coord` body — issue#30):
+
+```json
+{
+  "x_m":              0.0,        // typed delta (0 = no nudge)
+  "y_m":              0.0,
+  "theta_deg":        0.0,        // optional
+  "picked_world_x_m": 5.0,        // canvas-clicked world coord (optional;
+  "picked_world_y_m": 0.0,        // omission triggers legacy fallback +
+                                  // X-GODO-Deprecation: picked_world_missing)
+  "memo":             "wallcal01"
+}
+```
 
 ### 13.3. Resample (Lanczos-3 → BICUBIC)
 
@@ -1810,31 +1875,102 @@ Auto-canvas-expand keeps the entire rotated bitmap inside the new
 canvas. Hard cap `MAP_ROTATE_MAX_CANVAS_PX = 4096` rejects runaway
 rotations with a 422 + SSE `rejected{reason: canvas_too_large}` frame.
 
-### 13.4. Atomic pair-write protocol
+### 13.4. Atomic triple-write protocol (issue#30 — C3-triple)
 
-Two-file atomicity is critical: a partial write that lands a new PGM
-without a matching YAML (or vice-versa) leaves the maps directory in
-a state where activation chooses an inconsistent pair. Sequence
-(implemented in `godo-webctl/src/godo_webctl/map_rotate.py` and
-`map_origin.py`):
+Three-file atomicity is critical: a partial write that lands a new
+PGM without a matching YAML (or sidecar JSON) leaves the maps
+directory in a state where activation chooses an inconsistent triple.
+Sequence (implemented in `godo-webctl/src/godo_webctl/map_transform.py
+::_atomic_write_triple`):
 
 ```text
 1. Write PGM to <derived>.pgm.tmp + fsync
 2. Write YAML to <derived>.yaml.tmp + fsync
-3. fsync(parent_dir)
-4. rename <derived>.pgm.tmp → <derived>.pgm
-5. rename <derived>.yaml.tmp → <derived>.yaml
-6. fsync(parent_dir)
+3. Write sidecar JSON to <derived>.sidecar.json.tmp + fsync
+4. fsync(parent_dir)
+5. rename <derived>.pgm.tmp → <derived>.pgm
+6. rename <derived>.yaml.tmp → <derived>.yaml
+7. rename <derived>.sidecar.json.tmp → <derived>.sidecar.json
+8. fsync(parent_dir)
 
-On YAML failure between steps (4) and (5):
-   unlink <derived>.pgm  (rollback)
-   propagate error
+Cascade rollback on rename failure:
+- YAML failure (between 5 and 6): unlink <derived>.pgm
+- JSON failure (between 6 and 7): unlink <derived>.pgm AND <derived>.yaml
 ```
 
+Sidecar is written **last** so its absence is recoverable: a missing
+sidecar with both PGM + YAML present surfaces as `kind="synthesized"`
+or `kind="auto_migrated_pre_issue30"` via the recovery sweep (see
+§13.5). The sidecar carries integrity SHAs over the on-disk PGM +
+YAML bytes so an out-of-band hand-edit between Applies can be detected
+and surfaced as `HTTP 422 sidecar_sha_mismatch`.
+
 Stale `.tmp` files from a power loss or kill mid-Apply are swept on
-the next `list_pairs_grouped()` invocation. Tested by
-`tests/test_map_rotate.py::test_yaml_failure_unlinks_pgm` and
-`test_orphan_tmp_swept_on_list`.
+every `list_pairs_grouped()` invocation AND at lifespan startup.
+Tested by `tests/test_map_transform.py::test_yaml_failure_unlinks_pgm`,
+`test_orphan_tmp_swept_idempotent`, and the integration tests
+`tests/test_app_integration.py::test_apply_pipeline_writes_c3_triple_atomically`
++ `test_apply_pipeline_yaml_failure_unlinks_pgm_atomically`.
+
+### 13.5. Sidecar SSOT (issue#30 — `godo.map.sidecar.v1`)
+
+Every derived map carries a peer JSON file
+`<derived_base>.YYYYMMDD-HHMMSS-<memo>.sidecar.json` reified by
+`godo_webctl.sidecar.Sidecar`. Schema literal:
+`"godo.map.sidecar.v1"`. Sole owner of the schema is
+`godo-webctl/src/godo_webctl/sidecar.py` — no other module reads or
+writes `*.sidecar.json` directly.
+
+Body shape (top-level keys):
+
+```text
+schema:                       godo.map.sidecar.v1
+kind:                         "derived" | "synthesized"
+source.pristine_pgm:          <pristine PGM filename>
+source.pristine_yaml:         <pristine YAML filename>
+lineage.generation:           int (-1 = unknown)
+lineage.parents:              [<base>, <derived_1>, …]   # pristine-first
+lineage.kind:                 "operator_apply" | "synthesized" | "auto_migrated_pre_issue30"
+cumulative_from_pristine.translate_x_m:  float (pristine-frame world coord
+                                                that lands at derived world (0,0))
+cumulative_from_pristine.translate_y_m:  float
+cumulative_from_pristine.rotate_deg:     float (typed θ accumulation only;
+                                                 NOT including pristine yaw — Q1 lock)
+this_step:                    {delta_*, picked_world_*} — null for synthesized
+result_yaml_origin:           {x_m, y_m, yaw_deg}
+result_canvas:                {width_px, height_px}
+integrity.pgm_sha256:         hex over derived PGM bytes
+integrity.yaml_sha256:        hex over derived YAML bytes
+created.iso_kst:              "YYYY-MM-DDTHH:MM:SS+09:00"
+created.memo:                 operator-supplied memo
+created.reason:               "operator_apply" | etc.
+```
+
+Recovery sweep (`sidecar.recovery_sweep`) runs at **lifespan startup**
+AND **opportunistically on every `/api/maps`** call:
+
+| Pre-state | Action |
+|---|---|
+| PGM + YAML + sidecar | no-op |
+| PGM + YAML + no sidecar, derived filename pattern | synthesize `("derived", "auto_migrated_pre_issue30", 1)` |
+| PGM + YAML + no sidecar, non-derived filename | synthesize `("synthesized", "synthesized", -1)` |
+| PGM only | unlink |
+| YAML only | unlink |
+
+Pinned by `tests/test_sidecar.py::test_recovery_sweep_*` and the
+integration test
+`tests/test_app_integration.py::test_pr81_legacy_derived_auto_migration`.
+
+Wire access — `GET /api/maps/{name}/sidecar` returns:
+
+```json
+{ "name": "<name>", "sidecar": SidecarV1 | null }
+```
+
+`null` when the pair exists but no sidecar is on disk yet (legacy /
+pristine map). Frontend mirror lives in
+`godo-frontend/src/lib/protocol.ts::SidecarV1`/`SidecarResponse` and
+is consumed by `LineageModal.svelte`.
 
 ### 13.5. SSE progress channel
 

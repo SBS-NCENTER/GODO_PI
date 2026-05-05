@@ -1,6 +1,6 @@
 <script lang="ts">
   /**
-   * Track B-MAPEDIT-2 + issue#28 — origin-pick controls.
+   * issue#30 — origin-pick controls (delta-on-top of picked-at-origin).
    *
    * Sole owner of the dual-input origin form state per
    * `godo-frontend/CODEBASE.md` invariant (aa). The Edit sub-tab's
@@ -8,31 +8,21 @@
    * `'paint' | 'origin-pick'` click-mode toggle on `MapMaskCanvas`,
    * but does NOT mirror any of the form fields in a store.
    *
-   * Two input modes for x_m / y_m:
-   *   - Mode A (GUI pick): parent route's pointer-coord callback calls
-   *     `setCandidate({x_m, y_m})` to pre-fill the absolute fields.
-   *     This component flips its own mode toggle to `'absolute'`
-   *     (a click is unambiguously an absolute world coord) before
-   *     populating the inputs.
-   *   - Mode B (numeric entry): operator types `x_m` / `y_m` / `theta_deg`
-   *     directly and toggles `mode` between `absolute` and `delta`.
+   * Operator-locked semantic per `.claude/memory/project_pick_anchored
+   * _yaml_normalization_locked.md`:
    *
-   * issue#28 additions:
-   *   - `THETA_EDIT_ENABLED` flipped to true (B-MAPEDIT-3 ships full
-   *     PGM rotation on the backend, so theta is no longer a metadata-
-   *     only no-op).
-   *   - Dual-input parity for theta: numeric (with +/- step buttons)
-   *     OR 2-click yaw pick (P1 → P2 vector defines the new +x axis).
-   *     `setYawClick(world_x, world_y)` is the imperative API the
-   *     parent calls when the canvas is in `'yaw-pick'` sub-mode.
-   *   - Independent dirty flags per axis (`xyDirty`, `thetaDirty`); the
-   *     parent's Apply button commits whichever is dirty via
-   *     `getDirtyBody()`.
-   *   - Inline Apply button + redirect-after-Apply pattern REMOVED;
-   *     `<ApplyMemoModal>` (mounted by parent) owns the flow.
-   *   - SUBTRACT semantic for theta: parent computes
-   *     `new_yaml_yaw = wrap(prev_yaml_yaw - typed_yaw)` and shows it
-   *     as a preview; backend re-computes the same delta server-side.
+   *   - The XY click on the canvas captures `picked_world_x_m` /
+   *     `picked_world_y_m` — that point becomes the new world (0, 0)
+   *     by definition. Click does NOT pre-fill the input boxes.
+   *   - The input boxes hold an OPTIONAL DELTA on top of the picked
+   *     origin. Empty / `0` placeholder = "no further nudge".
+   *   - 2-click yaw pick still resolves to a yaw delta in degrees and
+   *     pre-fills `thetaText`.
+   *
+   * Pre-issue#30 absolute / delta mode toggle is removed — the pick-
+   * anchored delta-on-top semantic is unconditional. The
+   * `resolveDeltaFromPose` helper is preserved as a deprecated symbol
+   * (back-compat for `originMath.test.ts`) but no longer wired.
    */
 
   import { onDestroy, onMount } from 'svelte';
@@ -46,16 +36,11 @@
     ORIGIN_X_Y_ABS_MAX_M,
     YAW_PICK_MIN_PIXEL_DIST_PX,
   } from '$lib/constants';
-  import {
-    resolveDeltaFromPose,
-    resolveYawDeltaFromPose,
-    twoClickToYawDeg,
-  } from '$lib/originMath';
+  import { twoClickToYawDeg } from '$lib/originMath';
   import type {
     ConfigGetResponse,
     LastPose,
     MapEditCoordBody,
-    OriginMode,
     OriginPatchBody,
   } from '$lib/protocol';
   import { subscribeLastPose } from '$stores/lastPose';
@@ -100,27 +85,26 @@
     inlineApplyEnabled = true,
   }: Props = $props();
 
-  // issue#28 — feature gate flipped on. Theta editing is now backed by
-  // the `/api/map/edit/coord` pipeline (Lanczos-3 PGM rotation +
-  // SUBTRACT YAML rewrite), so the visual ↔ coordinate inconsistency
-  // that justified hiding the UI in issue#27 is gone.
   const THETA_EDIT_ENABLED = true;
 
   // Form state — owned exclusively by this component.
-  let mode = $state<OriginMode>('absolute');
+  // Per Q2 lock: input boxes hold the typed DELTA (optional). Empty /
+  // 0 placeholder = "no further nudge".
   let xText = $state<string>('');
   let yText = $state<string>('');
   let thetaText = $state<string>('');
   let inlineError = $state<string | null>(null);
 
-  // issue#28 — 2-click yaw pick state. `yawP1` holds the first click in
-  // world coords; the second click closes the gesture by calling
-  // `twoClickToYawDeg`. Cleared on Discard, on numeric edit of theta,
-  // and on `setCandidate` (an XY click overrides any pending yaw click).
+  // issue#30 — picked-point state (canvas-clicked world coord). Held
+  // INTERNALLY here, NOT mirrored into xText/yText. The XY click
+  // captures the pick; the typed DELTA on top is applied separately.
+  let pickedWorld = $state<{ x_m: number; y_m: number } | null>(null);
+
+  // 2-click yaw pick state.
   let yawP1 = $state<{ wx: number; wy: number } | null>(null);
   let inlineYawError = $state<string | null>(null);
 
-  // issue#27 — step deltas for the +/- buttons.
+  // Step deltas for the +/- buttons.
   let stepX = $state<number>(ORIGIN_STEP_X_M_DEFAULT);
   let stepY = $state<number>(ORIGIN_STEP_Y_M_DEFAULT);
   let stepYaw = $state<number>(ORIGIN_STEP_YAW_DEG_DEFAULT);
@@ -151,13 +135,15 @@
   function parseField(
     text: string,
     bound: number,
+    allowEmpty: boolean = true,
   ): { value: number | null; error: string | null } {
     if (text === null || text === undefined) {
-      return { value: null, error: 'empty' };
+      return allowEmpty ? { value: 0, error: null } : { value: null, error: 'empty' };
     }
     const trimmed = String(text).trim();
     if (trimmed === '') {
-      return { value: null, error: 'empty' };
+      // issue#30: empty input = 0 (no further nudge), not an error.
+      return allowEmpty ? { value: 0, error: null } : { value: null, error: 'empty' };
     }
     if (trimmed.includes(',')) {
       return { value: null, error: 'locale_comma' };
@@ -176,16 +162,30 @@
   let yParsed = $derived(parseField(yText, ORIGIN_X_Y_ABS_MAX_M));
   let thetaParsed = $derived(parseField(thetaText, ORIGIN_THETA_DEG_ABS_MAX));
 
-  let xyBothValid = $derived(xParsed.value !== null && yParsed.value !== null);
+  // Inputs are valid when the parser returns a finite number (incl. 0).
+  let xValid = $derived(xParsed.value !== null);
+  let yValid = $derived(yParsed.value !== null);
   let thetaBlocking = $derived(thetaText.trim() !== '' && thetaParsed.value === null);
 
-  // Independent dirty flags. xy is dirty when BOTH inputs parse and at
-  // least one is non-empty. theta is dirty when the input parses to a
-  // finite number (empty = clean).
-  let xyDirty = $derived(xyBothValid && (xText.trim() !== '' || yText.trim() !== ''));
+  // issue#30 — Apply is allowed when picked OR any non-empty typed
+  // delta exists (so operator can re-Apply with a new memo even if
+  // they only typed θ). At minimum, a picked point is required if
+  // none of x/y/θ is dirty (otherwise nothing distinguishes from the
+  // pristine baseline). The parent applies its own gate — we just
+  // gate the helper.
+  let xyDirty = $derived(xText.trim() !== '' || yText.trim() !== '');
   let thetaDirty = $derived(thetaText.trim() !== '' && thetaParsed.value !== null);
+  let pickedDirty = $derived(pickedWorld !== null);
 
-  let applyDisabled = $derived(busy || role !== 'admin' || (!xyDirty && !thetaDirty) || thetaBlocking);
+  let canApply = $derived(
+    !busy
+    && role === 'admin'
+    && (pickedDirty || xyDirty || thetaDirty)
+    && xValid
+    && yValid
+    && !thetaBlocking,
+  );
+  let applyDisabled = $derived(!canApply);
 
   function clearBanner(): void {
     inlineError = null;
@@ -203,25 +203,28 @@
     return v.toFixed(1);
   }
 
-  // Imperative API — invoked by the parent's GUI-pick handler. Per
-  // T1 fold: setCandidate also flips the mode to `'absolute'` (a click
-  // on the canvas is unambiguously an absolute world coord).
+  /**
+   * issue#30 — Q2 lock: XY click on canvas captures the picked world
+   * coord into INTERNAL state but does NOT pre-fill the input boxes.
+   * The picked point is the new world (0, 0) baseline; the input
+   * boxes hold an OPTIONAL DELTA on top.
+   */
   export function setCandidate(c: { x_m: number; y_m: number }): void {
-    mode = 'absolute';
-    xText = fmtDisplay(c.x_m);
-    yText = fmtDisplay(c.y_m);
+    pickedWorld = { x_m: c.x_m, y_m: c.y_m };
     inlineError = null;
     // An XY click cancels any in-progress yaw gesture.
     yawP1 = null;
     inlineYawError = null;
   }
 
-  // issue#28 — yaw-click feeder. Called by the parent in `'yaw-pick'`
-  // sub-mode. First call records P1; second call resolves to a yaw
-  // angle via `twoClickToYawDeg` and pre-fills `thetaText`. P1→P2 must
-  // exceed `YAW_PICK_MIN_PIXEL_DIST_PX` (converted via
-  // `resolutionMPerPx`); coincident clicks raise an inline error and
-  // leave P1 in place so the operator can re-click P2 without resetting.
+  /**
+   * issue#28 — yaw-click feeder. Called by the parent in `'yaw-pick'`
+   * sub-mode. First call records P1; second call resolves to a yaw
+   * angle via `twoClickToYawDeg` and pre-fills `thetaText`. P1→P2 must
+   * exceed `YAW_PICK_MIN_PIXEL_DIST_PX` (converted via
+   * `resolutionMPerPx`); coincident clicks raise an inline error and
+   * leave P1 in place so the operator can re-click P2 without resetting.
+   */
   export function setYawClick(c: { x_m: number; y_m: number }): void {
     if (!THETA_EDIT_ENABLED) return;
     if (yawP1 === null) {
@@ -231,9 +234,6 @@
     }
     const res = resolutionMPerPx;
     if (res === null || !(res > 0)) {
-      // Without a resolution we cannot evaluate the pixel-distance
-      // guard; reject the gesture explicitly so the operator gets a
-      // fixable error rather than a silently-skipped click.
       inlineYawError = 'no_resolution';
       return;
     }
@@ -254,62 +254,51 @@
     inlineYawError = null;
   }
 
-  /**
-   * issue#28 — yaw-pick state observer. Used by tests + parent for the
-   * "P1 placed, awaiting P2" UI affordance.
-   */
   export function isYawP1Pending(): boolean {
     return yawP1 !== null;
   }
 
   /**
-   * issue#28 — Apply gateway. Returns the JSON body for
+   * issue#30 — picked-point observer. Used by the parent route to
+   * render the orange pick-preview on the canvas underlay AND verify
+   * tests, since a test cannot read internal $state directly.
+   */
+  export function getPickedWorld(): { x_m: number; y_m: number } | null {
+    return pickedWorld;
+  }
+
+  /**
+   * issue#30 — Apply gateway. Returns the JSON body for
    * `POST /api/map/edit/coord` based on the dirty flags. Returns null
-   * when nothing is dirty (Apply must remain disabled), when only
-   * theta is supplied (the backend pipeline requires x/y to anchor
-   * the SUBTRACT), or when delta-mode lacks a pose. The parent's
-   * Apply button is `disabled = !canApply()` mirroring this.
+   * when nothing is dirty.
    *
-   * `memo` is supplied by `<ApplyMemoModal>` and appended at the call
-   * site, so this method intentionally returns the body MINUS memo.
+   * Wire shape per issue#30:
+   *   - `x_m`, `y_m`, `theta_deg`: operator's typed DELTA (0 if empty).
+   *   - `picked_world_x_m`, `picked_world_y_m`: the picked world coord
+   *     captured from the canvas click. Falls back to (0, 0) if the
+   *     operator typed only a delta without picking — in that case
+   *     the backend treats the typed delta as a nudge from the
+   *     active map's current origin (PICK#1 = pristine origin).
    */
   export function getDirtyBody(): Omit<MapEditCoordBody, 'memo'> | null {
-    if (!xyDirty && !thetaDirty) return null;
-    if (thetaBlocking) return null;
+    if (!canApply) return null;
+    if (!pickedDirty && !xyDirty && !thetaDirty) return null;
 
-    // x/y must always be present for the backend pipeline. If only
-    // theta is dirty, fill x/y from the current YAML origin so the
-    // SUBTRACT becomes a no-op on those axes.
-    let resolvedX: number;
-    let resolvedY: number;
-    if (xyDirty && xParsed.value !== null && yParsed.value !== null) {
-      resolvedX = xParsed.value;
-      resolvedY = yParsed.value;
-      if (mode === 'delta') {
-        if (lastPose === null || !lastPose.valid) {
-          inlineError = 'no_pose_for_delta';
-          return null;
-        }
-        const abs = resolveDeltaFromPose(
-          { x_m: lastPose.x_m, y_m: lastPose.y_m },
-          xParsed.value,
-          yParsed.value,
-        );
-        resolvedX = abs.x_m;
-        resolvedY = abs.y_m;
-      }
-    } else if (currentOrigin !== null) {
-      resolvedX = currentOrigin[0];
-      resolvedY = currentOrigin[1];
-    } else {
-      inlineError = 'no_xy_baseline';
-      return null;
-    }
+    // Empty input = 0 (no further nudge); already enforced by parseField.
+    const tx = xParsed.value ?? 0;
+    const ty = yParsed.value ?? 0;
 
-    const body: Omit<MapEditCoordBody, 'memo'> = { x_m: resolvedX, y_m: resolvedY };
+    const body: Omit<MapEditCoordBody, 'memo'> = { x_m: tx, y_m: ty };
     if (thetaDirty && thetaParsed.value !== null) {
       body.theta_deg = thetaParsed.value;
     }
+    if (pickedWorld !== null) {
+      body.picked_world_x_m = pickedWorld.x_m;
+      body.picked_world_y_m = pickedWorld.y_m;
+    }
+    // Stale-pose-from-LastPose path retired — issue#30 picked-anchored
+    // semantic supersedes the SUBTRACT delta-from-pose form.
+    void lastPose;
     return body;
   }
 
@@ -323,12 +312,10 @@
     inlineError = null;
     inlineYawError = null;
     yawP1 = null;
+    pickedWorld = null;
   }
 
-  // Legacy back-compat path: the inline Apply button still exists for
-  // the existing /api/map/origin tests + non-modal callers. The
-  // issue#28 parent route never clicks it (the parent's per-mode Apply
-  // button drives the modal flow instead).
+  // Legacy back-compat path — preserved for /api/map/origin smoke tests.
   function nudgeX(delta: number): void {
     const cur = xParsed.value ?? 0;
     xText = fmtDisplay(cur + delta);
@@ -348,28 +335,14 @@
 
   function onApplyClick(): void {
     if (applyDisabled) return;
-    if (!xyDirty || xParsed.value === null || yParsed.value === null) {
+    // Legacy back-compat path — emit OriginPatchBody with `mode='absolute'`.
+    if (xParsed.value === null || yParsed.value === null) {
       inlineError = 'inputs_invalid';
       return;
     }
-    let resolvedX = xParsed.value;
-    let resolvedY = yParsed.value;
-    if (mode === 'delta') {
-      if (lastPose === null || !lastPose.valid) {
-        inlineError = 'no_pose_for_delta';
-        return;
-      }
-      const abs = resolveDeltaFromPose(
-        { x_m: lastPose.x_m, y_m: lastPose.y_m },
-        xParsed.value,
-        yParsed.value,
-      );
-      resolvedX = abs.x_m;
-      resolvedY = abs.y_m;
-    }
     const body: OriginPatchBody = {
-      x_m: resolvedX,
-      y_m: resolvedY,
+      x_m: xParsed.value,
+      y_m: yParsed.value,
       mode: 'absolute',
     };
     if (thetaDirty && thetaParsed.value !== null) {
@@ -382,51 +355,10 @@
     if (busy) return;
     clearAll();
   }
-
-  // SUBTRACT preview for theta — mirrors backend `wrap(prev - typed)`.
-  let thetaPreview = $derived.by((): { prev: number; next: number } | null => {
-    if (!thetaDirty || thetaParsed.value === null || currentOrigin === null) return null;
-    const prevDeg = currentOrigin[2] * (180 / Math.PI);
-    const nextDeg = resolveYawDeltaFromPose(prevDeg, thetaParsed.value);
-    return { prev: prevDeg, next: nextDeg };
-  });
 </script>
 
 <section class="origin-picker" data-testid="origin-picker">
-  <h3 class="picker-title">Origin pick</h3>
-
-  <div class="mode-row" role="radiogroup" aria-label="origin mode">
-    <label class="radio-label">
-      <input
-        type="radio"
-        name="origin-mode"
-        value="absolute"
-        checked={mode === 'absolute'}
-        onchange={() => {
-          mode = 'absolute';
-          clearBanner();
-        }}
-        disabled={busy || role !== 'admin'}
-        data-testid="origin-mode-absolute"
-      />
-      Absolute
-    </label>
-    <label class="radio-label">
-      <input
-        type="radio"
-        name="origin-mode"
-        value="delta"
-        checked={mode === 'delta'}
-        onchange={() => {
-          mode = 'delta';
-          clearBanner();
-        }}
-        disabled={busy || role !== 'admin'}
-        data-testid="origin-mode-delta"
-      />
-      Delta
-    </label>
-  </div>
+  <h3 class="picker-title">Origin pick (issue#30 — pick + delta)</h3>
 
   <div class="number-row">
     <label class="num-label">
@@ -438,7 +370,8 @@
         oninput={clearBanner}
         disabled={busy || role !== 'admin'}
         data-testid="origin-x-input"
-        class={xParsed.error && xText !== '' ? 'input-invalid' : ''}
+        placeholder="0"
+        class={xParsed.error ? 'input-invalid' : ''}
       />
       m
       <button
@@ -457,6 +390,7 @@
         title={`+${stepX} m`}
         data-testid="origin-x-plus"
       >+</button>
+      <span class="hint-inline" data-testid="origin-x-hint">(이동 없음)</span>
     </label>
     <label class="num-label">
       y_m:
@@ -467,7 +401,8 @@
         oninput={clearBanner}
         disabled={busy || role !== 'admin'}
         data-testid="origin-y-input"
-        class={yParsed.error && yText !== '' ? 'input-invalid' : ''}
+        placeholder="0"
+        class={yParsed.error ? 'input-invalid' : ''}
       />
       m
       <button
@@ -486,6 +421,7 @@
         title={`+${stepY} m`}
         data-testid="origin-y-plus"
       >+</button>
+      <span class="hint-inline" data-testid="origin-y-hint">(이동 없음)</span>
     </label>
     {#if THETA_EDIT_ENABLED}
       <label class="num-label">
@@ -497,13 +433,12 @@
           oninput={() => {
             clearBanner();
             clearYawError();
-            // Numeric edit cancels any in-progress yaw gesture.
             yawP1 = null;
           }}
           disabled={busy || role !== 'admin'}
           data-testid="origin-theta-input"
-          placeholder="optional"
-          class={thetaParsed.error && thetaText !== '' ? 'input-invalid' : ''}
+          placeholder="0"
+          class={thetaParsed.error ? 'input-invalid' : ''}
         />
         °
         <button
@@ -522,6 +457,7 @@
           title={`+${stepYaw}°`}
           data-testid="origin-theta-plus"
         >+</button>
+        <span class="hint-inline" data-testid="origin-theta-hint">(회전 없음)</span>
       </label>
     {/if}
   </div>
@@ -533,9 +469,10 @@
     </p>
   {/if}
 
-  {#if THETA_EDIT_ENABLED && thetaPreview}
-    <p class="muted preview" data-testid="origin-theta-preview">
-      θ 미리보기: {thetaPreview.prev.toFixed(1)}° → {thetaPreview.next.toFixed(1)}°
+  {#if pickedWorld !== null}
+    <p class="muted picked-info" data-testid="origin-picked-info">
+      picked: ({fmtDisplay(pickedWorld.x_m)}, {fmtDisplay(pickedWorld.y_m)}) m
+      — 이 점이 새 world (0, 0)이 됩니다.
     </p>
   {/if}
 
@@ -545,15 +482,10 @@
     </p>
   {/if}
 
-  {#if mode === 'absolute'}
-    <p class="muted hint" data-testid="origin-absolute-hint">
-      Absolute: 입력한 좌표가 새 origin(0, 0)이 되도록 YAML이 다시 쓰여집니다.
-    </p>
-  {:else}
-    <p class="muted hint" data-testid="origin-delta-hint">
-      Delta: 현재 pose에서 입력한 만큼 떨어진 점이 새 origin(0, 0)이 됩니다.
-    </p>
-  {/if}
+  <p class="muted hint" data-testid="origin-delta-hint">
+    캔버스에서 클릭한 점이 새 origin (0, 0)이 됩니다. 입력값은 그 위에
+    추가로 적용되는 이동/회전 입니다. 0 또는 빈 칸 = 추가 변경 없음.
+  </p>
 
   {#if inlineApplyEnabled}
     <div class="actions">
@@ -587,11 +519,7 @@
           ? '유한하지 않은 값입니다.'
           : inlineError === 'out_of_bound'
             ? `값의 절댓값이 ${ORIGIN_X_Y_ABS_MAX_M} m를 넘습니다.`
-            : inlineError === 'no_pose_for_delta'
-              ? 'Delta 모드는 현재 LiDAR pose가 필요합니다. AMCL이 수렴할 때까지 기다리거나 Absolute 모드를 사용하세요.'
-              : inlineError === 'no_xy_baseline'
-                ? 'Theta 단독 적용을 위해서는 현재 origin 메타데이터가 필요합니다.'
-                : '입력 값이 잘못되었습니다.'}
+            : '입력 값이 잘못되었습니다.'}
     </p>
   {:else if inlineYawError}
     <p class="banner banner-error" data-testid="origin-yaw-banner">
@@ -618,16 +546,6 @@
   .picker-title {
     margin: 0 0 8px;
     font-size: 1em;
-  }
-  .mode-row {
-    display: flex;
-    gap: 16px;
-    margin: 4px 0;
-  }
-  .radio-label {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
   }
   .number-row {
     display: flex;
@@ -657,13 +575,18 @@
     font-family: var(--font-mono, ui-monospace, monospace);
     font-size: 0.9em;
   }
-  .preview {
+  .picked-info {
     font-family: var(--font-mono, ui-monospace, monospace);
     font-size: 0.9em;
     margin: 4px 0;
   }
   .muted {
     color: var(--color-text-muted, #666);
+  }
+  .hint-inline {
+    font-size: 0.8em;
+    color: var(--color-text-muted, #666);
+    margin-left: 4px;
   }
   .actions {
     display: flex;

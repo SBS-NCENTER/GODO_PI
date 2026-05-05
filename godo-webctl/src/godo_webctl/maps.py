@@ -486,6 +486,15 @@ def delete_pair(maps_dir: Path, name: str) -> None:
     _check_inside_maps_dir(yaml, maps_dir)
     pgm.unlink()
     yaml.unlink()
+    # issue#30 — also unlink the sidecar JSON if present. Sidecar
+    # absence is fine (pre-issue#30 derived, pristine, or
+    # auto-migrated path that hasn't been list-swept yet).
+    sidecar = maps_dir / f"{name}.sidecar.json"
+    try:
+        _check_inside_maps_dir(sidecar, maps_dir)
+        sidecar.unlink(missing_ok=True)
+    except (InvalidName, OSError) as e:
+        logger.info("maps.delete_pair_sidecar_unlink_skipped: name=%s — %s", name, e)
 
 
 # --- Back-compat soft migration ---------------------------------------

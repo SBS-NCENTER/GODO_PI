@@ -4717,19 +4717,17 @@ async def test_post_map_edit_coord_with_theta_does_not_double_count(
     tmp_map_pair: Path,
     tmp_maps_dir: Path,
 ) -> None:
-    """HIL fix 2026-05-04 KST — Option B (bake-into-bitmap) means the
-    bitmap rotation is the SOURCE OF TRUTH for yaw change; YAML yaw
-    must NOT also be SUBTRACT'd or the operator sees mirrored
-    rotation. This pin asserts the derived YAML's origin[2] equals the
-    pristine's origin[2] verbatim when theta_deg is non-zero."""
+    """issue#30 — pick-anchored YAML normalization. After Apply, derived
+    YAML's origin[2] (theta) is ALWAYS 0.0 — the bitmap rotation is the
+    source of truth, AND the derived YAML normalizes to (0, 0, 0)
+    semantics. (Note: PR #81 had its own pin for theta preservation;
+    issue#30 explicitly supersedes that by normalizing to 0.)"""
     s = _settings_for(
         uds_socket=tmp_path / "u.sock",
         map_path=tmp_map_pair,
         backup_dir=tmp_path / "bk",
         maps_dir=tmp_maps_dir,
     )
-    pristine_yaml_path = tmp_maps_dir / "studio_v1.yaml"
-    pristine_yaml_text = pristine_yaml_path.read_text("utf-8")
     async with _client(s) as cl:
         token = await _login_admin(cl)
         r = await cl.post(
@@ -4740,8 +4738,6 @@ async def test_post_map_edit_coord_with_theta_does_not_double_count(
     assert r.status_code == HTTPStatus.OK, r.text
     derived_name = r.json()["derived_name"]
     derived_yaml_text = (tmp_maps_dir / f"{derived_name}.yaml").read_text("utf-8")
-    # Extract `origin: [...]` lines from both files. The third element
-    # (theta) must match — bitmap rotation handled the yaw change.
     import re
 
     def get_origin_third(text: str) -> str:
@@ -4750,8 +4746,9 @@ async def test_post_map_edit_coord_with_theta_does_not_double_count(
         parts = [p.strip() for p in m.group(1).split(",")]
         return parts[2]
 
-    assert get_origin_third(pristine_yaml_text) == get_origin_third(derived_yaml_text), (
-        "derived YAML origin[2] must equal pristine origin[2] in Option B"
+    derived_theta = float(get_origin_third(derived_yaml_text))
+    assert derived_theta == 0.0, (
+        f"issue#30: derived YAML origin[2] must be 0.0 (got {derived_theta!r})"
     )
 
 
@@ -4779,3 +4776,403 @@ async def test_post_map_edit_coord_invalid_memo_422(
     # explicit `{ok, err: invalid_memo}`. Both surface the operator-
     # actionable failure; SPA handles either.
     assert body.get("err") == "invalid_memo" or "detail" in body
+
+
+# ---- issue#30 — Cardinal integration tests for round 2 ------------------
+
+
+async def _build_synthetic_pristine_maps_dir(
+    tmp_path: Path, name: str = "pristine", width: int = 200, height: int = 200,
+) -> Path:
+    """Build a fresh maps_dir with a single synthetic pristine map +
+    active.* symlinks pointing at it.
+
+    Returns the maps_dir Path.
+    """
+    import os
+
+    maps_dir = tmp_path / "maps"
+    maps_dir.mkdir(mode=0o750)
+    body = bytearray()
+    for r in range(height):
+        for c in range(width):
+            if r == 0 or c == 0 or r == height - 1 or c == width - 1:
+                body.append(0)
+            else:
+                body.append(254)
+    pgm = maps_dir / f"{name}.pgm"
+    yaml = maps_dir / f"{name}.yaml"
+    pgm.write_bytes(f"P5\n{width} {height}\n255\n".encode("ascii") + bytes(body))
+    yaml.write_text(
+        f"image: {name}.pgm\nresolution: 0.05\norigin: [0.0, 0.0, 0.0]\n"
+        "occupied_thresh: 0.65\nfree_thresh: 0.196\nnegate: 0\n",
+    )
+    os.symlink(f"{name}.pgm", maps_dir / "active.pgm")
+    os.symlink(f"{name}.yaml", maps_dir / "active.yaml")
+    return maps_dir
+
+
+async def test_apply_pipeline_pickpoint_lands_at_world_origin_via_http(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    """[C-B1 catcher] POST a wire-realistic body where `picked_world_*`
+    ≠ `typed_delta_*` (e.g., picked_world=(5, 0), typed_delta=(1, 0)).
+    Assert the resulting derived YAML's origin reflects that the picked
+    pristine pixel landed at derived world (1, 0) ± 0.5·res.
+
+    A regression to round-1's `picked = typed` behavior would FAIL this
+    test (would expect derived world = (0, 0) instead of (1, 0)).
+    """
+    maps_dir = await _build_synthetic_pristine_maps_dir(
+        tmp_path, name="pristine", width=200, height=200,
+    )
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        maps_dir=maps_dir,
+    )
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post(
+            "/api/map/edit/coord",
+            json={
+                "x_m": 1.0,           # typed delta
+                "y_m": 0.0,
+                "theta_deg": 0.0,
+                "picked_world_x_m": 5.0,  # canvas-clicked world coord
+                "picked_world_y_m": 0.0,
+                "memo": "c2pin1",
+            },
+            headers=_auth(token),
+        )
+    assert r.status_code == HTTPStatus.OK, r.text
+    # No deprecation header should be set when picked_world_* is supplied.
+    assert "x-godo-deprecation" not in {k.lower() for k in r.headers}
+    body = r.json()
+    derived_name = body["derived_name"]
+    derived_yaml = (maps_dir / f"{derived_name}.yaml").read_text("utf-8")
+    derived_pgm = maps_dir / f"{derived_name}.pgm"
+    # Read derived dimensions from the PGM header.
+    head = derived_pgm.read_bytes()[:64]
+    parts = head.split(b"\n", 3)
+    dims = parts[1].split()
+    h_d = int(dims[1])
+    # Parse derived YAML origin.
+    import re
+    m = re.search(r"^origin:\s*\[([^\]]*)\]", derived_yaml, re.MULTILINE)
+    assert m is not None
+    o_parts = [p.strip() for p in m.group(1).split(",")]
+    ox = float(o_parts[0])
+    oy = float(o_parts[1])
+    oyaw_rad = float(o_parts[2])
+    res_m = 0.05
+    # picked-pivot lives at derived world (0, 0). pristine-(5, 0) is 1 m
+    # in +x from picked-pivot in pristine world frame; with θ=0 and the
+    # picked-pivot at world (0, 0), pristine-(5, 0) lands at derived
+    # world (1, 0).
+    i_pick_in_derived = -ox / res_m
+    j_pick_in_derived = (h_d - 1) + oy / res_m
+    # Pristine-(5, 0): 1 m in +x from picked → +20 px in derived.
+    i_pristine5 = i_pick_in_derived + 1.0 / res_m
+    j_pristine5 = j_pick_in_derived
+    wx = ox + i_pristine5 * res_m
+    wy = oy + (h_d - 1 - j_pristine5) * res_m
+    assert wx == pytest.approx(1.0, abs=0.5 * res_m)
+    assert wy == pytest.approx(0.0, abs=0.5 * res_m)
+    assert oyaw_rad == pytest.approx(0.0, abs=1e-9)
+
+
+async def test_apply_pipeline_legacy_body_emits_deprecation_header(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    """Legacy SPA bundle that omits `picked_world_*` triggers the
+    `X-GODO-Deprecation: picked_world_missing` header so HIL operators
+    spot stale-bundle regressions immediately."""
+    maps_dir = await _build_synthetic_pristine_maps_dir(
+        tmp_path, name="pristine", width=100, height=100,
+    )
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        maps_dir=maps_dir,
+    )
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post(
+            "/api/map/edit/coord",
+            json={"x_m": 0.1, "y_m": 0.0, "theta_deg": 0.0, "memo": "legacy01"},
+            headers=_auth(token),
+        )
+    assert r.status_code == HTTPStatus.OK, r.text
+    assert r.headers.get("X-GODO-Deprecation") == "picked_world_missing"
+
+
+async def test_apply_pipeline_writes_c3_triple_atomically(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    """[C3-triple integration pin] Mock `os.replace` (only inside the
+    map_transform module, so the auth bootstrap's own os.replace stays
+    real) to fail on the JSON rename (3rd call); confirm cascade
+    rollback unlinks PGM + YAML so the maps_dir is left in a clean
+    (no orphan pair) state."""
+    maps_dir = await _build_synthetic_pristine_maps_dir(
+        tmp_path, name="pristine", width=64, height=64,
+    )
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        maps_dir=maps_dir,
+    )
+
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        # Patch os.replace AFTER login so auth seed bootstrap is unaffected.
+        from godo_webctl import map_transform as MT
+
+        real_replace = MT.os.replace
+        call_count = {"n": 0}
+
+        def flaky_replace(src: str, dst: str) -> None:
+            call_count["n"] += 1
+            if call_count["n"] == 3:
+                raise OSError("simulated json rename failure")
+            real_replace(src, dst)
+
+        MT.os.replace = flaky_replace  # type: ignore[assignment]
+        try:
+            r = await cl.post(
+                "/api/map/edit/coord",
+                json={
+                    "x_m": 0.0, "y_m": 0.0, "theta_deg": 0.0,
+                    "picked_world_x_m": 0.0, "picked_world_y_m": 0.0,
+                    "memo": "c3triple",
+                },
+                headers=_auth(token),
+            )
+        finally:
+            MT.os.replace = real_replace  # type: ignore[assignment]
+    assert r.status_code == HTTPStatus.INTERNAL_SERVER_ERROR, r.text
+    body = r.json()
+    assert body.get("err") == "pair_write_failed", body
+    leftover = sorted(p.name for p in maps_dir.iterdir())
+    for entry in leftover:
+        assert not entry.startswith("pristine.20"), (
+            f"orphan derived file left after rollback: {entry}"
+        )
+    for entry in leftover:
+        assert not entry.endswith(".tmp"), f"tmp leaked: {entry}"
+
+
+async def test_apply_pipeline_yaml_failure_unlinks_pgm_atomically(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    """[C3-triple integration pin] Mock `os.replace` to fail on the
+    YAML rename (2nd call); confirm PGM is unlinked."""
+    maps_dir = await _build_synthetic_pristine_maps_dir(
+        tmp_path, name="pristine", width=64, height=64,
+    )
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        maps_dir=maps_dir,
+    )
+
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        from godo_webctl import map_transform as MT
+
+        real_replace = MT.os.replace
+        call_count = {"n": 0}
+
+        def flaky_replace(src: str, dst: str) -> None:
+            call_count["n"] += 1
+            if call_count["n"] == 2:
+                raise OSError("simulated yaml rename failure")
+            real_replace(src, dst)
+
+        MT.os.replace = flaky_replace  # type: ignore[assignment]
+        try:
+            r = await cl.post(
+                "/api/map/edit/coord",
+                json={
+                    "x_m": 0.0, "y_m": 0.0, "theta_deg": 0.0,
+                    "picked_world_x_m": 0.0, "picked_world_y_m": 0.0,
+                    "memo": "c3yaml",
+                },
+                headers=_auth(token),
+            )
+        finally:
+            MT.os.replace = real_replace  # type: ignore[assignment]
+    assert r.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
+    leftover = sorted(p.name for p in maps_dir.iterdir())
+    for entry in leftover:
+        assert not entry.startswith("pristine.20"), (
+            f"orphan derived after yaml-failure rollback: {entry}"
+        )
+
+
+async def test_pr81_legacy_derived_auto_migration(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    """[auto-migration integration pin] Pre-place a PGM+YAML pair
+    matching the derived filename pattern WITHOUT a sidecar (simulates
+    PR #81-era), trigger startup recovery_sweep via lifespan, assert
+    sidecar is synthesized with `kind="derived"`,
+    `lineage.kind="auto_migrated_pre_issue30"`, `generation=1`."""
+    maps_dir = await _build_synthetic_pristine_maps_dir(
+        tmp_path, name="studio_v1", width=32, height=32,
+    )
+    # Pre-place a PR #81-era derived pair (no sidecar).
+    legacy_name = "studio_v1.20260301-120000-pr81edit"
+    body = bytearray([254] * (32 * 32))
+    (maps_dir / f"{legacy_name}.pgm").write_bytes(b"P5\n32 32\n255\n" + bytes(body))
+    (maps_dir / f"{legacy_name}.yaml").write_text(
+        f"image: {legacy_name}.pgm\nresolution: 0.05\norigin: [0.0, 0.0, 0.0]\n"
+        "occupied_thresh: 0.65\nfree_thresh: 0.196\nnegate: 0\n",
+    )
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        maps_dir=maps_dir,
+    )
+    async with _client(s) as cl:
+        # Lifespan startup ran recovery_sweep on enter; just trigger a
+        # list_maps call to ensure we hit the post-sweep state.
+        r = await cl.get("/api/maps")
+    assert r.status_code == HTTPStatus.OK
+    # Sidecar must exist on disk after lifespan startup sweep.
+    sidecar_path = maps_dir / f"{legacy_name}.sidecar.json"
+    assert sidecar_path.is_file(), f"sidecar not synthesized: {sidecar_path}"
+    import json as _json
+    sc = _json.loads(sidecar_path.read_bytes())
+    assert sc["schema"] == "godo.map.sidecar.v1"
+    assert sc["kind"] == "derived"
+    assert sc["lineage"]["kind"] == "auto_migrated_pre_issue30"
+    assert sc["lineage"]["generation"] == 1
+
+
+async def test_sidecar_sha_mismatch_returns_422(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    """[MI3 wire shape pin] Place a derived pair with sidecar; mutate
+    the YAML on disk; POST `/api/map/edit/coord` with the derived as
+    active → assert HTTP 422 + `{"err": "sidecar_sha_mismatch"}`."""
+    maps_dir = await _build_synthetic_pristine_maps_dir(
+        tmp_path, name="studio_v1", width=32, height=32,
+    )
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        maps_dir=maps_dir,
+    )
+
+    # Step 1: do a clean Apply to land a derived + sidecar.
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post(
+            "/api/map/edit/coord",
+            json={
+                "x_m": 0.0, "y_m": 0.0, "theta_deg": 0.0,
+                "picked_world_x_m": 0.0, "picked_world_y_m": 0.0,
+                "memo": "first",
+            },
+            headers=_auth(token),
+        )
+        assert r.status_code == HTTPStatus.OK, r.text
+        derived_name = r.json()["derived_name"]
+    # Activate the derived.
+    import os as _os
+    (maps_dir / "active.pgm").unlink()
+    (maps_dir / "active.yaml").unlink()
+    _os.symlink(f"{derived_name}.pgm", maps_dir / "active.pgm")
+    _os.symlink(f"{derived_name}.yaml", maps_dir / "active.yaml")
+    # Hand-mutate the derived YAML to break the SHA.
+    derived_yaml = maps_dir / f"{derived_name}.yaml"
+    derived_yaml.write_text(derived_yaml.read_text() + "# operator hand-edit\n")
+
+    # Step 2: POST another Apply — should refuse with 422.
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post(
+            "/api/map/edit/coord",
+            json={
+                "x_m": 0.0, "y_m": 0.0, "theta_deg": 0.0,
+                "picked_world_x_m": 0.0, "picked_world_y_m": 0.0,
+                "memo": "second",
+            },
+            headers=_auth(token),
+        )
+    assert r.status_code == HTTPStatus.UNPROCESSABLE_ENTITY, r.text
+    body = r.json()
+    assert body.get("err") == "sidecar_sha_mismatch", body
+
+
+async def test_get_map_sidecar_endpoint_returns_lineage_tree(
+    tmp_path: Path,
+    tmp_map_pair: Path,
+) -> None:
+    """[endpoint contract pin] Apply 2 PICKs to build cascade; GET
+    `/api/maps/{derived2_name}/sidecar` → assert response shape."""
+    maps_dir = await _build_synthetic_pristine_maps_dir(
+        tmp_path, name="studio_v1", width=64, height=64,
+    )
+    s = _settings_for(
+        uds_socket=tmp_path / "u.sock",
+        map_path=tmp_map_pair,
+        backup_dir=tmp_path / "bk",
+        maps_dir=maps_dir,
+    )
+    async with _client(s) as cl:
+        token = await _login_admin(cl)
+        r = await cl.post(
+            "/api/map/edit/coord",
+            json={
+                "x_m": 0.0, "y_m": 0.0, "theta_deg": 0.0,
+                "picked_world_x_m": 1.0, "picked_world_y_m": 0.5,
+                "memo": "p1",
+            },
+            headers=_auth(token),
+        )
+        assert r.status_code == HTTPStatus.OK
+        d1 = r.json()["derived_name"]
+        # Activate d1 so the next Apply parents off it.
+        import os as _os
+        (maps_dir / "active.pgm").unlink()
+        (maps_dir / "active.yaml").unlink()
+        _os.symlink(f"{d1}.pgm", maps_dir / "active.pgm")
+        _os.symlink(f"{d1}.yaml", maps_dir / "active.yaml")
+        r = await cl.post(
+            "/api/map/edit/coord",
+            json={
+                "x_m": 0.0, "y_m": 0.0, "theta_deg": 5.0,
+                "picked_world_x_m": 0.5, "picked_world_y_m": 0.2,
+                "memo": "p2",
+            },
+            headers=_auth(token),
+        )
+        assert r.status_code == HTTPStatus.OK, r.text
+        d2 = r.json()["derived_name"]
+        sc_resp = await cl.get(f"/api/maps/{d2}/sidecar")
+    assert sc_resp.status_code == HTTPStatus.OK, sc_resp.text
+    sc_body = sc_resp.json()
+    assert sc_body["name"] == d2
+    sc = sc_body["sidecar"]
+    assert sc is not None
+    assert sc["schema"] == "godo.map.sidecar.v1"
+    assert sc["kind"] == "derived"
+    assert sc["lineage"]["kind"] == "operator_apply"
+    assert sc["lineage"]["generation"] >= 1
+    # Parent chain contains d1.
+    assert d1 in sc["lineage"]["parents"]

@@ -1,3 +1,10 @@
+> ★ SUPERSEDED 2026-05-04 KST. This memory's (1)/(2) framing is
+> historical only. The chosen design is interpretation (3)
+> "pick-anchored + canvas-expand", surfaced during the
+> twenty-third-session opening cold-start question.
+> Live spec: `.claude/memory/project_pick_anchored_yaml_normalization_locked.md`
+> + `/doc/issue30_yaml_normalization_design_analysis.md`.
+
 ---
 name: issue#30 YAML normalization to (0, 0, 0°) per Apply — design spec
 description: Operator-locked deferred design from PR #81 PICK#1/PICK#2 cascade analysis. Every Apply produces a derived map whose YAML origin is (0, 0, 0°) — picked point IS the new world origin by definition. Requires bitmap translation + canvas adjustment + cumulative-typed tracking from pristine, beyond the current PR #81 implementation.

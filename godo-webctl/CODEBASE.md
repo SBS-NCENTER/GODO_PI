@@ -3845,3 +3845,279 @@ operator iterates.
   reflects to +180 (half-open at the lower bound). The legacy
   `apply_origin_edit` (in-place rewrite) keeps the older semantic for
   backward compat; the in-memory variant is the issue#28 path.
+
+## 2026-05-05 KST — PR #84 issue#30 HIL fold (Findings 1 + 3)
+
+### Why
+
+Operator HIL on news-pi01 (2026-05-05 KST) surfaced two webctl-side
+findings that were folded into the same PR #84 commit. Finding 2
+(rplidar_ros driver) is documented in `godo-mapping/CODEBASE.md`
+invariant `(k)`; the findings memory at `.claude/memory/project_issue30_hil_findings_2026-05-05.md`
+covers all three. Finding 1 + Finding 3 are scoped here.
+
+### Changed
+
+- `src/godo_webctl/map_transform.py` (Finding 1) —
+  `transform_pristine_to_derived` now passes `-theta_rad` to
+  `_affine_matrix_for_pivot_rotation`. Aligns AFFINE direction with
+  `_off_center_bbox`'s `-theta_rad` corner rotation; both pieces now
+  describe a visual CW rotation by the operator-typed θ, honouring
+  the Q2 lock (`+θ` typed → world frame rotates CCW → bitmap content
+  visually rotates CW). The helper itself is unchanged so
+  `test_affine_matrix_golden_4x4_theta45` still passes.
+- `src/godo_webctl/sidecar.py::recovery_sweep` (Finding 3) — orphan
+  PGM+YAML pairs whose stem does NOT match `DERIVED_NAME_REGEX` now
+  skip sidecar synthesis. A new cleanup pass at the start of
+  `recovery_sweep` unlinks pre-existing sidecars attached to
+  pristine-named stems (idempotent, runs once on next webctl
+  restart after deploy). Pre-fix, all pristines (`05.05_v1/v2/v3`,
+  `studio_v1`, `0429_*`, `04.29_v3`) had been mis-classified as
+  `kind=synthesized, gen=-1`.
+
+### Verification
+
+- HIL: post-deploy mapping with same physical setup as
+  `test_180check_left_obstacle.pgm` should place the 1 m wall at
+  PGM `+x_world` (not `-x_world` as before driver patch).
+- Yaw rotation: pick a non-pristine map, type `+30°` yaw, Apply →
+  bitmap visually rotates **CW** by 30° (CCW pre-fix).
+- Pristine cleanup: `journalctl -u godo-webctl` after restart shows
+  7 entries `unlinked misclassified pristine sidecar <stem>`.
+
+## 2026-05-04 KST — issue#30 — pick-anchored YAML normalization + sidecar SSOT + map_rotate→map_transform rename
+
+### Why
+
+Issue#28's PR #81 SUBTRACT semantic ("typed (x_m, y_m) names the
+world coord that should become the new (0, 0); YAML origin =
+old_origin − typed") drifted on the operator's mental model when
+combined with non-zero pristine yaw. Operator-locked decision
+2026-05-04: every Apply produces a derived YAML normalized to
+`origin: [-i_p'·res, -(H_d-1-j_p')·res, 0]` so world (0, 0) lands
+exactly on the picked pristine pixel and YAML yaw is 0. Cumulative
+state lives in a sidecar JSON. The bitmap rotates around the picked-
+point pivot (Pillow `Image.transform(AFFINE)`), the canvas grows to
+absorb rotation overhang, and pristine bytes remain immutable. PICK
+cascade gives the same result as a single composed Apply (1×
+resample regardless of cascade depth).
+
+### Added
+
+- `src/godo_webctl/map_transform.py` — renamed from `map_rotate.py`
+  via `git mv` (history preserved). Six exception classes
+  (`RotateError`, `PristineMissing`, `CanvasTooLarge`,
+  `RotateBudgetExceeded`, `PgmHeaderInvalid`, `PairWriteFailed`)
+  carry over verbatim. New public API:
+  `transform_pristine_to_derived(pristine_pgm, pristine_yaml,
+  derived_pgm, derived_yaml, derived_sidecar, cumulative_from_pristine,
+  this_step, parent_lineage)` and `pristine_world_to_pixel(cum_tx,
+  cum_ty, ox_p, oy_p, otheta_p, W_p, H_p, res)` (yaw-aware SSOT).
+  Atomic C3-triple write protocol replaces C3-pair (PGM → YAML →
+  JSON, cascade rollback).
+- `src/godo_webctl/sidecar.py` — sole owner of the
+  `godo.map.sidecar.v1` JSON schema. Stdlib only; no Pillow, no
+  `maps.py`, no `map_transform.py` imports (leaf discipline mirroring
+  `map_origin.py`). Public API: `read`, `write`, `compute_sha256`,
+  `synthesize_for_orphan_pair`, `verify_integrity`,
+  `compose_cumulative` (D3 algebra: standard CCW `[c -s; s c]`),
+  `recovery_sweep` (returns dict with EXACTLY four keys).
+- `app.py::_apply_map_edit_pipeline` rewritten coord branch — reads
+  parent's sidecar (if active map is a derived) to compose
+  cumulative_from_pristine, invokes `transform_pristine_to_derived`,
+  emits `sidecar_sha_mismatch` 422 on integrity failure.
+- `app.py` new endpoint `GET /api/maps/{name}/sidecar` returning
+  the lineage tree (or `{"sidecar": null}` for pristines / legacy
+  derived without sidecar).
+- `app.py:list_maps` now also calls `sidecar_mod.recovery_sweep`
+  opportunistically so PR #81-era derived maps get auto-migrated
+  lineage on first list.
+- `backup.backup_map` emits a `kind="backup"` sidecar alongside the
+  snapshot pair (best-effort, copied from source if present, else
+  synthesized).
+- `tests/test_map_transform.py` — replaces `test_map_rotate.py`
+  (renamed via `git mv`). 17 cases covering pickpoint round-trip,
+  pristine-yaw-aware world↔pixel, canvas bbox correctness, atomic
+  C3-triple write, sidecar emission.
+- `tests/test_sidecar.py` — 20 cases covering schema round-trip,
+  SHA verify, KST timestamp regex, compose_cumulative algebra
+  (Hypothesis fuzz with `derandomize=True, max_examples=200`),
+  PR #81-era auto-migration heuristic, recovery_sweep idempotency.
+- `production/RPi5/tests/test_origin_yaw_zero.cpp` — pins tracker
+  tolerance for `origin.yaw_deg = 0` across `compute_offset` +
+  `apply_yaw_tripwire` (4 cases / 20 assertions).
+- Frontend `lib/originMath.ts` — `pristineWorldToPixel`,
+  `composeCumulative`, `Cumulative` + `ThisStepLocal` interfaces
+  (mirrors of webctl SSOT).
+- `tests/unit/originMath.test.ts` — 7 new cases for the new helpers
+  + a deprecation marker test for `resolveDeltaFromPose`.
+
+### Changed
+
+- `maps.delete_pair` extended to unlink the sidecar JSON if present
+  (graceful when absent — pre-issue#30 derived, pristine, legacy
+  pair). Logs INFO when sidecar absent at delete time.
+- `map_origin.apply_origin_edit_in_memory` SUBTRACT branch retained
+  for back-compat (`/api/map/origin` legacy endpoint) but is no
+  longer reached by the issue#30 coord pipeline.
+- `originMath.ts::resolveDeltaFromPose` marked `@deprecated since
+  issue#30; remove in issue#31+`. Symbol export retained for back-
+  compat.
+- `constants.py` — added `SIDECAR_EXT`, `SIDECAR_SCHEMA`, four
+  `SIDECAR_LINEAGE_KIND_*` literals, `SIDECAR_GENERATION_UNKNOWN`.
+  Re-exported `MAP_TRANSFORM_*` aliases.
+- `tests/test_app_integration.py::test_post_map_edit_coord_with_theta_does_not_double_count`
+  — under issue#30 the derived YAML origin[2] is intentionally
+  `0.0` (normalized), not the pristine's value. Test updated to
+  reflect the new semantic.
+
+### Tests
+
+- New: `tests/test_sidecar.py` (20 cases including 1 Hypothesis fuzz
+  with `derandomize=True, max_examples=200`).
+- Renamed + rewritten: `tests/test_map_transform.py` (17 cases).
+- New: `production/RPi5/tests/test_origin_yaw_zero.cpp` (4 cases /
+  20 assertions).
+- New: `godo-frontend/tests/unit/originMath.test.ts` issue#30 block
+  (7 cases).
+- Updated: `tests/test_app_integration.py::
+  test_post_map_edit_coord_with_theta_does_not_double_count` to
+  pin the new `origin[2] == 0.0` semantic.
+
+### Invariants
+
+- **(ac) sidecar-sole-owner-godo.map.sidecar.v1** — `sidecar.py` is
+  the SOLE module that reads / writes / synthesizes `*.sidecar.json`
+  files under the `godo.map.sidecar.v1` schema. No other module
+  parses sidecar JSON directly. The schema literal and four lineage
+  kind labels live in `constants.py`. Schema reads reject unknown
+  major version (anything starting with `godo.map.sidecar.v` but not
+  exactly `v1`) with `SidecarSchemaMismatch`. SHA over on-disk bytes
+  is verbatim (no canonicalisation) so external hand-edit is
+  reliably detected.
+
+- **(ad) c3-triple-atomic-write-discipline** — issue#30 supersedes
+  the C3-pair contract for the coord pipeline. Order: PGM tmp →
+  YAML tmp → JSON tmp → fsync all → fsync dir → rename PGM → rename
+  YAML → rename JSON → fsync dir. Cascade rollback on graceful
+  failure: YAML rename failure unlinks the PGM; JSON rename failure
+  unlinks both PGM and YAML. The operator never sees a half-
+  committed set. Lives in `map_transform._atomic_write_triple`.
+
+- **(ae) pick-anchored-yaml-normalization-semantic** — issue#30
+  supersedes PR #81 SUBTRACT. Every Apply produces a derived YAML
+  with `origin: [-i_p'·res, -(H_d-1-j_p')·res, 0]` where `(i_p',
+  j_p')` is the picked pristine pixel's location in the rotated +
+  expanded canvas. Bitmap rotates around the picked-point pivot via
+  `Image.transform(AFFINE, ...)` (NOT `Image.rotate` — that only
+  supports center pivot). Canvas grows just enough to absorb
+  rotation overhang. Pristine bytes remain immutable; cumulative
+  state lives in the sidecar JSON. Frontend operator UX: input
+  boxes carry deltas applied on top of "picked-point at origin"
+  baseline (Q2 lock).
+
+## 2026-05-04 KST — issue#30 round 2 — wire shape extension + cardinal tests + Mode-B fold-in
+
+### Why
+
+Mode-B round 1 verdict was REWORK MAJOR: Round-1 backend math was
+correct in isolation but the wire seam between SPA and webctl
+collapsed `picked_world_*` to `typed_delta_*`, so every PICK#1 from
+the live SPA produced `cumulative.translate = (0, 0)` regardless of
+the operator's click. Round 2 extends the wire shape, fixes the seam,
+adds the cardinal tests Mode-B identified as showstoppers, and folds
+in the deferred frontend / docs deferrals so this PR ships as one
+operator-usable feature.
+
+### Added
+
+- `MapEditCoordBody` extended with optional `picked_world_x_m` and
+  `picked_world_y_m` fields. Backwards-compatible: legacy SPA
+  bundles that omit the picked fields trigger a fall-back that
+  treats `picked_world_* = x_m / y_m` (round-1 collapse) AND adds
+  `X-GODO-Deprecation: picked_world_missing` to the response so HIL
+  operators can spot stale-bundle regressions immediately.
+- Lifespan startup now runs `sidecar_mod.recovery_sweep` so PR
+  #81-era derived maps get auto-migrated lineage BEFORE any
+  list_maps consumer (rather than relying on the opportunistic
+  in-list sweep).
+- `tests/test_app_integration.py` — 7 new cardinal integration
+  tests:
+  - `test_apply_pipeline_pickpoint_lands_at_world_origin_via_http`
+    (catches C-B1: with `picked_world=(5,0)` + `typed_delta=(1,0)`,
+    derived YAML places pristine-(5,0) at derived world (1,0) ±
+    0.5·res. Round-1's collapse would have shipped (0,0)).
+  - `test_apply_pipeline_legacy_body_emits_deprecation_header`
+    (HIL stale-bundle detection).
+  - `test_apply_pipeline_writes_c3_triple_atomically` (mock
+    os.replace 3rd-call failure → cascade rollback unlinks PGM +
+    YAML; no orphan derived; no .tmp leak).
+  - `test_apply_pipeline_yaml_failure_unlinks_pgm_atomically`
+    (mock 2nd-call failure → PGM unlinked).
+  - `test_pr81_legacy_derived_auto_migration` (lifespan startup
+    sweep synthesizes auto_migrated_pre_issue30 sidecar).
+  - `test_sidecar_sha_mismatch_returns_422` (operator hand-edit
+    surfaces as 422 + `err: sidecar_sha_mismatch`).
+  - `test_get_map_sidecar_endpoint_returns_lineage_tree` (cascade
+    of 2 PICKs → endpoint returns lineage with parent chain).
+- `tests/test_sidecar.py::test_pick_cascade_associativity` (D7
+  cardinal — proves `cum_chained` re-derives via SSOT formula).
+- `tests/test_sidecar.py::test_compose_matches_d4_affine_pivot_rotation`
+  (C2 cross-check binding D3 algebra to D4 transform).
+- `tests/test_map_transform.py::test_affine_matrix_golden_4x4_theta45`
+  (MA1 sign-error catch — hand-derives the 6 AFFINE coefficients
+  for a 4×4 toy bitmap, picked-pixel (2, 2), θ=45°).
+- `tests/test_map_transform.py::test_typed_delta_shifts_picked_point_off_origin`
+  (C-2.1 cardinal — synthetic 200×200 fixture, click world (5, 0)
+  + typed (1, 0, 0), assert cumulative=(4,0) and derived YAML
+  places pristine-(5,0) at derived world (1,0) ± 0.5·res).
+
+### Changed
+
+- `MapEditCoordBody` docstring + wire shape comment in
+  `protocol.py` mirror updated for issue#30 picked_world_* + delta
+  semantics.
+- `_apply_map_edit_pipeline` reads `picked_world_x_m` /
+  `picked_world_y_m` from the body and passes them through the
+  ThisStep separately from the typed delta (`x_m` / `y_m`) — fixes
+  C-B1 wire-shape collapse.
+- `_apply_map_edit_pipeline` removed the slow-path fallback at the
+  pre-round-2 lines 825-830 (`elif active_name != pristine_base`
+  with no sidecar) — startup recovery_sweep now guarantees a
+  sidecar exists for every active derived [MI-B1].
+- Lifespan startup runs `sidecar_mod.recovery_sweep` once before
+  any request can land [MI-B1].
+- `_three_class_quantise` parameter renamed `rgba_bytes` →
+  `pixel_bytes` [N-B1]. Existing implementation comment refined to
+  "L-mode byte buffer".
+- `sidecar.py::_SCHEMA_MAJOR_PREFIX` annotated with TODO(issue#30+)
+  about future v2 migration policy [N-B2].
+- `tests/test_app_integration.py::
+  test_post_map_edit_coord_with_theta_does_not_double_count`
+  docstring fixed (false "supersedes PR #81 Option B" claim
+  removed) [N-B4].
+
+### Tests
+
+- New: 7 integration tests in `test_app_integration.py`.
+- New: 2 sidecar tests (associativity, D3↔D4 cross-check).
+- New: 2 map_transform tests (affine golden, typed-delta-shifts).
+- All 1047 existing pytest cases still pass (the only failure is
+  the pre-existing flake `test_calibrate_round_trip_observes_one
+  shot_then_idle` documented in NEXT_SESSION).
+
+### Invariants
+
+- **(ae) pick-anchored-yaml-normalization-semantic** extended: the
+  wire shape now carries `picked_world_*` separately from the typed
+  delta. Legacy bodies (no `picked_world_*`) trigger the fall-back
+  + `X-GODO-Deprecation: picked_world_missing` response header.
+
+- **(af) startup-recovery-sweep-invariant** — every long-running
+  webctl process MUST run `sidecar.recovery_sweep` once at
+  lifespan startup before serving any request. The opportunistic
+  in-list sweep on `/api/maps` is belt-and-braces; the load-bearing
+  invariant is the startup sweep, which guarantees every active
+  derived has a sidecar on disk by the time `_apply_map_edit_pipeline`
+  reads `parent_cumulative`. Pinned by
+  `tests/test_app_integration.py::test_pr81_legacy_derived_auto_migration`.

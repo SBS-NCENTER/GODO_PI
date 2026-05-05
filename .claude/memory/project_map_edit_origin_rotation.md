@@ -1,3 +1,12 @@
+> ★ issue#30 supersede 2026-05-04 KST. The "Sign convention update —
+> 2026-05-04 KST (issue#27, SUBTRACT)" section below describes the
+> PR #81 ship state, which has been superseded by the pick-anchored
+> design from issue#30.
+> Live spec: `.claude/memory/project_pick_anchored_yaml_normalization_locked.md`.
+> The PR #81 sections remain valid as historical context for the
+> tracker plumbing fix (prerequisite (a)) and coherent rendering
+> (prerequisite (b)) which carry forward unchanged.
+
 ---
 name: Map Edit feature spec — brush, origin pick, rotation
 description: B-MAPEDIT family spec — brush erase (P0), origin pick with GUI+numeric input (P1), rotation with GUI+numeric input (B-MAPEDIT-3 issue#28). Covers UX, data model, dual-input requirement, pristine-baseline file scheme, segmented-control mode UI, and overlay toggle row.

@@ -2,6 +2,7 @@
   import { onDestroy, onMount } from 'svelte';
   import ConfirmDialog from '$components/ConfirmDialog.svelte';
   import LastPoseCard from '$components/LastPoseCard.svelte';
+  import LineageModal from '$components/LineageModal.svelte';
   import MapList from '$components/MapList.svelte';
   import MapListPanel from '$components/MapListPanel.svelte';
   import MapZoomControls from '$components/MapZoomControls.svelte';
@@ -21,7 +22,10 @@
     type LastPose,
     type LastScan,
     type MappingStatus,
+    type SidecarResponse,
+    type SidecarV1,
   } from '$lib/protocol';
+  import { apiGet } from '$lib/api';
   import { navigate, route } from '$lib/router';
   import { subscribeLastPose } from '$stores/lastPose';
   import { subscribeLastScan } from '$stores/lastScan';
@@ -56,6 +60,31 @@
   let deleteOpen = $state(false);
   let deleteTarget = $state<string | null>(null);
   let mapListBanner = $state<{ msg: string; tone: 'info' | 'error' } | null>(null);
+
+  // issue#30 — LineageModal state.
+  let lineageOpen = $state<boolean>(false);
+  let lineageTarget = $state<string | null>(null);
+  let lineageData = $state<SidecarV1 | null>(null);
+
+  async function openLineage(name: string): Promise<void> {
+    lineageTarget = name;
+    lineageData = null;
+    lineageOpen = true;
+    try {
+      const resp = await apiGet<SidecarResponse>(
+        `/api/maps/${encodeURIComponent(name)}/sidecar`,
+      );
+      lineageData = resp.sidecar;
+    } catch {
+      lineageData = null;
+    }
+  }
+
+  function closeLineage(): void {
+    lineageOpen = false;
+    lineageTarget = null;
+    lineageData = null;
+  }
 
   function openActivate(name: string): void {
     activateTarget = name;
@@ -340,9 +369,18 @@
           }))}
           onActivate={openActivate}
           onDelete={openDelete}
+          onShowLineage={(n) => {
+            void openLineage(n);
+          }}
         />
       {/if}
     </section>
+    <LineageModal
+      open={lineageOpen}
+      name={lineageTarget ?? ''}
+      sidecar={lineageData}
+      onClose={closeLineage}
+    />
     <ConfirmDialog
       open={activateOpen}
       title="맵 활성화"

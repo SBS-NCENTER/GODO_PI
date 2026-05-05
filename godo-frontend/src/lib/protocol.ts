@@ -573,10 +573,22 @@ export interface OriginEditResponse {
   restart_required: true;
 }
 
-// --- issue#28 — POST /api/map/edit/{coord,erase} wire shapes ----------
+// --- issue#28 → issue#30 — POST /api/map/edit/{coord,erase} wire shapes
 // Mirror of `godo_webctl.app::MapEditCoordBody` /
 // `MapEditPipelineResult`. Coord endpoint is JSON; Erase endpoint is
-// multipart/form-data. SUBTRACT semantic for x_m, y_m, theta_deg.
+// multipart/form-data.
+//
+// issue#30 wire shape — pick-anchored + delta-on-top semantics:
+// - `x_m` / `y_m` / `theta_deg`: operator's typed delta (world-frame,
+//   active-at-pick frame). `0` / `null` / empty input = "no further
+//   nudge".
+// - `picked_world_x_m` / `picked_world_y_m`: the canvas-clicked world
+//   coord at time of click. Required for the new pick-anchored
+//   semantic. Omitting them triggers the legacy fall-back at the
+//   backend (treats the typed values as the pivot — equivalent to
+//   round-1 wire shape) and the response carries the
+//   `X-GODO-Deprecation: picked_world_missing` header so HIL spots
+//   stale-bundle regressions.
 export interface MapEditCoordBody {
   x_m: number;
   y_m: number;
@@ -584,6 +596,40 @@ export interface MapEditCoordBody {
   theta_deg?: number;
   /** Filesystem-safe postfix; matches MEMO_REGEX_SOURCE. */
   memo: string;
+  /** issue#30 — canvas-clicked world coord at time of click. */
+  picked_world_x_m?: number;
+  /** issue#30 — canvas-clicked world coord at time of click. */
+  picked_world_y_m?: number;
+}
+
+// issue#30 — sidecar wire shape (mirror of `godo_webctl.sidecar.Sidecar.to_dict`).
+// Returned by GET /api/maps/{name}/sidecar.
+export interface SidecarV1 {
+  schema: string;
+  kind: string;
+  source: { pristine_pgm: string; pristine_yaml: string };
+  lineage: { generation: number; parents: string[]; kind: string };
+  cumulative_from_pristine: {
+    translate_x_m: number;
+    translate_y_m: number;
+    rotate_deg: number;
+  };
+  this_step: {
+    delta_translate_x_m: number;
+    delta_translate_y_m: number;
+    delta_rotate_deg: number;
+    picked_world_x_m: number;
+    picked_world_y_m: number;
+  } | null;
+  result_yaml_origin: { x_m: number; y_m: number; yaw_deg: number };
+  result_canvas: { width_px: number; height_px: number };
+  integrity: { pgm_sha256: string; yaml_sha256: string };
+  created: { iso_kst: string; memo: string; reason: string };
+}
+
+export interface SidecarResponse {
+  name: string;
+  sidecar: SidecarV1 | null;
 }
 
 export interface MapEditPipelineResult {

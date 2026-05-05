@@ -118,4 +118,38 @@ describe('MapList', () => {
     expect(target.querySelector('.pristine-row .lineage-glyph')).toBeNull();
     unmount(inst);
   });
+
+  // issue#30.1 Mode-B fold — backup-restored maps surface lineage_kind="backup"
+  // (synthesized at backup time for orphan pairs per backup.py:128). Pin the
+  // wiring so a future drop of the LINEAGE_GLYPHS["backup"] entry surfaces
+  // here instead of silently rendering `?` in operator HIL.
+  it('variant row with backup lineage renders ↻ glyph', () => {
+    const groupsWithBackup = [
+      {
+        base: 'chroma',
+        pristine: sampleGroups[0].pristine,
+        variants: [
+          {
+            name: 'chroma.20260504-150000-restored',
+            is_active: false,
+            width_px: 200,
+            height_px: 100,
+            resolution_m: 0.05,
+            lineage_kind: 'backup',
+          },
+        ],
+      },
+    ];
+    const onActivate = vi.fn();
+    const inst = mount(MapList, {
+      target,
+      props: { groups: groupsWithBackup, onActivate },
+    });
+    flushSync();
+    const glyph = target.querySelector('.variant-row .lineage-glyph')!;
+    expect(glyph).not.toBeNull();
+    expect(glyph.textContent).toBe('↻');
+    expect(glyph.getAttribute('title')).toContain('백업');
+    unmount(inst);
+  });
 });

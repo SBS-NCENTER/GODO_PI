@@ -508,6 +508,10 @@ export const LINEAGE_GLYPHS: Readonly<Record<string, LineageGlyphEntry>> = {
     glyph: '⚠',
     tooltip: 'issue#30 이전 자동 합성 (generation unknown)',
   },
+  backup: {
+    glyph: '↻',
+    tooltip: '백업 시점 자동 합성 sidecar (orphan pair snapshot)',
+  },
   auto_migrated_pre_issue30: {
     glyph: 'ⓘ',
     tooltip: 'PR #81 이전 작업 자동 마이그레이션 (generation = 1 가정)',

@@ -3810,9 +3810,23 @@ to a single const.
 
 ### Tests
 
-- New: 3 vitest cases (`MapList.test.ts` x2, `LineageModal.test.ts` x1).
+- New: 4 vitest cases (`MapList.test.ts` x3 incl. Mode-B fold for
+  `backup` glyph; `LineageModal.test.ts` x1).
 - All 468 prior cases still green; `npm run build` clean of
   LineageModal a11y warnings.
+
+### Mode-B fold (post-review, same KST date)
+
+- Added 4th `LINEAGE_GLYPHS` entry for `backup` value (`↻` +
+  `'백업 시점 자동 합성 sidecar (orphan pair snapshot)'`). Mode-B caught
+  that `godo_webctl.constants::SIDECAR_LINEAGE_KIND_*` enumerates four
+  values (operator_apply / synthesized / backup /
+  auto_migrated_pre_issue30) but the inline mapping covered only
+  three — backup-restored maps would surface `?` instead of a
+  meaningful glyph. New vitest case
+  `variant_row_with_backup_lineage_renders_↻_glyph` pins the wiring
+  so a future drop of the entry surfaces in CI rather than in
+  operator HIL.
 
 ### Invariants
 

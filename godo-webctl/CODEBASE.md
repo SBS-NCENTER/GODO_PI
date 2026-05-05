@@ -4193,6 +4193,15 @@ additive wire-shape field; the locked semantic lives in
 - Changed: 1 strict-shape update + 1 extension to integration test.
 - All 1049 prior tests still green.
 
+### Mode-B fold (post-review, same KST date)
+
+- No webctl-side change — Mode-B's Should-fix landed on the
+  frontend (`LINEAGE_GLYPHS` table missed the `backup` value).
+  Webctl `SIDECAR_LINEAGE_KIND_BACKUP = "backup"` (constants.py:481)
+  and `backup.py:128` synthesizing `kind="backup"` for orphan pairs
+  remain unchanged. Cross-referenced here so a future grep on
+  `issue#30.1` from this side finds the Mode-B context.
+
 ### Invariants
 
 - No new invariant. `MapEntry.lineage_kind` is an additive wire-shape

@@ -443,104 +443,17 @@ def test_pick_cascade_associativity() -> None:
     # diverge.
 
 
-def test_compose_matches_d4_affine_pivot_rotation(tmp_path: Path) -> None:
-    """[C2 cross-check] Bind D3 algebra to D4 transform via a 200×200
-    pristine fixture (oθ_p=1.604 to exercise yaw-aware path).
-
-    Path A: PICK#1 then PICK#2 sequential `transform_pristine_to_derived`
-    calls (using the cumulative composed at each step).
-    Path B: pre-compose into single `cumulative` and ONE
-    `transform_pristine_to_derived` call.
-
-    Assertion: `result.new_yaml_origin_xy_yaw` matches between A and B
-    with `abs(diff) < 1e-6 m AND < 0.01·res`.
-    """
-    from godo_webctl import map_transform as MT
-    from godo_webctl.map_transform import Cumulative as MTCumulative
-    from godo_webctl.map_transform import ThisStep as MTThisStep
-
-    YAML_NZYAW = (
-        "image: pristine.pgm\n"
-        "resolution: 0.05\n"
-        "origin: [-9.575, -8.750, 1.6039575825827]\n"
-        "occupied_thresh: 0.65\n"
-        "free_thresh: 0.196\n"
-        "negate: 0\n"
-    )
-    pristine_pgm = tmp_path / "pristine.pgm"
-    pristine_yaml = tmp_path / "pristine.yaml"
-    body = bytearray()
-    for r in range(200):
-        for c in range(200):
-            if r == 0 or c == 0 or r == 199 or c == 199:
-                body.append(0)
-            else:
-                body.append(254)
-    pristine_pgm.write_bytes(b"P5\n200 200\n255\n" + bytes(body))
-    pristine_yaml.write_text(YAML_NZYAW)
-
-    # Two-step pick parameters.
-    step1 = ThisStep(
-        delta_translate_x_m=0.0,
-        delta_translate_y_m=0.0,
-        delta_rotate_deg=10.0,
-        picked_world_x_m=2.0,
-        picked_world_y_m=1.0,
-    )
-    step2 = ThisStep(
-        delta_translate_x_m=0.1,
-        delta_translate_y_m=0.0,
-        delta_rotate_deg=5.0,
-        picked_world_x_m=1.5,
-        picked_world_y_m=0.5,
-    )
-    parent = Cumulative(0.0, 0.0, 0.0)
-    cum1 = compose_cumulative(parent, step1)
-    cum_chained = compose_cumulative(cum1, step2)
-
-    # Path B: SINGLE transform with cum_chained.
-    derived_pgm_b = tmp_path / "derived_b.pgm"
-    derived_yaml_b = tmp_path / "derived_b.yaml"
-    sidecar_b = tmp_path / "derived_b.sidecar.json"
-    cum_b = MTCumulative(
-        cum_chained.translate_x_m,
-        cum_chained.translate_y_m,
-        cum_chained.rotate_deg,
-    )
-    step_b = MTThisStep(
-        step2.delta_translate_x_m,
-        step2.delta_translate_y_m,
-        step2.delta_rotate_deg,
-        step2.picked_world_x_m,
-        step2.picked_world_y_m,
-    )
-    res_b = MT.transform_pristine_to_derived(
-        pristine_pgm, pristine_yaml,
-        derived_pgm_b, derived_yaml_b, sidecar_b,
-        cum_b, step_b, parent_lineage=[],
-    )
-
-    # Path A: TWO sequential transforms (we only need the FINAL YAML
-    # origin to compare with Path B). Stage-1 transforms pristine
-    # under cum1, but the issue#30 invariant is that derived chains
-    # are 1× resample — we drive them through cum2 from PRISTINE per
-    # the design. The cumulative algebra makes Path A's final cumulative
-    # identical to Path B's cum_chained, so the result is identical.
-    derived_pgm_a = tmp_path / "derived_a.pgm"
-    derived_yaml_a = tmp_path / "derived_a.yaml"
-    sidecar_a = tmp_path / "derived_a.sidecar.json"
-    res_a = MT.transform_pristine_to_derived(
-        pristine_pgm, pristine_yaml,
-        derived_pgm_a, derived_yaml_a, sidecar_a,
-        cum_b, step_b, parent_lineage=[],
-    )
-
-    ox_a, oy_a, oyaw_a = res_a.new_yaml_origin_xy_yaw
-    ox_b, oy_b, oyaw_b = res_b.new_yaml_origin_xy_yaw
-    res_m = 0.05
-    tol_m = max(1e-6, 0.01 * res_m)
-    assert abs(ox_a - ox_b) < tol_m
-    assert abs(oy_a - oy_b) < tol_m
-    assert oyaw_a == pytest.approx(oyaw_b)
-    # Sanity: yaw must be 0.
-    assert oyaw_b == pytest.approx(0.0)
+# issue#30.1 — `test_compose_matches_d4_affine_pivot_rotation` removed
+# 2026-05-05 KST. Mode-B round 2 flagged the test as tautological:
+# Path A and Path B both invoked `transform_pristine_to_derived` with
+# IDENTICAL `cum_b` + `step_b`, so the assertion was structurally
+# guaranteed and could never fail. The intended D3↔D4 binding is
+# already covered by:
+#   - `test_typed_delta_shifts_picked_point_off_origin`
+#     (test_map_transform.py:363) — composes via `compose_cumulative`
+#     (D3) and asserts `transform_pristine_to_derived` (D4) lands the
+#     picked pixel at derived world `typed_delta`.
+#   - `test_pick_cascade_associativity` (test_sidecar.py:380) — D3
+#     two-step cascade with explicit re-derivation via the SSOT
+#     formula.
+# No replacement; sister coverage is sufficient.

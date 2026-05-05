@@ -369,8 +369,8 @@ AmclResult run_one_iteration(const godo::core::Config&         cfg,
     //    check them.
     //
     // issue#28: yaw frame SSOT is the active map YAML `origin[2]`,
-    // parsed into `grid.origin_yaw_deg`. cfg.amcl_origin_yaw_deg is
-    // deprecated and ignored.
+    // parsed into `grid.origin_yaw_deg`. The legacy cfg
+    // `amcl.origin_yaw_deg` field was hard-removed in issue#28.1.
     if (apply_yaw_tripwire(result.pose,
                            grid.origin_yaw_deg,
                            yaw_tripwire)) {

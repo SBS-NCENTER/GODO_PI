@@ -105,7 +105,6 @@ TEST_CASE("run_one_iteration — published Offset is NaN/Inf-free with canonical
     cfg.amcl_seed                   = 42;
     cfg.amcl_origin_x_m             = 1.0;
     cfg.amcl_origin_y_m             = 1.0;
-    cfg.amcl_origin_yaw_deg         = 0.0;
     cfg.amcl_max_iters              = 5;     // keep test fast
     cfg.amcl_particles_local_n      = 200;   // smaller for speed; still > N_eff threshold
     cfg.amcl_particles_global_n     = 200;
@@ -260,7 +259,6 @@ Config make_fast_oneshot_cfg() {
     cfg.amcl_seed                     = 42;
     cfg.amcl_origin_x_m               = 0.0;
     cfg.amcl_origin_y_m               = 0.0;
-    cfg.amcl_origin_yaw_deg           = 0.0;
     cfg.amcl_max_iters                = 5;
     cfg.amcl_particles_local_n        = 200;
     cfg.amcl_particles_global_n       = 200;
@@ -465,31 +463,25 @@ TEST_CASE("run_one_iteration — second OneShot without re-publish takes seed_gl
 
 // --------------------------------------------------------------
 // issue#28 (Mode-B CR2) — Offset is computed against grid.origin_yaw_deg,
-// NOT cfg.amcl_origin_yaw_deg. Pre-issue#28 behaviour read the cfg
-// field; issue#28 SSOT change routes everything through the YAML
-// `origin[2]` parsed into `OccupancyGrid::origin_yaw_deg`.
+// the active map YAML `origin[2]` parsed into
+// `OccupancyGrid::origin_yaw_deg`. The legacy cfg field
+// `amcl.origin_yaw_deg` was hard-removed in issue#28.1; this test
+// guards against a regression that re-anchors the offset to a
+// 0-degree fallback (or to any other path that ignores the grid).
 //
-// Why this test is asymmetric (cfg=0, grid=10°): every other
-// test_cold_writer_*.cpp fixture leaves both fields = 0.0, so a
-// silent regression that re-routes cold_writer back to cfg.amcl_origin_yaw_deg
-// would not be caught. Asymmetric values make the offset.dyaw value
-// distinct (5° vs 15°) for the two source-of-truth interpretations.
-//
-// Math: compute_offset(pose, origin) returns dyaw = canonical_360(
-//   pose.yaw_deg - origin.yaw_deg). With pose.yaw=15° and origin
-// reading from grid (10°) → dyaw = 5°. With origin reading from cfg
-// (0°) → dyaw = 15°. The CHECK below pins the grid path explicitly.
+// Setup is asymmetric (grid=10°, hypothetical fallback=0°): every
+// other test_cold_writer_*.cpp fixture lives at grid=0°, so a
+// regression that anchors dyaw to 0 would silently pass elsewhere.
+// Here, dyaw under the correct grid path is canonical_360(pose.yaw - 10°);
+// under a wrong 0-anchored path it would be canonical_360(pose.yaw - 0°).
 // --------------------------------------------------------------
 TEST_CASE("OffsetComputedAgainstGridYaw_NotConfigField — issue#28 CR2") {
-    // Build a Config that leaves the deprecated field at 0 so a
-    // regression rerouting cold_writer back to cfg silently shifts
-    // dyaw by +10° (15 - 0 = 15) instead of producing the correct
-    // grid-anchored 5° (15 - 10 = 5).
+    // Build a Config with origin_x/y at 0 so only the grid-yaw axis is
+    // load-bearing. A 0-anchored regression would shift dyaw by +10°.
     Config cfg = Config::make_default();
     cfg.amcl_seed                     = 99;
     cfg.amcl_origin_x_m               = 0.0;
     cfg.amcl_origin_y_m               = 0.0;
-    cfg.amcl_origin_yaw_deg           = 0.0;     // deprecated; cold_writer must IGNORE this
     cfg.amcl_max_iters                = 5;
     cfg.amcl_particles_local_n        = 200;
     cfg.amcl_particles_global_n       = 200;
@@ -529,25 +521,20 @@ TEST_CASE("OffsetComputedAgainstGridYaw_NotConfigField — issue#28 CR2") {
                                           hot_cfg_seq);
 
     // Pin the source of truth: dyaw = canonical_360(pose.yaw - 10°).
-    // The synthetic-fixture pose may not be a fixed angle (AMCL is
-    // stochastic), but the relationship between the published dyaw
-    // and the pose.yaw is exact and observable here. If cold_writer
-    // routed origin.yaw_deg via cfg (=0), the dyaw would equal
-    // canonical_360(pose.yaw - 0) = canonical_360(pose.yaw).
+    // A regression anchoring dyaw to 0° instead would yield
+    // canonical_360(pose.yaw - 0).
     const double expected_dyaw_grid = std::fmod(
         std::fmod(result.pose.yaw_deg - grid.origin_yaw_deg, 360.0) + 360.0,
         360.0);
-    const double expected_dyaw_cfg  = std::fmod(
-        std::fmod(result.pose.yaw_deg - cfg.amcl_origin_yaw_deg, 360.0) + 360.0,
+    const double expected_dyaw_zero  = std::fmod(
+        std::fmod(result.pose.yaw_deg - 0.0, 360.0) + 360.0,
         360.0);
     // CHECK: the published dyaw matches the GRID-anchored expectation,
-    // NOT the cfg-anchored one. (And the two MUST differ by ~10° given
-    // grid=10° vs cfg=0°, so the asymmetric setup is the load-bearing
-    // bit of the test.)
+    // NOT the 0-anchored one.
     CHECK(result.offset.dyaw == doctest::Approx(expected_dyaw_grid).epsilon(1e-9));
-    // Document the asymmetry: grid- and cfg-paths produce different
-    // numbers, so a regression CANNOT pass both checks at once.
-    const double diff = std::fabs(expected_dyaw_grid - expected_dyaw_cfg);
+    // Asymmetry guard: grid- and zero-paths produce different numbers,
+    // so a regression CANNOT pass both checks at once.
+    const double diff = std::fabs(expected_dyaw_grid - expected_dyaw_zero);
     // The diff is either 10.0 OR 350.0 (canonical-360 wrap if pose.yaw
     // is small). Either way it's NOT zero.
     CHECK(diff > 1.0);

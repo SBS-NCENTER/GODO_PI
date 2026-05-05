@@ -6,11 +6,13 @@
  * preserves the operator's choice; legacy v0 sessionStorage key is
  * migrated once on first read (M4 lock).
  *
- * Subscribers gate downstream effects: e.g. `<GridOverlay>` reads
- * `gridOn`, `<OriginAxisOverlay>` reads `originAxisOn`. The existing
- * `scanOverlay` store stays alive — `lidarOn` mirrors INTO it for the
- * SSE-gating pin. Removing `scanOverlay` outright would touch every
- * subscriber call site; the mirror is the minimum-surface migration.
+ * Subscribers gate downstream effects inside PoseCanvas's
+ * `drawPoseLayer` (origin/axis + grid via `lib/overlayDraw.ts`
+ * helpers — see `Map.svelte:167-168` and `MapEdit.svelte`). The
+ * existing `scanOverlay` store stays alive — `lidarOn` mirrors INTO
+ * it for the SSE-gating pin. Removing `scanOverlay` outright would
+ * touch every subscriber call site; the mirror is the minimum-
+ * surface migration.
  */
 
 import { writable, type Writable } from 'svelte/store';

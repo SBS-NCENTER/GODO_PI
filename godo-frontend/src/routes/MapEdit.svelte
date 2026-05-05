@@ -418,8 +418,8 @@
     setEraseBanner(null, null);
   }
 
-  // Yaml origin in degrees for the OriginAxisOverlay; stays in sync with
-  // mapMetadata.origin[2] (radians on disk).
+  // Yaml origin in degrees for the `drawOriginAxis` overlay helper;
+  // stays in sync with mapMetadata.origin[2] (radians on disk).
   let yamlYawDeg = $derived(currentOrigin === null ? 0 : currentOrigin[2] * (180 / Math.PI));
 
   // Note: pre-issue#28 used standalone `<canvas bind:this=...>` mounts

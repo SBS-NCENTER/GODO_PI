@@ -2143,13 +2143,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # ---- /api/maps (Track E, PR-C; issue#28 grouped tree) ---------------
     # Anonymous-readable per Track F (read endpoints are anon, mutations
-    # are admin-gated).
-    #
-    # issue#28 wire shape: response is `{"groups": [...], "flat": [...]}`
-    # where `groups` is the new grouped-tree shape (pristine parents with
-    # derived variants) and `flat` is the legacy list shape (kept one
-    # release for backward compat with pre-issue#28 SPA bundles cached
-    # in the browser). New SPA reads only `groups`.
+    # are admin-gated). Wire shape: `{"groups": [...]}` only — the legacy
+    # `flat` list was hard-removed in issue#28.1 (2026-W19).
     @app.get("/api/maps")
     async def list_maps() -> JSONResponse:
         try:
@@ -2159,15 +2154,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # issue#30 — also run sidecar recovery sweep so PR #81-era
             # derived maps get auto-migrated lineage on first list.
             await asyncio.to_thread(sidecar_mod.recovery_sweep, cfg.maps_dir)
-            entries = await asyncio.to_thread(maps_mod.list_pairs, cfg.maps_dir)
             groups = await asyncio.to_thread(maps_mod.list_pairs_grouped, cfg.maps_dir)
         except maps_mod.MapsDirMissing as e:
             return _map_maps_exc_to_response(e)
         return JSONResponse(
-            {
-                "groups": [g.to_dict() for g in groups],
-                "flat": [e.to_dict() for e in entries],
-            },
+            {"groups": [g.to_dict() for g in groups]},
             status_code=HTTPStatus.OK,
         )
 

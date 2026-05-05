@@ -86,7 +86,6 @@ from pathlib import Path
 from typing import Protocol
 
 from .constants import (
-    LANCZOS_FILTER_NAME,
     MAP_ROTATE_MAX_CANVAS_PX,
     MAP_ROTATE_THRESH_FREE,
     MAP_ROTATE_THRESH_OCC,
@@ -772,8 +771,3 @@ def sweep_stale_tmp(maps_dir: Path) -> int:
         except OSError as e:
             logger.warning("map_transform.sweep_failed: %s — %s", stale, e)
     return swept
-
-
-# Marker — preserves the legacy `LANCZOS` constant export so existing
-# import sites compile.
-_LANCZOS_FILTER_NAME_MARKER: str = LANCZOS_FILTER_NAME

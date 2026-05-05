@@ -93,25 +93,25 @@ def test_parse_three_rows_preserves_order() -> None:
 
 
 def test_parse_rejects_short_row_count(tmp_path: Path) -> None:
-    """The default `EXPECTED_ROW_COUNT` is 68; a 1-row file via the
+    """The default `EXPECTED_ROW_COUNT` is 67; a 1-row file via the
     public path raises."""
     src = _make_synthetic_source(
         '{"a.x", ValueType::Int, 0.0, 10.0, "1", ReloadClass::Hot, "f"},',
-        expected=68,  # the wrapper claims 68, but only 1 row in body
+        expected=67,  # the wrapper claims 67, but only 1 row in body
     )
     src_path = tmp_path / "config_schema.hpp"
     src_path.write_text(src)
     with pytest.raises(schema_mod.ConfigSchemaError) as ei:
         schema_mod.load_schema(source_path=src_path)
     assert "1" in str(ei.value)
-    assert "68" in str(ei.value)
+    assert "67" in str(ei.value)
 
 
-def test_load_schema_real_source_returns_68_rows() -> None:
+def test_load_schema_real_source_returns_67_rows() -> None:
     """TB1 fold: load by real path; pin row count + alphabetical sort.
-    issue#27 fold: 53 → 68 (added 12 output_transform.* + 3 origin_step.*)."""
+    issue#28.1: 68 → 67 (amcl.origin_yaw_deg hard-removed)."""
     rows = schema_mod.load_schema()
-    assert len(rows) == 68
+    assert len(rows) == 67
     # Alphabetical (matches the C++ pin in config_schema.hpp).
     names = [r.name for r in rows]
     assert names == sorted(names)

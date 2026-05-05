@@ -429,12 +429,6 @@ MEMO_MAX_LEN_CHARS: Final[int] = 32
 # `\d{8}-\d{6}` exactly — UTC, second resolution.
 DERIVED_TS_STRFTIME: Final[str] = "%Y%m%d-%H%M%S"
 
-# Pillow ≥ 10 modern enum (M6 lock). The deprecated `Image.LANCZOS`
-# constant emits DeprecationWarning on Pillow 10. Bound at runtime so
-# `map_rotate.py` does not import Pillow at module-collection time
-# (matches `map_edit.py` discipline).
-LANCZOS_FILTER_NAME: Final[str] = "LANCZOS"
-
 # 3-class threshold for re-quantising the resampled PGM back to
 # {free, unknown, occupied}. Mirrors the slam_toolbox / map_server
 # convention: occupied=0, unknown=205, free=254.

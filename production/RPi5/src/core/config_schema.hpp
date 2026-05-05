@@ -115,7 +115,7 @@ struct ConfigSchemaRow {
 // CODEBASE.md invariant (q).
 
 // clang-format off
-inline constexpr std::array<ConfigSchemaRow, 68> CONFIG_SCHEMA = {{
+inline constexpr std::array<ConfigSchemaRow, 67> CONFIG_SCHEMA = {{
     {"amcl.anneal_iters_per_phase",     ValueType::Int,    1.0,      200.0,    "10",                             ReloadClass::Recalibrate, "Track D-5: per-phase upper-bound iteration count for sigma annealing."},
     {"amcl.converge_xy_std_m",          ValueType::Double, 0.001,    1.0,      "0.015",                          ReloadClass::Recalibrate, "AMCL converge() xy_std exit threshold (m)."},
     {"amcl.converge_yaw_std_deg",       ValueType::Double, 0.01,     30.0,     "0.3",                            ReloadClass::Recalibrate, "AMCL converge() yaw_std exit threshold (deg)."},
@@ -130,7 +130,6 @@ inline constexpr std::array<ConfigSchemaRow, 68> CONFIG_SCHEMA = {{
     {"amcl.max_iters",                  ValueType::Int,    1.0,      200.0,    "25",                             ReloadClass::Recalibrate, "AMCL converge() upper-bound iteration count."},
     {"amcl.origin_x_m",                 ValueType::Double, -1000.0,  1000.0,   "0.0",                            ReloadClass::Recalibrate, "Calibration origin X (m); affects offset arithmetic."},
     {"amcl.origin_y_m",                 ValueType::Double, -1000.0,  1000.0,   "0.0",                            ReloadClass::Recalibrate, "Calibration origin Y (m)."},
-    {"amcl.origin_yaw_deg",             ValueType::Double, -180.0,   180.0,    "0.0",                            ReloadClass::Recalibrate, "Calibration origin yaw (deg)."},
     {"amcl.particles_global_n",         ValueType::Int,    100.0,    10000.0,  "5000",                           ReloadClass::Recalibrate, "Global localization particle count."},
     {"amcl.particles_local_n",          ValueType::Int,    50.0,     2000.0,   "500",                            ReloadClass::Recalibrate, "Local-mode particle count."},
     {"amcl.range_max_m",                ValueType::Double, 1.0,      50.0,     "12.0",                           ReloadClass::Recalibrate, "Max beam range (m)."},
@@ -187,7 +186,7 @@ inline constexpr std::array<ConfigSchemaRow, 68> CONFIG_SCHEMA = {{
 }};
 // clang-format on
 
-static_assert(CONFIG_SCHEMA.size() == 68,
+static_assert(CONFIG_SCHEMA.size() == 67,
               "CONFIG_SCHEMA row count drifted; update tests + schema mirror");
 
 // O(N) lookup. N=40 keeps this trivially fine; O(log N) binary search is

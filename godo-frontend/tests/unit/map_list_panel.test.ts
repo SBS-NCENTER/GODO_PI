@@ -44,29 +44,34 @@ beforeEach(() => {
   // Stub fetch so the `onMount → refresh()` call in `MapListPanel`
   // resolves with a deterministic two-row list — one active, one not.
   // We click the activate button on the NON-active row so the dialog
-  // opens without hitting any "already active" branch.
+  // opens without hitting any "already active" branch. issue#28.1 wire
+  // shape: `{groups: [...]}` only.
+  const p1 = {
+    name: 'studio_v1',
+    size_bytes: 16,
+    mtime_unix: 1.0,
+    is_active: true,
+    width_px: 200,
+    height_px: 200,
+    resolution_m: 0.05,
+  };
+  const p2 = {
+    name: 'studio_v2',
+    size_bytes: 16,
+    mtime_unix: 2.0,
+    is_active: false,
+    width_px: 400,
+    height_px: 400,
+    resolution_m: 0.025,
+  };
   vi.spyOn(globalThis, 'fetch').mockResolvedValue(
     new Response(
-      JSON.stringify([
-        {
-          name: 'studio_v1',
-          size_bytes: 16,
-          mtime_unix: 1.0,
-          is_active: true,
-          width_px: 200,
-          height_px: 200,
-          resolution_m: 0.05,
-        },
-        {
-          name: 'studio_v2',
-          size_bytes: 16,
-          mtime_unix: 2.0,
-          is_active: false,
-          width_px: 400,
-          height_px: 400,
-          resolution_m: 0.025,
-        },
-      ]),
+      JSON.stringify({
+        groups: [
+          { base: 'studio_v1', pristine: p1, variants: [] },
+          { base: 'studio_v2', pristine: p2, variants: [] },
+        ],
+      }),
       { status: 200, headers: { 'content-type': 'application/json' } },
     ),
   );
@@ -214,19 +219,20 @@ describe('MapListPanel — map dimensions cell (operator UX 2026-05-02)', () => 
   it('renders W×H px alone when resolution is null (graceful degradation)', async () => {
     setHostname('127.0.0.1');
     setAdminSession();
+    const p = {
+      name: 'studio_no_res',
+      size_bytes: 16,
+      mtime_unix: 1.0,
+      is_active: false,
+      width_px: 100,
+      height_px: 50,
+      resolution_m: null,
+    };
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response(
-        JSON.stringify([
-          {
-            name: 'studio_no_res',
-            size_bytes: 16,
-            mtime_unix: 1.0,
-            is_active: false,
-            width_px: 100,
-            height_px: 50,
-            resolution_m: null,
-          },
-        ]),
+        JSON.stringify({
+          groups: [{ base: 'studio_no_res', pristine: p, variants: [] }],
+        }),
         { status: 200, headers: { 'content-type': 'application/json' } },
       ),
     );
@@ -247,19 +253,20 @@ describe('MapListPanel — map dimensions cell (operator UX 2026-05-02)', () => 
   it('renders em-dash when both dims are null', async () => {
     setHostname('127.0.0.1');
     setAdminSession();
+    const p = {
+      name: 'studio_corrupt_pgm',
+      size_bytes: 0,
+      mtime_unix: 1.0,
+      is_active: false,
+      width_px: null,
+      height_px: null,
+      resolution_m: null,
+    };
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response(
-        JSON.stringify([
-          {
-            name: 'studio_corrupt_pgm',
-            size_bytes: 0,
-            mtime_unix: 1.0,
-            is_active: false,
-            width_px: null,
-            height_px: null,
-            resolution_m: null,
-          },
-        ]),
+        JSON.stringify({
+          groups: [{ base: 'studio_corrupt_pgm', pristine: p, variants: [] }],
+        }),
         { status: 200, headers: { 'content-type': 'application/json' } },
       ),
     );

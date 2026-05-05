@@ -84,7 +84,6 @@ Config make_test_config(std::uint64_t seed) {
     cfg.amcl_seed                = seed;
     cfg.amcl_origin_x_m          = 1.0;
     cfg.amcl_origin_y_m          = 1.0;
-    cfg.amcl_origin_yaw_deg      = 0.0;
     cfg.amcl_max_iters           = 5;
     cfg.amcl_particles_local_n   = 200;
     cfg.amcl_particles_global_n  = 200;

@@ -173,7 +173,6 @@ EffectiveValue read_effective(const Config& c, const ConfigSchemaRow& row) {
     else if (k == "amcl.max_iters")                  v.as_int    = c.amcl_max_iters;
     else if (k == "amcl.origin_x_m")                 v.as_double = c.amcl_origin_x_m;
     else if (k == "amcl.origin_y_m")                 v.as_double = c.amcl_origin_y_m;
-    else if (k == "amcl.origin_yaw_deg")             v.as_double = c.amcl_origin_yaw_deg;
     else if (k == "amcl.particles_global_n")         v.as_int    = c.amcl_particles_global_n;
     else if (k == "amcl.particles_local_n")          v.as_int    = c.amcl_particles_local_n;
     else if (k == "amcl.range_max_m")                v.as_double = c.amcl_range_max_m;
@@ -257,7 +256,6 @@ bool apply_one(Config& c,
     else if (k == "amcl.max_iters")                  c.amcl_max_iters                  = static_cast<int>(vr.parsed_double);
     else if (k == "amcl.origin_x_m")                 c.amcl_origin_x_m                 = vr.parsed_double;
     else if (k == "amcl.origin_y_m")                 c.amcl_origin_y_m                 = vr.parsed_double;
-    else if (k == "amcl.origin_yaw_deg")             c.amcl_origin_yaw_deg             = vr.parsed_double;
     else if (k == "amcl.particles_global_n")         c.amcl_particles_global_n         = static_cast<int>(vr.parsed_double);
     else if (k == "amcl.particles_local_n")          c.amcl_particles_local_n          = static_cast<int>(vr.parsed_double);
     else if (k == "amcl.range_max_m")                c.amcl_range_max_m                = vr.parsed_double;

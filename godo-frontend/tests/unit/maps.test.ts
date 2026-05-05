@@ -32,60 +32,64 @@ function jsonResp(body: unknown, status = 200): Response {
 }
 
 describe('maps store', () => {
-  it('refresh() GETs /api/maps and updates the store', async () => {
-    const fakeList = [
-      { name: 'studio_v1', size_bytes: 1024, mtime_unix: 1.0, is_active: true },
-      { name: 'studio_v2', size_bytes: 2048, mtime_unix: 2.0, is_active: false },
-    ];
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResp(fakeList));
+  it('refresh() GETs /api/maps and flattens groups into the store', async () => {
+    const pristine1 = { name: 'studio_v1', size_bytes: 1024, mtime_unix: 1.0, is_active: true };
+    const pristine2 = { name: 'studio_v2', size_bytes: 2048, mtime_unix: 2.0, is_active: false };
+    const groupedResp = {
+      groups: [
+        { base: 'studio_v1', pristine: pristine1, variants: [] },
+        { base: 'studio_v2', pristine: pristine2, variants: [] },
+      ],
+    };
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResp(groupedResp));
 
     const list = await refresh();
 
-    expect(list).toEqual(fakeList);
-    expect(get(maps)).toEqual(fakeList);
+    expect(list).toEqual([pristine1, pristine2]);
+    expect(get(maps)).toEqual([pristine1, pristine2]);
     expect(fetchSpy).toHaveBeenCalledOnce();
     const url = fetchSpy.mock.calls[0]![0] as string;
     expect(url).toBe('/api/maps');
   });
 
-  // issue#28 (HIL fix) — server response shape changed from `MapEntry[]`
-  // to `{groups, flat}`. Operator HIL on PR #81 caught the SPA showing
-  // an empty map list because the store assigned the entire object to
-  // a `Writable<MapEntry[]>`. This pin guards the new extraction path.
-  it('refresh() extracts `flat` from issue#28 grouped response shape', async () => {
-    const flat = [
-      { name: 'studio_v1', size_bytes: 1024, mtime_unix: 1.0, is_active: true },
-      {
-        name: 'studio_v1.20260504-1430-wallcal',
-        size_bytes: 1024,
-        mtime_unix: 2.0,
-        is_active: false,
-      },
-    ];
+  // issue#28.1 — server response is `{groups: MapGroup[]}` only; the
+  // legacy `flat` key was hard-removed. Pin: the store derives the
+  // flat list from groups (pristine + variants).
+  it('refresh() flattens pristine + variants from the grouped response', async () => {
+    const pristine = { name: 'studio_v1', size_bytes: 1024, mtime_unix: 1.0, is_active: true };
+    const variant = {
+      name: 'studio_v1.20260504-1430-wallcal',
+      size_bytes: 1024,
+      mtime_unix: 2.0,
+      is_active: false,
+    };
     const groupedResp = {
-      groups: [{ pristine: flat[0], variants: [flat[1]] }],
-      flat,
+      groups: [{ base: 'studio_v1', pristine, variants: [variant] }],
     };
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResp(groupedResp));
 
     const list = await refresh();
 
-    expect(list).toEqual(flat);
-    expect(get(maps)).toEqual(flat);
+    expect(list).toEqual([pristine, variant]);
+    expect(get(maps)).toEqual([pristine, variant]);
   });
 
   it('activate(name) POSTs to /api/maps/<name>/activate and triggers refresh', async () => {
-    const fakeList = [
-      { name: 'studio_v1', size_bytes: 1024, mtime_unix: 1.0, is_active: false },
-      { name: 'studio_v2', size_bytes: 2048, mtime_unix: 2.0, is_active: true },
-    ];
+    const p1 = { name: 'studio_v1', size_bytes: 1024, mtime_unix: 1.0, is_active: false };
+    const p2 = { name: 'studio_v2', size_bytes: 2048, mtime_unix: 2.0, is_active: true };
+    const groupedResp = {
+      groups: [
+        { base: 'studio_v1', pristine: p1, variants: [] },
+        { base: 'studio_v2', pristine: p2, variants: [] },
+      ],
+    };
     let call = 0;
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
       call++;
       if (call === 1) {
         return jsonResp({ ok: true, restart_required: true });
       }
-      return jsonResp(fakeList);
+      return jsonResp(groupedResp);
     });
 
     const resp = await activate('studio_v2');
@@ -100,18 +104,21 @@ describe('maps store', () => {
     const secondUrl = fetchSpy.mock.calls[1]![0] as string;
     expect(secondUrl).toBe('/api/maps');
 
-    expect(get(maps)).toEqual(fakeList);
+    expect(get(maps)).toEqual([p1, p2]);
   });
 
   it('remove(name) DELETEs /api/maps/<name> and triggers refresh', async () => {
-    const fakeList = [{ name: 'studio_v1', size_bytes: 1024, mtime_unix: 1.0, is_active: true }];
+    const p1 = { name: 'studio_v1', size_bytes: 1024, mtime_unix: 1.0, is_active: true };
+    const groupedResp = {
+      groups: [{ base: 'studio_v1', pristine: p1, variants: [] }],
+    };
     let call = 0;
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
       call++;
       if (call === 1) {
         return jsonResp({ ok: true });
       }
-      return jsonResp(fakeList);
+      return jsonResp(groupedResp);
     });
 
     await remove('studio_v2');
@@ -121,7 +128,7 @@ describe('maps store', () => {
     const firstInit = fetchSpy.mock.calls[0]![1] as RequestInit;
     expect(firstInit.method).toBe('DELETE');
 
-    expect(get(maps)).toEqual(fakeList);
+    expect(get(maps)).toEqual([p1]);
   });
 
   it('activate() rejects path-traversal name client-side without issuing the request', async () => {

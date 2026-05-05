@@ -479,14 +479,12 @@ export interface MapGroup {
   variants: MapEntry[];
 }
 
-// GET /api/maps response. issue#28 added the grouped-tree shape;
-// `flat` is retained one release for backward compatibility with
-// pre-issue#28 SPA bundles cached in browsers. New consumers read
-// `groups` for the tree view; legacy consumers (MapListPanel) read
-// `flat` (extracted in `stores/maps::refresh`).
+// GET /api/maps response. issue#28 introduced the grouped-tree shape;
+// the legacy `flat` list was hard-removed in issue#28.1. Consumers
+// that need a flat list (e.g. `<MapListPanel>`) flatten `groups`
+// client-side via `stores/maps::refresh`.
 export interface MapListResponse {
   groups: MapGroup[];
-  flat: MapEntry[];
 }
 
 // POST /api/maps/<name>/activate response shape.

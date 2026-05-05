@@ -445,7 +445,7 @@ def test_apply_origin_edit_subtracts_theta_rotate_2() -> None:
 
 
 def test_apply_origin_edit_subtracts_theta_wraps_at_180() -> None:
-    """Mode-A C5 pin — wrap-around: old=170°, typed=−20° → +170° (not
+    """Mode-A C5 pin — wrap-around: old=170°, typed=−20° → −170° (not
     +190°)."""
     yaml_170 = _PRISTINE_YAML.replace("0.08726646", "2.96705973")  # 170° rad
     _, res = map_origin.apply_origin_edit_in_memory(

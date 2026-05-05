@@ -76,8 +76,8 @@ const std::string kValidYaml =
 }  // namespace
 
 // issue#28 — origin_yaw is sourced from YAML row `origin: [a, b, c]`
-// element [2]. The pre-issue#28 path read `cfg.amcl_origin_yaw_deg`;
-// the field is now deprecated and cold_writer reads grid.origin_yaw_deg
+// element [2]. The legacy `cfg.amcl_origin_yaw_deg` cfg field was
+// hard-removed in issue#28.1; cold_writer reads grid.origin_yaw_deg
 // directly. Pin: the value parses through the loader as RADIANS and
 // is converted to DEGREES inside `load_map`. yaml row `0.523599` (rad)
 // → grid.origin_yaw_deg ≈ 30.

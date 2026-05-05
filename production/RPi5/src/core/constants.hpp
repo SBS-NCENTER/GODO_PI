@@ -24,6 +24,11 @@ inline constexpr double   FREED_PAN_LSB_PER_DEG = 1.0 / FREED_PAN_Q;        // 3
 inline constexpr double   RPLIDAR_Q14_DEG  = 90.0 / 16384.0;
 inline constexpr double   RPLIDAR_Q2_MM    = 1.0 / 4.0;
 
+// Angular conversion (180 / π). Project-wide constant — issue#28.1 B9
+// promoted from per-TU `kRadToDeg`. Used by pose.cpp circular-statistics
+// helpers and occupancy_grid.cpp YAML-radians → grid-degrees conversion.
+inline constexpr double   KRAD_TO_DEG      = 57.29577951308232;
+
 // Hot-path cadence — pinned by UE's 59.94 fps project standard.
 inline constexpr double   FRAME_RATE_HZ    = 60000.0 / 1001.0;
 inline constexpr int64_t  FRAME_PERIOD_NS  = 16'683'350;

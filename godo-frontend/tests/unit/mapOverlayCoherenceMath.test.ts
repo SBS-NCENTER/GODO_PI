@@ -5,13 +5,14 @@
  * the *math contract* used by the rotation overlays — pure-function
  * algebra against `originMath.pixelToWorld` and
  * `scanTransform.projectScanToWorld`. It does NOT mount any Svelte
- * component; the production overlays are pinned via real
- * component-mount tests in:
- *   - tests/unit/OriginAxisOverlay.test.ts (CR1 fix)
- *   - tests/unit/GridOverlay.test.ts (CR1 fix — schedule + mount pins)
- * Math + component pins are intentionally split so a math regression
- * surfaces here while a "production component bypassed the math" bug
- * surfaces in the mount tests.
+ * component; the production overlays are pinned via the
+ * `drawOriginAxis` / `drawGrid` helpers in `lib/overlayDraw.ts` and
+ * their tests in `tests/unit/overlayDraw.test.ts`. (Standalone
+ * `<OriginAxisOverlay>` / `<GridOverlay>` components were deleted in
+ * issue#28.1; their CR1-era mount tests went with them.)
+ * Math + helper pins are intentionally split so a math regression
+ * surfaces here while a "production helper bypassed the math" bug
+ * surfaces in the helper tests.
  *
  * Operator-locked C7 split: instead of a single `pose dot + heading
  * arrow + LiDAR scan dots + bitmap rotate together when YAML theta

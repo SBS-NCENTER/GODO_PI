@@ -27,10 +27,9 @@ natural follow-up — it will connect to the UDS server landed in 4-2 D.
 
 ---
 
-## Module map (current — as of 2026-04-26 Phase 4-2 D Wave B)
+## Module map
 
-The per-date entries below this section track the diffs that landed each
-day. This top-level map is the up-to-date snapshot.
+Top-level snapshot of the C++ tracker source tree. For per-week dated change-log entries, see the weekly archives at [`CODEBASE/`](./CODEBASE/).
 
 ```text
 CMakeLists.txt                       C++17, warnings-as-errors, doctest, OpenSSL::Crypto, Eigen3
@@ -759,3 +758,19 @@ Entries are archived weekly under [`CODEBASE/`](./CODEBASE/) (ISO 8601 weeks, KS
 | 2026-W19 | 2026-05-04 → 2026-05-10 | [CODEBASE/2026-W19.md](./CODEBASE/2026-W19.md) |
 | 2026-W18 | 2026-04-27 → 2026-05-03 | [CODEBASE/2026-W18.md](./CODEBASE/2026-W18.md) |
 | 2026-W17 | 2026-04-20 → 2026-04-26 | [CODEBASE/2026-W17.md](./CODEBASE/2026-W17.md) |
+
+---
+
+## Quick reference links
+
+- Project guide: [`CLAUDE.md`](../../CLAUDE.md) — operating rules + agent pipeline + deploy.
+- Cross-stack scaffold: [`CODEBASE.md`](../../CODEBASE.md) (root) — module roles + cross-stack data flow.
+- Backend design SSOT: [`SYSTEM_DESIGN.md`](../../SYSTEM_DESIGN.md) — RT path / AMCL / FreeD / 59.94 fps design.
+- Sibling stacks:
+  - Web control plane: [`godo-webctl/CODEBASE.md`](../../godo-webctl/CODEBASE.md) — drives this tracker via UDS at `/run/godo/ctl.sock`.
+  - SPA: [`godo-frontend/CODEBASE.md`](../../godo-frontend/CODEBASE.md) — never reaches this binary directly; all traffic transits webctl.
+- Project state: [`PROGRESS.md`](../../PROGRESS.md) (English) · [`doc/history.md`](../../doc/history.md) (Korean).
+- Most recent shipping: [`CODEBASE/2026-W19.md`](./CODEBASE/2026-W19.md).
+- README (build + deploy + smoke check): [`README.md`](./README.md).
+- Embedded reliability checklist: [`doc/Embedded_CheckPoint.md`](../../doc/Embedded_CheckPoint.md).
+- FreeD wiring (Phase 4-1 reference): [`production/RPi5/doc/freed_wiring.md`](./doc/freed_wiring.md).

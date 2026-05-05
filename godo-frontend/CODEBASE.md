@@ -609,3 +609,17 @@ Entries are archived weekly under [`CODEBASE/`](./CODEBASE/) (ISO 8601 weeks, KS
 | --- | --- | --- |
 | 2026-W19 | 2026-05-04 → 2026-05-10 | [CODEBASE/2026-W19.md](./CODEBASE/2026-W19.md) |
 | 2026-W18 | 2026-04-27 → 2026-05-03 | [CODEBASE/2026-W18.md](./CODEBASE/2026-W18.md) |
+
+---
+
+## Quick reference links
+
+- Project guide: [`CLAUDE.md`](../CLAUDE.md) — operating rules + agent pipeline + deploy.
+- Cross-stack scaffold: [`CODEBASE.md`](../CODEBASE.md) (root) — module roles + cross-stack data flow.
+- Frontend design SSOT: [`FRONT_DESIGN.md`](../FRONT_DESIGN.md) — page contracts + route map + auth model + component composition.
+- Sibling stacks:
+  - Backend (web control plane): [`godo-webctl/CODEBASE.md`](../godo-webctl/CODEBASE.md) — serves the SPA bundle and `/api/*` + SSE; this stack consumes those wire shapes.
+  - C++ tracker: [`production/RPi5/CODEBASE.md`](../production/RPi5/CODEBASE.md) — never reached directly; all SPA traffic transits webctl.
+- Project state: [`PROGRESS.md`](../PROGRESS.md) (English) · [`doc/history.md`](../doc/history.md) (Korean).
+- Most recent shipping: [`CODEBASE/2026-W19.md`](./CODEBASE/2026-W19.md).
+- README (build + dev runbook): [`README.md`](./README.md).

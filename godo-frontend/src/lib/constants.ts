@@ -485,3 +485,39 @@ export const MAPPING_RESERVED_NAMES: ReadonlySet<string> = new Set<string>([
 // closes, the SPA freezes the last Docker frame and shows a "중단됨"
 // badge; never re-issues HTTP. The only way to refresh Docker stats
 // post-close is to start a new mapping run.)
+
+// --- issue#30.1 (2026-05-05 KST) — LINEAGE_GLYPHS SSOT ---------------
+// Single source of truth for sidecar `lineage.kind` → display glyph +
+// Korean tooltip. Imported by BOTH `<MapList>` (inline glyph next to
+// each variant row) and `<LineageModal>` (kind badge inside the
+// modal). Keys mirror `godo_webctl.constants::SIDECAR_LINEAGE_KIND_*`
+// (operator-locked value space — see
+// .claude/memory/project_pick_anchored_yaml_normalization_locked.md).
+//
+// Unmapped values fall back to `?` + a generic tooltip — operators
+// reading the modal still see the raw kind string in `<td>`. The
+// fallback exists to defend against future schema additions that
+// reach the SPA before `LINEAGE_GLYPHS` is updated.
+export interface LineageGlyphEntry {
+  glyph: string;
+  tooltip: string;
+}
+export const LINEAGE_GLYPHS: Readonly<Record<string, LineageGlyphEntry>> = {
+  operator_apply: { glyph: '✓', tooltip: '운영자 Apply' },
+  synthesized: {
+    glyph: '⚠',
+    tooltip: 'issue#30 이전 자동 합성 (generation unknown)',
+  },
+  backup: {
+    glyph: '↻',
+    tooltip: '백업 시점 자동 합성 sidecar (orphan pair snapshot)',
+  },
+  auto_migrated_pre_issue30: {
+    glyph: 'ⓘ',
+    tooltip: 'PR #81 이전 작업 자동 마이그레이션 (generation = 1 가정)',
+  },
+};
+export const LINEAGE_GLYPH_FALLBACK: LineageGlyphEntry = {
+  glyph: '?',
+  tooltip: 'unknown lineage',
+};

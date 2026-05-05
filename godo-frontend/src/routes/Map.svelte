@@ -365,6 +365,9 @@
           groups={groups.map((g) => ({
             base: g.pristine.name,
             pristine: g.pristine,
+            // issue#30.1 — `MapEntry.lineage_kind` rides through the
+            // structural assignment to `MapEntryView` (optional field
+            // on the view, present-but-nullable on the wire).
             variants: g.variants,
           }))}
           onActivate={openActivate}

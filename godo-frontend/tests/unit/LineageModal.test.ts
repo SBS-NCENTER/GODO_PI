@@ -147,4 +147,33 @@ describe('LineageModal (issue#30)', () => {
     expect(closed).toBe(true);
     unmount(inst);
   });
+
+  // issue#30.1 — Svelte a11y compile-warning fix.
+  // Contract: exactly one element in the modal subtree carries
+  // `role="dialog"`, and that element is the inner `.modal-card`
+  // (NOT the click/keydown-handler-bearing backdrop). Pinning the
+  // contract instead of the class-name choice avoids brittle coupling.
+  // The backdrop carries `role="presentation"` to satisfy Svelte's
+  // sister rule (a static div with handlers needs a role).
+  it('role_dialog_lives_on_exactly_one_element_not_the_backdrop', () => {
+    const sc = makeSidecar();
+    const inst = mount(LineageModal, {
+      target,
+      props: { sidecar: sc, name: 'foo', open: true, onClose: () => {} },
+    });
+    flushSync();
+    const dialogs = target.querySelectorAll('[role="dialog"]');
+    expect(dialogs.length).toBe(1);
+    const dialog = target.querySelector('[role="dialog"]');
+    const card = target.querySelector('.modal-card');
+    expect(dialog).not.toBeNull();
+    expect(card).not.toBeNull();
+    expect(dialog).toBe(card);
+    // Backdrop must NOT carry the dialog role (its role is
+    // `presentation`, semantically empty).
+    const backdrop = target.querySelector('.modal-backdrop');
+    expect(backdrop).not.toBeNull();
+    expect(backdrop!.getAttribute('role')).not.toBe('dialog');
+    unmount(inst);
+  });
 });

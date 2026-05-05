@@ -32,6 +32,7 @@ const sampleGroups = [
       width_px: 200,
       height_px: 100,
       resolution_m: 0.05,
+      lineage_kind: null,
     },
     variants: [
       {
@@ -40,6 +41,7 @@ const sampleGroups = [
         width_px: 200,
         height_px: 100,
         resolution_m: 0.05,
+        lineage_kind: 'operator_apply',
       },
     ],
   },
@@ -84,6 +86,70 @@ describe('MapList', () => {
     pristineBtn.click();
     flushSync();
     expect(onActivate).toHaveBeenCalledWith('chroma');
+    unmount(inst);
+  });
+
+  // issue#30.1 — inline lineage glyph next to variant rows.
+  it('variant row with operator_apply lineage renders ✓ glyph', () => {
+    const onActivate = vi.fn();
+    const inst = mount(MapList, {
+      target,
+      props: { groups: sampleGroups, onActivate },
+    });
+    flushSync();
+    const variantRow = target.querySelector('.variant-row')!;
+    const glyph = variantRow.querySelector('.lineage-glyph')!;
+    expect(glyph).not.toBeNull();
+    expect(glyph.textContent).toBe('✓');
+    expect(glyph.getAttribute('title')).toContain('운영자 Apply');
+    // Symmetric assertion: pristine + variant = 1 visible glyph total.
+    // Catches a regression that paints the glyph on `.pristine-row`.
+    expect(target.querySelectorAll('.lineage-glyph').length).toBe(1);
+    unmount(inst);
+  });
+
+  it('pristine row with no lineage_kind renders no glyph', () => {
+    const onActivate = vi.fn();
+    const inst = mount(MapList, {
+      target,
+      props: { groups: sampleGroups, onActivate },
+    });
+    flushSync();
+    expect(target.querySelector('.pristine-row .lineage-glyph')).toBeNull();
+    unmount(inst);
+  });
+
+  // issue#30.1 Mode-B fold — backup-restored maps surface lineage_kind="backup"
+  // (synthesized at backup time for orphan pairs per backup.py:128). Pin the
+  // wiring so a future drop of the LINEAGE_GLYPHS["backup"] entry surfaces
+  // here instead of silently rendering `?` in operator HIL.
+  it('variant row with backup lineage renders ↻ glyph', () => {
+    const groupsWithBackup = [
+      {
+        base: 'chroma',
+        pristine: sampleGroups[0].pristine,
+        variants: [
+          {
+            name: 'chroma.20260504-150000-restored',
+            is_active: false,
+            width_px: 200,
+            height_px: 100,
+            resolution_m: 0.05,
+            lineage_kind: 'backup',
+          },
+        ],
+      },
+    ];
+    const onActivate = vi.fn();
+    const inst = mount(MapList, {
+      target,
+      props: { groups: groupsWithBackup, onActivate },
+    });
+    flushSync();
+    const glyph = target.querySelector('.variant-row .lineage-glyph')!;
+    expect(glyph).not.toBeNull();
+    expect(glyph.textContent).toBe('↻');
+    expect(glyph.getAttribute('title')).toContain('백업');
     unmount(inst);
   });
 });

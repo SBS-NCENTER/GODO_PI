@@ -5165,6 +5165,11 @@ async def test_get_map_sidecar_endpoint_returns_lineage_tree(
         assert r.status_code == HTTPStatus.OK, r.text
         d2 = r.json()["derived_name"]
         sc_resp = await cl.get(f"/api/maps/{d2}/sidecar")
+        # issue#30.1 (2026-05-05 KST): /api/maps response now carries
+        # `lineage_kind` per row so the SPA can render an inline
+        # kind-coded glyph without opening LineageModal. Pristine has
+        # no sidecar → null; derived has the operator_apply value.
+        maps_resp = await cl.get("/api/maps")
     assert sc_resp.status_code == HTTPStatus.OK, sc_resp.text
     sc_body = sc_resp.json()
     assert sc_body["name"] == d2
@@ -5176,3 +5181,12 @@ async def test_get_map_sidecar_endpoint_returns_lineage_tree(
     assert sc["lineage"]["generation"] >= 1
     # Parent chain contains d1.
     assert d1 in sc["lineage"]["parents"]
+    # /api/maps wire-shape: lineage_kind populated per row (issue#30.1).
+    assert maps_resp.status_code == HTTPStatus.OK, maps_resp.text
+    maps_body = maps_resp.json()
+    flat_by_name = {e["name"]: e for e in maps_body["flat"]}
+    # Pristine row has no sidecar on disk → lineage_kind = None.
+    assert flat_by_name["studio_v1"]["lineage_kind"] is None
+    # Derived rows produced by the Apply pipeline carry operator_apply.
+    assert flat_by_name[d1]["lineage_kind"] == "operator_apply"
+    assert flat_by_name[d2]["lineage_kind"] == "operator_apply"

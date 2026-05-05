@@ -501,6 +501,8 @@ def test_map_entry_to_dict_uses_mtime_unix_float(tmp_path: Path) -> None:
     d = entries[0].to_dict()
     # Operator UX 2026-05-02 KST: width_px / height_px / resolution_m
     # added so the SPA Map list can render `W×H px (X.X×Y.Y m)`.
+    # issue#30.1 (2026-05-05 KST): lineage_kind added so the SPA Map
+    # list can render an inline kind-coded glyph next to each variant.
     assert set(d.keys()) == {
         "name",
         "size_bytes",
@@ -509,10 +511,13 @@ def test_map_entry_to_dict_uses_mtime_unix_float(tmp_path: Path) -> None:
         "width_px",
         "height_px",
         "resolution_m",
+        "lineage_kind",
     }
     assert isinstance(d["mtime_unix"], float)
     # Sanity: mtime_unix should be within a few seconds of now.
     assert abs(float(d["mtime_unix"]) - time.time()) < 60.0
+    # Pristine pair has no sidecar → lineage_kind is None.
+    assert d["lineage_kind"] is None
 
 
 # --- read_yaml_resolution (Operator UX 2026-05-02 KST) -----------------
@@ -589,6 +594,79 @@ def test_list_pairs_tolerates_malformed_yaml_resolution(tmp_path: Path) -> None:
     assert entries[0].width_px == 8
     assert entries[0].height_px == 8
     assert entries[0].resolution_m is None
+
+
+# --- issue#30.1 — list_pairs surfaces lineage_kind --------------------
+
+
+def test_list_pairs_includes_lineage_kind_when_sidecar_present(
+    tmp_path: Path,
+) -> None:
+    """issue#30.1: a pristine pair has lineage_kind=None (no sidecar
+    on disk); a derived pair with a valid sidecar carries the
+    `lineage.kind` value verbatim. The SPA renders an inline glyph
+    keyed off this string."""
+    # Pristine pair (no sidecar).
+    _make_pair(tmp_path, "chroma")
+    # Derived pair WITH a sidecar JSON containing lineage.kind.
+    _make_pair(tmp_path, "chroma.20260504-143000-foo")
+    sidecar_body = {
+        "schema": "godo.map.sidecar.v1",
+        "kind": "derived",
+        "source": {"pristine_pgm": "chroma.pgm", "pristine_yaml": "chroma.yaml"},
+        "lineage": {
+            "generation": 1,
+            "parents": ["chroma"],
+            "kind": "operator_apply",
+        },
+        "cumulative_from_pristine": {
+            "translate_x_m": 0.0,
+            "translate_y_m": 0.0,
+            "rotate_deg": 0.0,
+        },
+        "this_step": None,
+        "result_yaml_origin": {"x_m": 0.0, "y_m": 0.0, "yaw_deg": 0.0},
+        "result_canvas": {"width_px": 4, "height_px": 4},
+        "integrity": {
+            "pgm_sha256": "0" * 64,
+            "yaml_sha256": "0" * 64,
+        },
+        "created": {
+            "iso_kst": "2026-05-04T14:30:00+09:00",
+            "memo": "foo",
+            "reason": "operator_apply",
+        },
+    }
+    import json as _json
+
+    (tmp_path / "chroma.20260504-143000-foo.sidecar.json").write_text(
+        _json.dumps(sidecar_body),
+    )
+
+    entries = {e.name: e for e in M.list_pairs(tmp_path)}
+    assert entries["chroma"].lineage_kind is None
+    assert entries["chroma.20260504-143000-foo"].lineage_kind == "operator_apply"
+    # Wire-shape parity.
+    assert entries["chroma"].to_dict()["lineage_kind"] is None
+    assert (
+        entries["chroma.20260504-143000-foo"].to_dict()["lineage_kind"]
+        == "operator_apply"
+    )
+
+
+def test_list_pairs_lineage_kind_none_on_malformed_sidecar(tmp_path: Path) -> None:
+    """issue#30.1: graceful degradation. A truncated / non-JSON
+    sidecar must NOT raise out of list_pairs — the row appears with
+    lineage_kind=None and the SPA shows no glyph (`?` fallback would
+    require an unmappable string, which malformed JSON cannot produce)."""
+    _make_pair(tmp_path, "chroma.20260504-143000-bar")
+    # Truncated JSON (mid-key).
+    (tmp_path / "chroma.20260504-143000-bar.sidecar.json").write_text(
+        '{"schema": "godo.map.sidecar.v1", "lineage": {"kind": "oper',
+    )
+    entries = M.list_pairs(tmp_path)
+    assert len(entries) == 1
+    assert entries[0].lineage_kind is None
 
 
 # --- read_pgm_dimensions (Track D scale fix) --------------------------

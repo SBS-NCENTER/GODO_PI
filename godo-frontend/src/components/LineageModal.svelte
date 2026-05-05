@@ -17,6 +17,7 @@
    */
 
   import type { SidecarV1 } from '$lib/protocol';
+  import { LINEAGE_GLYPHS, LINEAGE_GLYPH_FALLBACK } from '$lib/constants';
 
   interface Props {
     sidecar: SidecarV1 | null;
@@ -27,23 +28,12 @@
 
   const { sidecar, name, open, onClose }: Props = $props();
 
+  // issue#30.1 — `LINEAGE_GLYPHS` is the SSOT (shared with `<MapList>`).
+  // Unmapped non-string `kind` falls back through `LINEAGE_GLYPH_FALLBACK`
+  // — operator still sees the raw kind string in the `<td>` next to the
+  // glyph, so a future schema addition is debuggable in-place.
   function lineageBadge(kind: string): { glyph: string; tooltip: string } {
-    if (kind === 'synthesized') {
-      return {
-        glyph: '⚠',
-        tooltip: 'issue#30 이전 자동 합성 (generation unknown)',
-      };
-    }
-    if (kind === 'auto_migrated_pre_issue30') {
-      return {
-        glyph: 'ⓘ',
-        tooltip: 'PR #81 이전 작업 자동 마이그레이션 (generation = 1 가정)',
-      };
-    }
-    if (kind === 'operator_apply') {
-      return { glyph: '✓', tooltip: '운영자 Apply' };
-    }
-    return { glyph: '?', tooltip: kind };
+    return LINEAGE_GLYPHS[kind] ?? { glyph: LINEAGE_GLYPH_FALLBACK.glyph, tooltip: kind };
   }
 
   function backdropClick(ev: MouseEvent): void {
@@ -54,19 +44,33 @@
 </script>
 
 {#if open}
+  <!--
+    issue#30.1 — a11y split: outer backdrop carries click/keydown
+    handlers + `role="presentation"` (semantically empty wrapper);
+    inner card carries `role="dialog"` + `aria-modal` + `data-testid`.
+    Keeping `role="dialog"` on a click/keydown-handler-bearing element
+    triggered Svelte's `a11y_no_noninteractive_element_interactions`
+    warning. `role="presentation"` on the backdrop satisfies the sister
+    rule `a11y_no_static_element_interactions` (static elements with
+    interaction handlers need a role) while keeping the click-outside-
+    to-close UX.
+  -->
   <div
     class="modal-backdrop"
-    role="dialog"
-    aria-modal="true"
-    aria-label="Sidecar lineage viewer"
+    role="presentation"
     onclick={backdropClick}
     onkeydown={(e) => {
       if (e.key === 'Escape') onClose();
     }}
     tabindex="-1"
-    data-testid="lineage-modal"
   >
-    <div class="modal-card">
+    <div
+      class="modal-card"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Sidecar lineage viewer"
+      data-testid="lineage-modal"
+    >
       <header class="modal-header">
         <h3>맵 lineage — {name}</h3>
         <button

@@ -3735,3 +3735,100 @@ SPA, including sidecar visualization.
   (mirror of webctl `app.py::map_sidecar_named` and
   `sidecar.Sidecar.to_dict()`). The SPA must consume only this
   typed wire shape — no ad-hoc string-keyed access.
+
+## 2026-05-05 10:50 KST — issue#30.1 — PR #84 Mode-B round 2 backlog
+
+### Why
+
+Three Mode-B round-2 follow-ups deferred from issue#30 (PR #84,
+MERGED 2026-05-05). Frontend changes: surface the lineage `kind`
+glyph inline on each variant row of `<MapList>` (operators can
+scan lineage without opening LineageModal), extract the kind→glyph
+mapping into a shared `LINEAGE_GLYPHS` const so `<MapList>` and
+`<LineageModal>` share one SSOT, and split the LineageModal DOM so
+the dialog role + click/keydown handlers no longer collide on the
+same element. No new invariant — invariant (x) already lists the
+three glyph categories; this PR moves them from inline-per-component
+to a single const.
+
+### Added
+
+- `lib/constants.ts` — `LINEAGE_GLYPHS` const (Readonly<Record<string,
+  {glyph, tooltip}>>) keyed by sidecar `lineage.kind`. Three entries
+  pre-populated from invariant (x). `LINEAGE_GLYPH_FALLBACK = {glyph:
+  '?', tooltip: 'unknown lineage'}` for unmapped values. Both
+  `<MapList>` and `<LineageModal>` import from here — eliminates
+  drift risk.
+- `components/MapList.svelte::MapEntryView.lineage_kind?: string |
+  null` (optional field on the view; `MapEntry.lineage_kind`
+  rides through structural assignment from `Map.svelte`'s
+  projection). Inline `<span class="lineage-glyph">` rendered to
+  the LEFT of `.name` on variant rows. Pristine rows render NO
+  glyph (the `lineageGlyph(null)` returns null, the `{#if glyph}`
+  block is skipped). CSS: `.lineage-glyph { font-size: 12px;
+  margin-right: 4px; cursor: help; opacity: 0.85 }` — consistent
+  with sister `.dims` / `.badge` font-size at MapList:135-141.
+- `tests/unit/MapList.test.ts` — 2 new cases:
+  - `variant row with operator_apply lineage renders ✓ glyph`
+    (asserts glyph + Korean tooltip + symmetric `.lineage-glyph`
+    count == 1, catching a regression that paints the glyph on
+    `.pristine-row` for both rows).
+  - `pristine row with no lineage_kind renders no glyph`.
+- `tests/unit/LineageModal.test.ts` — 1 new case
+  `role_dialog_lives_on_exactly_one_element_not_the_backdrop` —
+  contract-shaped assertion (`querySelectorAll('[role="dialog"]')
+  .length === 1` AND that dialog === `.modal-card`; backdrop's
+  role !== `'dialog'`). Avoids brittle coupling to the class-name
+  choice.
+
+### Changed
+
+- `lib/protocol.ts::MapEntry` — added `lineage_kind: string | null`.
+  Mirror comment block (~line 449) extended with issue#30.1 source
+  + the locked value space (`operator_apply` / `synthesized` /
+  `auto_migrated_pre_issue30` / `null`).
+- `routes/Map.svelte` — `groups.map(g => …)` projection now passes
+  `g.variants` verbatim (the spread retains `lineage_kind`
+  through structural assignment to `MapEntryView`).
+- `components/LineageModal.svelte`:
+  - Replaced inline `lineageBadge` glyph mapping with
+    `LINEAGE_GLYPHS` import from `lib/constants.ts`.
+  - DOM split for Svelte a11y: outer `.modal-backdrop` becomes a
+    plain `<div role="presentation">` carrying click/keydown
+    handlers + `tabindex="-1"`; inner `.modal-card` carries
+    `role="dialog"` + `aria-modal` + `aria-label` + `data-testid`.
+    Without this split, Svelte's
+    `a11y_no_noninteractive_element_interactions` warning fired
+    on every build because `role="dialog"` is noninteractive but
+    the element carried click + keydown. `role="presentation"`
+    on the backdrop satisfies the sister rule
+    `a11y_no_static_element_interactions` (a static div with
+    handlers needs SOME role) without re-claiming the dialog
+    role. Mirrors the intent of `ConfirmDialog.svelte` /
+    `ApplyMemoModal.svelte` (dialog role lives off
+    handler-bearing elements).
+
+### Tests
+
+- New: 4 vitest cases (`MapList.test.ts` x3 incl. Mode-B fold for
+  `backup` glyph; `LineageModal.test.ts` x1).
+- All 468 prior cases still green; `npm run build` clean of
+  LineageModal a11y warnings.
+
+### Mode-B fold (post-review, same KST date)
+
+- Added 4th `LINEAGE_GLYPHS` entry for `backup` value (`↻` +
+  `'백업 시점 자동 합성 sidecar (orphan pair snapshot)'`). Mode-B caught
+  that `godo_webctl.constants::SIDECAR_LINEAGE_KIND_*` enumerates four
+  values (operator_apply / synthesized / backup /
+  auto_migrated_pre_issue30) but the inline mapping covered only
+  three — backup-restored maps would surface `?` instead of a
+  meaningful glyph. New vitest case
+  `variant_row_with_backup_lineage_renders_↻_glyph` pins the wiring
+  so a future drop of the entry surfaces in CI rather than in
+  operator HIL.
+
+### Invariants
+
+- No new invariant. `<MapList>` glyph rendering is a UX layer on
+  top of invariant (x); the kind-coded category list is unchanged.

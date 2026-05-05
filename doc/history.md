@@ -10,6 +10,93 @@
 
 ---
 
+## 2026-05-05 (날짜 횡단 — 02:00 KST → 12:00 KST, 스물 세 번째 + 스물 네 번째 세션 — issue#30 pick-anchored YAML normalization ship + HIL 3라운드 fold, driver fix는 sed-patch에서 `flip_x_axis` 런타임 파라미터로 마이그레이션)
+
+### 한 줄 요약
+
+issue#30 pick-anchored YAML normalization을 단일 PR (#84)로 ship. 스물 세 번째 세션이 02:00 KST에 시작해 Planner R1→R3 + Mode-A R1→R3 APPROVE + Writer R1→R2 + Mode-B R1→R2 APPROVE WITH MINOR로 PR을 OPEN 상태까지 가져갔지만, 운영자 HIL이 3개 finding(yaw 부호, mapping driver 180° point-reflection, recovery_sweep pristine 오분류)을 surface. 운영자 결정: "어느 한쪽만 수정하면 더 꼬일 수도" — 다음 세션에서 한 번에. 스물 네 번째 세션이 06:30 KST에 이어받아 3라운드 HIL fix-in을 fold하고 머지. 가장 큰 학습은 **mapping driver의 `M_PI - angle` 수식이 SLAMTEC datasheet 정의와 모순한다**는 점, 그리고 그 수정 시 단순 sed-patch가 published `/scan` angle range를 비표준 `[-2π, 0]`로 만들어 rf2o cumulative mapping을 silently 깨뜨렸다는 점.
+
+### 2개 PR (날짜 횡단 arc)
+
+| PR | issue# | 제목 | 결과 |
+|---|---|---|---|
+| #84 | issue#30 | feat(issue#30): pick-anchored YAML normalization + sidecar SSOT | merged `af3b6cf` (squash, 4 commit → 1; HIL 3 fold round 포함) |
+| #85 | n/a (handoff) | parent: NEXT_SESSION.md rewrite + issue#30 HIL findings memory | merged `6973167` (squash, 스물 세 번째 세션 close docs) |
+
+PR #84 squash 전 4개 commit:
+1. `640b420` — 원래 feat (스물 세 번째 세션 pipeline 출력)
+2. `e865aed` — HIL fold v1 (driver sed + AFFINE -theta + recovery_sweep guard + cleanup)
+3. `b668f26` — yaw direction operator 재잠금 + frontend 2-point negate + cropping fix
+4. `f9694e4` — driver fix v2 (sed → `flip_x_axis: True` runtime parameter)
+
+### 핵심 구조 발견 #1 — SLAMTEC RPLIDAR `M_PI - angle` driver 수식이 datasheet와 모순
+
+Slamtec/rplidar_ros 업스트림 `src/rplidar_node.cpp:247-251`은 raw RPLIDAR angle을 ROS `/scan`으로 변환할 때 `M_PI - angle`을 쓴다. 그런데 SLAMTEC 자체 datasheet (Figure 2-4 page 11)는 ▲ marker = +x = scanner forward, θ는 +x에서 CW로 측정, left-handed 좌표계를 정의한다. REP-103 (right-handed, +y left, θ CCW)으로 정확히 변환하려면 `ψ = -θ` 한 번의 negation으로 충분 (handedness flip + CW→CCW direction을 동시에 처리).
+
+driver의 `M_PI - θ = -θ + π`는 정확한 -θ 변환 위에 추가로 180° 회전을 더한 셈. 결과적으로 모든 빔 endpoint가 LIDAR origin 기준 점대칭(point-reflected) 위치에 그려짐. HIL `test_180check_left_obstacle` PGM에서 이 fingerprint를 직접 확인 — 정면 1m 벽이 PGM의 `-x_world` (LIDAR 왼쪽)에 그려짐, world span이 `x ∈ [-1.15, +10.25]`로 비대칭 (정면 free-space가 10m 끝났다는 건 정면에 obstacle 없음 = 잘못된 placement).
+
+운영자 lock: "이렇게 고정하자, 이게 맞는 것 같아요" (driver 수정 후 정상 single-frame 매핑 확인 직후).
+
+메모리: `project_rplidar_cw_vs_ros_ccw.md`을 5-path SSOT로 전면 rewrite (live driver / live AMCL / live overlay / mapping driver / mapping rf2o).
+
+### 핵심 구조 발견 #2 — bbox/affine sign mismatch가 silent canvas-cropping 유발
+
+issue#30 `map_transform.py`는 `_off_center_bbox`에 `R(-θ)`로 corner forward placement 계산 + `_affine_matrix_for_pivot_rotation`에 `R(+θ)` matrix coefficients (Pillow output→input) 사용. Pillow의 output→input convention에서는 이 두 piece가 **수학적 inverse**여야 정상 (forward placement와 source-lookup이 inverse 관계). pre-issue#30 (PR #81)부터 issue#30 round-1 Finding-1 fix까지의 history를 다시 분석한 결과:
+
+| 상태 | bbox | affine | visual rotation | bbox/affine inverse? |
+|---|---|---|---|---|
+| Pre-fix (issue#30 initial) | `R(-θ)` | `R(+θ)` | CCW for `+typed θ` | YES ✓ |
+| Round 1 fix (`-theta_rad`) | `R(-θ)` | `R(-θ)` | CW for `+typed θ` | NO ✗ → cropping |
+| Final (operator-locked) | `R(-θ)` | `R(+θ)` | CCW for `+typed θ` | YES ✓ |
+
+Round-1 fix가 동일 부호로 만들어버린 게 cropping 원인. `05.05_v3.20260505-085323-after_fix` 매핑 결과에서 derived의 bottom 영역 wall이 잘려나가는 현상으로 운영자가 발견. Final fix는 round-1을 revert하고 operator-locked semantic을 명시화.
+
+메모리: `project_pick_anchored_yaml_normalization_locked.md`에 "Yaw rotation sign convention" 섹션 추가, bbox/affine inverse-pair invariant 명시.
+
+### 핵심 구조 발견 #3 — 비표준 angle range가 rf2o scan-to-scan registration을 silent하게 깨뜨림
+
+Round 2 driver fix는 `rplidar_node.cpp` source를 sed로 직접 patch (`M_PI - angle` → `-angle`). single-frame 방향성은 정상화 (`test_180check_after_fix`로 확인 — 정면 1m 벽이 PGM의 +x_world). 그러나 운영자가 cumulative mapping을 시도해 본 결과: 같은 벽을 여러 각도에서 보면 잔상처럼 새로 그려지고 누적되지 않음. 운영자 표현: "지도가 잔상처럼 남아있어 … 움직이면 계속 새로 그리는 듯해."
+
+원인 진단: sed가 published `/scan`의 `angle_min/angle_max`를 conventional `[-π, π]` 범위에서 비표준 `[-2π, 0]` 범위로 시프트. ROS LaserScan을 소비하는 다운스트림 노드들 (rf2o + slam_toolbox) 중 일부가 `[-π, π]` 범위를 가정하는 internal logic을 갖고 있어서 scan-to-scan registration이 silently 잘못된 결과 산출 → slam_toolbox가 잘못된 상대 pose에 scan plot → 잔상.
+
+해결: sed를 revert + upstream driver의 기존 `flip_x_axis: True` 런타임 파라미터로 동등 변환을 launch에서 적용. 이 파라미터는 `apply_index += scan_midpoint (= n/2)` shift를 publish_scan 데이터 채우기 루프에서 트리거. 배열 인덱스 공간에서의 n/2 shift = angle 공간에서의 180° 회전. 이게 upstream `M_PI - angle` (published angle 값 공간에서의 180° 회전)과 정확히 합쳐져서 published-vs-physical 대응 관계는 identity (정확한 orientation), AND 양쪽 piece가 독립적으로 conventional `[-π, π]` 범위를 보존.
+
+운영자 HIL final 검증 (`test_180check_dockercheck_v1`): single-frame 정상 + cumulative 정상 + 30° yaw + ~70° (≈90°) yaw 모두 정상. "이대로 머지하면 될 것 같아."
+
+메모리: `project_rplidar_cw_vs_ros_ccw.md` SSOT 동일 entry 업데이트 (chosen fix + why-not-source-patch).
+
+### 핵심 구조 발견 #4 — 운영자 yaw 방향 직관은 PR #81이 아니라 수학 표준 컨벤션
+
+Q2 lock 원래 semantic: "typed +θ = world frame이 +θ CCW 회전 → bitmap 시각적으로 -θ (CW) 회전". PR #81의 `Image.rotate(-typed_yaw_deg)` 방향과 일치. issue#30 round-1 Finding-1 fix가 이 방향을 복원했더니 운영자 HIL: "내가 지금보다 반시계방향 90도로 돌리려 하면 -90을 입력해야 하는 상황." 즉 사용자 직관은 정반대 — `+typed = visual CCW` (수학 표준).
+
+운영자 lock 명시화: "typed +θ = bitmap visually rotates +θ CCW" (positive = CCW = 표준 수학 부호 컨벤션). frontend `twoClickToYawDeg`도 atan2 결과를 negate하도록 동기화 — P2가 사용자 의도하는 새 +x 방향에 있을 때 typed 값이 그 방향을 +x로 끌어당기는 회전 (visual CW)이 되도록.
+
+메모리: `project_pick_anchored_yaml_normalization_locked.md` "Yaw rotation sign convention" 섹션이 SSOT.
+
+### Process lesson — 구조적 fix는 single-frame + cumulative HIL 둘 다 통과해야 ship
+
+Round-1 Finding-1 fix는 webctl 1047/1047 + frontend 37/37 + ctest 48/48 모두 통과한 후 ship. 운영자 HIL이 (a) yaw direction wrong, (b) canvas cropping, (c) cumulative ghosting의 3가지 모두 발견. 어느 것도 자동화 테스트로 잡힐 수 없음:
+- direction-vs-intuition: 사용자 판단 필요
+- cropping: picked-pivot이 off-center인 HIL 시나리오 필요
+- cumulative ghosting: 운영자가 들고 움직이는 동적 HIL 필요
+
+학습: **scan/coordinate semantics를 바꾸는 구조적 fix는 single-frame HIL + cumulative motion HIL 양쪽을 거치기 전엔 shippable이 아님**. 테스트 통과만으로는 부족. (메모리 후보, Parent에 flag.)
+
+### 다음 세션 큐 (운영자 우선순위 잠금)
+
+1. issue#30.1 — Mode-B round 2 backlog (반나절): tautological test 재작성, MapList lineage glyph inline, LineageModal a11y 경고 정리.
+2. issue#28.1 — B-MAPEDIT-3 follow-ups (반나절 batch).
+3. issue#26 — 측정 도구 round 2 + Writer + HIL.
+4. issue#11 — Live pipelined-parallel (PAUSED).
+5. issue#13 — 거리-가중 AMCL likelihood.
+6. issue#4 — AMCL silent-converge 진단.
+7. issue#29 — SHOTOKU base-move (issue#30 dependency 해소됨).
+8. issue#17 — GPIO UART 마이그레이션 (perma-deferred).
+9. Bug B — Live mode 정지 jitter.
+10. issue#7 — boom-arm angle masking (issue#4 contingent).
+
+---
+
 ## 2026-05-04 (오전 ~ 심야 — 06:00 KST → 22:30 KST, 스물 두 번째 세션 — issue#28 B-MAPEDIT-3 yaw rotation 풀스택 ship + 5라운드 HIL fix — "이번에 같은 PR로 맞추자")
 
 ### 한 줄 요약

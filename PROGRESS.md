@@ -174,6 +174,48 @@ All host-side bring-up steps complete. See per-step session log entry below. The
 
 ## Session log
 
+### 2026-05-05 (cross-day — 02:00 KST → 12:00 KST, twenty-third + twenty-fourth-session — issue#30 pick-anchored YAML normalization ships with 3 HIL fold rounds, including driver-fix migration from sed-patch to `flip_x_axis` runtime parameter)
+
+Twenty-third-session opened 02:00-ish KST, ran the issue#30 pipeline to completion (Planner R1→R3 + Mode-A R1→R3 APPROVE + Writer R1→R2 + Mode-B R1→R2 APPROVE WITH MINOR), pushed commit `640b420` to PR #84, deployed to news-pi01 for HIL. Operator HIL surfaced 3 findings; operator chose to defer all to twenty-fourth-session for clean coupled fix rather than partial fix that "더 꼬일 수도". Twenty-third-session closed with PR #85 (handoff: NEXT_SESSION rewrite + new memory `project_issue30_hil_findings_2026-05-05.md`) merged at `6973167`.
+
+Twenty-fourth-session opened 06:30 KST, root-caused all 3 findings, applied 3 fold rounds, merged PR #84 at `af3b6cf`. Net: 1 merged PR over the cross-day arc (4 commits squashed), 1 docs handoff PR (#85), and a complex 3-round Finding 2 (driver) journey that taught a deep ROS-driver-internals lesson.
+
+**Notable structural revelation #1 — SLAMTEC RPLIDAR `M_PI - angle` driver formula vs datasheet**. Slamtec/rplidar_ros's upstream `src/rplidar_node.cpp:247-251` converts raw RPLIDAR angles to ROS `/scan` via `M_PI - angle`. Per SLAMTEC's own datasheet (Figure 2-4 page 11) the correct REP-103 conversion is `ψ = -θ` (single negation handles both left-handed→right-handed handedness flip and CW→CCW direction). The driver's `M_PI - θ = -θ + π` adds an extra 180° rotation on top, mapping every beam endpoint to the origin-symmetric position. HIL `test_180check_left_obstacle` PGM fingerprint: 1m wall physically forward placed at PGM `-x_world`. World-span asymmetry (`x ∈ [-1.15, +10.25]` for a wall-in-front setup) confirmed the point-reflection. Memory: `project_rplidar_cw_vs_ros_ccw.md` rewritten as full 5-path SSOT.
+
+**Notable structural revelation #2 — bbox/affine sign mismatch causes silent canvas cropping**. Issue#30's `map_transform.py` had `_off_center_bbox` using `R(-θ)` for forward corner placement and `_affine_matrix_for_pivot_rotation` using `R(+θ)` matrix coefficients (output→input). For Pillow's output→input convention, these two pieces are mathematical inverses ONLY when their parameters compose correctly. Round-1 Finding-1 fix (`helper(-theta_rad)`) made BOTH use `R(-θ)` — same matrix instead of inverses — causing observed canvas-cropping on `05.05_v3.20260505-085323-after_fix` (bottom wall clipped). Final fix (revert helper to `helper(+theta_rad)`) restored bbox/affine as inverses AND aligned the visual rotation direction with the operator-locked semantic. Memory: `project_pick_anchored_yaml_normalization_locked.md` adds explicit "Yaw rotation sign convention" section.
+
+**Notable structural revelation #3 — non-conventional angle range silently breaks rf2o scan-to-scan registration**. Round-2 driver fix sed-patched `M_PI - angle` → `-angle` in `rplidar_node.cpp`. Single-frame orientation became correct (verified by `test_180check_after_fix`), but cumulative mapping over operator motion broke: walls would ghost / not be re-recognised across consecutive scans. Operator HIL: "지도가 잔상처럼 남아있어 … 움직이면 계속 새로 그리는 듯해." Diagnosed as the sed shifting the published `/scan` `angle_min/angle_max` from conventional `[-π, π]` to `[-2π, 0]`, which degraded rf2o's internal scan alignment math. Replaced with `flip_x_axis: True` runtime parameter (existing in upstream driver), which composes with `M_PI - angle` to produce identity in physical correspondence AND keeps the conventional `[-π, π]` range. Composition explanation: two 180° rotations (one in published angle values, one in array index ordering via `apply_index += n/2`) compose to identity in beam-position correspondence. Memory: same `project_rplidar_cw_vs_ros_ccw.md` SSOT updated.
+
+**Notable structural revelation #4 — operator yaw direction lock matches math convention, not PR #81 direction**. Original Q2 lock semantic was "typed +θ = world frame +θ CCW → bitmap visually rotates -θ (CW)". This matched PR #81's `Image.rotate(-typed_yaw_deg)` direction. Operator HIL on the round-1 Finding-1 fix discovered this direction was opposite to their intuition — they kept typing negative values to get visual CCW rotation. Operator-locked the math-convention direction explicitly: "typed +θ = bitmap visually rotates +θ CCW" (positive angle = CCW = standard math convention). Frontend `twoClickToYawDeg` co-fixed to negate atan2 output for the new lock. Memory: `project_pick_anchored_yaml_normalization_locked.md` "Yaw rotation sign convention" section.
+
+**Process violation + lesson — fix v1 ship before mode-B re-review broke production cumulative mapping**. Round-1 Finding-1 fix shipped after webctl tests passed (1047/1047 green). Operator HIL on the deployed fix discovered (a) yaw direction wrong vs intuition AND (b) canvas-cropping AND (c) cumulative-mapping ghosting. None of these were caught by tests — direction-vs-intuition needs human judgment, cropping needs HIL with picked-pivot off-center, ghosting needs cumulative motion. Lesson: **structural fixes that change scan/coordinate semantics MUST go through operator HIL across BOTH single-frame AND cumulative mapping** before being considered shippable. Test pass alone is insufficient. (Memory candidate for Parent.)
+
+**2 PRs landed this session** (cross-day arc):
+
+| PR | Issue | Title | State |
+|---|---|---|---|
+| #84 | issue#30 | feat(issue#30): pick-anchored YAML normalization + sidecar SSOT | merged `af3b6cf` (squash, 4 commits → 1; with 3 HIL fold rounds) |
+| #85 | n/a (handoff) | parent: NEXT_SESSION.md rewrite + issue#30 HIL findings memory | merged `6973167` (squash, twenty-third-session close docs) |
+
+PR #84's 4 internal commits (squashed):
+1. `640b420` — original feat (twenty-third-session pipeline output)
+2. `e865aed` — HIL fold v1 (driver sed + AFFINE -theta + recovery_sweep guard + cleanup)
+3. `b668f26` — operator-relock yaw direction + frontend 2-point negate + cropping fix
+4. `f9694e4` — driver fix v2 (sed → `flip_x_axis: True` runtime parameter)
+
+**Open queue for next session** (priority order, operator-locked):
+
+1. issue#30.1 — Mode-B round 2 backlog (half-day): tautological test rewrite, MapList lineage glyph inline, LineageModal a11y warning.
+2. issue#28.1 — B-MAPEDIT-3 follow-ups (half-day batch from PR #81 Mode-B Major findings).
+3. issue#26 — measurement tool round 2 + Writer + HIL (half-day at broadcasting-room wired LAN).
+4. issue#11 — Live pipelined-parallel (PAUSED awaiting issue#26 first capture).
+5. issue#13 — distance-weighted AMCL likelihood.
+6. issue#4 — AMCL silent-converge diagnostic.
+7. issue#29 — SHOTOKU base-move (issue#30 dependency now resolved).
+8. issue#17 — GPIO UART migration (perma-deferred).
+9. Bug B — Live mode standstill jitter.
+10. issue#7 — boom-arm angle masking (contingent on issue#4).
+
 ### 2026-05-04 (morning → late-night — 06:00 KST → 22:30 KST, twenty-second-session — issue#28 ships B-MAPEDIT-3 yaw rotation full stack + 5 HIL fix rounds)
 
 Twenty-second-session opened directly off the twenty-first-session close (PR #80 docs merged 06:11 KST → main = `046d49d`). Operator brief: "B-MAPEDIT-3 yaw rotation 다음 세션 1순위" plus mid-session "이번에 같은 PR로 맞추자" — fold every Critical / Major / cascade item into ONE PR rather than splitting follow-ups. Net result: 1 merged PR (#81 squash at `da78dd0`), 54 files / +6746 / -384 LOC, 1456/1456 tests pass, longest pipeline stack of any session to date (Planner → Mode-A ACCEPT-WITH-NITS → Writer × 3 commits → Mode-B ACCEPT-WITH-NITS → Writer × 1 fold-in → operator HIL × 5 rounds → 5 HIL-fix commits → squash-merge).

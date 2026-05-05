@@ -247,11 +247,19 @@ export function resolveYawDeltaFromPose(
 /**
  * issue#28 — compute the desired YAW from a 2-click yaw pick. Operator
  * clicks point P1 (origin), then point P2 (along the desired +x axis);
- * the angle of the (P1→P2) vector in the world frame is the new yaw.
+ * we return the typed-θ value that, when applied via Apply, rotates
+ * the bitmap so the (P1→P2) direction becomes the new +x.
+ *
+ * Sign convention (operator-locked 2026-05-05 KST after PR #84 HIL):
+ *   - Backend semantic: `typed +θ` = bitmap visual CCW by θ.
+ *   - For the (P1→P2) direction at world-angle β to become the new +x,
+ *     the bitmap must rotate visually by -β (CW by β). This corresponds
+ *     to typed value -β under the locked semantic.
+ *   - We therefore return `-atan2(dy, dx)` (negated standard atan2).
  *
  * The caller MUST supply WORLD-frame coordinates (canvas → world via
  * `viewport.canvasToWorld`). World Y increases upward (ROS map_server
- * convention) so the vector angle is the standard atan2.
+ * convention).
  *
  * Returns `null` when the two points are pixel-coincident — the caller
  * displays the "두 점이 너무 가깝습니다" inline error.
@@ -273,5 +281,6 @@ export function twoClickToYawDeg(
   if (distPx < minPixelDistPx) return null;
   const radians = Math.atan2(dyWorld, dxWorld);
   const degrees = (radians * 180) / Math.PI;
-  return wrapYawDeg(degrees);
+  // Negate for the locked semantic (typed +θ = visual CCW θ).
+  return wrapYawDeg(-degrees);
 }

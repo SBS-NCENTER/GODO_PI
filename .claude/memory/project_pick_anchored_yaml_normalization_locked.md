@@ -93,6 +93,31 @@ Operator-visible cumulative display reads "회전 (typed θ 누적)" — never
 references pristine yaw, so the operator's mental cumulative matches
 the JSON field exactly.
 
+## Yaw rotation sign convention (operator-relock 2026-05-05 KST)
+
+PR #84 HIL surfaced a sign-direction question. Operator-locked direction:
+
+> **Typed `+θ` deg = bitmap visually rotates CCW by θ.** (Standard math
+> convention: positive angle = CCW rotation as seen on screen.)
+
+Implementation invariants (must stay matched to avoid canvas cropping):
+- `_off_center_bbox` rotates pristine corners by `R(-θ)` to compute the
+  forward bounding box (corner placement after the bitmap rotation).
+- `_affine_matrix_for_pivot_rotation` uses `R(+θ)` matrix coefficients
+  (= the mathematical inverse of `R(-θ)`, required by Pillow's
+  `Image.transform` output→input convention).
+- Frontend `twoClickToYawDeg` returns `-atan2(dy, dx)` (negated standard
+  atan2) so that clicking P2 in the desired-new-`+x` direction yields a
+  typed value that, when applied, rotates the bitmap to bring that
+  direction to `+x`.
+
+Pre-relock history: PR #81 used `Image.rotate(-typed_yaw_deg)` (typed
++θ → visual CW θ); issue#30 round-2 dropped the negation when migrating
+to `Image.transform(AFFINE)` (typed +θ → visual CCW θ); PR #84 HIL
+Finding 1 initial fix re-added a negation (back to PR #81 direction);
+operator HIL on the re-fixed code 2026-05-05 KST showed the math-
+convention CCW direction is more intuitive — re-locked here.
+
 ## Why this design is structurally clean
 
 `project_amcl_yaw_metadata_only.md` documents that AMCL's likelihood

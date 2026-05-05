@@ -13,51 +13,74 @@ discovered three issues during HIL on 2026-05-05 KST. Twenty-fourth
 session (2026-05-05) root-caused all three and folded fixes into the
 same PR.
 
-## Finding 1 — issue#30 AFFINE rotation direction sign-flipped — RESOLVED
+## Finding 1 — issue#30 AFFINE rotation direction (operator re-locked 2026-05-05 KST)
 
-### Symptom
+### History (2 fix rounds → final lock)
 
-Operator typed a yaw delta on `test_v4` (pristine yaw=1.604 rad) using
-the new pick-anchored Apply pipeline. Bitmap rotated **opposite to PR #81's
-direction** for the same typed value.
+**Round 1 fix (initial Finding 1 fix)**: pass `-theta_rad` to
+`_affine_matrix_for_pivot_rotation`. This produced visual CW rotation
+for `+typed_θ` (matching PR #81's direction).
 
-### Root cause
+**Operator HIL on round 1 fix (2026-05-05 KST follow-up)**:
+- Operator finds that under round-1 fix, `+typed θ` rotated the bitmap
+  CW (= clockwise), but their math-convention intuition says `+θ`
+  should be CCW.
+- Operator also found that the same Apply produced cropping in some
+  cases (e.g., `05.05_v3.20260505-085323-after_fix` had bottom wall
+  clipped).
 
-`godo-webctl/src/godo_webctl/map_transform.py` had a sign mismatch
-between the bbox sizing and the AFFINE transform direction:
+### Root cause (correct analysis)
 
-- `_off_center_bbox` (line 425) rotated corners by `-theta_rad` →
-  canvas sized for visual CW rotation.
-- `_affine_matrix_for_pivot_rotation` (line 458) used `+theta_rad` →
-  visual CCW rotation.
+The bbox and affine sign signs must be **mathematical inverses** for
+the canvas-cropping safety, AND the visual direction must match the
+locked semantic. Pre-fix and round-1-fix BOTH had issues:
 
-Pillow's `Image.transform(AFFINE)` uses output→input convention. The
-helper builds the matrix from `R(+α)` coefficients, which when applied
-output→input produces a visual `-α` rotation of the source. To honour
-the Q2 lock (operator typed +θ → bitmap visually rotates CW by θ), the
-helper must be called with `-theta_rad` so the visual rotation is `+θ` in
-the matrix-α space, which corresponds to `-θ` visual = CW.
+| State | bbox | affine | visual | bbox/affine inverse? |
+| --- | --- | --- | --- | --- |
+| Pre-fix (issue#30 initial) | `R(-θ)` | `R(+θ)` | CCW for `+θ` | YES ✓ |
+| Round 1 fix | `R(-θ)` | `R(-θ)` | CW for `+θ` | NO ✗ → cropping |
+| Final (operator-locked) | `R(-θ)` | `R(+θ)` | CCW for `+θ` | YES ✓ |
 
-### Fix
+The final state matches the operator's intuition (`+typed = visual
+CCW`) AND keeps bbox/affine as mathematical inverses (no cropping).
 
-`map_transform.py:333` — pass `-theta_rad` instead of `+theta_rad`:
+This is operationally a **revert of the round-1 Finding 1 fix** plus
+explicit re-lock of the visual direction.
 
+### Final fix (2026-05-05 KST)
+
+`map_transform.py` `transform_pristine_to_derived`:
 ```python
-affine = _affine_matrix_for_pivot_rotation(i_p, j_p, x_min, y_min, -theta_rad)
+affine = _affine_matrix_for_pivot_rotation(i_p, j_p, x_min, y_min, theta_rad)
 ```
 
-The helper itself (`_affine_matrix_for_pivot_rotation`) is untouched, so
-`test_affine_matrix_golden_4x4_theta45` (which calls the helper directly)
-still passes.
+(`-theta_rad` reverted to `theta_rad`.) Module docstring + bbox docstring
+updated to reflect the locked semantic. Helper signature itself
+unchanged so `test_affine_matrix_golden_4x4_theta45` keeps passing.
+
+### Frontend co-fix (2-point yaw)
+
+`originMath.ts` `twoClickToYawDeg`:
+```typescript
+return wrapYawDeg(-degrees);  // negate atan2 result for new lock
+```
+
+Under the lock, P2-direction at world-angle β requires bitmap to rotate
+visually by `-β` (CW by β) to bring that direction to `+x`. Since
+`typed +θ = visual CCW θ`, the corresponding typed value is `-β`.
+Frontend test cardinal expectations updated: north (0, +10) → `-90°`
+(was `+90°`); new south case (0, -10) → `+90°`.
 
 ### Test impact
 
 - `test_affine_matrix_golden_4x4_theta45`: helper-level, untouched. ✓
-- `test_pickpoint_lands_at_world_origin[*]`: pivot doesn't move under
-  rotation around itself. ✓
+- `test_pickpoint_lands_at_world_origin[*]`: pivot invariant under any
+  rotation direction. ✓
 - `test_typed_delta_shifts_picked_point_off_origin`: θ=0 path. ✓
 - `test_apply_pipeline_pickpoint_lands_at_world_origin_via_http`: pivot
   invariant. ✓
+- Frontend `originMath.test.ts` cardinal `north` updated; new `south`
+  test added.
 
 ## Finding 2 — `rplidar_ros` driver extra 180° rotation — RESOLVED
 

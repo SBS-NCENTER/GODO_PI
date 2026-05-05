@@ -167,14 +167,18 @@ describe('originMath.resolveYawDeltaFromPose (issue#28 ROTATE pins)', () => {
   });
 });
 
-describe('originMath.twoClickToYawDeg (issue#28 — 2-click yaw pick)', () => {
-  it('twoClickToYawDeg simple cardinal east → 0°', async () => {
+describe('originMath.twoClickToYawDeg (issue#28 — 2-click yaw pick; PR #84 HIL sign-relock 2026-05-05 KST)', () => {
+  it('twoClickToYawDeg cardinal east → 0° (already aligned with +x; no rotation needed)', async () => {
     const { twoClickToYawDeg } = await import('../../src/lib/originMath');
     expect(twoClickToYawDeg(0, 0, 10, 0, 8, 0.05)).toBeCloseTo(0, 6);
   });
-  it('twoClickToYawDeg simple cardinal north → 90°', async () => {
+  it('twoClickToYawDeg cardinal north → -90° (P2 is 90° CCW from +x → bitmap must rotate CW by 90° to align it with new +x; under "typed +θ = visual CCW θ" lock that is typed -90°)', async () => {
     const { twoClickToYawDeg } = await import('../../src/lib/originMath');
-    expect(twoClickToYawDeg(0, 0, 0, 10, 8, 0.05)).toBeCloseTo(90, 6);
+    expect(twoClickToYawDeg(0, 0, 0, 10, 8, 0.05)).toBeCloseTo(-90, 6);
+  });
+  it('twoClickToYawDeg cardinal south → +90° (P2 is 90° CW from +x → bitmap must rotate CCW by 90° = typed +90°)', async () => {
+    const { twoClickToYawDeg } = await import('../../src/lib/originMath');
+    expect(twoClickToYawDeg(0, 0, 0, -10, 8, 0.05)).toBeCloseTo(90, 6);
   });
   it('twoClickToYawDeg ignores length (scaling P1→P2 by 10× yields same yaw)', async () => {
     const { twoClickToYawDeg } = await import('../../src/lib/originMath');

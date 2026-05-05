@@ -48,8 +48,14 @@ Convention pins:
 - `j_p`, `j_p'` are **row-from-top** (Pillow convention).
 - ROS YAML origin is **row-from-bottom**. The Y-flip from row-from-top
   to row-from-bottom is applied **only in Step 5**.
-- Rotation sign: `+θ` = CCW in operator's world view. Bitmap content
-  rotates by `-θ` (Pillow output→input convention).
+- Rotation sign (operator-locked 2026-05-05 KST after PR #84 HIL):
+  `+θ` typed = bitmap visual rotation CCW by θ (= positive in standard
+  math convention). The operator clicks pre-rotation positions and
+  types the visual rotation amount; backend transforms the bitmap to
+  show the rotated result. Bbox sizes the canvas with `R(-θ)` corner
+  placement (forward) and the affine matrix `R(+θ)` (output→input)
+  acts as the mathematical inverse — together they give a visually
+  CCW rotation of magnitude θ with no cropping.
 
 Step 1: Bitmap pivot pixel — yaw-aware via `pristine_world_to_pixel`.
 Step 2: Off-center bbox by rotating four pristine corners around
@@ -331,14 +337,14 @@ def transform_pristine_to_derived(  # noqa: C901, PLR0912, PLR0913, PLR0915
     j_p_new = j_p - y_min
 
     # 4. Pillow AFFINE matrix (output → input).
-    # Pass `-theta_rad` (NOT `+theta_rad`) so the matrix matches the
-    # `_off_center_bbox`'s `-theta_rad` corner rotation: both pieces
-    # now describe a visual CW rotation of the bitmap by θ, which is
-    # the Q2 lock semantic for operator-typed +θ (world frame rotates
-    # +θ CCW → bitmap content rotates -θ CW). The historical `+theta_rad`
-    # call produced a visual CCW rotation disagreeing with the bbox's
-    # CW-sized canvas (PR #84 HIL Finding 1, 2026-05-05 KST).
-    affine = _affine_matrix_for_pivot_rotation(i_p, j_p, x_min, y_min, -theta_rad)
+    # Pass `+theta_rad` so that bbox `R(-theta_rad)` (forward corner
+    # placement) and affine matrix `R(+theta_rad)` (output→input lookup)
+    # are mathematical inverses — required for canvas-cropping safety.
+    # The visual rotation produced is `+theta_rad` (CCW for `+typed_θ`),
+    # matching the operator-locked direction ("typed +θ = bitmap visual
+    # CCW θ"). PR #84 HIL operator-relock 2026-05-05 KST after the
+    # initial Finding 1 revert proved direction-flipped vs intuition.
+    affine = _affine_matrix_for_pivot_rotation(i_p, j_p, x_min, y_min, theta_rad)
 
     resample = _resolve_transform_filter(deps.image_mod)
     transformed = img.transform(

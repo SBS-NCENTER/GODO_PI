@@ -42,7 +42,7 @@ There is no single value that is both fast-enough on steady AND slack-enough on 
 | Site | Workload anchor | Notes |
 |---|---|---|
 | issue#11 ParallelEvalPool (shipped PR #99) | N=500 (Live steady) | Anchor: `kJoinTimeoutAnchorN = 500`; first-tick N=5000 → 10× scale → 500 ms deadline. |
-| issue#19 EDT 2D 3-way (planned, reuses pool) | W × H per row/col pass | Map-size-proportional. The `parallel_for_with_scratch<S>` extension can use the same pattern at the pool level. |
+| issue#19 EDT 2D 3-way (shipped feat/issue-19-edt-parallel, 2026-05-07 KST — DONE) | W × H per row/col pass | EDT-specific Tier-1 anchors `EDT_PARALLEL_DEADLINE_BASE_NS = 30 ms`, `EDT_PARALLEL_ANCHOR_DIM = 256 × 256 / 3 = 21,845` cells per worker at the 256×256 reference scale. Production 1000×1000 / 3 ≈ 333,333 → scale ≈ 15 → ~450 ms per pass. Shares the `parallel_for_with_scratch<S>` extension (caller-owned `std::vector<EdtScratch> per_worker`, type-erased shim). issue#19.2 reserved for production-runtime fold-rate telemetry per m2 HIL ask (deferred follow-up; opens after operator HIL completes the 5-min Phase-0 capture on news-pi01 per the post-deploy verification bar in `production/RPi5/CODEBASE/2026-W19.md`). |
 | Map activate phased reload (future) | Active map cell count | Re-prime time scales with map. |
 | Phase 5 UE characterization runs (future) | Scenario length | Long scenarios get longer budgets. |
 | FreeD smoother fast-recovery path (future, hypothetical) | Burst replay length | If we ever build a "replay-and-re-smooth" path, range-proportional fits. |

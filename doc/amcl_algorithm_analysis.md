@@ -850,4 +850,4 @@ There is no current plan for the AMCL-classical *random sample injection* (textb
 
 ---
 
-*End of document. ~1100 lines. Last updated 2026-05-06 KST (twenty-eighth-session, post-issue#11 deploy + Phase-0 5-min capture).*
+*End of document. 853 lines. Last updated 2026-05-06 KST (twenty-eighth-session, post-issue#11 deploy + Phase-0 5-min capture).*

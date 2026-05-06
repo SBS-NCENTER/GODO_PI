@@ -1148,12 +1148,117 @@ Restart-class so the operator gets a clean re-start path; no mid-run
 hot-flip.
 
 **Cross-applicability**: the same pool is the primitive for issue#19
-(EDT 2D Felzenszwalb row/column passes). issue#19 will extend the
-public API with `parallel_for_with_scratch<S>` for per-worker `(v, z)`
-scratch pairs (~30 LOC extension). Together issue#11 + issue#19
-absorb 99 % of the per-tick cold compute, projecting ~21 Hz at p50
-(48 ms / scan) on the same Phase-0 fixture. issue#11 ships the simpler
+(EDT 2D Felzenszwalb row/column passes). issue#19 ships the extension
+(`parallel_for_with_scratch<S>` for per-worker `(v, z)` scratch pairs)
+— see §6.6.1 below. Together issue#11 + issue#19 absorb 99 % of the
+per-tick cold compute, projecting ~21 Hz at p50 (48 ms / scan) on the
+same Phase-0 fixture. issue#11 ships the simpler
 `parallel_for(begin, end, fn)` surface only.
+
+### 6.6.1 EDT 2D parallelisation (issue#19)
+
+The Felzenszwalb 2D EDT (`localization/likelihood_field.cpp::build_likelihood_field`)
+runs two 1-D passes — column (W independent vertical sweeps) then row
+(H independent horizontal sweeps). Phase-0 measured LF rebuild p50 at
+~40 ms (29 % of TOTAL p50 in pre-issue#11 sequential, 46 % of TOTAL
+p50 post-issue#11). issue#19 partitions both passes across the same
+`ParallelEvalPool` (cores 0/1/2, CPU 3 still vetoed by Thread D RT
+contract):
+
+```text
+┌─────────────────────────────────────────────────────────────────┐
+│ build_likelihood_field (cold writer thread, cpus 0/1/2)          │
+│                                                                  │
+│   ┌─── pool.parallel_for_with_scratch<EdtScratch> (col pass) ─┐  │
+│   │ Worker 0: cols [0   .. W/3) — 16-float aligned residue    │  │
+│   │ Worker 1: cols [W/3 .. 2W/3) — 16-float aligned residue   │  │
+│   │ Worker 2: cols [2W/3 .. W)   — last-worker takes residue  │  │
+│   └─── join (range-proportional deadline, anchor=W·H/3) ─────┘   │
+│                                                                  │
+│   ┌─── pool.parallel_for_with_scratch<EdtScratch> (row pass) ─┐  │
+│   │ Worker 0: rows [0   .. H/3)                              │   │
+│   │ Worker 1: rows [H/3 .. 2H/3)                             │   │
+│   │ Worker 2: rows [2H/3 .. H)                               │   │
+│   └─── join (same deadline shape) ────────────────────────────┘  │
+│                                                                  │
+│   sq_dist → values   (Gaussian conversion, sequential)            │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**EDT scratch ownership** is the API surface delta. Felzenszwalb's
+`edt_1d` needs two per-sweep scratch buffers (`v` parabola-locator
+indices + `z` parabola intersections). Caller builds
+`std::vector<EdtScratch> per_worker(workers)` once per pass and passes
+it via `parallel_for_with_scratch<EdtScratch>`. Each worker receives
+`(thread_idx, &per_worker[thread_idx])` so EDT writes into its own
+scratch slot — no contention, no per-iter heap allocation. Pool stays
+Scratch-agnostic via a type-erased `void*` shim (D1 / m3 fold);
+runtime size guard `if (per_worker.size() != workers)
+{ fprintf + std::abort(); }` trips in BOTH debug AND release
+(`[edt-scratch-asserted]` build-grep at `parallel_eval_pool.cpp`
+function definition; `assert(...)` macro is banned per D1 because it
+compiles out under release).
+
+**Cache-line aligned column partition** (D4) — `floor(W/3)` rounded
+down to the nearest multiple of 16 floats (= 64 B Cortex-A76 line
+width); the last worker absorbs the residue. Row pass uses the
+naive `floor(H/3)` partition because consecutive rows are
+`W·sizeof(float)` bytes apart so worker boundaries are naturally
+cache-aligned. Bit-equality with sequential preserved at production
+1000×1000 scale (`tests/bench_lf_rebuild.cpp` case 2 memcmp).
+
+**Range-proportional deadline** (reuses the issue#11 pattern at
+`.claude/memory/project_range_proportional_deadline_pattern.md`)
+with EDT-specific Tier-1 anchors:
+- `EDT_PARALLEL_DEADLINE_BASE_NS = 50 ms` (single-pass anchor at the
+  1000-dim reference scale).
+- `EDT_PARALLEL_ANCHOR_DIM = 1000` (`max(W, H)` is the dispatch range,
+  NOT cell count). Formula: `scale = max(1, max(W,H) / 1000)`.
+- Production 1000×1000 → scale=1 → deadline = 50 ms per pass.
+  2000×2000 (EDT_MAX_CELLS edge) → scale=2 → deadline = 100 ms per
+  pass. Both passes back-to-back at the edge ≈ 200 ms total — well
+  under the 5 s SIGTERM watchdog.
+- m2 fallback rule (operator-locked 2026-05-06 21:00 KST): if HIL or
+  `bench_lf_rebuild` measures 2000×2000 worker p99 > 80 ms, anchor
+  drops to 750 via a separate small PR (preserves production-scale
+  headroom while tightening the EDT_MAX_CELLS edge to 1.9× headroom).
+
+**Bit-equality with sequential**: workers write to disjoint output
+subranges (column subranges in the col pass, row subranges in the
+row pass); `sq_dist → values` Gaussian conversion stays sequential
+so the IEEE 754 exp() ordering is identical. Pinned by
+`tests/test_likelihood_field_parallel.cpp` cases 2/3/4 (FNV-1a-
+equivalent memcmp at 16×16 + 256×256 + 1000×1000) and
+`tests/bench_lf_rebuild.cpp` case 2 (memcmp at production
+1000×1000 scale).
+
+**Graceful fallback** (R7 / R8): if the pool transitions to
+permanent inline-sequential (`pool->degraded()` returns true) at
+any point during a build, the affected pass is re-run sequentially
+using `per_worker[0]`'s scratch. Subsequent calls short-circuit
+straight to sequential because `degraded` is sticky for the rest
+of the process. Workers=0 rollback (TOML
+`amcl.parallel_eval_workers = 1`) bit-equal to pre-issue#19
+sequential — `per_worker` sized to `max(1, worker_count())` so the
+empty-cpus path has exactly 1 scratch slot; the runtime size-guard
+sees the expected size; output bit-equal to nullptr path.
+
+**M1 spirit preservation**: `cold_writer.cpp` source text never
+gains `<mutex>` or `std::mutex`. The 3 `build_likelihood_field`
+call sites in `cold_writer.cpp` thread the existing `pool*` (the
+issue#11 plumbing) into the new `pool` overload of
+`build_likelihood_field`; `[m1-no-mutex]` build-grep stays clean.
+
+**Combined projection (issue#11 + issue#19)**: TOTAL p50 87 →
+~47 ms ≈ 21.4 Hz at p50, matching §6.6 closing paragraph's
+prediction. Operator HIL on news-pi01 verifies post-deploy via
+fresh Phase-0 5-min capture (`GODO_PHASE0_TRIM_ON=1`); acceptance
+bar LF rebuild p50 ≤ 17 ms, TOTAL p50 ≤ 50 ms, cold-path Hz ≥ 18,
+`[pool-degraded]` count == 0.
+
+**Rollback**: TOML `amcl.parallel_eval_workers = 1` (the issue#11
+single-lever) — same lever covers both eval-pool and EDT
+parallelism. No new TOML key (D5 / A5).
 
 ---
 

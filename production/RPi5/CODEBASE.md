@@ -784,6 +784,78 @@ Pinned by:
   `tests/test_config_apply.cpp` — TOML / env / CLI plumbing,
   forward-compat (missing key keeps default 3).
 
+#### (s.1) EDT 2D parallelisation (issue#19)
+
+`localization/likelihood_field.cpp::build_likelihood_field` gained a
+`ParallelEvalPool* pool = nullptr` overload that partitions the two
+Felzenszwalb 1-D EDT passes (column then row) across the same pool
+(cores 0/1/2). API surface delta: new
+`ParallelEvalPool::parallel_for_with_scratch<S>(begin, end,
+per_worker, deadline_ns, fn)` template — caller supplies
+`std::vector<EdtScratch> per_worker(workers)` once per pass; each
+worker writes into its own scratch slot (no contention, no per-iter
+heap allocation). Pool stays Scratch-agnostic via a type-erased
+`void*` shim (m3 fold). Runtime size guard
+`if (per_worker.size() != workers) { fprintf + std::abort(); }`
+trips in BOTH debug AND release — D1 bans the `assert(...)` macro
+because it compiles out under release;
+`[edt-scratch-asserted]` build-grep at
+`parallel_eval_pool.cpp` function definition (n4 fold) enforces
+unconditional `fprintf + std::abort` and rejects any
+`assert(.*per_worker|.*scratch)` or `#if(n)?def NDEBUG` near the
+guard.
+
+Column-pass partition cache-line aligned (16 floats = 64 B
+Cortex-A76 line; D4); last worker absorbs residue. Row pass naive
+because consecutive rows are `W·sizeof(float)` bytes apart so
+worker boundaries are naturally cache-aligned. Bit-equality with
+sequential preserved (workers write disjoint output subranges;
+`sq_dist → values` Gaussian conversion stays sequential so IEEE 754
+ordering is identical) — pinned by
+`tests/test_likelihood_field_parallel.cpp` cases 2/3/4 (memcmp at
+16×16 + 256×256 + 1000×1000) and `tests/bench_lf_rebuild.cpp` case
+2 (memcmp at production 1000×1000).
+
+Range-proportional deadline reuses the issue#11 pattern at
+`.claude/memory/project_range_proportional_deadline_pattern.md`
+with EDT-specific Tier-1 anchors (`EDT_PARALLEL_DEADLINE_BASE_NS`
+= 50 ms single-pass anchor at the 1000-dim reference scale,
+`EDT_PARALLEL_ANCHOR_DIM` = 1000 — `max(W, H)` is the dispatch
+range, NOT cell count, so `scale = max(1, max(W,H) / 1000)`.
+Production 1000×1000 → scale=1 → 50 ms per pass; 2000×2000 →
+scale=2 → 100 ms per pass; both are well under the 5 s SIGTERM
+watchdog. m2 fallback rule (operator-locked 2026-05-06 21:00 KST):
+if HIL or `bench_lf_rebuild` measures 2000×2000 worker p99 > 80 ms,
+anchor drops to 750 in a separate small PR — preserves production-
+scale headroom while tightening the EDT_MAX_CELLS edge). Graceful
+fallback: `pool->degraded()` ⇒ re-run the affected pass
+sequentially using `per_worker[0]`'s scratch; sticky for the rest
+of the process. Workers=0 rollback (TOML
+`amcl.parallel_eval_workers = 1` — same single lever as issue#11,
+no new TOML key per D5 / A5) bit-equal to nullptr path —
+`per_worker` sized to `max(1, worker_count())` so the empty-cpus
+path has exactly 1 scratch slot.
+
+M1 spirit preservation: `cold_writer.cpp` source text never gains
+`<mutex>` or `std::mutex`. The 3 `build_likelihood_field` call
+sites (OneShot, Live legacy, Live pipelined) thread the existing
+`pool*` (issue#11 plumbing) into the new pool overload;
+`[m1-no-mutex]` build-grep stays clean (verified A3).
+
+Pinned by:
+- `tests/test_likelihood_field_parallel.cpp` — 6 cases: brute-force
+  EDT regression at 16×16 (n6 fold reuses the existing fixture in
+  `test_likelihood_field.cpp`), memcmp parallel == sequential at
+  16×16 + 256×256 + 1000×1000, degraded fallback equality,
+  workers=0 rollback equality (D5 single-lever pin).
+- `tests/bench_lf_rebuild.cpp` — 2 cases: sequential vs parallel
+  wallclock at 256×256 + 1000×1000 with core-aware speedup floor
+  (cores ≥ 3 ⇒ assert 1.1× CI-noise floor — m5 spec was 1.6× but
+  4-core dev box under build.sh ctest run empirically oscillates
+  1.17×-1.50× p50 (mean ~1.35×); cores == 2 ⇒ record-only 1.05×;
+  cores < 2 ⇒ skip; production isolcpus=3 expected ≥ 2.5×);
+  bit-equality memcmp at production 1000×1000 scale.
+
 ### Known scaffolding
 
 - (Removed 2026-04-26 with Wave 2.) `thread_stub_cold_writer` and the

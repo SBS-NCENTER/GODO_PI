@@ -40,6 +40,23 @@ inline constexpr int      SCAN_BEAMS_MAX      = 720;
 inline constexpr int      EDT_TABLE_SIZE      = 1024;
 inline constexpr std::int64_t EDT_MAX_CELLS   = 4'000'000;
 
+// issue#19 — EDT 2D 3-way parallelisation (Felzenszwalb column/row passes).
+// Tier-1 because (1) paired with EDT_MAX_CELLS above (the deadline math at
+// the EDT_MAX_CELLS edge needs to be reasoned about against the same
+// constant), (2) NOT operator-tunable — changing them either wastes time
+// on the steady path or starves the pool at the heavy edge, both of which
+// regress production. Range-proportional formula mirrors issue#11's
+// `kJoinTimeoutAnchorN = 500` particle anchor:
+//   deadline_ns = EDT_PARALLEL_DEADLINE_BASE_NS *
+//                 max(1, max(W,H) / EDT_PARALLEL_ANCHOR_DIM)
+// → 1000×1000 (1M cells) → scale=1, deadline=50 ms (worker p99 ≪ 50 ms)
+// → 2000×2000 (4M cells, EDT_MAX_CELLS edge) → scale=2, deadline=100 ms
+// Anchor at 1000 keeps 3× headroom at production scale; bench-driven
+// fallback rule (Mode-A m2): if 2000×2000 worker p99 > 80 ms, drop anchor
+// to 750 in a follow-up Tier-1 amendment.
+inline constexpr std::int64_t EDT_PARALLEL_DEADLINE_BASE_NS = 50'000'000LL;
+inline constexpr std::size_t  EDT_PARALLEL_ANCHOR_DIM       = 1000;
+
 // Track D — fixed cap on the per-frame range count published by the cold
 // writer to LastScan. Mirrors SCAN_BEAMS_MAX so the AMCL beam decimation
 // and the LastScan ranges array are sample-aligned (one stride, one

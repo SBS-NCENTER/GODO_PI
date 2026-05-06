@@ -143,6 +143,17 @@ public:
     [[nodiscard]] double circular_std_yaw_deg() const noexcept;
     [[nodiscard]] std::size_t particle_count() const noexcept { return n_; }
 
+    // issue#19 — Forward access to the optional ParallelEvalPool. Cold
+    // writer plumbs `amcl.pool()` into `build_likelihood_field` so the
+    // EDT 2D Felzenszwalb passes share the same pool (and the same
+    // CPU 3 hard-veto guarantee) as `Amcl::step`'s particle eval. The
+    // pool is owned by the caller (production: main.cpp); Amcl never
+    // deletes it. Returns the same nullptr passed at construction when
+    // the operator booted with `amcl.parallel_eval_workers = 1` in the
+    // pre-issue#11 surface OR when no pool was wired.
+    [[nodiscard]] godo::parallel::ParallelEvalPool*
+    pool() const noexcept { return pool_; }
+
     // Pre-allocated buffer capacity. `front`/`back` and `cumsum` all share
     // this size.
     [[nodiscard]] std::size_t buffer_capacity() const noexcept {

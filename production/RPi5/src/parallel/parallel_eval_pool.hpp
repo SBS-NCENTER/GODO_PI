@@ -29,6 +29,7 @@
 // articulation; the body of that invariant lives in the master
 // CODEBASE.md.
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -37,6 +38,16 @@
 #include <vector>
 
 namespace godo::parallel {
+
+namespace test_hooks {
+// issue#19 — test-only flag. When set true by a test fixture, the
+// dispatcher's D1 size-mismatch guard throws `std::logic_error` instead
+// of calling `std::abort()` (which would tear down the doctest runner).
+// Production code MUST NOT touch this. Pinned by build-grep
+// [edt-scratch-asserted] which still requires the verbatim `std::abort`
+// keyword in parallel_eval_pool.cpp.
+extern std::atomic<bool> s_abort_throws_for_test;
+}  // namespace test_hooks
 
 // Snapshot of the pool's runtime state, sampled by the diag publisher.
 // Layout pinned to 32 B for Seqlock<T> safety (8-aligned + trivially
@@ -119,6 +130,75 @@ public:
                       std::size_t                       end,
                       std::function<void(std::size_t)>  fn);
 
+    // issue#19 — Per-worker scratch variant.
+    //
+    // Run `fn(i, per_worker[wid])` for each i in [begin, end). Each worker
+    // receives the SAME `Scratch&` for every iteration it executes within
+    // one dispatch (so scratch can be re-used between iterations on the
+    // same worker), but workers see DISJOINT references — no synchronization
+    // is required inside fn().
+    //
+    // Caller MUST pass `per_worker.size() == worker_count()`. A mismatch
+    // is a programming error and trips a runtime guard in BOTH debug AND
+    // release builds (`fprintf(stderr) + std::abort()` rather than the
+    // NDEBUG-conditional `assert(...)` macro). D1 is explicit: production
+    // builds must trip too. Pinned by build-grep `[edt-scratch-asserted]`.
+    //
+    // `deadline_ns_override` REPLACES the issue#11 N=500-anchored auto-scale
+    // for this dispatch — it is a hard caller-specified deadline, NOT
+    // optional, NOT auto-scaled. EDT callers compute their own scale (see
+    // `localization/likelihood_field.cpp` against `EDT_PARALLEL_*`
+    // constants in `core/constants.hpp`); the pool does not interpret the
+    // value. D2.
+    //
+    // Returns true on full completion of all iterations. Returns false on
+    // (a) size mismatch (after the abort lands), (b) pool degraded
+    // mid-call (per-pass false-return, drains stragglers before returning),
+    // (c) deadline overrun (drains stragglers before returning + flips
+    // `degraded` sticky for the rest of the process).
+    //
+    // workers=0 path: when the pool was constructed with an empty
+    // cpus_to_pin, runs fn inline on the caller thread with
+    // `per_worker[0]` (asserts per_worker.size() == 1).
+    //
+    // ---- Type-erasure rationale (Mode-A m3) ----
+    // The header surface is a non-virtual function template; the body
+    // forwards into a non-template private dispatcher in the .cpp. The
+    // dispatcher accepts `void**` per-worker pointers + a
+    // `std::function<void(size_t, void*)>` so that the pimpl Impl (and
+    // its `<mutex>` / `<condition_variable>` private members) stay sealed
+    // inside the .cpp. Future Scratch types do NOT cascade a header
+    // re-include into every TU that uses the pool. Per-call overhead is
+    // one small `std::vector<void*>` (≤ 24 B at N=3) plus one
+    // `std::function` construction per dispatch — NOT per iteration. The
+    // worker hot loop dereferences the per-worker pointer directly inside
+    // the wrapped fn lambda; reviewers must verify the Impl never
+    // re-wraps `fn_erased` per-iteration.
+    template <typename Scratch>
+    bool parallel_for_with_scratch(
+        std::size_t                                  begin,
+        std::size_t                                  end,
+        std::vector<Scratch>&                        per_worker,
+        std::function<void(std::size_t, Scratch&)>   fn,
+        std::int64_t                                 deadline_ns_override) {
+        // Build the per-worker void* table on the caller stack
+        // (size N ≤ 3 in production; small_vector-like via the std::vector
+        // single allocation). Stable address: per_worker.data() must not
+        // be invalidated for the duration of dispatch_with_scratch_erased.
+        std::vector<void*> ptr_table(per_worker.size());
+        for (std::size_t i = 0; i < per_worker.size(); ++i) {
+            ptr_table[i] = static_cast<void*>(&per_worker[i]);
+        }
+        // Wrap fn into the type-erased dispatcher signature once per call.
+        std::function<void(std::size_t, void*)> erased =
+            [fn](std::size_t i, void* p) {
+                fn(i, *static_cast<Scratch*>(p));
+            };
+        return dispatch_with_scratch_erased(
+            begin, end, ptr_table.data(), per_worker.size(),
+            std::move(erased), deadline_ns_override);
+    }
+
     // Snapshot the diag counters. Safe to call from any thread; uses
     // atomic loads only.
     [[nodiscard]] ParallelEvalSnapshot snapshot_diag() const noexcept;
@@ -134,6 +214,21 @@ public:
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
+
+    // issue#19 — Type-erased dispatcher for `parallel_for_with_scratch<S>`.
+    // Public-API surface is the template above; this private function is
+    // the actual implementation seam. Defined in parallel_eval_pool.cpp.
+    bool dispatch_with_scratch_erased(
+        std::size_t                              begin,
+        std::size_t                              end,
+        void* const*                             per_worker_ptrs,
+        std::size_t                              per_worker_count,
+        std::function<void(std::size_t, void*)>  fn_erased,
+        std::int64_t                             deadline_ns_override);
+
+    // Befriend the public template wrapper so it can reach the private
+    // dispatcher above. (The template lives in this class scope so
+    // implicit access is sufficient — no friend declaration needed.)
 };
 
 }  // namespace godo::parallel

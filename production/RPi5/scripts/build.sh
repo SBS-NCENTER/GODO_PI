@@ -300,3 +300,48 @@ if [[ -n "${ATOMIC_TOML_HITS}" ]]; then
     exit 1
 fi
 echo "[atomic-toml-write-grep] clean (mkstemp/rename only in config/atomic_toml_writer.cpp + uds/uds_server.cpp)"
+
+# -----------------------------------------------------------------------
+# [edt-scratch-asserted] — issue#19 invariant: the type-erased EDT scratch
+# dispatcher in parallel_eval_pool.cpp MUST trip a size-mismatch guard in
+# BOTH debug AND release builds. D1 (operator-locked 2026-05-06) bans the
+# NDEBUG-conditional `assert(...)` macro for this guard because under
+# release builds it would compile out and a caller bug would silently
+# produce OOB / UB on uninitialised scratch.
+#
+# The grep targets the dispatcher's function definition in
+# parallel_eval_pool.cpp:
+#   - REQUIRES at least one `std::abort` OR `fprintf(stderr).*scratch`
+#     (the pair the runtime guard emits before aborting).
+#   - REJECTS any `assert(.*per_worker` / `assert(.*scratch` (NDEBUG-
+#     conditional macro path is forbidden).
+#   - REJECTS any `#ifdef NDEBUG` / `#ifndef NDEBUG` near the guard
+#     (would gate the abort on build flavour).
+# Mode-A n4 fold: target the .cpp function body, not the call sites,
+# because call sites belong to caller modules (likelihood_field.cpp +
+# future EDT users) and would drift on refactor.
+# -----------------------------------------------------------------------
+EDT_SCRATCH_TARGET="${ROOT_DIR}/src/parallel/parallel_eval_pool.cpp"
+if [[ -f "${EDT_SCRATCH_TARGET}" ]]; then
+    EDT_ABORT_HITS=$(grep -cE 'std::abort\b' "${EDT_SCRATCH_TARGET}" || true)
+    EDT_FPRINTF_HITS=$(grep -cE 'fprintf.*scratch|edt-scratch-asserted' \
+        "${EDT_SCRATCH_TARGET}" || true)
+    if [[ "${EDT_ABORT_HITS}" -lt 1 || "${EDT_FPRINTF_HITS}" -lt 1 ]]; then
+        echo "[edt-scratch-asserted] FAIL — parallel_eval_pool.cpp is missing the unconditional size-mismatch guard (std::abort + fprintf(stderr)). D1 requires the guard trip in both debug and release; assert(...) is banned." >&2
+        exit 1
+    fi
+    EDT_ASSERT_HITS=$(grep -cE 'assert\(.*per_worker|assert\(.*scratch' \
+        "${EDT_SCRATCH_TARGET}" || true)
+    if [[ "${EDT_ASSERT_HITS}" -gt 0 ]]; then
+        echo "[edt-scratch-asserted] FAIL — parallel_eval_pool.cpp uses assert() macro for the per_worker / scratch size guard; assert is NDEBUG-conditional and compiles out under release. Use 'if (size != expected) { fprintf + std::abort(); }' instead." >&2
+        grep -nE 'assert\(.*per_worker|assert\(.*scratch' \
+            "${EDT_SCRATCH_TARGET}" | sed 's/^/[edt-scratch-asserted]   /' >&2
+        exit 1
+    fi
+    EDT_NDEBUG_HITS=$(grep -cE '#if(n)?def\s+NDEBUG' "${EDT_SCRATCH_TARGET}" || true)
+    if [[ "${EDT_NDEBUG_HITS}" -gt 0 ]]; then
+        echo "[edt-scratch-asserted] FAIL — parallel_eval_pool.cpp gates code on NDEBUG; the size guard MUST be unconditional." >&2
+        exit 1
+    fi
+    echo "[edt-scratch-asserted] clean (parallel_eval_pool.cpp dispatcher emits unconditional fprintf+std::abort; no assert(per_worker/scratch); no NDEBUG gating)"
+fi

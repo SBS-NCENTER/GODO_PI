@@ -237,6 +237,61 @@ TEST_CASE("Case 4: Pool null-safety — Amcl(cfg, lf, nullptr).step continues to
     CHECK(std::isfinite(res.yaw_std_deg));
 }
 
+TEST_CASE("issue#19 (g): Amcl::pool() accessor exposes the wired pool") {
+    // The cold writer uses `amcl.pool()` to forward the pool into
+    // `build_likelihood_field`. This pin verifies the accessor returns
+    // the same pointer the ctor was wired with — and nullptr when no
+    // pool was wired (regression net for the workers=1 rollback path
+    // and for unit-test fixtures that pass nullptr).
+    const Config        cfg  = make_test_config();
+    const OccupancyGrid grid = load_fixture();
+    const LikelihoodField lf =
+        build_likelihood_field(grid, cfg.amcl_sigma_hit_m);
+
+    {
+        Amcl amcl(cfg, lf, nullptr);
+        CHECK(amcl.pool() == nullptr);
+    }
+    {
+        ParallelEvalPool pool({0, 1, 2});
+        Amcl amcl(cfg, lf, &pool);
+        CHECK(amcl.pool() == &pool);
+    }
+}
+
+TEST_CASE("issue#19 (h): build_likelihood_field via amcl.pool() reaches the pool") {
+    // End-to-end: build the LF once with the pool wired through the
+    // amcl.pool() accessor; the pool's dispatch_count must increment.
+    // Snapshot before (0) → call build_likelihood_field with pool →
+    // snapshot after (>= 2 — column + row passes; possibly more if
+    // the bench harness was already used). Bit-equality with the
+    // nullptr path is pinned by test_likelihood_field_parallel cases
+    // 2..4 (FNV-1a memcmp); we re-pin it here at the larger fixture
+    // grid scale to close the integration loop.
+    const Config        cfg  = make_test_config();
+    const OccupancyGrid grid = load_fixture();
+    const LikelihoodField seq_lf =
+        build_likelihood_field(grid, cfg.amcl_sigma_hit_m, nullptr);
+
+    ParallelEvalPool pool({0, 1, 2});
+    Amcl amcl(cfg, seq_lf, &pool);
+    REQUIRE(amcl.pool() == &pool);
+
+    const auto before = pool.snapshot_diag();
+
+    LikelihoodField par_lf = build_likelihood_field(
+        grid, cfg.amcl_sigma_hit_m, amcl.pool());
+
+    const auto after = pool.snapshot_diag();
+    CHECK(after.dispatch_count >= before.dispatch_count + 2);
+    CHECK(after.degraded == 0);
+
+    // Bit-equality re-pin at the fixture grid scale.
+    REQUIRE(seq_lf.values.size() == par_lf.values.size());
+    const std::size_t nb = seq_lf.values.size() * sizeof(float);
+    CHECK(std::memcmp(seq_lf.values.data(), par_lf.values.data(), nb) == 0);
+}
+
 TEST_CASE("Case 5 (bonus): Pool empty cpus path is bit-equal to nullptr path") {
     // Plan §6.1 case 5 says workers=1 fallback runs fn on caller thread.
     // Combined with case 1's bit-equality proof, an Amcl wired to an

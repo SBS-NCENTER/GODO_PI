@@ -1,14 +1,14 @@
 # Next session — cold-start brief
 
 > Throwaway. Delete the moment the next session picks up the thread.
-> Refreshed 2026-05-06 18:00 KST (twenty-eighth-session close — issue#11 main shipped as PR #99 `64a2abb`; production cold-path 7.34 → 11.52 Hz +57% verified post-fix; range-proportional deadline pattern locked; AMCL deep-dive doc written but kept untracked for separate next-session PR).
+> Refreshed 2026-05-07 KST (twenty-ninth-session close — issue#19 EDT 2D parallelization shipped via PR #104 to be squash-merged; production cold-path 11.52 → 13.77 Hz +19% measured on news-pi01; 1.43× LF speedup vs plan's 3× projection — memory-bandwidth ceiling identified; 0 [pool-degraded] events; bit-equality preserved. Two doc typos (env var GODO_PHASE0_TRIM_ON → GODO_PHASE0; grep `\[phase0\]` → `PHASE0 path=`) found mid-HIL and folded back. Two memory entries added on yaw tripwire design flaw + OneShot-vs-MAP-EDIT origin yaw clarification).
 > Cache-role per `.claude/memory/feedback_next_session_cache_role.md` — SSOT = RAM (PROGRESS / history / per-stack CODEBASE.md / memory); this file is cache. 3-step absorb routine: read → record in SSOT → prune.
 
-## TL;DR (operator-locked priority order, refreshed 2026-05-06 18:00 KST)
+## TL;DR (operator-locked priority order, refreshed 2026-05-07 KST)
 
-1. **★ issue#19 — EDT 2D Felzenszwalb 3-way parallelization** (TOP PRIORITY now that issue#11 main is shipped). Reuses issue#11's `ParallelEvalPool` primitive with a `parallel_for_with_scratch<S>` API extension for per-worker `(v, z)` scratch buffers (Mode-A round 1 C6 surfaced this requirement). ~80 LOC: ~30 LOC pool API extension + ~50 LOC EDT integration. Projected lift: 11.52 → ~21 Hz (LF rebuild p50 40 → ~14 ms). LF rebuild is now 46% of TOTAL (40 / 87 ms) post-issue#11 — biggest remaining slice. Plan likely re-uses range-proportional deadline pattern (`project_range_proportional_deadline_pattern.md`) since EDT workload scales with W × H grid size.
+1. **issue#19.5** — EDT cache locality / SIMD optimisation. The 1.43× memory-bandwidth ceiling measured during issue#19 HIL is the trigger: Felzenszwalb 1D EDT does column-major reads → cache miss heavy → 3-worker parallel saturates DDR4 bus on Pi 5 → sub-linear scaling. Candidate paths (NEON vectorisation of `edt_1d` inner loop, `__builtin_prefetch` directives, transpose-tile cache locality, or row-major rewrite of column pass). Independent PR; stacks on issue#19's `parallel_for_with_scratch<S>` infrastructure. Reuses range-proportional deadline pattern. **Open question**: which optimisation gives the biggest lift per LOC — bench-driven exploration first, then commit to a path.
 
-2. **AMCL algorithm analysis docs PR** — `/doc/amcl_algorithm_analysis.md` already written this session (853 lines, 11 Parts × 32 sections, file:line cited from main `129ad3f` + branch HEAD; bit-equality 5-step proof + Felzenszwalb 1D EDT decoded + tuning cheat sheet). Operator decision-locked: NOT in PR #99; separate docs PR in next session. **Action**: branch `docs/amcl-algorithm-analysis` from main → commit single file → open PR. Untracked file already at `/home/ncenter/projects/GODO/doc/amcl_algorithm_analysis.md` — just `git add` + commit. ~5 minute task; can be opener for next session.
+2. **issue#36 — `cold_writer.cpp` yaw tripwire elimination** (operator-locked design flaw per `.claude/memory/project_yaw_tripwire_design_flaw.md`). LiDAR sits on crane pan-axis center → LiDAR yaw follows pan rotation 1:1 → tripwire fires every Live tick whenever camera is panned > 5° from OneShot time. Designed for "BASE rotates" scenarios that physical invariants rule out. 2994 events / 5 minutes during issue#19 HIL is unacceptable noise. Operator preference (2026-05-07): eliminate the tripwire entirely (option 1 of 3 in the memory file). Trivial PR (~10 LOC removal) but Mode-A should validate that no other code reads the tripwire's stderr output.
 
 3. **issue#13 — distance-weighted AMCL likelihood** (`r_cutoff` near-LiDAR down-weight). Orthogonal to issue#11/19 (modifies `evaluate_scan` body, not the caller); composes with Option C without re-design. Standalone single-knob algorithmic experiment.
 
@@ -34,7 +34,7 @@
 
 14. **Future: SPA Config tab search input** (low-priority UX follow-up surfaced during PR #93 HIL — there's no in-page search box; manual scroll required). Verify if `project_config_tab_grouping.md` (issue#15 candidate) covers this or if it's a separate ask.
 
-**Next free issue integer: `issue#36`** (issue#11 P4-2-11-0 was DONE in PR #96; issue#11 main DONE in PR #99 28th-session; issue#35 candidate still tracking — sample size 2 from 27th-session, 0 reproductions in 28th-session).
+**Next free issue integer: `issue#37`** (issue#11 P4-2-11-0 DONE in PR #96; issue#11 main DONE in PR #99 28th-session; issue#19 main DONE in PR #104 29th-session; issue#36 reserved 2026-05-07 for yaw tripwire elimination; issue#35 candidate still tracking — sample size 2 from 27th-session, 0 reproductions in 28th + 29th sessions). issue#19.1–.5 are decimal sub-issues per CLAUDE.md §6 scheme.
 
 ## Where we are (2026-05-06 18:00 KST — twenty-eighth-session close)
 

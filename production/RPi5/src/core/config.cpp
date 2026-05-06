@@ -77,6 +77,7 @@ const std::set<std::string>& allowed_keys() {
         "amcl.sigma_hit_schedule_m",
         "amcl.sigma_seed_xy_schedule_m",
         "amcl.anneal_iters_per_phase",
+        "amcl.parallel_eval_workers",
         "amcl.hint_sigma_xy_m_default",
         "amcl.hint_sigma_yaw_deg_default",
         "amcl.live_carry_pose_as_hint",
@@ -222,6 +223,10 @@ void apply_toml_file(Config& c, const std::filesystem::path& path) {
     }
     if (auto v = tbl["amcl"]["anneal_iters_per_phase"].value<int64_t>();   v) {
         c.amcl_anneal_iters_per_phase = static_cast<int>(*v);
+    }
+    // issue#11 — fork-join particle eval pool workers.
+    if (auto v = tbl["amcl"]["parallel_eval_workers"].value<int64_t>();   v) {
+        c.amcl_parallel_eval_workers = static_cast<int>(*v);
     }
     // issue#3 — hint-σ defaults.
     if (auto v = tbl["amcl"]["hint_sigma_xy_m_default"].value<double>();   v) {
@@ -514,6 +519,11 @@ void apply_env(Config& c, char** envp) {
         c.amcl_anneal_iters_per_phase =
             parse_int_or_throw(*v, "GODO_AMCL_ANNEAL_ITERS_PER_PHASE");
     }
+    // issue#11 — fork-join particle eval pool workers.
+    if (auto v = env_get(envp, "GODO_AMCL_PARALLEL_EVAL_WORKERS")) {
+        c.amcl_parallel_eval_workers =
+            parse_int_or_throw(*v, "GODO_AMCL_PARALLEL_EVAL_WORKERS");
+    }
     // issue#3 — hint-σ defaults.
     if (auto v = env_get(envp, "GODO_AMCL_HINT_SIGMA_XY_M_DEFAULT")) {
         c.amcl_hint_sigma_xy_m_default =
@@ -647,6 +657,8 @@ void apply_cli(Config& c, int argc, char** argv) {
         {"amcl-sigma-hit-schedule-m",      [](Config& cc, const std::string& v){ cc.amcl_sigma_hit_schedule_m      = parse_csv_doubles_or_throw(v, "--amcl-sigma-hit-schedule-m"); }},
         {"amcl-sigma-seed-xy-schedule-m",  [](Config& cc, const std::string& v){ cc.amcl_sigma_seed_xy_schedule_m  = parse_csv_doubles_with_sentinel_or_throw(v, "--amcl-sigma-seed-xy-schedule-m"); }},
         {"amcl-anneal-iters-per-phase",    [](Config& cc, const std::string& v){ cc.amcl_anneal_iters_per_phase    = parse_int_or_throw(v, "--amcl-anneal-iters-per-phase"); }},
+        // issue#11 — fork-join particle eval pool workers.
+        {"amcl-parallel-eval-workers",     [](Config& cc, const std::string& v){ cc.amcl_parallel_eval_workers     = parse_int_or_throw(v, "--amcl-parallel-eval-workers"); }},
         {"amcl-hint-sigma-xy-m-default",   [](Config& cc, const std::string& v){ cc.amcl_hint_sigma_xy_m_default   = parse_double_or_throw(v, "--amcl-hint-sigma-xy-m-default"); }},
         {"amcl-hint-sigma-yaw-deg-default",[](Config& cc, const std::string& v){ cc.amcl_hint_sigma_yaw_deg_default = parse_double_or_throw(v, "--amcl-hint-sigma-yaw-deg-default"); }},
         // issue#5 — Live pipelined-hint kernel keys. Flag accepts the
@@ -816,6 +828,14 @@ void validate_amcl(const Config& c) {
     // Track D-5 — annealing schedule + seed_xy schedule + iters_per_phase.
     require_positive_int(c.amcl_anneal_iters_per_phase,
                          "amcl_anneal_iters_per_phase");
+    // issue#11 — pool worker count must be in [1, 3] (CPU 3 reserved for
+    // Thread D; project_cpu3_isolation.md). The schema row enforces the
+    // same bounds for `set_config` payloads.
+    if (c.amcl_parallel_eval_workers < 1 || c.amcl_parallel_eval_workers > 3) {
+        throw std::runtime_error(
+            "config: amcl_parallel_eval_workers must be in [1, 3] (got " +
+            std::to_string(c.amcl_parallel_eval_workers) + ")");
+    }
     if (c.amcl_sigma_hit_schedule_m.empty()) {
         throw std::runtime_error(
             "config: amcl_sigma_hit_schedule_m must be non-empty");
@@ -982,6 +1002,9 @@ Config Config::make_default() {
             cfg_defaults::AMCL_SIGMA_SEED_XY_SCHEDULE_M,
             "AMCL_SIGMA_SEED_XY_SCHEDULE_M");
     c.amcl_anneal_iters_per_phase = cfg_defaults::AMCL_ANNEAL_ITERS_PER_PHASE;
+
+    // issue#11 — fork-join particle eval pool default.
+    c.amcl_parallel_eval_workers  = cfg_defaults::AMCL_PARALLEL_EVAL_WORKERS_DEFAULT;
 
     // issue#3 — hint-σ defaults.
     c.amcl_hint_sigma_xy_m_default    = cfg_defaults::AMCL_HINT_SIGMA_XY_M_DEFAULT;

@@ -713,6 +713,72 @@ TEST_CASE("Config::load — Track D-5 anneal_iters_per_phase = 0 rejected") {
                     std::runtime_error);
 }
 
+// ---------------------------------------------------------------------------
+// issue#11 — fork-join particle eval pool worker count. Default 3,
+// range [1, 3] (CPU 3 reserved for Thread D). main.cpp owns the
+// translation int → cpus_to_pin vector at boot.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Config::make_default — wires issue#11 amcl_parallel_eval_workers default 3") {
+    Config c = Config::make_default();
+    CHECK(c.amcl_parallel_eval_workers ==
+          godo::config::defaults::AMCL_PARALLEL_EVAL_WORKERS_DEFAULT);
+    CHECK(c.amcl_parallel_eval_workers == 3);
+}
+
+TEST_CASE("Config::load — issue#11 TOML round-trip (workers = 1 rollback)") {
+    auto tmp = write_temp_toml(
+        "[amcl]\n"
+        "parallel_eval_workers = 1\n"
+    );
+    Argv argv({});
+    Env  env({"GODO_CONFIG_PATH=" + tmp.path.string()});
+    Config c = Config::load(argv.argc, argv.argv.data(), env.ptr());
+    CHECK(c.amcl_parallel_eval_workers == 1);
+}
+
+TEST_CASE("Config::load — issue#11 env override (workers = 2)") {
+    Argv argv({});
+    Env  env({"GODO_AMCL_PARALLEL_EVAL_WORKERS=2"});
+    Config c = Config::load(argv.argc, argv.argv.data(), env.ptr());
+    CHECK(c.amcl_parallel_eval_workers == 2);
+}
+
+TEST_CASE("Config::load — issue#11 CLI override (workers = 3 explicit)") {
+    Argv argv({"--amcl-parallel-eval-workers=3"});
+    Env  env({});
+    Config c = Config::load(argv.argc, argv.argv.data(), env.ptr());
+    CHECK(c.amcl_parallel_eval_workers == 3);
+}
+
+TEST_CASE("Config::load — issue#11 below range (workers = 0) rejected") {
+    Argv argv({"--amcl-parallel-eval-workers=0"});
+    Env  env({});
+    CHECK_THROWS_AS(Config::load(argv.argc, argv.argv.data(), env.ptr()),
+                    std::runtime_error);
+}
+
+TEST_CASE("Config::load — issue#11 above range (workers = 4) rejected") {
+    Argv argv({"--amcl-parallel-eval-workers=4"});
+    Env  env({});
+    CHECK_THROWS_AS(Config::load(argv.argc, argv.argv.data(), env.ptr()),
+                    std::runtime_error);
+}
+
+TEST_CASE("Config::load — issue#11 missing TOML key keeps default 3 (forward compat)") {
+    // R8: a NEW tracker reading an OLD tracker.toml that lacks the
+    // amcl.parallel_eval_workers key MUST keep the compile-time
+    // default. toml++ silently ignores missing-key reads.
+    auto tmp = write_temp_toml(
+        "[amcl]\n"
+        "max_iters = 17\n"  // arbitrary other key
+    );
+    Argv argv({});
+    Env  env({"GODO_CONFIG_PATH=" + tmp.path.string()});
+    Config c = Config::load(argv.argc, argv.argv.data(), env.ptr());
+    CHECK(c.amcl_parallel_eval_workers == 3);
+}
+
 TEST_CASE("Config::load — Track D-5 sigma_hit_m bound bump (1.5 accepted, 5.01 rejected)") {
     // Mode-A T4: pin that the bound was actually loosened, not just
     // left at 1.0 with a typo.

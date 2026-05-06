@@ -65,6 +65,10 @@
 #include "rt/amcl_rate.hpp"
 #include "scan_ops.hpp"
 
+namespace godo::parallel {
+class ParallelEvalPool;  // issue#11 P4-2-11-3
+}
+
 namespace godo::localization {
 
 // Factory that constructs (and `open()`s) a fresh LidarSourceRplidar.
@@ -297,12 +301,19 @@ AmclResult run_live_iteration_pipelined(
 // derive the AMCL iteration rate exposed via UDS `get_amcl_rate`.
 // Build-grep `[amcl-rate-publisher-grep]` enforces that only the cold
 // writer (here) calls `record(...)` on this accumulator.
+// issue#11 P4-2-11-3: `pool` is the fork-join particle eval pool spawned
+// by main.cpp BEFORE the cold writer thread (R11 ordering). Empty / null
+// indistinguishable to the cold writer — it just forwards the pointer to
+// the Amcl ctor. main.cpp owns the lifetime; cold writer never deletes.
+// nullptr is allowed for tests that drive run_cold_writer directly without
+// a pool fixture.
 void run_cold_writer(const godo::core::Config&              cfg,
                      godo::rt::Seqlock<godo::rt::Offset>&   target_offset,
                      godo::rt::Seqlock<godo::rt::LastPose>& last_pose_seq,
                      godo::rt::Seqlock<godo::rt::LastScan>& last_scan_seq,
                      godo::rt::AmclRateAccumulator&         amcl_rate_accum,
                      godo::rt::Seqlock<godo::core::HotConfig>& hot_cfg_seq,
-                     LidarFactory                           lidar_factory);
+                     LidarFactory                           lidar_factory,
+                     godo::parallel::ParallelEvalPool*      pool = nullptr);
 
 }  // namespace godo::localization

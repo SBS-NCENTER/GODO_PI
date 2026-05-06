@@ -20,8 +20,8 @@ using godo::core::config_schema::reload_class_to_string;
 using godo::core::config_schema::ValueType;
 using godo::core::config_schema::value_type_to_string;
 
-TEST_CASE("CONFIG_SCHEMA has exactly 67 rows (issue#28.1 hard-removed amcl.origin_yaw_deg)") {
-    CHECK(CONFIG_SCHEMA.size() == 67);
+TEST_CASE("CONFIG_SCHEMA has exactly 68 rows (issue#11 added amcl.parallel_eval_workers)") {
+    CHECK(CONFIG_SCHEMA.size() == 68);
 }
 
 TEST_CASE("CONFIG_SCHEMA rows are alphabetically ordered by name") {
@@ -203,6 +203,20 @@ TEST_CASE("Track D-5: amcl.sigma_hit_m upper bound bumped 1.0 → 5.0") {
     const auto* row = find("amcl.sigma_hit_m");
     REQUIRE(row != nullptr);
     CHECK(row->max_d == 5.0);
+}
+
+TEST_CASE("issue#11: amcl.parallel_eval_workers row present (count went 67 → 68)") {
+    const auto* row = find("amcl.parallel_eval_workers");
+    REQUIRE(row != nullptr);
+    CHECK(row->type == ValueType::Int);
+    CHECK(row->min_d == 1.0);
+    CHECK(row->max_d == 3.0);              // CPU 3 hard-vetoed
+    CHECK(row->default_repr == "3");
+    CHECK(row->reload_class == ReloadClass::Recalibrate);
+    // Description must mention CPU 3 hard-veto + invariant (s) so an
+    // operator reading the Config tab tooltip understands the topology.
+    CHECK(std::string_view(row->description).find("CPU 3") !=
+          std::string_view::npos);
 }
 
 TEST_CASE("issue#5: Live-carry rows present (count went 42 → 46)") {

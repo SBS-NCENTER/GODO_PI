@@ -24,6 +24,13 @@
 #include "rng.hpp"
 #include "scan_ops.hpp"
 
+namespace godo::rt {
+// issue#11 P4-2-11-0 — Trim path Phase-0 instrumentation out-param.
+// Forward decl avoids dragging core/rt_types.hpp into amcl.hpp's
+// include surface; full definition lives there.
+struct Phase0InnerBreakdown;
+}  // namespace godo::rt
+
 namespace godo::localization {
 
 // Track D-5 — `set_field` swaps `field_` between phases of the OneShot
@@ -44,16 +51,30 @@ public:
     // Sets `result.iterations = 1`, `result.converged = (xy_std + yaw_std
     // both inside cfg thresholds)`, `result.forced = false`.
     //
-    // Two overloads:
+    // Overloads:
     //   - explicit-σ form: callers pick the per-call motion-model jitter
     //     (Phase 4-2 D Live mode passes the wider Live σ pair).
     //   - default form: forwards to the explicit form using
     //     cfg.amcl_sigma_xy_jitter_m / amcl_sigma_yaw_jitter_deg
     //     (OneShot semantics; converge() builds on this).
+    //   - issue#11 P4-2-11-0 trim Phase-0 form: same as above but accepts
+    //     a `godo::rt::Phase0InnerBreakdown*` out-param. When non-null,
+    //     the body wraps each of the 4 inner stages (jitter, evaluate_scan
+    //     loop, normalize, resample) with `monotonic_ns()` deltas. When
+    //     null (the default), the path is zero-overhead — the existing 4-arg
+    //     and 2-arg overloads delegate with `nullptr`.
+    AmclResult step(const std::vector<RangeBeam>& beams,
+                    Rng&                          rng,
+                    double                        sigma_xy_m,
+                    double                        sigma_yaw_deg,
+                    godo::rt::Phase0InnerBreakdown* phase0_out);
     AmclResult step(const std::vector<RangeBeam>& beams,
                     Rng&                          rng,
                     double                        sigma_xy_m,
                     double                        sigma_yaw_deg);
+    AmclResult step(const std::vector<RangeBeam>& beams,
+                    Rng&                          rng,
+                    godo::rt::Phase0InnerBreakdown* phase0_out);
     AmclResult step(const std::vector<RangeBeam>& beams, Rng& rng);
 
     // Loop on top of step() up to `cfg.amcl_max_iters`. Early-exits when

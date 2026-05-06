@@ -10,5 +10,6 @@ target_include_directories(godo_rt PUBLIC
 
 target_link_libraries(godo_rt PUBLIC
     godo_core
+    godo_parallel
     pthread
 )

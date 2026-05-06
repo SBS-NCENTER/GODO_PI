@@ -452,6 +452,39 @@ std::string format_ok_amcl_rate(const godo::rt::AmclIterationRate& r) {
     return std::string(buf, len);
 }
 
+// issue#11 P4-2-11-5 — get_parallel_eval payload. Field order pinned to
+// `godo::parallel::ParallelEvalSnapshot` declaration in
+// src/parallel/parallel_eval_pool.hpp. The wire shape mirrors
+// `format_ok_jitter`'s envelope so the SPA's diag tab can render it
+// uniformly. The Python mirror godo-webctl/protocol.py::
+// PARALLEL_EVAL_FIELDS is regex-pinned against this format string at
+// test time once webctl ships its consumer (separate PR).
+std::string format_ok_parallel_eval(
+    const godo::parallel::ParallelEvalSnapshot& s) {
+    char buf[512];
+    const int n = std::snprintf(buf, sizeof(buf),
+        "{\"ok\":true,\"valid\":%u,\"dispatch_count\":%llu,"
+        "\"fallback_count\":%llu,\"p99_us\":%u,\"max_us\":%u,"
+        "\"degraded\":%u,\"published_mono_ns\":%llu}\n",
+        static_cast<unsigned>(s.valid),
+        static_cast<unsigned long long>(s.dispatch_count),
+        static_cast<unsigned long long>(s.fallback_count),
+        static_cast<unsigned>(s.p99_us),
+        static_cast<unsigned>(s.max_us),
+        static_cast<unsigned>(s.degraded),
+        static_cast<unsigned long long>(s.published_mono_ns));
+    if (n <= 0) {
+        return std::string(
+            "{\"ok\":true,\"valid\":0,\"dispatch_count\":0,"
+            "\"fallback_count\":0,\"p99_us\":0,\"max_us\":0,"
+            "\"degraded\":0,\"published_mono_ns\":0}\n");
+    }
+    const std::size_t len = (static_cast<std::size_t>(n) >= sizeof(buf))
+                            ? sizeof(buf) - 1
+                            : static_cast<std::size_t>(n);
+    return std::string(buf, len);
+}
+
 // Field order pin — MUST match godo::rt::LastOutputFrame declaration in
 // core/rt_types.hpp. The Python mirror godo-webctl/protocol.py::
 // LAST_OUTPUT_FIELDS is regex-extracted from this format string at test

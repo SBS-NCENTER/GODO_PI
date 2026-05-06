@@ -25,5 +25,6 @@ target_include_directories(godo_localization PUBLIC
 target_link_libraries(godo_localization PUBLIC
     godo_core
     godo_lidar
+    godo_parallel
     Eigen3::Eigen
 )

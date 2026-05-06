@@ -20,6 +20,7 @@
 
 #include "core/rt_flags.hpp"
 #include "core/rt_types.hpp"
+#include "parallel/parallel_eval_pool.hpp"
 
 namespace godo::uds {
 
@@ -128,6 +129,20 @@ std::string format_ok_jitter(const godo::rt::JitterSnapshot& j);
 //   - published_mono_ns           → %llu   (uint64)
 //   - valid                       → %u
 std::string format_ok_amcl_rate(const godo::rt::AmclIterationRate& r);
+
+// issue#11 P4-2-11-5 — `get_parallel_eval` response (uds_protocol.md
+// §C.8). Field order MUST match `godo::parallel::ParallelEvalSnapshot`
+// declaration in src/parallel/parallel_eval_pool.hpp; the Python mirror
+// godo-webctl/protocol.py::PARALLEL_EVAL_FIELDS is regex-pinned against
+// this format string at test time (drift catch).
+//
+// Precision split:
+//   - dispatch_count / fallback_count  → %llu  (uint64)
+//   - published_mono_ns                → %llu  (uint64)
+//   - p99_us / max_us                  → %u    (uint32)
+//   - valid / degraded                 → %u    (uint8 → unsigned int)
+std::string format_ok_parallel_eval(
+    const godo::parallel::ParallelEvalSnapshot& s);
 
 // issue#27 — `get_last_output` response. Field order MUST match
 // `godo::rt::LastOutputFrame` declaration in core/rt_types.hpp; the

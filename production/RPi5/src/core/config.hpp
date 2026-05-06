@@ -98,6 +98,16 @@ struct Config {
     std::vector<double> amcl_sigma_seed_xy_schedule_m;
     int                 amcl_anneal_iters_per_phase{};
 
+    // issue#11 — fork-join particle eval pool worker count. main.cpp
+    // translates the int to a cpus_to_pin vector at boot time:
+    //   1 → {} (inline-sequential rollback; bit-equal to pre-issue#11),
+    //   2 → {0, 1},
+    //   3 → {0, 1, 2} (production default).
+    // CPU 3 is hard-vetoed by project_cpu3_isolation.md. Recalibrate
+    // class — value is captured at cold-writer construction; takes
+    // effect on next tracker boot.
+    int                 amcl_parallel_eval_workers{};
+
     // issue#3 — calibrate pose-hint default σ (recalibrate class).
     // Cold writer falls back to these when the UDS hint payload omits
     // sigma_xy_m / sigma_yaw_deg overrides (i.e. the operator placed a

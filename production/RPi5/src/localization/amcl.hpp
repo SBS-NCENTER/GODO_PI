@@ -31,6 +31,14 @@ namespace godo::rt {
 struct Phase0InnerBreakdown;
 }  // namespace godo::rt
 
+namespace godo::parallel {
+// issue#11 P4-2-11-2 — fork-join particle eval pool. Forward decl avoids
+// dragging parallel_eval_pool.hpp (and its <mutex> in the .cpp) into
+// every TU that includes amcl.hpp; cold_writer.cpp picks up the full
+// type via its own include.
+class ParallelEvalPool;
+}  // namespace godo::parallel
+
 namespace godo::localization {
 
 // Track D-5 — `set_field` swaps `field_` between phases of the OneShot
@@ -44,7 +52,19 @@ public:
     // The likelihood field is held by const-pointer; the caller (cold
     // writer) owns it and must keep it alive for the lifetime of the Amcl
     // instance. Pre-allocates ping-pong particle buffers + cumsum scratch.
-    explicit Amcl(const godo::core::Config& cfg, const LikelihoodField& field);
+    //
+    // issue#11 P4-2-11-2 — `pool` is an optional fork-join particle eval
+    // pool. When non-null, `step()` partitions the per-particle
+    // `evaluate_scan` loop across the pool's workers; on a join timeout
+    // the step transparently re-runs sequentially for the remainder of
+    // that call, and the pool itself transitions to permanent-degraded
+    // (subsequent steps still produce bit-equal results — the pool's
+    // inline-sequential degraded mode equals the nullptr path here).
+    // Pool ownership stays with the caller (production: main.cpp; tests:
+    // test fixture); Amcl never deletes it.
+    explicit Amcl(const godo::core::Config&         cfg,
+                  const LikelihoodField&            field,
+                  godo::parallel::ParallelEvalPool* pool = nullptr);
 
     // Single AMCL iteration: motion (jitter) → sensor (evaluate_scan) →
     // normalize → conditional resample (only if N_eff < neff_frac * N).
@@ -132,8 +152,9 @@ public:
 private:
     void normalize_weights();
 
-    const godo::core::Config& cfg_;
-    const LikelihoodField*    field_;
+    const godo::core::Config&         cfg_;
+    const LikelihoodField*            field_;
+    godo::parallel::ParallelEvalPool* pool_{nullptr};
 
     // Ping-pong buffers (front_ = active particles; back_ = resampler dst).
     // Resized to `n_` per seed; capacity stays at PARTICLE_BUFFER_MAX.

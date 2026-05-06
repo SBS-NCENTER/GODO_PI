@@ -843,7 +843,8 @@ void run_cold_writer(const godo::core::Config&              cfg,
                      godo::rt::Seqlock<godo::rt::LastScan>& last_scan_seq,
                      godo::rt::AmclRateAccumulator&         amcl_rate_accum,
                      godo::rt::Seqlock<godo::core::HotConfig>& hot_cfg_seq,
-                     LidarFactory                           lidar_factory) {
+                     LidarFactory                           lidar_factory,
+                     godo::parallel::ParallelEvalPool*      pool) {
     OccupancyGrid grid;
     LikelihoodField lf;
     try {
@@ -858,7 +859,7 @@ void run_cold_writer(const godo::core::Config&              cfg,
         return;
     }
 
-    Amcl amcl(cfg, lf);
+    Amcl amcl(cfg, lf, pool);
     Rng  rng(cfg.amcl_seed);
     Pose2D last_pose{};
     bool live_first_iter = true;

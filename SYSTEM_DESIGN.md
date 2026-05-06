@@ -1068,6 +1068,93 @@ Pinned unit tests:
 - [ ] Idempotence: `wrap_signed24(wrap_signed24(v)) == wrap_signed24(v)` for
       any `v ∈ [−2^30, 2^30)`.
 
+### 6.6 Parallel particle evaluation (issue#11)
+
+The cold writer's per-tick compute is dominated by the per-particle
+`evaluate_scan` loop. Phase-0 5-min main capture (PR #96 / `53453f5` /
+`.claude/tmp/phase0_results_5min_20260506_095949.md`) measured the
+sequential breakdown at K ≈ 17 iters / scan, N=500 particles:
+
+| Stage          | p50 (ms) | share of TOTAL p50 |
+|----------------|---------:|:------------------:|
+| LF rebuild     |    39.58 |             29.1 % |
+| jitter         |     0.77 |              0.6 % |
+| evaluate_scan  |    94.85 |             69.7 % |
+| normalize      |     0.14 |              0.1 % |
+| resample       |     0.07 |              0.1 % |
+| **TOTAL**      | **136.15** |       **7.34 Hz** |
+
+The 10 Hz LiDAR rate produces ~30 % scan drop against a 7.34 Hz cold
+path. issue#11 partitions the per-particle eval across a
+`ParallelEvalPool` with workers pinned to `{CPU 0, 1, 2}` and joins per
+AMCL step:
+
+```text
+┌────────────────────────────────────────────────────────────┐
+│ Cold writer thread (CFS, cpus 0/1/2)                       │
+│                                                            │
+│   for k in σ_schedule:                                     │
+│     LF.rebuild(σ_k)                       ──── 13.2 ms     │
+│     for iter in K_phase:                                   │
+│       jitter_inplace(front_)              ──── ~0.05 ms    │
+│       ┌──────── pool.parallel_for ──────┐                 │
+│       │ Worker 0 (CPU 0)                │                 │
+│       │   evaluate_scan(front_[i_0..N/3])│ ─ ~1.85 ms     │
+│       │ Worker 1 (CPU 1)                │   parallel      │
+│       │   evaluate_scan(front_[N/3..2N/3])│  fork-join    │
+│       │ Worker 2 (CPU 2)                │                 │
+│       │   evaluate_scan(front_[2N/3..N])│                 │
+│       └─────── join (≤ 50 ms timeout) ──┘                 │
+│       normalize_weights()                ──── 0.14 ms     │
+│       resample (conditional)             ──── 0.07 ms     │
+│                                                            │
+│   apply_deadband_publish(target_offset, …)                 │
+│                                                            │
+│ Thread D (SCHED_FIFO 50 on CPU 3) — UNAFFECTED.            │
+└────────────────────────────────────────────────────────────┘
+```
+
+**Cache topology** is the load-bearing reason this fork-join design
+holds at Pi 5 scale: the 16 MB likelihood field is read-only during
+each step, so all three workers pull the same cache lines; reads
+replicate across L1d without any MESI coherence traffic. By contrast
+Option B (multi-tier σ pipeline) would require 3 × LF replicas (48 MB)
+which exceed the Pi 5 8 GB DRAM bandwidth budget under sustained load
+(plan §2.B'). The single-LF design also keeps the cold path's working
+set inside the natural locality the sequential path already enjoyed.
+
+**Bit-equality with sequential** (plan §3.6 proof; pinned by
+`tests/test_amcl_parallel_eval.cpp::case 1`): workers write to a
+partition-disjoint subrange of `front_[i].weight`; `normalize_weights`
++ `weighted_mean()` then sum in identical i-order, so the IEEE 754
+reductions are bit-equal regardless of worker thread interleaving. The
+invariant explicitly forbids parallelizing `weighted_mean` without
+re-deriving the proof — see CODEBASE.md `(s)`.
+
+**Diag surface**: `Seqlock<ParallelEvalSnapshot>` published at 1 Hz by
+`run_diag_publisher` (mirroring the JitterSnapshot seam). UDS
+`get_parallel_eval` reads it (`uds_protocol.md` §C.11). Operator
+acceptance bar: `dispatch_count` grows in step with cold-writer
+iters, `fallback_count == 0` in steady state, `degraded == 0`,
+`p99_us` ≤ 4000 µs. `degraded == 1` means the pool transitioned to
+permanent inline-sequential mode (ctor 1 s timeout OR a single 50 ms
+join overrun); the cold writer continues at the pre-issue#11
+sequential speed without accuracy regression.
+
+**Rollback**: TOML `amcl.parallel_eval_workers = 1` boots the pool
+with no worker threads — `parallel_for` runs fn on the caller thread
+and produces output bit-equal to the pre-issue#11 sequential path.
+Restart-class so the operator gets a clean re-start path; no mid-run
+hot-flip.
+
+**Cross-applicability**: the same pool is the primitive for issue#19
+(EDT 2D Felzenszwalb row/column passes). issue#19 will extend the
+public API with `parallel_for_with_scratch<S>` for per-worker `(v, z)`
+scratch pairs (~30 LOC extension). Together issue#11 + issue#19
+absorb 99 % of the per-tick cold compute, projecting ~21 Hz at p50
+(48 ms / scan) on the same Phase-0 fixture. issue#11 ships the simpler
+`parallel_for(begin, end, fn)` surface only.
+
 ---
 
 ## 7. Phase-by-phase plan (Phase 1 → 5)

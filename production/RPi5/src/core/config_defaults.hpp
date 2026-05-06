@@ -110,6 +110,16 @@ inline constexpr std::string_view AMCL_SIGMA_SEED_XY_SCHEDULE_M  =
     "-,0.10,0.05,0.03,0.02";
 inline constexpr int              AMCL_ANNEAL_ITERS_PER_PHASE    = 10;
 
+// issue#11 — fork-join particle eval pool worker count. Production
+// default 3 maps to CPU {0, 1, 2} (CPU 3 is reserved for Thread D per
+// project_cpu3_isolation.md). 1 maps to the workers=1 inline-sequential
+// rollback path; 2 maps to {0, 1}. Range [1, 3]. main.cpp owns the
+// translation from int → cpus_to_pin vector so the pool API stays
+// domain-agnostic. Recalibrate class — operator may flip in tracker.toml
+// + restart for HIL-safe rollback (the pool boots with workers=1, no
+// fork-join, output bit-equal to pre-issue#11 sequential path).
+inline constexpr int              AMCL_PARALLEL_EVAL_WORKERS_DEFAULT = 3;
+
 // Phase 4-2 D — GPIO BCM pin assignments. BCM 16 (calibrate button) and
 // BCM 20 (live-toggle button); active-low against PULL_UP. See
 // production/RPi5/doc/gpio_wiring.md (Wave B).

@@ -387,6 +387,53 @@ PATCH state on disk, never a torn write. See
 - `recalibrate`: same as `restart` plus the AMCL particle cloud must
   be re-seeded (next OneShot). The SPA shows red `‼`.
 
+### `get_parallel_eval` (issue#11, §C.11)
+
+Returns a snapshot of the cold-side `ParallelEvalPool`'s runtime
+counters, sampled at the diag publisher's 1 Hz cadence (the same
+seqlock-store seam as `get_jitter` / `get_amcl_rate`). Wire shape
+mirrors `get_jitter` for SPA-side rendering uniformity.
+
+**Request**:
+
+```json
+{"cmd":"get_parallel_eval"}
+```
+
+**Response**:
+
+```json
+{"ok":true,"valid":1,"dispatch_count":1542,"fallback_count":0,"p99_us":1850,"max_us":2100,"degraded":0,"published_mono_ns":12345678901234}
+```
+
+**Field semantics**:
+
+| Field                | Type   | Meaning                                                      |
+|----------------------|--------|--------------------------------------------------------------|
+| `valid`              | uint8  | 0 = no diag publish yet (first second post-boot); 1 = populated |
+| `dispatch_count`     | uint64 | Total `parallel_for` calls since boot (monotonic)            |
+| `fallback_count`     | uint64 | Total inline-sequential fallbacks (degraded ctor / 50 ms join timeout / subsequent inline dispatches) |
+| `p99_us`             | uint32 | p99 wallclock dispatch+join latency over the last ~1.5 s     |
+| `max_us`             | uint32 | Decaying max latency over a 1 s window                       |
+| `degraded`           | uint8  | 1 = pool transitioned to permanent inline-sequential; 0 = active |
+| `published_mono_ns`  | uint64 | `monotonic_ns()` at diag-publisher store time                |
+
+**Operator interpretation**:
+- `degraded=1` ⇒ pool has fallen back permanently for this tracker
+  process; restart to retry. The cold writer continues at sequential
+  speed (~7 Hz on Phase-0 baseline) — accuracy is unaffected (output
+  bit-equal per plan §3.6) but Hz-vs-LiDAR margin disappears.
+- `fallback_count` growing while `degraded=0` is unexpected — investigate
+  CPU oversubscription on cores 0/1/2 (e.g., another process pinned).
+- `p99_us` should be ≤ 4000 µs in steady state at N=500 particles
+  (Phase-0 projection: ~1.85 ms × 1.05 jitter buffer ≈ 1950 µs typical).
+
+**Workers=1 rollback path**: `cfg.amcl_parallel_eval_workers = 1` boots
+the pool with no worker threads; `parallel_for` runs fn on the caller
+thread. The diag snapshot reports `degraded=0` (workers=1 is a
+configured choice, not a degradation), `fallback_count=0`, and `p99_us`
+reflects the inline sequential cost (~5.6 ms typical at N=500).
+
 ## D. Errors
 
 | Code            | Meaning                                                |

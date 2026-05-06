@@ -252,6 +252,16 @@ target_compile_definitions(test_phase0_env PRIVATE
 add_test(NAME test_phase0_env COMMAND test_phase0_env)
 set_tests_properties(test_phase0_env PROPERTIES LABELS "hardware-free")
 
+# issue#11 P4-2-11-1 — ParallelEvalPool fork-join particle eval pool.
+# 8 unit cases per plan §6.1: lifecycle / output equivalence / 10^5
+# stress / worker affinity / workers=1 fallback / deadline timeout /
+# concurrent-dispatch reject / healthy-steady-state diag.
+add_executable(test_parallel_eval_pool test_parallel_eval_pool.cpp)
+target_link_libraries(test_parallel_eval_pool PRIVATE
+    doctest::doctest godo_parallel)
+add_test(NAME test_parallel_eval_pool COMMAND test_parallel_eval_pool)
+set_tests_properties(test_parallel_eval_pool PROPERTIES LABELS "hardware-free")
+
 # issue#30 — pin tracker tolerance for origin.yaw_deg=0 (the new
 # normalized derived YAML always carries yaw=0).
 add_executable(test_origin_yaw_zero test_origin_yaw_zero.cpp)

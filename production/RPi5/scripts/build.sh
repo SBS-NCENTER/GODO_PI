@@ -62,6 +62,15 @@ fi
 # there either, but the gate's load-bearing target is the cold publish
 # path on the AMCL → smoother seam.
 #
+# issue#11 P4-2-11-1 note: src/parallel/ ships ParallelEvalPool, which DOES
+# use std::mutex + std::condition_variable internally for fork-join
+# dispatch. The gate stays scoped to cold_writer.cpp — the pool's mutex is
+# pimpl-hidden inside parallel_eval_pool.cpp, never visible to
+# cold_writer.cpp's source text. M1 *spirit* is preserved because cold
+# writer is NOT the wait-free publisher (only Thread D is); the pool's
+# dispatch+join completes BEFORE target_offset.store() fires. See
+# CODEBASE.md invariant (s).
+#
 # Test label inventory:
 #   - hardware-free          — runs in CI / local without LiDAR or GPIO
 #   - hardware-required      — runs only with RPLIDAR C1 attached

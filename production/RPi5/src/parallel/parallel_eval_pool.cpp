@@ -26,10 +26,6 @@ constexpr std::int64_t kJoinTimeoutNs = 50'000'000LL;
 // transitioning to degraded inline-sequential mode (M4 / R12).
 constexpr std::int64_t kCtorReadyTimeoutNs = 1'000'000'000LL;  // 1 s
 
-// pthread stack size for the workers (M5 / R13). Eval of N=500 particles
-// uses minimal stack (only the evaluate_scan call frame + integer locals).
-constexpr std::size_t kWorkerStackBytes = 256 * 1024;  // 256 KB
-
 // Cache-line alignment for the per-dispatch shared atomics (R2 / §3.3).
 // Pi 5 Cortex-A76 cache line is 64 bytes.
 constexpr std::size_t kCacheLineBytes = 64;
@@ -111,7 +107,10 @@ private:
     // via worker_count + degraded()).
     std::vector<int> cpus_to_pin_;
 
-    // Worker threads. Created with pthread_attr_setstacksize(256 KB).
+    // Worker threads. DEVIATION from plan §3.2 line 289 / R13: workers use
+    // std::thread default 8 MB stack (24 MB total under mlockall(MCL_FUTURE)).
+    // The 256 KB cap requires pthread_create + pthread_attr_setstacksize +
+    // a join wrapper — deferred. Within rt_setup.cpp's 128 MiB headroom.
     std::vector<std::thread> workers_;
 
     // Reentry guard: the API contract is single-caller. A second concurrent
@@ -186,24 +185,11 @@ ParallelEvalPool::Impl::Impl(std::vector<int> cpus_to_pin)
     ready_ = std::vector<std::atomic<std::uint8_t>>(n_workers);
     for (auto& r : ready_) r.store(0, std::memory_order_relaxed);
 
-    // Spawn workers with a bounded stack via pthread_attr_setstacksize.
-    // std::thread's default ctor uses the default 8 MB stack; we go
-    // through a thin pthread wrapper to override that.
+    // Spawn workers via std::thread (default 8 MB stack — see header field
+    // comment for the 256 KB cap deviation). Affinity is set immediately
+    // after spawn via the native handle.
     workers_.reserve(n_workers);
     for (std::size_t wid = 0; wid < n_workers; ++wid) {
-        // std::thread spawn — we then override the stack size by setting
-        // the attribute via the thread's native handle is not possible
-        // (the stack is set at create time). Use pthread_create directly
-        // and wrap the joinable handle into std::thread via a small
-        // adapter is also non-portable. Instead, accept the default 8 MB
-        // stack and rely on mlockall+RLIMIT_MEMLOCK headroom (24 MB total
-        // for 3 workers — within the 128 MB headroom rt_setup.cpp
-        // requires; documented in §3.5).
-        //
-        // The plan §3.2 line 289 / §6.1 case 4 / R13 allow this to be
-        // either pthread_attr_setstacksize OR documented as accepted
-        // 8 MB×N cost. We pick the explicit pthread_create path for
-        // production-ready hygiene.
         workers_.emplace_back([this, wid]() { worker_body(wid); });
         set_thread_affinity(workers_.back().native_handle(),
                             cpus_to_pin_[wid]);

@@ -22,7 +22,6 @@
 #include <vector>
 
 #include "core/config.hpp"
-#include "core/rt_types.hpp"
 #include "lidar/sample.hpp"
 #include "localization/amcl.hpp"
 #include "localization/cold_writer.hpp"

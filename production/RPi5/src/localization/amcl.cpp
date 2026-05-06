@@ -8,6 +8,7 @@
 #include "core/constants.hpp"
 #include "core/rt_types.hpp"
 #include "core/time.hpp"
+#include "parallel/parallel_eval_pool.hpp"
 
 namespace godo::localization {
 
@@ -32,8 +33,10 @@ void Amcl::set_field(const LikelihoodField& field) noexcept {
     field_ = &field;
 }
 
-Amcl::Amcl(const godo::core::Config& cfg, const LikelihoodField& field)
-    : cfg_(cfg), field_(&field) {
+Amcl::Amcl(const godo::core::Config&         cfg,
+           const LikelihoodField&            field,
+           godo::parallel::ParallelEvalPool* pool)
+    : cfg_(cfg), field_(&field), pool_(pool) {
     // Pre-allocate ping-pong buffers + cumsum scratch ONCE. Subsequent
     // seed_global / seed_around / step / converge do not grow these (S3:
     // capacity invariant pinned by test_amcl_components and test_resampler).
@@ -198,12 +201,29 @@ AmclResult Amcl::step(const std::vector<RangeBeam>& beams,
     }
 
     // 2. Sensor — evaluate_scan returns a non-log likelihood per particle.
+    //
+    // issue#11 P4-2-11-2 — when a fork-join pool is wired, partition the
+    // per-particle eval across workers pinned to CPU {0, 1, 2}. Workers
+    // each write to a partition-disjoint subrange of `front_[i].weight`;
+    // bit-equality with the sequential path is preserved (plan §3.6
+    // proof). The pool's degraded-inline mode (ctor timeout / 50 ms join
+    // deadline) runs fn on the caller thread and still produces
+    // bit-equal output; on a join-timeout `parallel_for` returns false
+    // and we re-run that eval sequentially as a belt-and-braces guard
+    // against half-populated weights.
     const std::int64_t t_eval_start = phase0_out ? godo::rt::monotonic_ns() : 0;
-    for (std::size_t i = 0; i < n_; ++i) {
+    auto eval_one = [this, &beams](std::size_t i) {
         front_[i].weight = evaluate_scan(front_[i].pose,
                                          beams.data(),
                                          beams.size(),
                                          *field_);
+    };
+    bool dispatched = false;
+    if (pool_ != nullptr) {
+        dispatched = pool_->parallel_for(0, n_, eval_one);
+    }
+    if (!dispatched) {
+        for (std::size_t i = 0; i < n_; ++i) eval_one(i);
     }
     if (phase0_out) {
         phase0_out->evaluate_scan_ns = godo::rt::monotonic_ns() - t_eval_start;

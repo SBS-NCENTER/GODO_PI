@@ -8,7 +8,7 @@
 
 1. **★ issue#19 — EDT 2D Felzenszwalb 3-way parallelization** (TOP PRIORITY now that issue#11 main is shipped). Reuses issue#11's `ParallelEvalPool` primitive with a `parallel_for_with_scratch<S>` API extension for per-worker `(v, z)` scratch buffers (Mode-A round 1 C6 surfaced this requirement). ~80 LOC: ~30 LOC pool API extension + ~50 LOC EDT integration. Projected lift: 11.52 → ~21 Hz (LF rebuild p50 40 → ~14 ms). LF rebuild is now 46% of TOTAL (40 / 87 ms) post-issue#11 — biggest remaining slice. Plan likely re-uses range-proportional deadline pattern (`project_range_proportional_deadline_pattern.md`) since EDT workload scales with W × H grid size.
 
-2. **AMCL algorithm analysis docs PR** — `/doc/amcl_algorithm_analysis.md` already written this session (1100 lines, 11 Parts × 32 sections, file:line cited from main `129ad3f` + branch HEAD; bit-equality 5-step proof + Felzenszwalb 1D EDT decoded + tuning cheat sheet). Operator decision-locked: NOT in PR #99; separate docs PR in next session. **Action**: branch `docs/amcl-algorithm-analysis` from main → commit single file → open PR. Untracked file already at `/home/ncenter/projects/GODO/doc/amcl_algorithm_analysis.md` — just `git add` + commit. ~5 minute task; can be opener for next session.
+2. **AMCL algorithm analysis docs PR** — `/doc/amcl_algorithm_analysis.md` already written this session (853 lines, 11 Parts × 32 sections, file:line cited from main `129ad3f` + branch HEAD; bit-equality 5-step proof + Felzenszwalb 1D EDT decoded + tuning cheat sheet). Operator decision-locked: NOT in PR #99; separate docs PR in next session. **Action**: branch `docs/amcl-algorithm-analysis` from main → commit single file → open PR. Untracked file already at `/home/ncenter/projects/GODO/doc/amcl_algorithm_analysis.md` — just `git add` + commit. ~5 minute task; can be opener for next session.
 
 3. **issue#13 — distance-weighted AMCL likelihood** (`r_cutoff` near-LiDAR down-weight). Orthogonal to issue#11/19 (modifies `evaluate_scan` body, not the caller); composes with Option C without re-design. Standalone single-knob algorithmic experiment.
 
@@ -113,7 +113,7 @@ Carryover (still active from prior sessions):
 7. **`production/RPi5/CODEBASE.md`** invariant `(s)` — ParallelEvalPool ownership + worker pinning + M1 spirit + range-proportional deadline rule.
 8. **`production/RPi5/SYSTEM_DESIGN.md`** §6.6 — pool architecture page (data flow / cache topology / bit-equality / diag surface / rollback / cross-applicability).
 9. **`production/RPi5/CODEBASE/2026-W19.md`** 2026-05-06 14:34 KST entry + Post-deploy HIL section — empirical anchor for the issue#11 narrative.
-10. ★ **`/doc/amcl_algorithm_analysis.md`** (untracked at session-close) — ready to commit + open as standalone docs PR. 1100 lines.
+10. ★ **`/doc/amcl_algorithm_analysis.md`** (untracked at session-close) — ready to commit + open as standalone docs PR. 853 lines.
 
 ## Issue labelling reminder (CLAUDE.md §6 SSOT)
 
@@ -189,7 +189,7 @@ Twenty-eighth was a **focused single-issue session** (~4.5 hours, 13:30 → 18:0
 - Full agent pipeline run: code-planner (Round 2 plan rewrite with Phase-0 numbers) → code-reviewer Mode-A round 2 (APPROVE WITH MINOR REVISIONS, 4 minors inline-folded) → code-writer (P4-2-11-1 ~ -7, 6 commits, 38 files / +2376 / -57) → diagnostics fix → code-reviewer Mode-B (APPROVE WITH MINOR REVISIONS, 2 docs-fix recommendations) → PR #99 squash-merge.
 - Critical post-deploy defect caught at HIL — `[pool-degraded] range=[0,5000)` within 1m 49s. Plan §3.7/§4 self-inconsistency. Fixed via range-proportional deadline pattern, shipped same-day as commit `bfbf671` within PR #99 squash.
 - Fresh 5-min Phase-0 re-capture verified +57% cold-path Hz lift (7.34 → 11.52 Hz).
-- AMCL deep-dive doc (1100 lines) written as parallel work during capture. Operator decided separate PR.
+- AMCL deep-dive doc (853 lines) written as parallel work during capture. Operator decided separate PR.
 - 2 new memory entries (`feedback_cross_section_consistency_after_round_2_adds.md`, `project_range_proportional_deadline_pattern.md`) + 1 updated (`project_issue11_analysis_paused.md` → DONE).
 
 **Cold-start sequence for twenty-ninth session**:

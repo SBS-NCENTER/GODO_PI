@@ -739,7 +739,7 @@ fits within the `rt_setup.cpp:31` 128 MiB headroom for N ≤ 3.
 
 **Bit-equality of parallel-vs-sequential `Amcl::step` output** depends
 on `weighted_mean()` remaining a sequential summation
-(`amcl.cpp:297-314`, pinned by
+(`Amcl::weighted_mean()` body in `amcl.cpp`, pinned by
 `tests/test_amcl_parallel_eval.cpp::case 1`). Do NOT parallelize
 `weighted_mean` without re-deriving the IEEE 754 ordering proof and
 updating the test.
@@ -765,7 +765,9 @@ Pinned by:
   `converge_anneal` equivalence within 1e-9, pool null-safety, and
   empty-cpus rollback bit-equality with the nullptr path.
 - `tests/bench_amcl_converge.cpp` — wallclock regression band
-  (parallel ≥ 2× faster than sequential at N=500; ≥ 1.5× at N=5000).
+  (parallel ≥ 1.5× at N=500 and ≥ 1.2× at N=5000 — CI-noise floors;
+  standalone observed 2.86× / 1.76×; production isolcpus=3 expected
+  ~3× per Phase-0 projection).
 - `tests/test_diag_publisher.cpp` — pump end-to-end with synthetic
   pool getter.
 - `tests/test_uds_server.cpp` — `get_parallel_eval` round-trip +

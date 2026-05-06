@@ -174,7 +174,7 @@ AmclResult run_anneal_kernel(const godo::core::Config&     cfg,
         // (amcl.hpp static_assert), so a throw inside leaves the basic
         // exception guarantee intact.
         const std::int64_t t_lf_start = kPhase0On ? godo::rt::monotonic_ns() : 0;
-        field_inout = build_likelihood_field(grid, sigma_k);
+        field_inout = build_likelihood_field(grid, sigma_k, amcl.pool());
         if (kPhase0On) {
             g_phase0_lf_rebuild_ns_sum += godo::rt::monotonic_ns() - t_lf_start;
         }
@@ -336,7 +336,8 @@ void rebuild_lf_for_live(const godo::core::Config& cfg,
                          const OccupancyGrid&      grid,
                          LikelihoodField&          lf_inout,
                          Amcl&                     amcl) {
-    lf_inout = build_likelihood_field(grid, cfg.amcl_sigma_hit_m);
+    lf_inout = build_likelihood_field(grid, cfg.amcl_sigma_hit_m,
+                                      amcl.pool());
     amcl.set_field(lf_inout);
 }
 
@@ -849,7 +850,7 @@ void run_cold_writer(const godo::core::Config&              cfg,
     LikelihoodField lf;
     try {
         grid = load_map(cfg.amcl_map_path);
-        lf   = build_likelihood_field(grid, cfg.amcl_sigma_hit_m);
+        lf   = build_likelihood_field(grid, cfg.amcl_sigma_hit_m, pool);
     } catch (const std::exception& e) {
         std::fprintf(stderr,
             "cold_writer: failed to load map '%s' or build likelihood "

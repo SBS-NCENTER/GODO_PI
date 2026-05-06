@@ -1791,3 +1791,91 @@ TEST_CASE("format_ok_output — byte-exact shape on a default-zero LastOutputFra
     CHECK(s.back() == '\n');
 }
 
+// ----------------------------------------------------------------------
+// issue#11 P4-2-11-5 — get_parallel_eval dispatch + format_ok_parallel_eval
+// shape pin. Mirrors the get_jitter / get_amcl_rate test pattern.
+// ----------------------------------------------------------------------
+
+TEST_CASE("get_parallel_eval returns valid=0 when no publisher tick yet") {
+    TempUdsPath guard(tmp_socket_path("getparalleleval_invalid"));
+    ServerHarness h;
+    godo::rt::g_running.store(true, std::memory_order_release);
+
+    UdsServer server(
+        guard.path,
+        [&]() { return h.mode_target.load(); },
+        [&](AmclMode m) { h.mode_target.store(m); });
+    REQUIRE_NOTHROW(server.open());
+    h.th = std::thread([&]() { server.run(); });
+
+    int fd = connect_client(guard.path);
+    REQUIRE(fd >= 0);
+    auto resp = send_recv(fd, "{\"cmd\":\"get_parallel_eval\"}\n");
+    ::close(fd);
+    CHECK(resp.find("\"ok\":true") != std::string::npos);
+    CHECK(resp.find("\"valid\":0") != std::string::npos);
+    CHECK(resp.find("\"dispatch_count\":0") != std::string::npos);
+    CHECK(resp.find("\"degraded\":0") != std::string::npos);
+    CHECK(resp.back() == '\n');
+
+    godo::rt::g_running.store(false, std::memory_order_release);
+    h.th.join();
+}
+
+TEST_CASE("get_parallel_eval returns published snapshot verbatim") {
+    TempUdsPath guard(tmp_socket_path("getparalleleval_synth"));
+    ServerHarness h;
+    godo::rt::g_running.store(true, std::memory_order_release);
+
+    godo::parallel::ParallelEvalSnapshot synth{};
+    synth.dispatch_count    = 17;
+    synth.fallback_count    = 0;
+    synth.published_mono_ns = 9876543210ULL;
+    synth.p99_us            = 1850;
+    synth.max_us            = 2100;
+    synth.valid             = 1;
+    synth.degraded          = 0;
+
+    UdsServer server(
+        guard.path,
+        [&]() { return h.mode_target.load(); },
+        [&](AmclMode m) { h.mode_target.store(m); },
+        // Trailing positional slots: last_pose, last_scan, jitter,
+        // amcl_rate, get_config, get_config_schema, set_config,
+        // last_output, get_parallel_eval.
+        nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+        nullptr,
+        [&]() { return synth; });
+    REQUIRE_NOTHROW(server.open());
+    h.th = std::thread([&]() { server.run(); });
+
+    int fd = connect_client(guard.path);
+    REQUIRE(fd >= 0);
+    auto resp = send_recv(fd, "{\"cmd\":\"get_parallel_eval\"}\n");
+    ::close(fd);
+    CHECK(resp.find("\"valid\":1") != std::string::npos);
+    CHECK(resp.find("\"dispatch_count\":17") != std::string::npos);
+    CHECK(resp.find("\"fallback_count\":0") != std::string::npos);
+    CHECK(resp.find("\"p99_us\":1850") != std::string::npos);
+    CHECK(resp.find("\"max_us\":2100") != std::string::npos);
+    CHECK(resp.find("\"degraded\":0") != std::string::npos);
+    CHECK(resp.find("\"published_mono_ns\":9876543210") != std::string::npos);
+
+    godo::rt::g_running.store(false, std::memory_order_release);
+    h.th.join();
+}
+
+TEST_CASE("format_ok_parallel_eval — byte-exact shape on a default-zero snapshot") {
+    using godo::uds::format_ok_parallel_eval;
+    godo::parallel::ParallelEvalSnapshot s{};
+    const std::string out = format_ok_parallel_eval(s);
+    // Field order pin: must match the Python mirror (godo-webctl
+    // PARALLEL_EVAL_FIELDS, to be added when webctl ships its consumer).
+    // Drift here breaks the regex pin.
+    CHECK(out ==
+        "{\"ok\":true,\"valid\":0,\"dispatch_count\":0,"
+        "\"fallback_count\":0,\"p99_us\":0,\"max_us\":0,"
+        "\"degraded\":0,\"published_mono_ns\":0}\n");
+    CHECK(out.back() == '\n');
+}
+

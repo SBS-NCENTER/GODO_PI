@@ -39,6 +39,7 @@
 
 #include "core/rt_flags.hpp"
 #include "core/rt_types.hpp"
+#include "parallel/parallel_eval_pool.hpp"
 
 namespace godo::uds {
 
@@ -72,6 +73,11 @@ using LastOutputGetter = std::function<godo::rt::LastOutputFrame()>;
 // [jitter-publisher-grep]). Null callback → valid=0 sentinel reply.
 using JitterGetter   = std::function<godo::rt::JitterSnapshot()>;
 using AmclRateGetter = std::function<godo::rt::AmclIterationRate()>;
+
+// issue#11 P4-2-11-5 — `get_parallel_eval` callback. Production wires to
+// `parallel_eval_seq.load()`. Null callback → valid=0 sentinel reply.
+using ParallelEvalGetter =
+    std::function<godo::parallel::ParallelEvalSnapshot()>;
 
 // Track B-CONFIG (PR-CONFIG-α) — config edit callbacks.
 //
@@ -109,7 +115,8 @@ public:
               ConfigGetter       get_config         = nullptr,
               ConfigSchemaGetter get_config_schema  = nullptr,
               ConfigSetter       set_config         = nullptr,
-              LastOutputGetter   get_last_output    = nullptr);
+              LastOutputGetter   get_last_output    = nullptr,
+              ParallelEvalGetter get_parallel_eval  = nullptr);
 
     UdsServer(const UdsServer&)            = delete;
     UdsServer& operator=(const UdsServer&) = delete;
@@ -140,6 +147,7 @@ private:
     ConfigSchemaGetter get_config_schema_;
     ConfigSetter       set_config_;
     LastOutputGetter   get_last_output_;
+    ParallelEvalGetter get_parallel_eval_;
     int                listen_fd_  = -1;
     bool               path_bound_ = false;
 };

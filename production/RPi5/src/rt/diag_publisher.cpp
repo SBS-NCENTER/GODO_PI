@@ -60,13 +60,16 @@ void compute_amcl_rate(const AmclRateRecord& cur,
     out.valid = (out.hz > 0.0) ? std::uint8_t{1} : std::uint8_t{0};
 }
 
-void publish_one_tick(JitterRing&                  ring,
-                      AmclRateAccumulator&         accum,
-                      Seqlock<JitterSnapshot>&     jitter_seq,
-                      Seqlock<AmclIterationRate>&  amcl_rate_seq,
-                      std::uint64_t&               prev_count_inout,
-                      std::uint64_t&               prev_last_ns_inout,
-                      std::int64_t                 now_ns) {
+void publish_one_tick(
+    JitterRing&                                              ring,
+    AmclRateAccumulator&                                     accum,
+    Seqlock<JitterSnapshot>&                                 jitter_seq,
+    Seqlock<AmclIterationRate>&                              amcl_rate_seq,
+    Seqlock<godo::parallel::ParallelEvalSnapshot>*           parallel_eval_seq,
+    const ParallelEvalSnapshotGetter&                        pool_getter,
+    std::uint64_t&                                           prev_count_inout,
+    std::uint64_t&                                           prev_last_ns_inout,
+    std::int64_t                                             now_ns) {
     // --- jitter --------------------------------------------------------
     // Stack-allocated scratch — no heap. Sized to JITTER_RING_DEPTH so
     // sort + percentile work on the full snapshot.
@@ -90,16 +93,30 @@ void publish_one_tick(JitterRing&                  ring,
     amcl_rate_seq.store(ar);
     prev_count_inout   = cur.count;
     prev_last_ns_inout = cur.last_ns;
+
+    // --- Parallel eval pool diag (issue#11) ----------------------------
+    // Pump samples once per publisher tick (1 Hz). The pool's
+    // snapshot_diag() is lock-protected internally + cheap; we layer the
+    // wallclock published_mono_ns on top here so consumers see the same
+    // shape as JitterSnapshot.
+    if (parallel_eval_seq != nullptr && pool_getter) {
+        godo::parallel::ParallelEvalSnapshot ps = pool_getter();
+        ps.published_mono_ns = static_cast<std::uint64_t>(now_ns);
+        parallel_eval_seq->store(ps);
+    }
 }
 
 }  // namespace
 
-void run_diag_publisher_with_clock(JitterRing&                  ring,
-                                   AmclRateAccumulator&         accum,
-                                   Seqlock<JitterSnapshot>&     jitter_seq,
-                                   Seqlock<AmclIterationRate>&  amcl_rate_seq,
-                                   NowProvider                  now_ns,
-                                   SleepFor                     sleep_for) noexcept {
+void run_diag_publisher_with_clock(
+    JitterRing&                                              ring,
+    AmclRateAccumulator&                                     accum,
+    Seqlock<JitterSnapshot>&                                 jitter_seq,
+    Seqlock<AmclIterationRate>&                              amcl_rate_seq,
+    Seqlock<godo::parallel::ParallelEvalSnapshot>*           parallel_eval_seq,
+    ParallelEvalSnapshotGetter                               pool_getter,
+    NowProvider                                              now_ns,
+    SleepFor                                                 sleep_for) noexcept {
     std::uint64_t prev_count   = 0;
     std::uint64_t prev_last_ns = 0;
 
@@ -107,6 +124,7 @@ void run_diag_publisher_with_clock(JitterRing&                  ring,
         try {
             const std::int64_t t = now_ns();
             publish_one_tick(ring, accum, jitter_seq, amcl_rate_seq,
+                             parallel_eval_seq, pool_getter,
                              prev_count, prev_last_ns, t);
         } catch (const std::exception& e) {
             // TM9: a percentile-math throw logs and exits the publisher;
@@ -123,10 +141,13 @@ void run_diag_publisher_with_clock(JitterRing&                  ring,
     }
 }
 
-void run_diag_publisher(JitterRing&                  ring,
-                        AmclRateAccumulator&         accum,
-                        Seqlock<JitterSnapshot>&     jitter_seq,
-                        Seqlock<AmclIterationRate>&  amcl_rate_seq) noexcept {
+void run_diag_publisher(
+    JitterRing&                                              ring,
+    AmclRateAccumulator&                                     accum,
+    Seqlock<JitterSnapshot>&                                 jitter_seq,
+    Seqlock<AmclIterationRate>&                              amcl_rate_seq,
+    Seqlock<godo::parallel::ParallelEvalSnapshot>&           parallel_eval_seq,
+    godo::parallel::ParallelEvalPool&                        pool) noexcept {
     auto now_provider = []() -> std::int64_t {
         return godo::rt::monotonic_ns();
     };
@@ -152,7 +173,11 @@ void run_diag_publisher(JitterRing&                  ring,
             return false;
         }
     };
+    auto pool_getter = [&pool]() {
+        return pool.snapshot_diag();
+    };
     run_diag_publisher_with_clock(ring, accum, jitter_seq, amcl_rate_seq,
+                                  &parallel_eval_seq, pool_getter,
                                   now_provider, sleep_callable);
 }
 

@@ -487,11 +487,13 @@ std::uint32_t ParallelEvalPool::Impl::compute_max_us(
 
 ParallelEvalSnapshot ParallelEvalPool::Impl::snapshot_diag() const noexcept {
     ParallelEvalSnapshot s{};
-    s.dispatch_count = dispatch_count_.load(std::memory_order_relaxed);
-    s.fallback_count = fallback_count_.load(std::memory_order_relaxed);
-    s.p99_us         = compute_p99_us();
-    s.max_us         = compute_max_us(godo::rt::monotonic_ns());
-    s.degraded       = degraded_.load(std::memory_order_acquire) ? 1 : 0;
+    s.dispatch_count    = dispatch_count_.load(std::memory_order_relaxed);
+    s.fallback_count    = fallback_count_.load(std::memory_order_relaxed);
+    s.published_mono_ns = 0;  // pump fills this at store time
+    s.p99_us            = compute_p99_us();
+    s.max_us            = compute_max_us(godo::rt::monotonic_ns());
+    s.valid             = (s.dispatch_count > 0) ? 1 : 0;
+    s.degraded          = degraded_.load(std::memory_order_acquire) ? 1 : 0;
     return s;
 }
 

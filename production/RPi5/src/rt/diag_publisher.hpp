@@ -25,6 +25,7 @@
 
 #include "core/rt_types.hpp"
 #include "core/seqlock.hpp"
+#include "parallel/parallel_eval_pool.hpp"
 #include "rt/amcl_rate.hpp"
 #include "rt/jitter_ring.hpp"
 
@@ -36,22 +37,40 @@ namespace godo::rt {
 using NowProvider = std::function<std::int64_t()>;
 using SleepFor    = std::function<bool(std::int64_t)>;
 
+// issue#11 P4-2-11-5 — pool snapshot getter. Production wires this to
+// `pool.snapshot_diag()`; tests inject a synthetic getter to drive the
+// publisher's third store path. Null getter → no parallel_eval seqlock
+// store this tick.
+using ParallelEvalSnapshotGetter =
+    std::function<godo::parallel::ParallelEvalSnapshot()>;
+
 // Test variant — drives the loop with an injected clock + sleep. Returns
 // when g_running becomes false OR `sleep_for` returns false (the test's
 // signal to stop). Exceptions inside the body are caught and logged; the
 // loop exits.
-void run_diag_publisher_with_clock(JitterRing&                ring,
-                                   AmclRateAccumulator&       accum,
-                                   Seqlock<JitterSnapshot>&   jitter_seq,
-                                   Seqlock<AmclIterationRate>& amcl_rate_seq,
-                                   NowProvider                now_ns,
-                                   SleepFor                   sleep_for) noexcept;
+//
+// issue#11: parallel_eval_seq + pool_getter are nullable (tests / older
+// callers may pass nullptrs); the production variant always wires both.
+void run_diag_publisher_with_clock(
+    JitterRing&                                          ring,
+    AmclRateAccumulator&                                 accum,
+    Seqlock<JitterSnapshot>&                             jitter_seq,
+    Seqlock<AmclIterationRate>&                          amcl_rate_seq,
+    Seqlock<godo::parallel::ParallelEvalSnapshot>*       parallel_eval_seq,
+    ParallelEvalSnapshotGetter                           pool_getter,
+    NowProvider                                          now_ns,
+    SleepFor                                             sleep_for) noexcept;
 
 // Production variant — uses monotonic_ns() + clock_nanosleep. Spawned
-// from godo_tracker_rt/main.cpp.
-void run_diag_publisher(JitterRing&                ring,
-                        AmclRateAccumulator&       accum,
-                        Seqlock<JitterSnapshot>&   jitter_seq,
-                        Seqlock<AmclIterationRate>& amcl_rate_seq) noexcept;
+// from godo_tracker_rt/main.cpp. The pool ref is captured by reference
+// because main owns its lifetime; the getter forwards to
+// pool.snapshot_diag().
+void run_diag_publisher(
+    JitterRing&                                          ring,
+    AmclRateAccumulator&                                 accum,
+    Seqlock<JitterSnapshot>&                             jitter_seq,
+    Seqlock<AmclIterationRate>&                          amcl_rate_seq,
+    Seqlock<godo::parallel::ParallelEvalSnapshot>&       parallel_eval_seq,
+    godo::parallel::ParallelEvalPool&                    pool) noexcept;
 
 }  // namespace godo::rt

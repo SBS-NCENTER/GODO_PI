@@ -33,6 +33,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <type_traits>
 #include <vector>
 
 namespace godo::parallel {
@@ -41,14 +42,28 @@ namespace godo::parallel {
 // Layout pinned to 32 B for Seqlock<T> safety (8-aligned + trivially
 // copyable). Mirrors the `format_ok_parallel_eval` field order in
 // uds/json_mini.cpp.
+//
+// The published_mono_ns is appended at publish time by the diag pump
+// (mirroring JitterSnapshot's pattern); kept out of the pool's internal
+// snapshot because the pool itself doesn't observe wall-clock publish
+// cadence.
 struct ParallelEvalSnapshot {
     std::uint64_t dispatch_count;       // total `parallel_for` calls since boot
     std::uint64_t fallback_count;       // total inline-sequential fallbacks
+    std::uint64_t published_mono_ns;    // monotonic_ns at diag-publisher store time (set by pump)
     std::uint32_t p99_us;               // pool-side dispatch+join wallclock p99 (µs)
     std::uint32_t max_us;               // decaying max over a 1 s window (µs)
+    std::uint8_t  valid;                // 0 = no publish yet, 1 = populated
     std::uint8_t  degraded;             // 1 = ctor timed out / sequential inline; 0 = active
-    std::uint8_t  _pad[7];              // align trailing to 8 B
+    std::uint8_t  _pad[6];              // align trailing to 8 B
 };
+
+static_assert(sizeof(ParallelEvalSnapshot) == 40,
+              "ParallelEvalSnapshot layout pinned at 40 B");
+static_assert(alignof(ParallelEvalSnapshot) == 8,
+              "ParallelEvalSnapshot must be 8-aligned");
+static_assert(std::is_trivially_copyable_v<ParallelEvalSnapshot>,
+              "ParallelEvalSnapshot must be trivially copyable for Seqlock payload");
 
 class ParallelEvalPool {
 public:

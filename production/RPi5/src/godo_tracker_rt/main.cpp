@@ -264,7 +264,8 @@ void thread_uds(const godo::core::Config&                 cfg,
                 Seqlock<LastScan>&                        last_scan_seq,
                 Seqlock<JitterSnapshot>&                  jitter_seq,
                 Seqlock<AmclIterationRate>&               amcl_rate_seq,
-                Seqlock<LastOutputFrame>&                 last_output_seq) {
+                Seqlock<LastOutputFrame>&                 last_output_seq,
+                Seqlock<godo::parallel::ParallelEvalSnapshot>& parallel_eval_seq) {
     godo::uds::UdsServer server(
         cfg.uds_socket,
         []() { return godo::rt::g_amcl_mode.load(std::memory_order_acquire); },
@@ -296,7 +297,10 @@ void thread_uds(const godo::core::Config&                 cfg,
                     ar.reload_class));
             return rep;
         },
-        [&last_output_seq]() { return last_output_seq.load(); });
+        [&last_output_seq]() { return last_output_seq.load(); },
+        // issue#11 P4-2-11-5 — get_parallel_eval reads the pool diag
+        // seqlock published by run_diag_publisher (1 Hz cadence).
+        [&parallel_eval_seq]() { return parallel_eval_seq.load(); });
     try {
         server.open();
     } catch (const std::exception& e) {
@@ -480,6 +484,13 @@ int main(int argc, char** argv, char** envp) {
     Seqlock<JitterSnapshot>     jitter_seq;
     Seqlock<AmclIterationRate>  amcl_rate_seq;
 
+    // issue#11 P4-2-11-5 — fork-join particle eval pool diag seqlock.
+    // Single-writer (diag_publisher); single-reader (UDS handler thread
+    // via get_parallel_eval). Default-constructed payload has valid=0 +
+    // degraded=0 + zero counters; the SPA shows "no publish yet" until
+    // the diag pump's first tick (1 Hz cadence).
+    Seqlock<godo::parallel::ParallelEvalSnapshot> parallel_eval_seq;
+
     // PR-DIAG — single-writer (Thread D) ring + single-writer (cold
     // writer) accumulator. Both consumed by run_diag_publisher.
     JitterRing          jitter_ring;
@@ -558,7 +569,8 @@ int main(int argc, char** argv, char** envp) {
                                std::ref(last_scan_seq),
                                std::ref(jitter_seq),
                                std::ref(amcl_rate_seq),
-                               std::ref(last_output_seq));
+                               std::ref(last_output_seq),
+                               std::ref(parallel_eval_seq));
         t_d      = std::thread(thread_d_rt, std::cref(cfg),
                                std::ref(latest_freed),
                                std::ref(target_offset),
@@ -566,12 +578,16 @@ int main(int argc, char** argv, char** envp) {
                                std::ref(jitter_ring));
         // PR-DIAG — diag publisher runs on SCHED_OTHER (no rt_setup
         // calls inside run_diag_publisher; pinned by code review per
-        // CODEBASE.md invariant).
+        // CODEBASE.md invariant). issue#11 P4-2-11-5 adds the
+        // parallel_eval seqlock + pool ref so the publisher can sample
+        // pool.snapshot_diag() once per 1 Hz tick.
         t_diag   = std::thread(godo::rt::run_diag_publisher,
                                std::ref(jitter_ring),
                                std::ref(amcl_rate_accum),
                                std::ref(jitter_seq),
-                               std::ref(amcl_rate_seq));
+                               std::ref(amcl_rate_seq),
+                               std::ref(parallel_eval_seq),
+                               std::ref(eval_pool));
     } catch (const std::exception& e) {
         std::fprintf(stderr,
             "godo_tracker_rt: thread spawn failed: %s\n", e.what());

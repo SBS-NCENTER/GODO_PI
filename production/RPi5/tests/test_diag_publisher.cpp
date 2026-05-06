@@ -72,6 +72,8 @@ TEST_CASE("diag_publisher — publishes-once-per-interval with virtual clock") {
     godo::rt::g_running.store(true, std::memory_order_release);
     godo::rt::run_diag_publisher_with_clock(
         ring, accum, jitter_seq, amcl_rate_seq,
+        /*parallel_eval_seq=*/nullptr,
+        /*pool_getter=*/godo::rt::ParallelEvalSnapshotGetter{},
         [&]() { return vc.time_now(); },
         [&](std::int64_t ns) { return vc.sleep_for(ns); });
 
@@ -110,6 +112,8 @@ TEST_CASE("diag_publisher — first tick computes hz correctly (Mode-B TB2)") {
     godo::rt::g_running.store(true, std::memory_order_release);
     godo::rt::run_diag_publisher_with_clock(
         ring, accum, jitter_seq, amcl_rate_seq,
+        /*parallel_eval_seq=*/nullptr,
+        /*pool_getter=*/godo::rt::ParallelEvalSnapshotGetter{},
         [&]() { return vc.time_now(); },
         [&](std::int64_t ns) { return vc.sleep_for(ns); });
 
@@ -132,6 +136,8 @@ TEST_CASE("diag_publisher — exits when sleep_for returns false") {
     godo::rt::g_running.store(true, std::memory_order_release);
     godo::rt::run_diag_publisher_with_clock(
         ring, accum, jitter_seq, amcl_rate_seq,
+        /*parallel_eval_seq=*/nullptr,
+        /*pool_getter=*/godo::rt::ParallelEvalSnapshotGetter{},
         []() -> std::int64_t { return 0; },
         [&](std::int64_t /*ns*/) { ++sleep_calls; return false; });
     CHECK(sleep_calls == 1);
@@ -148,6 +154,8 @@ TEST_CASE("diag_publisher — exits when g_running is false on entry") {
     int now_calls = 0;
     godo::rt::run_diag_publisher_with_clock(
         ring, accum, jitter_seq, amcl_rate_seq,
+        /*parallel_eval_seq=*/nullptr,
+        /*pool_getter=*/godo::rt::ParallelEvalSnapshotGetter{},
         [&]() -> std::int64_t { ++now_calls; return 0; },
         [&](std::int64_t /*ns*/) { ++sleep_calls; return true; });
     // No tick body executed; loop checks g_running first.
@@ -167,6 +175,8 @@ TEST_CASE("diag_publisher — empty ring publishes valid=0 sentinel") {
     godo::rt::g_running.store(true, std::memory_order_release);
     godo::rt::run_diag_publisher_with_clock(
         ring, accum, jitter_seq, amcl_rate_seq,
+        /*parallel_eval_seq=*/nullptr,
+        /*pool_getter=*/godo::rt::ParallelEvalSnapshotGetter{},
         [&]() { return vc.time_now(); },
         [&](std::int64_t ns) { return vc.sleep_for(ns); });
 
@@ -177,4 +187,51 @@ TEST_CASE("diag_publisher — empty ring publishes valid=0 sentinel") {
     const AmclIterationRate ar = amcl_rate_seq.load();
     CHECK(ar.valid == 0);
     CHECK(ar.hz == 0.0);
+}
+
+// issue#11 P4-2-11-5 — pool diag pump: when both `parallel_eval_seq` and
+// `pool_getter` are wired, the publisher tick stores a populated
+// snapshot (with the published_mono_ns timestamp filled in by the pump).
+TEST_CASE("diag_publisher — issue#11 parallel_eval pump stores pool snapshot once per tick") {
+    JitterRing            ring;
+    AmclRateAccumulator   accum;
+    Seqlock<JitterSnapshot>     jitter_seq;
+    Seqlock<AmclIterationRate>  amcl_rate_seq;
+    Seqlock<godo::parallel::ParallelEvalSnapshot> parallel_eval_seq;
+
+    // Synthetic pool snapshot — the test does not need a real pool, just
+    // a getter that returns a populated payload so the pump's store path
+    // exercises end-to-end.
+    int getter_calls = 0;
+    auto pool_getter = [&]() {
+        ++getter_calls;
+        godo::parallel::ParallelEvalSnapshot s{};
+        s.dispatch_count = 17;
+        s.fallback_count = 0;
+        s.p99_us         = 1850;
+        s.max_us         = 2100;
+        s.valid          = 1;
+        s.degraded       = 0;
+        return s;
+    };
+
+    VirtualClock vc(1'000'000'000LL, /*max_ticks=*/1);
+    godo::rt::g_running.store(true, std::memory_order_release);
+    godo::rt::run_diag_publisher_with_clock(
+        ring, accum, jitter_seq, amcl_rate_seq,
+        &parallel_eval_seq, pool_getter,
+        [&]() { return vc.time_now(); },
+        [&](std::int64_t ns) { return vc.sleep_for(ns); });
+
+    CHECK(getter_calls == 1);
+    const godo::parallel::ParallelEvalSnapshot ps = parallel_eval_seq.load();
+    CHECK(ps.valid == 1);
+    CHECK(ps.dispatch_count == 17u);
+    CHECK(ps.p99_us == 1850u);
+    CHECK(ps.max_us == 2100u);
+    CHECK(ps.degraded == 0);
+    // published_mono_ns is filled by the pump (== vc.time_now() at
+    // tick start, which is 0 in this fixture; tolerate 0 as evidence
+    // the pump touched the field).
+    CHECK(ps.published_mono_ns == 0u);
 }

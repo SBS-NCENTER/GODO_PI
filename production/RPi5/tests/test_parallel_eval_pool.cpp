@@ -169,6 +169,7 @@ TEST_CASE("Case 5: workers=1 fallback — empty cpus runs fn on caller, not degr
     const ParallelEvalSnapshot s = pool.snapshot_diag();
     CHECK(s.dispatch_count == 1);
     CHECK(s.fallback_count == 0);
+    CHECK(s.valid == 1);
     CHECK(s.degraded == 0);
 }
 

@@ -15,4 +15,5 @@ target_include_directories(godo_uds PUBLIC
 
 target_link_libraries(godo_uds PUBLIC
     godo_core
+    godo_parallel
 )

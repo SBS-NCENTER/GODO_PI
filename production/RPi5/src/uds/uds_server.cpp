@@ -91,7 +91,8 @@ UdsServer::UdsServer(std::string        socket_path,
                      ConfigGetter       get_config,
                      ConfigSchemaGetter get_config_schema,
                      ConfigSetter       set_config,
-                     LastOutputGetter   get_last_output)
+                     LastOutputGetter   get_last_output,
+                     ParallelEvalGetter get_parallel_eval)
     : socket_path_(std::move(socket_path)),
       get_mode_(std::move(get_mode)),
       set_mode_(std::move(set_mode)),
@@ -102,7 +103,8 @@ UdsServer::UdsServer(std::string        socket_path,
       get_config_(std::move(get_config)),
       get_config_schema_(std::move(get_config_schema)),
       set_config_(std::move(set_config)),
-      get_last_output_(std::move(get_last_output)) {}
+      get_last_output_(std::move(get_last_output)),
+      get_parallel_eval_(std::move(get_parallel_eval)) {}
 
 UdsServer::~UdsServer() {
     close();
@@ -467,6 +469,18 @@ void UdsServer::handle_one_request(int conn_fd) noexcept {
         godo::rt::AmclIterationRate rate{};
         if (get_amcl_rate_) rate = get_amcl_rate_();
         const auto resp = format_ok_amcl_rate(rate);
+        (void)::send(conn_fd, resp.data(), resp.size(), MSG_NOSIGNAL);
+        return;
+    }
+    if (req.cmd == "get_parallel_eval") {
+        // issue#11 P4-2-11-5 — see doc/uds_protocol.md §C.8. Same
+        // null-callback semantics as get_jitter / get_amcl_rate:
+        // valid=0 distinguishes "no diag publish yet" from "tracker
+        // down". The pool's diag pump runs at 1 Hz so a fresh tracker
+        // shows valid=0 for the first second post-boot.
+        godo::parallel::ParallelEvalSnapshot snap{};
+        if (get_parallel_eval_) snap = get_parallel_eval_();
+        const auto resp = format_ok_parallel_eval(snap);
         (void)::send(conn_fd, resp.data(), resp.size(), MSG_NOSIGNAL);
         return;
     }

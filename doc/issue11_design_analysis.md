@@ -62,6 +62,56 @@ Live mode publishes a corrected camera-base pose at the LiDAR scan rate (~10 Hz)
 - Round 1 dismissed E as "Reviewer-only artifact". Round 2 folded a Phase-0 micro-benchmark into the Writer task list as the FIRST step.
 - **Operator decision 2026-05-03 14:00 KST: E is the actual next move.** Build a cross-device measurement tool, gather empirical data, then decide between A/B/C with real numbers.
 
+### 2.6 Option B vs Option C — what gets split (FAQ)
+
+This is the most common point of confusion when reading the options side-by-side. The two architectures parallelize along **different axes of the same workload**.
+
+**Option B = time-axis split** (stage / tier parallelism). Three threads run in lockstep, each on a *different σ value* in the schedule:
+
+- Thread 0: σ=0.2 (wide, basin discovery) — runs every tick on the newest scan
+- Thread 1: σ=0.1 (mid) — runs every tick on Thread 0's previous-tick output
+- Thread 2: σ=0.05 (tight, publishes) — runs every tick on Thread 1's previous-tick output
+
+After warmup (3 ticks), every wallclock tick produces one tier-2 pose. Each thread sees the **full scan + full LF** for its own σ. The split is on *which σ tier each thread is responsible for*, not on which beams or which particles each thread sees. Cascade-jitter risk lives here: Thread 0 stalling on tick t → Thread 1 stale input on tick t+1 → Thread 2 stale input on tick t+2 (bounded to 1 tick under skip-tick + per-stage deadline policy, but the dependency chain is fundamental to the architecture).
+
+**Option C = data-axis split** (per-particle / fork-join parallelism). Inside ONE AMCL step at ONE σ, the inner particle loop is split across 3 workers:
+
+- Worker 0: particles 0..166 (167 candidate poses)
+- Worker 1: particles 167..333 (166 candidate poses)
+- Worker 2: particles 334..499 (166 candidate poses)
+
+Every worker uses the **full scan (all ~290 beams) + full LF (all 16 MB)**. The split is purely on *which candidate poses are evaluated*. After fork-join completion, the cold writer continues sequential post-processing (normalize → resample → publish). No inter-tick state propagation between workers → cascade-jitter structurally impossible.
+
+**Common misunderstanding (operator-flagged 2026-05-05)**: "splitting particles 1/3 each → each worker sees only 1/3 of the LiDAR scan → less information → AMCL accuracy degrades". This is wrong. The scan is read-only and shared across all workers. Each particle still scores against every beam, identical to the sequential path. The split is on *how many candidate poses we score in parallel*, not on *what information each pose has access to*.
+
+**Analogy**: 500 candidate answer sheets to grade. 3 graders divide the answer sheets among themselves (167 sheets each), but every grader uses the same complete grading rubric. We do not split the rubric; we only split the sheets.
+
+```text
+Option B (tier-pipeline) ─ time axis
+                  tick1   tick2   tick3   tick4   tick5
+   Thread0(σ=0.2): scan1 → scan2 → scan3 → scan4 → scan5    (wide σ, basin discovery)
+   Thread1(σ=0.1):    ·  → scan1 → scan2 → scan3 → scan4    (1 tick lag, narrows)
+   Thread2(σ=0.05):   ·  →    ·  → scan1 → scan2 → scan3    (2 tick lag, publishes)
+                                       ▲
+                              tier0 stall → tier1 stale → tier2 stale → ripple
+
+Option C (fork-join) ─ data axis (within one tick)
+                  tick1                          tick2
+                  ┌──────────────────────┐       ┌──────────────────────┐
+                  │ jitter (single)      │       │ jitter (single)      │
+                  │ eval ↓ FORK          │       │ eval ↓ FORK          │
+   Worker 0:      │   particles 0..166   │       │   particles 0..166   │
+   Worker 1:      │   particles 167..333 │       │   particles 167..333 │
+   Worker 2:      │   particles 334..499 │       │   particles 334..499 │
+                  │ JOIN                 │       │ JOIN                 │
+                  │ normalize + resample │       │ normalize + resample │
+                  │ publish pose1        │       │ publish pose2        │
+                  └──────────────────────┘       └──────────────────────┘
+                          tick 안에 fork-join 완결 → 다음 tick은 독립
+```
+
+**Compatibility with issue#13 (distance-weighted likelihood)**: issue#13 modifies the *body* of `evaluate_scan` to add per-beam weighting based on range (down-weight near-LiDAR beams). Option C parallelizes the *caller* of `evaluate_scan` over particles. The two operate at different abstraction layers and compose without conflict — the parallel path calls the same `evaluate_scan` body, distance-weighted or not. issue#13 may be merged before, after, or alongside issue#11 without re-design.
+
 ---
 
 ## 3. Mode-A round 1 findings — the numerical foundation collapse

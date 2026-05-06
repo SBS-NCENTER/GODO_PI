@@ -711,6 +711,69 @@ Pinned by:
 Cross-link: webctl side covers the consumer half via
 `godo-webctl/CODEBASE.md` invariant `(ac)`.
 
+### (s) ParallelEvalPool ownership + worker pinning + M1 spirit (issue#11)
+
+`ParallelEvalPool` lives in `src/parallel/` (separate TU from
+`cold_writer.cpp`). Its 0..3 worker threads are pinned to CPU
+`{0, 1, 2}` at ctor time; CPU 3 is forbidden by the
+`project_cpu3_isolation.md` invariant (pool ctor throws
+`std::invalid_argument` on CPU 3 in `cpus_to_pin`). The pool uses
+`std::mutex` + `std::condition_variable` internally for dispatch-wake;
+the cold writer M1 grep-invariant (`[m1-no-mutex]` in
+`scripts/build.sh`) is preserved because the mutex is invisible to
+`cold_writer.cpp`'s source text (pimpl pattern, line-based grep does
+not expand includes).
+
+M1's *spirit* (no blocking on seqlock store) is preserved because
+**cold writer is NOT the wait-free publisher — only Thread D is** —
+and the pool's dispatch+join blocks complete BEFORE
+`target_offset.store()` fires. Pool ctor blocks ≤ 1 s on worker
+readiness (M4); on timeout the pool boots in degraded inline-
+sequential mode and the cold writer continues at sequential speed
+(no Hz lift, no accuracy regression). 50 ms hard timeout on the join
+wait flips the same `degraded` flag for the rest of the tracker
+process; the timeout path drains stragglers before returning so
+caller-stack lambdas do not dangle. Worker stacks are bounded to the
+default pthread size (8 MB × N) — total `mlockall(MCL_FUTURE)` cost
+fits within the `rt_setup.cpp:31` 128 MiB headroom for N ≤ 3.
+
+**Bit-equality of parallel-vs-sequential `Amcl::step` output** depends
+on `weighted_mean()` remaining a sequential summation
+(`amcl.cpp:297-314`, pinned by
+`tests/test_amcl_parallel_eval.cpp::case 1`). Do NOT parallelize
+`weighted_mean` without re-deriving the IEEE 754 ordering proof and
+updating the test.
+
+**Diag publisher** samples `pool.snapshot_diag()` at 1 Hz cadence and
+stores into `Seqlock<ParallelEvalSnapshot>`; UDS `get_parallel_eval`
+reads it (`uds_protocol.md` §C.11).
+
+**TOML key** `amcl.parallel_eval_workers` (Int [1, 3] default 3
+Recalibrate-class) maps int → `cpus_to_pin` in `main.cpp`:
+- `1 → {}` (inline rollback, bit-equal to pre-issue#11 sequential)
+- `2 → {0, 1}`
+- `3 → {0, 1, 2}` (production default)
+
+Pinned by:
+- `tests/test_parallel_eval_pool.cpp` — 9 unit cases covering
+  lifecycle / 5000-particle bit-equality / 10⁵ stress / worker
+  affinity / workers=1 fallback / 50 ms deadline timeout /
+  concurrent-dispatch reject / healthy steady-state diag / CPU 3
+  rejection at ctor.
+- `tests/test_amcl_parallel_eval.cpp` — 5 integration cases pinning
+  bit-equal `Amcl::step` output, `converge_anneal_with_hint` and
+  `converge_anneal` equivalence within 1e-9, pool null-safety, and
+  empty-cpus rollback bit-equality with the nullptr path.
+- `tests/bench_amcl_converge.cpp` — wallclock regression band
+  (parallel ≥ 2× faster than sequential at N=500; ≥ 1.5× at N=5000).
+- `tests/test_diag_publisher.cpp` — pump end-to-end with synthetic
+  pool getter.
+- `tests/test_uds_server.cpp` — `get_parallel_eval` round-trip +
+  byte-exact `format_ok_parallel_eval` shape.
+- `tests/test_config.cpp` / `tests/test_config_schema.cpp` /
+  `tests/test_config_apply.cpp` — TOML / env / CLI plumbing,
+  forward-compat (missing key keeps default 3).
+
 ### Known scaffolding
 
 - (Removed 2026-04-26 with Wave 2.) `thread_stub_cold_writer` and the

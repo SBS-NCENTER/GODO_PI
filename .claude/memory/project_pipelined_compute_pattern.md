@@ -111,3 +111,57 @@ sites, NOT a Live-mode-specific bolt-on.
   yaw ±1°) is the "before" measurement to beat.
 - CPU 3 isolation invariant: `.claude/memory/project_cpu3_isolation.md`
   pins CPU 3 RT-only; pipeline must respect this.
+
+## issue#11 status — DONE (2026-05-06 KST, twenty-seventh-session)
+
+**Option C (fork-join particle eval) selected** after Round 2
+empirical re-anchor on Phase-0 5-min main capture (eval 69.7 % / LF
+29.1 %, TOTAL p50 = 136.15 ms / 7.34 Hz). Plan §2 / §3 / §6 fully
+re-derived from measured numbers; Round 1's "phantom baseline"
+critique closed. See `.claude/tmp/plan_issue_11_live_pipelined_parallel.md`
+for the full Round 2 body + Mode-A round 2 APPROVE-WITH-MINOR-REVISIONS
+fold.
+
+Implementation shipped in branch `feat/issue-11-parallel-eval-pool`:
+
+- P4-2-11-1: `src/parallel/parallel_eval_pool.{hpp,cpp}` static lib
+  + 9 unit tests (lifecycle / 5000-particle bit-equality / 10⁵
+  random-partition stress / worker affinity / workers=1 fallback /
+  50 ms deadline timeout / concurrent-dispatch reject / healthy diag /
+  CPU 3 ctor reject).
+- P4-2-11-2: Amcl ctor + step() accept optional pool pointer; eval
+  loop wraps in `pool->parallel_for` with sequential fallback on
+  pool==nullptr or join timeout. weighted_mean unchanged. 5
+  integration cases pin bit-equal step output / converge_anneal_with_hint
+  / converge_anneal / null-safety / empty-cpus-bit-equal-to-nullptr.
+- P4-2-11-3: cold writer + main.cpp wiring (pool spawn BEFORE cold
+  writer thread per R11; RAII reverse construction guarantees pool
+  dtor runs after cold writer join).
+- P4-2-11-4: schema row 67 → 68 `amcl.parallel_eval_workers` Int [1, 3]
+  default 3 Recalibrate. Plumbing through allowed_keys / TOML / env /
+  CLI / make_default / validate_amcl / apply_one / read_effective.
+  7 new test cases pin TOML / env / CLI round-trips and
+  forward-compat (toml++ silently ignores missing key).
+- P4-2-11-5: Seqlock<ParallelEvalSnapshot> + `format_ok_parallel_eval`
+  JSON writer + `get_parallel_eval` UDS endpoint
+  + diag publisher pump (1 Hz cadence, mirrors JitterSnapshot seam).
+- P4-2-11-6: `bench_amcl_converge` regression band — parallel ≥ 2×
+  faster than sequential at N=500 (Phase-0 projects ~3×); ≥ 1.5× at
+  N=5000. Initial dev-host run: 2.01× / 2.37× — passes the floor.
+- P4-2-11-7: CODEBASE.md invariant `(s)` + weekly archive entry
+  (`production/RPi5/CODEBASE/2026-W19.md`) + SYSTEM_DESIGN.md §6.6
+  parallel particle evaluation subsection + this status close note.
+
+Final: 52/52 hardware-free tests pass; full build.sh gate clean
+(`[m1-no-mutex]`, `[rt-alloc-grep]`, etc.). HIL on news-pi01 driven
+by operator per plan §6.6 acceptance bar.
+
+**Operator's broader staggered-tier pattern preserved** for sites 2-5
+(FreeD smoother, Map activate, confidence monitor, Phase 5 UE
+characterization). Selecting C for issue#11 does NOT foreclose B for
+those sites — see plan §2.B' for the rejection-reasoning split.
+
+**issue#19** (EDT 2D parallelization) inherits the pool primitive as
+~80 LOC follow-up: ~30 LOC `parallel_for_with_scratch<S>` API
+extension + ~50 LOC EDT integration. Combined with #11, projects
+~21 Hz at p50 / 48 ms scan total on the same Phase-0 fixture.

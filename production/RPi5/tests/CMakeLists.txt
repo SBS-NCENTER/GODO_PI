@@ -206,6 +206,19 @@ target_link_libraries(test_likelihood_field PRIVATE
 add_test(NAME test_likelihood_field COMMAND test_likelihood_field)
 set_tests_properties(test_likelihood_field PROPERTIES LABELS "hardware-free")
 
+# issue#19 — `build_likelihood_field` × ParallelEvalPool integration.
+# 6 doctest cases per plan §6: brute-force regression / 16×16 / 256×256
+# / 1000×1000 FNV-1a memcmp / degraded fallback / workers=0 rollback
+# bit-equality. Hardware-free.
+add_executable(test_likelihood_field_parallel
+    test_likelihood_field_parallel.cpp)
+target_link_libraries(test_likelihood_field_parallel PRIVATE
+    doctest::doctest godo_localization godo_parallel godo_core)
+add_test(NAME test_likelihood_field_parallel
+    COMMAND test_likelihood_field_parallel)
+set_tests_properties(test_likelihood_field_parallel PROPERTIES
+    LABELS "hardware-free")
+
 add_executable(test_resampler test_resampler.cpp)
 target_link_libraries(test_resampler PRIVATE
     doctest::doctest godo_localization)

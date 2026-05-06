@@ -17,6 +17,14 @@
 
 #include "occupancy_grid.hpp"
 
+namespace godo::parallel {
+// issue#19 — forward declare ParallelEvalPool. Avoids dragging the full
+// parallel_eval_pool.hpp (and its <atomic>) into every TU that includes
+// likelihood_field.hpp; consumers that pass a non-null pool include the
+// full header in their .cpp directly.
+class ParallelEvalPool;
+}  // namespace godo::parallel
+
 namespace godo::localization {
 
 struct LikelihoodField {
@@ -31,7 +39,20 @@ struct LikelihoodField {
 // Build the likelihood field. `sigma_hit_m` is the LiDAR hit-noise σ in
 // metres; AMCL uses cfg.amcl_sigma_hit_m. Throws std::invalid_argument if
 // the grid is empty or σ is non-positive.
-LikelihoodField build_likelihood_field(const OccupancyGrid& grid,
-                                       double               sigma_hit_m);
+//
+// issue#19 — `pool` parameter is optional. `nullptr` (default) selects
+// the existing sequential Felzenszwalb path, byte-identical to pre-
+// issue#19 behaviour. Non-null pool dispatches the column + row passes
+// 3-way (workers pinned to {CPU 0, 1, 2} per the pool's ctor); the
+// Gaussian conversion stays sequential (not the bottleneck). Pool path
+// is bit-equal to sequential — workers write disjoint output subranges
+// (column pass: x-block; row pass: y-block) and `edt_1d` is invoked per-
+// column / per-row sequentially within that span; no cross-worker
+// reduction. Pinned by FNV-1a memcmp in
+// `tests/test_likelihood_field_parallel.cpp`.
+LikelihoodField build_likelihood_field(
+    const OccupancyGrid&                grid,
+    double                              sigma_hit_m,
+    godo::parallel::ParallelEvalPool*   pool = nullptr);
 
 }  // namespace godo::localization

@@ -819,10 +819,15 @@ ordering is identical) — pinned by
 Range-proportional deadline reuses the issue#11 pattern at
 `.claude/memory/project_range_proportional_deadline_pattern.md`
 with EDT-specific Tier-1 anchors (`EDT_PARALLEL_DEADLINE_BASE_NS`
-= 30 ms, `EDT_PARALLEL_ANCHOR_DIM` = 256 × 256 / 3 = 21,845 cells
-per worker at the 256×256 reference scale; production
-1000×1000 / 3 ≈ 333,333 → scale ≈ 15 → ~450 ms per pass; ≈ 900 ms
-both passes; well under the 5 s SIGTERM watchdog). Graceful
+= 50 ms single-pass anchor at the 1000-dim reference scale,
+`EDT_PARALLEL_ANCHOR_DIM` = 1000 — `max(W, H)` is the dispatch
+range, NOT cell count, so `scale = max(1, max(W,H) / 1000)`.
+Production 1000×1000 → scale=1 → 50 ms per pass; 2000×2000 →
+scale=2 → 100 ms per pass; both are well under the 5 s SIGTERM
+watchdog. m2 fallback rule (operator-locked 2026-05-06 21:00 KST):
+if HIL or `bench_lf_rebuild` measures 2000×2000 worker p99 > 80 ms,
+anchor drops to 750 in a separate small PR — preserves production-
+scale headroom while tightening the EDT_MAX_CELLS edge). Graceful
 fallback: `pool->degraded()` ⇒ re-run the affected pass
 sequentially using `per_worker[0]`'s scratch; sticky for the rest
 of the process. Workers=0 rollback (TOML

@@ -275,3 +275,187 @@ TEST_CASE("Bonus: CPU 3 in cpus_to_pin throws std::invalid_argument") {
     // Negative CPU id is also invalid.
     CHECK_THROWS_AS(ParallelEvalPool({-1, 0}), std::invalid_argument);
 }
+
+// =====================================================================
+// issue#19 — `parallel_for_with_scratch<S>` cases (a)..(e). Per plan §6
+// + Mode-A m3/n4/n5 fold. The runtime size-mismatch guard uses
+// `std::abort()` in production; the test fixture flips
+// `test_hooks::s_abort_throws_for_test` so the same guard throws
+// `std::logic_error` for doctest-observable testing.
+// =====================================================================
+
+namespace {
+
+// RAII switch on the test-only abort-throws flag. Tests that observe
+// the size-mismatch path scope this so the flag never leaks across
+// cases (could race with a parallel test runner).
+struct AbortThrowsScope {
+    AbortThrowsScope() {
+        godo::parallel::test_hooks::s_abort_throws_for_test.store(
+            true, std::memory_order_release);
+    }
+    ~AbortThrowsScope() {
+        godo::parallel::test_hooks::s_abort_throws_for_test.store(
+            false, std::memory_order_release);
+    }
+};
+
+}  // namespace
+
+TEST_CASE("issue#19 (a): parallel_for_with_scratch round-trips per-worker scratch state") {
+    constexpr std::size_t kN = 600;
+    ParallelEvalPool pool(available_cpus_for_test());
+    REQUIRE(pool.worker_count() == 3);
+
+    // Per-worker scratch: each worker owns one int counter and an
+    // accumulator vector. The fn body increments the counter once per
+    // iteration the worker handles.
+    struct Scratch {
+        std::int64_t count{0};
+        std::int64_t sum{0};
+    };
+    std::vector<Scratch> per_worker(3);
+
+    const std::int64_t deadline = 100'000'000LL;  // 100 ms
+    const bool ok = pool.parallel_for_with_scratch<Scratch>(
+        0, kN, per_worker,
+        [](std::size_t i, Scratch& s) {
+            s.count += 1;
+            s.sum   += static_cast<std::int64_t>(i);
+        },
+        deadline);
+    CHECK(ok);
+
+    std::int64_t total_count = 0;
+    std::int64_t total_sum   = 0;
+    for (const auto& s : per_worker) {
+        CHECK(s.count > 0);              // every worker did at least 1
+        total_count += s.count;
+        total_sum   += s.sum;
+    }
+    CHECK(total_count == static_cast<std::int64_t>(kN));
+    // Sum of i in [0, kN) = kN*(kN-1)/2 = 600*599/2 = 179700.
+    CHECK(total_sum == 179700);
+}
+
+TEST_CASE("issue#19 (b): per_worker size mismatch trips the runtime abort guard") {
+    AbortThrowsScope scope;  // flip abort → throw for the duration
+    ParallelEvalPool pool(available_cpus_for_test());
+    REQUIRE(pool.worker_count() == 3);
+
+    struct Scratch { int x{0}; };
+    std::vector<Scratch> wrong_sized(2);  // 2 instead of 3
+
+    CHECK_THROWS_AS((pool.parallel_for_with_scratch<Scratch>(
+        0, 16, wrong_sized,
+        [](std::size_t, Scratch&) {},
+        100'000'000LL)), std::logic_error);
+
+    // Oversized also trips.
+    std::vector<Scratch> oversized(5);
+    CHECK_THROWS_AS((pool.parallel_for_with_scratch<Scratch>(
+        0, 16, oversized,
+        [](std::size_t, Scratch&) {},
+        100'000'000LL)), std::logic_error);
+}
+
+TEST_CASE("issue#19 (c): workers=0 rollback runs fn on caller, per_worker[0] sees all increments") {
+    ParallelEvalPool pool({});  // empty cpus_to_pin
+    CHECK(pool.worker_count() == 0);
+    CHECK_FALSE(pool.degraded());
+
+    constexpr std::size_t kN = 256;
+    struct Scratch { std::int64_t hits{0}; };
+    std::vector<Scratch> per_worker(1);  // exactly 1 expected for w=0
+
+    const std::thread::id caller = std::this_thread::get_id();
+    std::atomic<bool> ran_off_caller{false};
+
+    const bool ok = pool.parallel_for_with_scratch<Scratch>(
+        0, kN, per_worker,
+        [&](std::size_t, Scratch& s) {
+            if (std::this_thread::get_id() != caller) {
+                ran_off_caller.store(true);
+            }
+            s.hits += 1;
+        },
+        100'000'000LL);
+    CHECK(ok);
+    CHECK_FALSE(ran_off_caller.load());
+    CHECK(per_worker[0].hits == static_cast<std::int64_t>(kN));
+    CHECK_FALSE(pool.degraded());
+}
+
+TEST_CASE("issue#19 (d): caller-supplied deadline overrun returns false + flips degraded") {
+    ParallelEvalPool pool(available_cpus_for_test());
+    REQUIRE_FALSE(pool.degraded());
+
+    struct Scratch { int x{0}; };
+    std::vector<Scratch> per_worker(3);
+
+    // 100 ms sleep per iter against a 1 ms deadline ⇒ guaranteed timeout.
+    const bool ok = pool.parallel_for_with_scratch<Scratch>(
+        0, 16, per_worker,
+        [](std::size_t, Scratch&) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        },
+        1'000'000LL);  // 1 ms
+    CHECK_FALSE(ok);
+    CHECK(pool.degraded());
+
+    // Subsequent dispatch sees pool degraded ⇒ runs inline + returns false.
+    std::atomic<int> count{0};
+    const bool second = pool.parallel_for_with_scratch<Scratch>(
+        0, 8, per_worker,
+        [&](std::size_t, Scratch&) { count.fetch_add(1); },
+        100'000'000LL);
+    CHECK_FALSE(second);            // degraded path returns false
+    CHECK(count.load() == 8);       // but iterations did run inline
+
+    const ParallelEvalSnapshot s = pool.snapshot_diag();
+    CHECK(s.degraded == 1);
+    CHECK(s.fallback_count >= 1);
+}
+
+TEST_CASE("issue#19 (e): issue#11 parallel_for(begin, end, fn) is byte-identical regression pin") {
+    // The new scratch path is purely additive; the index-only
+    // `parallel_for` surface must produce identical output to the
+    // pre-issue#19 main. We validate via the same fixture as Case 2
+    // (squared-i write pattern at N=5000) and an independent FNV-1a
+    // hash of the result buffer to catch any silent reordering.
+    constexpr std::size_t kN = 5000;
+    std::vector<std::int64_t> par(kN, 0);
+
+    ParallelEvalPool pool(available_cpus_for_test());
+    const bool ok = pool.parallel_for(0, kN, [&](std::size_t i) {
+        par[i] = static_cast<std::int64_t>(i) *
+                 static_cast<std::int64_t>(i);
+    });
+    CHECK(ok);
+
+    // FNV-1a 64-bit hash of the byte representation of par[].
+    std::uint64_t hash = 14695981039346656037ULL;
+    const auto* bytes = reinterpret_cast<const std::uint8_t*>(par.data());
+    const std::size_t nbytes = par.size() * sizeof(std::int64_t);
+    for (std::size_t i = 0; i < nbytes; ++i) {
+        hash ^= static_cast<std::uint64_t>(bytes[i]);
+        hash *= 1099511628211ULL;
+    }
+
+    // Sequential reference (intent: same sequence of values).
+    std::vector<std::int64_t> seq(kN, 0);
+    for (std::size_t i = 0; i < kN; ++i) {
+        seq[i] = static_cast<std::int64_t>(i) *
+                 static_cast<std::int64_t>(i);
+    }
+    std::uint64_t seq_hash = 14695981039346656037ULL;
+    const auto* seq_bytes =
+        reinterpret_cast<const std::uint8_t*>(seq.data());
+    for (std::size_t i = 0; i < nbytes; ++i) {
+        seq_hash ^= static_cast<std::uint64_t>(seq_bytes[i]);
+        seq_hash *= 1099511628211ULL;
+    }
+
+    CHECK(hash == seq_hash);
+    CHECK(par == seq);
+}

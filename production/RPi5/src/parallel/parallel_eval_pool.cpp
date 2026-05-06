@@ -15,6 +15,21 @@
 
 #include "core/time.hpp"
 
+namespace godo::parallel::test_hooks {
+
+// issue#19 — test-only escape hatch for the D1 size-mismatch abort.
+// `std::abort()` cannot be exercised directly under doctest (it tears
+// down the test runner), so the test fixture sets `s_abort_throws_for_test`
+// to swap the production `std::abort()` for a `std::logic_error` throw.
+// Production code paths (cold writer, AMCL) NEVER touch this flag — it
+// stays `false` and the dispatcher's guard calls `std::abort()` verbatim.
+// The build-grep `[edt-scratch-asserted]` matches `std::abort` in source
+// text and stays clean (the keyword is still present below, merely
+// gated behind a runtime atomic).
+std::atomic<bool> s_abort_throws_for_test{false};
+
+}  // namespace godo::parallel::test_hooks
+
 namespace godo::parallel {
 
 namespace {
@@ -66,6 +81,23 @@ struct ParallelEvalPool::Impl {
     bool parallel_for(std::size_t begin,
                       std::size_t end,
                       std::function<void(std::size_t)> fn);
+
+    // issue#19 — Type-erased per-worker-scratch dispatcher. The public
+    // template `parallel_for_with_scratch<S>` (header) wraps the fn into
+    // `void(size_t, void*)` and supplies a `void* const*` table of
+    // per-worker pointers; this routine drives the same fork-join
+    // machinery as `parallel_for` but each worker invokes
+    // `fn_erased(i, per_worker_ptrs[wid])` per iteration. The deadline
+    // is caller-supplied (D2) — pool does NOT auto-scale via the
+    // issue#11 N=500 anchor for these dispatches.
+    bool dispatch_with_scratch_erased(
+        std::size_t                              begin,
+        std::size_t                              end,
+        void* const*                             per_worker_ptrs,
+        std::size_t                              per_worker_count,
+        std::function<void(std::size_t, void*)>  fn_erased,
+        std::int64_t                             deadline_ns_override);
+
     ParallelEvalSnapshot snapshot_diag() const noexcept;
     bool degraded_load() const noexcept {
         return degraded_.load(std::memory_order_acquire);
@@ -95,6 +127,18 @@ private:
         std::size_t                       begin{0};
         std::size_t                       end{0};
         std::function<void(std::size_t)>  fn;        // owned copy (R5)
+        // issue#19 — scratch-mode dispatch path. When `is_scratch_mode`
+        // is true, workers invoke `scratch_fn(i, scratch_ptrs[wid])`
+        // instead of `fn(i)`. `scratch_ptrs` stores caller-owned per-
+        // worker void* pointers; their lifetime is bounded by
+        // `dispatch_with_scratch_erased` returning (the timeout path
+        // drains stragglers before returning, mirroring `fn`'s lifetime
+        // story). The two fn slots are held simultaneously so an in-
+        // flight straggler from a prior dispatch keeps its captured
+        // signature alive across a mode flip.
+        std::function<void(std::size_t, void*)> scratch_fn;
+        std::vector<void*>                scratch_ptrs;
+        bool                              is_scratch_mode{false};
         bool                              has_work{false};
     };
     DispatchState dispatch_;
@@ -263,6 +307,8 @@ void ParallelEvalPool::Impl::worker_body(std::size_t wid) {
         std::size_t   range_lo  = 0;
         std::size_t   range_hi  = 0;
         bool          has_work  = false;
+        bool          scratch_mode = false;
+        void*         my_scratch = nullptr;
         {
             std::unique_lock<std::mutex> lock(mutex_);
             cv_.wait(lock, [this, wid] {
@@ -287,15 +333,25 @@ void ParallelEvalPool::Impl::worker_body(std::size_t wid) {
             range_hi = (range_lo + chunk < dispatch_.end)
                        ? (range_lo + chunk) : dispatch_.end;
             has_work = dispatch_.has_work;
+            scratch_mode = dispatch_.is_scratch_mode;
+            if (scratch_mode && wid < dispatch_.scratch_ptrs.size()) {
+                my_scratch = dispatch_.scratch_ptrs[wid];
+            }
         }
 
         if (range_lo < range_hi && has_work) {
-            // dispatch_.fn is owned by the Impl (R5); its lifetime
-            // outlives any caller-stack frame even if parallel_for's
-            // join timed out (the timeout path drains stragglers before
+            // dispatch_.fn / scratch_fn is owned by the Impl (R5); its
+            // lifetime outlives any caller-stack frame even if the join
+            // timed out (the timeout path drains stragglers before
             // returning to the caller, so fn stays valid throughout).
-            for (std::size_t i = range_lo; i < range_hi; ++i) {
-                dispatch_.fn(i);
+            if (scratch_mode) {
+                for (std::size_t i = range_lo; i < range_hi; ++i) {
+                    dispatch_.scratch_fn(i, my_scratch);
+                }
+            } else {
+                for (std::size_t i = range_lo; i < range_hi; ++i) {
+                    dispatch_.fn(i);
+                }
             }
         }
 
@@ -357,10 +413,11 @@ bool ParallelEvalPool::Impl::parallel_for(
     // caller stack.
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        dispatch_.begin    = begin;
-        dispatch_.end      = end;
-        dispatch_.fn       = std::move(fn);
-        dispatch_.has_work = true;
+        dispatch_.begin           = begin;
+        dispatch_.end             = end;
+        dispatch_.fn              = std::move(fn);
+        dispatch_.is_scratch_mode = false;
+        dispatch_.has_work        = true;
         completed_.store(0, std::memory_order_release);
         dispatch_seq_.fetch_add(1, std::memory_order_release);
     }
@@ -431,6 +488,160 @@ bool ParallelEvalPool::Impl::parallel_for(
         // are guaranteed to bump completed_ when they finish their
         // partition. Worst case is bounded by fn's wallclock; the test
         // exercises a 100 ms fn against a 50 ms deadline.
+        while (completed_.load(std::memory_order_acquire) < target) {
+            std::this_thread::yield();
+        }
+        in_dispatch_.store(false, std::memory_order_release);
+        return false;
+    }
+    in_dispatch_.store(false, std::memory_order_release);
+    return true;
+}
+
+// issue#19 — Type-erased per-worker-scratch dispatcher. Mirrors
+// `parallel_for` semantics (R5 fn-by-value, in_dispatch_ guard, latency
+// ring) but: (1) workers receive `(i, per_worker_ptrs[wid])`, (2) the
+// caller's `deadline_ns_override` REPLACES the issue#11 N=500 anchor —
+// pool does not auto-scale (D2). Size-mismatch trips a runtime guard in
+// BOTH debug AND release (D1) via `fprintf(stderr) + std::abort()` —
+// NOT the NDEBUG-conditional `assert(...)` macro. Build-grep
+// `[edt-scratch-asserted]` pins this contract.
+bool ParallelEvalPool::Impl::dispatch_with_scratch_erased(
+    std::size_t                              begin,
+    std::size_t                              end,
+    void* const*                             per_worker_ptrs,
+    std::size_t                              per_worker_count,
+    std::function<void(std::size_t, void*)>  fn_erased,
+    std::int64_t                             deadline_ns_override) {
+    // D1 — runtime size guard: per_worker.size() must match
+    // worker_count() (or be exactly 1 for the workers=0 inline path).
+    // Tripping this is a programming error; we abort BOTH in debug and
+    // release so the bug surfaces in production too. Pinned by
+    // [edt-scratch-asserted] build-grep targeting this function's body.
+    const std::size_t expected_workers =
+        workers_.empty() ? std::size_t{1} : workers_.size();
+    if (per_worker_count != expected_workers) {
+        std::fprintf(stderr,
+            "[edt-scratch-asserted] dispatch_with_scratch_erased: "
+            "per_worker size mismatch — got %zu, expected %zu "
+            "(worker_count()=%zu). This is a programming error: caller "
+            "MUST size per_worker to worker_count() (or 1 for the "
+            "workers=0 rollback path). Aborting.\n",
+            per_worker_count, expected_workers, workers_.size());
+        // Production: hard abort. Tests: optionally throw so doctest can
+        // observe the abort-shaped guard without tearing down the runner.
+        if (test_hooks::s_abort_throws_for_test.load(
+                std::memory_order_acquire)) {
+            throw std::logic_error(
+                "[edt-scratch-asserted] size mismatch (test hook)");
+        }
+        std::abort();
+    }
+
+    if (begin >= end) {
+        dispatch_count_.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+
+    // workers=0 rollback path OR pool degraded → run inline on caller
+    // thread with per_worker_ptrs[0]. fn_erased is invoked directly
+    // without going through the worker queue.
+    if (workers_.empty()) {
+        const std::int64_t t0 = godo::rt::monotonic_ns();
+        for (std::size_t i = begin; i < end; ++i) {
+            fn_erased(i, per_worker_ptrs[0]);
+        }
+        const std::int64_t dt = godo::rt::monotonic_ns() - t0;
+        dispatch_count_.fetch_add(1, std::memory_order_relaxed);
+        const std::uint32_t us = (dt < 0) ? 0
+            : static_cast<std::uint32_t>(dt / 1000);
+        record_latency(us, t0);
+        return true;
+    }
+    if (degraded_.load(std::memory_order_acquire)) {
+        const std::int64_t t0 = godo::rt::monotonic_ns();
+        for (std::size_t i = begin; i < end; ++i) {
+            fn_erased(i, per_worker_ptrs[0]);
+        }
+        const std::int64_t dt = godo::rt::monotonic_ns() - t0;
+        dispatch_count_.fetch_add(1, std::memory_order_relaxed);
+        fallback_count_.fetch_add(1, std::memory_order_relaxed);
+        const std::uint32_t us = (dt < 0) ? 0
+            : static_cast<std::uint32_t>(dt / 1000);
+        record_latency(us, t0);
+        // Caller asked for parallel; degraded path returns false so the
+        // caller can take its sequential fallback branch (the iterations
+        // already ran inline above, but the caller's contract is "false
+        // ⇒ the parallel path didn't fire, run it sequentially yourself
+        // if you want bit-equality with sequential"). Mirrors the
+        // parallel_for degraded behaviour.
+        return false;
+    }
+
+    // Reentry guard — same single-caller contract as parallel_for.
+    bool expected = false;
+    if (!in_dispatch_.compare_exchange_strong(
+            expected, true,
+            std::memory_order_acq_rel,
+            std::memory_order_acquire)) {
+        return false;
+    }
+
+    const std::int64_t t0 = godo::rt::monotonic_ns();
+
+    // Publish range + scratch fn + per-worker pointers under the mutex.
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        dispatch_.begin           = begin;
+        dispatch_.end             = end;
+        dispatch_.scratch_fn      = std::move(fn_erased);
+        dispatch_.scratch_ptrs.assign(per_worker_ptrs,
+                                      per_worker_ptrs + per_worker_count);
+        dispatch_.is_scratch_mode = true;
+        dispatch_.has_work        = true;
+        completed_.store(0, std::memory_order_release);
+        dispatch_seq_.fetch_add(1, std::memory_order_release);
+    }
+    cv_.notify_all();
+
+    // Spin-wait on completion against caller-supplied deadline (D2).
+    const std::int64_t deadline_ns =
+        (deadline_ns_override > 0) ? deadline_ns_override
+                                   : kJoinTimeoutBaseNs;
+    const std::int64_t deadline = t0 + deadline_ns;
+    const std::uint32_t target  = static_cast<std::uint32_t>(workers_.size());
+    bool ok = false;
+    while (true) {
+        if (completed_.load(std::memory_order_acquire) >= target) {
+            ok = true;
+            break;
+        }
+        if (godo::rt::monotonic_ns() >= deadline) {
+            break;
+        }
+        std::this_thread::yield();
+    }
+
+    const std::int64_t dt = godo::rt::monotonic_ns() - t0;
+    const std::uint32_t us = (dt < 0) ? 0
+        : static_cast<std::uint32_t>(dt / 1000);
+    record_latency(us, t0);
+    dispatch_count_.fetch_add(1, std::memory_order_relaxed);
+
+    if (!ok) {
+        degraded_.store(true, std::memory_order_release);
+        fallback_count_.fetch_add(1, std::memory_order_relaxed);
+        std::fprintf(stderr,
+            "[pool-degraded] dispatch_with_scratch_erased: scratch join "
+            "exceeded %lld ms caller-specified deadline (workers=%zu, "
+            "range=[%zu,%zu)); falling back to inline-sequential mode "
+            "for the remainder of this tracker process. Draining "
+            "stragglers before return.\n",
+            static_cast<long long>(deadline_ns / 1'000'000),
+            workers_.size(), begin, end);
+        // Bounded straggler drain — mirrors parallel_for timeout path so
+        // caller-side per_worker / fn_erased lifetimes are safe to free
+        // after this returns false.
         while (completed_.load(std::memory_order_acquire) < target) {
             std::this_thread::yield();
         }
@@ -520,6 +731,18 @@ bool ParallelEvalPool::parallel_for(
     std::size_t                       end,
     std::function<void(std::size_t)>  fn) {
     return impl_->parallel_for(begin, end, std::move(fn));
+}
+
+bool ParallelEvalPool::dispatch_with_scratch_erased(
+    std::size_t                              begin,
+    std::size_t                              end,
+    void* const*                             per_worker_ptrs,
+    std::size_t                              per_worker_count,
+    std::function<void(std::size_t, void*)>  fn_erased,
+    std::int64_t                             deadline_ns_override) {
+    return impl_->dispatch_with_scratch_erased(
+        begin, end, per_worker_ptrs, per_worker_count,
+        std::move(fn_erased), deadline_ns_override);
 }
 
 ParallelEvalSnapshot ParallelEvalPool::snapshot_diag() const noexcept {

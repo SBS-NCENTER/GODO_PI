@@ -19,8 +19,25 @@ namespace godo::parallel {
 
 namespace {
 
-// 50 ms hard timeout on the per-dispatch join wait (R5).
-constexpr std::int64_t kJoinTimeoutNs = 50'000'000LL;
+// Range-proportional hard timeout on the per-dispatch join wait (R5).
+//
+// `kJoinTimeoutBaseNs` is the deadline for the steady-state Live anchor
+// (N=`kJoinTimeoutAnchorN`=500 particles per `Amcl::step`). For larger
+// ranges — most importantly the OneShot first-tick / Live re-entry case
+// where `seed_global` makes N=5000 — the deadline scales linearly:
+//
+//   deadline_ns = kJoinTimeoutBaseNs × max(1, range / kJoinTimeoutAnchorN)
+//
+// → N=500  (steady-state)         → 50 ms
+// → N=5000 (first-tick / re-seed) → 500 ms (~2.5× safety over plan §3.7
+//                                   first-tick parallel projection ~190 ms)
+//
+// A flat 50 ms is empirically sufficient for steady-state but causes
+// permanent fallback on the very first N=5000 dispatch (plan §3.7 is
+// internally inconsistent with a flat deadline). Range-proportional
+// preserves the R5 worker-stall guard while honoring §3.7.
+constexpr std::int64_t kJoinTimeoutBaseNs  = 50'000'000LL;  // 50 ms
+constexpr std::size_t  kJoinTimeoutAnchorN = 500;
 
 // Pool ctor waits this long for every worker to publish ready=1 before
 // transitioning to degraded inline-sequential mode (M4 / R12).
@@ -65,7 +82,8 @@ private:
     // Per-dispatch shared state — the workers each pick up the same range
     // and fn and partition it by worker_id.
     //
-    // R5 lifetime hazard: when parallel_for's 50 ms join deadline fires,
+    // R5 lifetime hazard: when parallel_for's range-proportional join
+    // deadline fires (kJoinTimeoutBaseNs × max(1, range/kJoinTimeoutAnchorN)),
     // the caller returns to its frame while one or more workers may still
     // be inside fn(). To avoid UB on a caller-stack-allocated lambda we
     // store fn BY VALUE inside the Impl state so its lifetime extends
@@ -348,10 +366,14 @@ bool ParallelEvalPool::Impl::parallel_for(
     }
     cv_.notify_all();
 
-    // Spin-wait on completed_ with a 50 ms hard deadline (R5). Yield
-    // periodically so a worker that ended up on the same CFS-scheduled
-    // CPU is not starved (m7 yield).
-    const std::int64_t deadline = t0 + kJoinTimeoutNs;
+    // Spin-wait on completed_ with a range-proportional hard deadline
+    // (R5). Yield periodically so a worker that ended up on the same
+    // CFS-scheduled CPU is not starved (m7 yield).
+    const std::size_t  range    = end - begin;  // begin < end checked above
+    const std::int64_t scale_n  = std::max<std::int64_t>(
+        1, static_cast<std::int64_t>(range / kJoinTimeoutAnchorN));
+    const std::int64_t deadline_ns = kJoinTimeoutBaseNs * scale_n;
+    const std::int64_t deadline    = t0 + deadline_ns;
     const std::uint32_t target  = static_cast<std::uint32_t>(workers_.size());
     bool ok = false;
     while (true) {
@@ -397,11 +419,14 @@ bool ParallelEvalPool::Impl::parallel_for(
         fallback_count_.fetch_add(1, std::memory_order_relaxed);
         std::fprintf(stderr,
             "[pool-degraded] ParallelEvalPool: parallel_for join exceeded "
-            "%lld ms hard deadline (workers=%zu, range=[%zu,%zu)); falling "
-            "back to inline-sequential mode for the remainder of this "
-            "tracker process. Draining stragglers before return.\n",
-            static_cast<long long>(kJoinTimeoutNs / 1'000'000),
-            workers_.size(), begin, end);
+            "%lld ms hard deadline (workers=%zu, range=[%zu,%zu), N=%zu, "
+            "base=%lld ms × %lld); falling back to inline-sequential mode "
+            "for the remainder of this tracker process. Draining stragglers "
+            "before return.\n",
+            static_cast<long long>(deadline_ns / 1'000'000),
+            workers_.size(), begin, end, range,
+            static_cast<long long>(kJoinTimeoutBaseNs / 1'000'000),
+            static_cast<long long>(scale_n));
         // Bounded straggler drain — workers respect dispatch_seq_ and
         // are guaranteed to bump completed_ when they finish their
         // partition. Worst case is bounded by fn's wallclock; the test

@@ -730,12 +730,19 @@ and the pool's dispatch+join blocks complete BEFORE
 `target_offset.store()` fires. Pool ctor blocks ≤ 1 s on worker
 readiness (M4); on timeout the pool boots in degraded inline-
 sequential mode and the cold writer continues at sequential speed
-(no Hz lift, no accuracy regression). 50 ms hard timeout on the join
-wait flips the same `degraded` flag for the rest of the tracker
-process; the timeout path drains stragglers before returning so
-caller-stack lambdas do not dangle. Worker stacks are bounded to the
-default pthread size (8 MB × N) — total `mlockall(MCL_FUTURE)` cost
-fits within the `rt_setup.cpp:31` 128 MiB headroom for N ≤ 3.
+(no Hz lift, no accuracy regression). **Range-proportional join
+deadline** (`kJoinTimeoutBaseNs × max(1, range / kJoinTimeoutAnchorN)`,
+base 50 ms anchored on N=500): steady-state Live N=500 → 50 ms;
+OneShot first-tick / Live re-entry N=5000 → 500 ms (~2.5× safety
+over plan §3.7's parallel ~190 ms projection). Flat 50 ms triggered
+permanent fallback on the very first N=5000 dispatch (verified
+2026-05-06 HIL); the range-proportional rule resolves the §3.7 / §4
+self-inconsistency. Timeout flips the `degraded` flag for the rest
+of the tracker process; the timeout path drains stragglers before
+returning so caller-stack lambdas do not dangle. Worker stacks are
+bounded to the default pthread size (8 MB × N) — total
+`mlockall(MCL_FUTURE)` cost fits within the `rt_setup.cpp:31` 128 MiB
+headroom for N ≤ 3.
 
 **Bit-equality of parallel-vs-sequential `Amcl::step` output** depends
 on `weighted_mean()` remaining a sequential summation
@@ -757,7 +764,8 @@ Recalibrate-class) maps int → `cpus_to_pin` in `main.cpp`:
 Pinned by:
 - `tests/test_parallel_eval_pool.cpp` — 9 unit cases covering
   lifecycle / 5000-particle bit-equality / 10⁵ stress / worker
-  affinity / workers=1 fallback / 50 ms deadline timeout /
+  affinity / workers=1 fallback / range-proportional deadline timeout
+  (Case 6: 100 ms fn over 16-element range → 50 ms base deadline) /
   concurrent-dispatch reject / healthy steady-state diag / CPU 3
   rejection at ctor.
 - `tests/test_amcl_parallel_eval.cpp` — 5 integration cases pinning

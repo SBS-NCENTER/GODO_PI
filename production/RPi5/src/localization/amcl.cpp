@@ -6,6 +6,8 @@
 #include <stdexcept>
 
 #include "core/constants.hpp"
+#include "core/rt_types.hpp"
+#include "core/time.hpp"
 
 namespace godo::localization {
 
@@ -176,7 +178,8 @@ void Amcl::normalize_weights() {
 AmclResult Amcl::step(const std::vector<RangeBeam>& beams,
                       Rng&                          rng,
                       double                        sigma_xy_m,
-                      double                        sigma_yaw_deg) {
+                      double                        sigma_yaw_deg,
+                      godo::rt::Phase0InnerBreakdown* phase0_out) {
     AmclResult res{};
     res.forced     = false;
     res.iterations = 1;
@@ -185,25 +188,39 @@ AmclResult Amcl::step(const std::vector<RangeBeam>& beams,
     //    σ pair comes from the caller — OneShot keeps the cfg-default pair
     //    via the no-σ overload below; Live mode passes the wider Live pair
     //    so a fast-moving base does not collapse the cloud.
+    const std::int64_t t_jitter_start = phase0_out ? godo::rt::monotonic_ns() : 0;
     jitter_inplace(front_.data(), n_,
                    sigma_xy_m,
                    sigma_yaw_deg,
                    rng);
+    if (phase0_out) {
+        phase0_out->jitter_ns = godo::rt::monotonic_ns() - t_jitter_start;
+    }
 
     // 2. Sensor — evaluate_scan returns a non-log likelihood per particle.
+    const std::int64_t t_eval_start = phase0_out ? godo::rt::monotonic_ns() : 0;
     for (std::size_t i = 0; i < n_; ++i) {
         front_[i].weight = evaluate_scan(front_[i].pose,
                                          beams.data(),
                                          beams.size(),
                                          *field_);
     }
+    if (phase0_out) {
+        phase0_out->evaluate_scan_ns = godo::rt::monotonic_ns() - t_eval_start;
+    }
 
     // 3. Normalize (log-sum-exp re-stabilization in case any particle
     // returned a very large or very small weight).
+    const std::int64_t t_norm_start = phase0_out ? godo::rt::monotonic_ns() : 0;
     normalize_weights();
+    if (phase0_out) {
+        phase0_out->normalize_ns = godo::rt::monotonic_ns() - t_norm_start;
+    }
 
     // 4. Effective sample size: only resample when the cloud has lost
-    // diversity.
+    // diversity. (Phase-0 measures the resample stage; the n_eff
+    // computation itself is a small O(N) sum included in the slice.)
+    const std::int64_t t_resample_start = phase0_out ? godo::rt::monotonic_ns() : 0;
     double sum_sq = 0.0;
     for (std::size_t i = 0; i < n_; ++i) {
         sum_sq += front_[i].weight * front_[i].weight;
@@ -218,8 +235,14 @@ AmclResult Amcl::step(const std::vector<RangeBeam>& beams,
                  rng);
         std::swap(front_, back_);
     }
+    if (phase0_out) {
+        phase0_out->resample_ns = godo::rt::monotonic_ns() - t_resample_start;
+    }
 
-    // 5. Stats + convergence assessment.
+    // 5. Stats + convergence assessment. (NOT in Phase-0 breakdown — the
+    // four-stage slice is what Mode-A round 2 cares about; the residual
+    // is recoverable as total - sum-of-slices in journal post-processing
+    // if needed.)
     res.pose         = weighted_mean();
     res.xy_std_m     = xy_std_m();
     res.yaw_std_deg  = circular_std_yaw_deg();
@@ -229,10 +252,27 @@ AmclResult Amcl::step(const std::vector<RangeBeam>& beams,
     return res;
 }
 
+AmclResult Amcl::step(const std::vector<RangeBeam>& beams,
+                      Rng&                          rng,
+                      double                        sigma_xy_m,
+                      double                        sigma_yaw_deg) {
+    return step(beams, rng, sigma_xy_m, sigma_yaw_deg, nullptr);
+}
+
+AmclResult Amcl::step(const std::vector<RangeBeam>& beams,
+                      Rng&                          rng,
+                      godo::rt::Phase0InnerBreakdown* phase0_out) {
+    return step(beams, rng,
+                cfg_.amcl_sigma_xy_jitter_m,
+                cfg_.amcl_sigma_yaw_jitter_deg,
+                phase0_out);
+}
+
 AmclResult Amcl::step(const std::vector<RangeBeam>& beams, Rng& rng) {
     return step(beams, rng,
                 cfg_.amcl_sigma_xy_jitter_m,
-                cfg_.amcl_sigma_yaw_jitter_deg);
+                cfg_.amcl_sigma_yaw_jitter_deg,
+                nullptr);
 }
 
 AmclResult Amcl::converge(const std::vector<RangeBeam>& beams, Rng& rng) {

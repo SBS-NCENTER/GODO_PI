@@ -238,6 +238,20 @@ target_compile_definitions(test_amcl_components PRIVATE
 add_test(NAME test_amcl_components COMMAND test_amcl_components)
 set_tests_properties(test_amcl_components PROPERTIES LABELS "hardware-free")
 
+# issue#11 P4-2-11-0 — Trim Phase-0 instrumentation: pins the new
+# Amcl::step 5-arg + 3-arg overloads (Phase0InnerBreakdown* out-param)
+# against the no-write / write contract. TEMPORARY by design — reverts
+# along with the rest of the trim path once Mode-A round 2 of issue#11
+# absorbs the per-component numbers.
+add_executable(test_phase0_env test_phase0_env.cpp)
+target_link_libraries(test_phase0_env PRIVATE
+    doctest::doctest godo_localization godo_core)
+target_compile_definitions(test_phase0_env PRIVATE
+    GODO_FIXTURES_MAPS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/maps"
+)
+add_test(NAME test_phase0_env COMMAND test_phase0_env)
+set_tests_properties(test_phase0_env PROPERTIES LABELS "hardware-free")
+
 # issue#30 — pin tracker tolerance for origin.yaw_deg=0 (the new
 # normalized derived YAML always carries yaw=0).
 add_executable(test_origin_yaw_zero test_origin_yaw_zero.cpp)

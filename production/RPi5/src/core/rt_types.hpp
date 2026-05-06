@@ -235,4 +235,31 @@ static_assert(alignof(LastOutputFrame) == 8, "LastOutputFrame must be 8-aligned"
 static_assert(std::is_trivially_copyable_v<LastOutputFrame>,
               "LastOutputFrame must be trivially copyable for Seqlock payload");
 
+// issue#11 P4-2-11-0 — Trim path Phase-0 instrumentation out-param shape.
+//
+// Captures per-stage ns within `Amcl::step` when the cold writer's
+// `GODO_PHASE0=1` env latch is set. Pure POD; NOT a Seqlock payload —
+// the cold writer accumulates these into thread-local sums across an
+// anneal kernel's iterations and emits a single fprintf line at
+// end-of-scan to stderr / journald. Operator captures via
+// `journalctl -u godo-tracker | grep PHASE0`.
+//
+// nullptr-default in the new `Amcl::step(beams, rng, σxy, σyaw, out)`
+// overload makes the flag-off path zero-overhead. This surface is
+// TEMPORARY — it lives only as long as Mode-A round 2 of issue#11 needs
+// the per-component numbers; revert is a single PR back-out. See
+// `.claude/tmp/plan_issue_11_phase0_instrumentation.md` "Trim path
+// resolution" fold (twenty-seventh-session 2026-05-06 KST).
+struct Phase0InnerBreakdown {
+    std::int64_t jitter_ns;          // stage 1: jitter_inplace
+    std::int64_t evaluate_scan_ns;   // stage 2: per-particle evaluate_scan loop
+    std::int64_t normalize_ns;       // stage 3: normalize_weights
+    std::int64_t resample_ns;        // stage 4: low-variance resample (0 when n_eff above threshold)
+};
+
+static_assert(sizeof(Phase0InnerBreakdown) == 32,
+              "Phase0InnerBreakdown layout pinned for trim Phase-0 instrumentation");
+static_assert(std::is_trivially_copyable_v<Phase0InnerBreakdown>,
+              "Phase0InnerBreakdown must be trivially copyable (POD out-param)");
+
 }  // namespace godo::rt

@@ -4,6 +4,7 @@
 #include <cerrno>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <limits>
@@ -11,11 +12,82 @@
 
 #include "core/constants.hpp"
 #include "core/rt_flags.hpp"
+#include "core/rt_types.hpp"
 #include "core/time.hpp"
 #include "deadband.hpp"
 #include "likelihood_field.hpp"
 
 namespace godo::localization {
+
+namespace {
+
+// issue#11 P4-2-11-0 — Trim path Phase-0 instrumentation env latch.
+//
+// `GODO_PHASE0=1` enables per-scan stderr breakdown emit (PHASE0 lines
+// that journald captures). Any other value (or unset) keeps the cold
+// path zero-overhead. Latched once at static init time; immutable
+// thereafter — operator must restart godo-tracker to flip the flag.
+//
+// Single TU-scope const: lives only in cold_writer.cpp, doesn't bleed
+// into the hot path or other modules. TEMPORARY by design — reverts
+// cleanly along with the rest of P4-2-11-0 once Mode-A round 2 of
+// issue#11 absorbs the per-component numbers. See
+// `.claude/tmp/plan_issue_11_phase0_instrumentation.md` "Trim path
+// resolution" fold.
+const bool kPhase0On = []() {
+    const char* env = std::getenv("GODO_PHASE0");
+    return env != nullptr && env[0] == '1' && env[1] == '\0';
+}();
+
+// Thread-local accumulators for the trim Phase-0 breakdown. Cold writer
+// thread is the SOLE writer (anneal kernel + step both run on this
+// thread). Reset to zero at scan-top inside each
+// `run_*_iteration` wrapper; emitted at scan-bottom via fprintf.
+//
+// `g_phase0_lf_rebuild_ns_sum` aggregates LF rebuild time across all σ
+// phases inside `run_anneal_kernel`. `g_phase0_inner_sum` aggregates the
+// 4-stage Amcl::step breakdown across all anneal iters within a single
+// scan. Both reset on every scan; the wrappers see only this scan's
+// totals.
+thread_local std::int64_t g_phase0_lf_rebuild_ns_sum = 0;
+thread_local godo::rt::Phase0InnerBreakdown g_phase0_inner_sum{};
+thread_local std::int64_t g_phase0_scan_seq = 0;
+
+// Reset thread-local accumulators + capture scan-start mono ns. Called
+// at the top of each `run_*_iteration` wrapper when kPhase0On.
+[[gnu::cold]]
+inline void phase0_reset_and_stamp_start(std::int64_t& scan_start_ns_out) {
+    g_phase0_lf_rebuild_ns_sum  = 0;
+    g_phase0_inner_sum          = godo::rt::Phase0InnerBreakdown{};
+    scan_start_ns_out           = godo::rt::monotonic_ns();
+}
+
+// Emit one PHASE0 line to stderr (captured by journald). Called at the
+// bottom of each `run_*_iteration` wrapper when kPhase0On. `path_label`
+// distinguishes oneshot vs live vs live_pipelined; `iters` is the
+// AmclResult.iterations value for this scan.
+[[gnu::cold]]
+inline void phase0_emit(const char* path_label,
+                        std::int64_t scan_start_ns,
+                        std::int32_t iters) {
+    const std::int64_t total_ns = godo::rt::monotonic_ns() - scan_start_ns;
+    ++g_phase0_scan_seq;
+    std::fprintf(stderr,
+        "PHASE0 path=%s scan=%lld iters=%d "
+        "lf_rebuild_ns=%lld jitter_ns=%lld eval_ns=%lld norm_ns=%lld resamp_ns=%lld "
+        "total_ns=%lld\n",
+        path_label,
+        static_cast<long long>(g_phase0_scan_seq),
+        static_cast<int>(iters),
+        static_cast<long long>(g_phase0_lf_rebuild_ns_sum),
+        static_cast<long long>(g_phase0_inner_sum.jitter_ns),
+        static_cast<long long>(g_phase0_inner_sum.evaluate_scan_ns),
+        static_cast<long long>(g_phase0_inner_sum.normalize_ns),
+        static_cast<long long>(g_phase0_inner_sum.resample_ns),
+        static_cast<long long>(total_ns));
+}
+
+}  // namespace
 
 // Track D-5 — Coarse-to-fine sigma_hit annealing for OneShot AMCL.
 //
@@ -101,7 +173,11 @@ AmclResult run_anneal_kernel(const godo::core::Config&     cfg,
         // Rebuild EDT at σ_k. LikelihoodField is nothrow-move-assignable
         // (amcl.hpp static_assert), so a throw inside leaves the basic
         // exception guarantee intact.
+        const std::int64_t t_lf_start = kPhase0On ? godo::rt::monotonic_ns() : 0;
         field_inout = build_likelihood_field(grid, sigma_k);
+        if (kPhase0On) {
+            g_phase0_lf_rebuild_ns_sum += godo::rt::monotonic_ns() - t_lf_start;
+        }
         amcl.set_field(field_inout);
 
         // Seed.
@@ -137,7 +213,19 @@ AmclResult run_anneal_kernel(const godo::core::Config&     cfg,
         const int max_iters = cfg.amcl_anneal_iters_per_phase;
         int iter = 0;
         for (; iter < max_iters; ++iter) {
-            phase_result = amcl.step(beams, rng);
+            // issue#11 P4-2-11-0 — Trim Phase-0: when env latch is set,
+            // route through the 3-arg overload so Amcl::step writes the
+            // 4-stage breakdown into a local; we accumulate per-iter.
+            if (kPhase0On) {
+                godo::rt::Phase0InnerBreakdown phase0_inner_local{};
+                phase_result = amcl.step(beams, rng, &phase0_inner_local);
+                g_phase0_inner_sum.jitter_ns        += phase0_inner_local.jitter_ns;
+                g_phase0_inner_sum.evaluate_scan_ns += phase0_inner_local.evaluate_scan_ns;
+                g_phase0_inner_sum.normalize_ns     += phase0_inner_local.normalize_ns;
+                g_phase0_inner_sum.resample_ns      += phase0_inner_local.resample_ns;
+            } else {
+                phase_result = amcl.step(beams, rng);
+            }
             if (phase_result.converged && iter >= 2) {
                 ++iter;
                 break;
@@ -328,6 +416,12 @@ AmclResult run_one_iteration(const godo::core::Config&         cfg,
                              godo::rt::Seqlock<godo::rt::LastScan>& last_scan_seq,
                              godo::rt::AmclRateAccumulator&    amcl_rate_accum,
                              godo::rt::Seqlock<godo::core::HotConfig>& hot_cfg_seq) {
+    // issue#11 P4-2-11-0 — Trim Phase-0: reset thread-local accumulators
+    // + capture scan-start mono ns when env latch is on. Zero overhead
+    // when off (single bool branch).
+    std::int64_t phase0_scan_start_ns = 0;
+    if (kPhase0On) phase0_reset_and_stamp_start(phase0_scan_start_ns);
+
     // 0. PR-DIAG (Mode-A M2): record this AMCL iteration into the rate
     //    accumulator. Single seqlock store; no allocation; only the cold
     //    writer (this function + run_live_iteration) is allowed to call
@@ -456,6 +550,7 @@ AmclResult run_one_iteration(const godo::core::Config&         cfg,
     // unless the operator places a new hint via webctl.
     godo::rt::g_calibrate_hint_valid.store(false, std::memory_order_release);
 
+    if (kPhase0On) phase0_emit("oneshot", phase0_scan_start_ns, result.iterations);
     return result;
 }
 
@@ -473,6 +568,10 @@ AmclResult run_live_iteration(const godo::core::Config&         cfg,
                               godo::rt::Seqlock<godo::rt::LastScan>& last_scan_seq,
                               godo::rt::AmclRateAccumulator&    amcl_rate_accum,
                               godo::rt::Seqlock<godo::core::HotConfig>& hot_cfg_seq) {
+    // issue#11 P4-2-11-0 — Trim Phase-0 (mirror of run_one_iteration).
+    std::int64_t phase0_scan_start_ns = 0;
+    if (kPhase0On) phase0_reset_and_stamp_start(phase0_scan_start_ns);
+
     // 0. PR-DIAG (Mode-A M2): record this AMCL iteration into the rate
     //    accumulator. Mirrors run_one_iteration's record() pin.
     amcl_rate_accum.record(
@@ -574,6 +673,7 @@ AmclResult run_live_iteration(const godo::core::Config&         cfg,
     //    around the freshly refined pose.
     last_pose_inout = result.pose;
     live_first_iter_inout = false;
+    if (kPhase0On) phase0_emit("live_legacy", phase0_scan_start_ns, result.iterations);
     return result;
 }
 
@@ -618,6 +718,10 @@ AmclResult run_live_iteration_pipelined(
     godo::rt::Seqlock<godo::rt::LastScan>&        last_scan_seq,
     godo::rt::AmclRateAccumulator&                amcl_rate_accum,
     godo::rt::Seqlock<godo::core::HotConfig>&     hot_cfg_seq) {
+    // issue#11 P4-2-11-0 — Trim Phase-0 (mirror of run_one_iteration).
+    std::int64_t phase0_scan_start_ns = 0;
+    if (kPhase0On) phase0_reset_and_stamp_start(phase0_scan_start_ns);
+
     // 0. PR-DIAG (Mode-A M2): record this AMCL iteration into the rate
     //    accumulator. Mirrors run_one_iteration / run_live_iteration.
     amcl_rate_accum.record(
@@ -706,6 +810,7 @@ AmclResult run_live_iteration_pipelined(
     //    `live_first_iter` latch is intentionally not consulted on the
     //    pipelined path.
     last_pose_inout = result.pose;
+    if (kPhase0On) phase0_emit("live_pipelined", phase0_scan_start_ns, result.iterations);
     return result;
 }
 

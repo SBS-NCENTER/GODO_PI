@@ -1,116 +1,114 @@
 # Next session — cold-start brief
 
 > Throwaway. Delete the moment the next session picks up the thread.
-> Refreshed 2026-05-05 late-afternoon KST (twenty-sixth-session close — 3 PRs merged: #91 issue#34 doc hierarchy weekly archives + #92 issue#34.1 CLAUDE.md polish + nav footers + #93 issue#28.1 B-MAPEDIT-3 follow-up backlog. Live mode CPU thrashing surface during HIL → motivates issue#11 re-prioritisation).
+> Refreshed 2026-05-06 morning KST (twenty-seventh-session close — 2 PRs merged: #95 issue#28.2 SSE producer-side pin + #96 issue#11 P4-2-11-0 trim Phase-0 instrumentation. Live mode CPU thrashing reclassified normal-as-designed via 12.5h monitoring. Phase-0 HIL captured 2,716 scans / 5-min main dataset → issue#11 Mode-A round 2 input ready).
 > Cache-role per `.claude/memory/feedback_next_session_cache_role.md` — SSOT = RAM (PROGRESS / history / per-stack CODEBASE.md / memory); this file is cache. 3-step absorb routine: read → record in SSOT → prune.
 
-## TL;DR (operator-locked priority order, refreshed 2026-05-05 late-afternoon KST)
+## TL;DR (operator-locked priority order, refreshed 2026-05-06 morning KST)
 
-1. **★ issue#11 — Live pipelined-parallel multi-thread** (now top priority — empirical motivator captured this session). News-pi01 HIL revealed ONE cold-path thread sustaining 40-60% on a single core while CFS migrates it between cores 0/1/2 (RT hot path on isolated CPU 3 stays at 0.25%, fine). Operator flagged this as the "장시간 운용 부담" concern. Plan + Mode-A round 1 fold preserved at `.claude/tmp/plan_issue_11_live_pipelined_parallel.md`. **Empirical data**: `.claude/memory/project_live_mode_cpu_thrashing_2026-05-05.md`. Re-prioritise: was paused awaiting issue#26 capture; operator now wants to resume directly with the CPU thrashing observation as motivation, decoupled from issue#26 timing baseline.
+1. **★ issue#11 Mode-A round 2** — The numerical foundation gap that REJECTed Round 1 is CLOSED. PR #96 captured 2,716 scans across 3 windows on news-pi01 with `GODO_PHASE0=1`. Main dataset (5-min, 2166 scans, single PID): **p50 TOTAL = 136.15 ms / 7.34 Hz; evaluate_scan = 94.85 ms (69.7%); LF rebuild = 39.58 ms (29.1%); jitter+normalize+resample combined < 1%; residual 0.5%**. Cross-capture variance < 0.5% — empirically locked. **Action**: re-spin `.claude/tmp/plan_issue_11_live_pipelined_parallel.md` Round 2 fold with these numbers; replace back-of-envelope estimates; re-derive K-budget + σ-schedule + Option B/C/D scoring. Mode-A round 1 mechanical findings (C4 schema row count today is 67 → 68 / C5 invariant `(s)` / C6 EDT scratch buffer / C7 M1 spirit articulation) absorb into the new plan body. Capture results stored at `.claude/tmp/phase0_results_5min_20260506_095949.md` (main dataset) + 2 supplementary files.
 
-2. **issue#28.2 — SSE producer-side end-to-end pin** (NEW, from PR #93 Mode-B M1). The B2/B3/B4 SSE tests landed in PR #93 pin only the broadcaster *relay* (frame inject → frame relay), not the *producer* side (`/api/map/edit/coord` handler emitting frames with proper shape). A regression that drops `request_id` from server-side publish, returns "rejected" without `reason`, etc., would NOT be caught. Recommended fix: one integration test that subscribes to `/sse/map-edit/progress` then fires `/api/map/edit/coord`, asserts the actual emitted sequence. ~30-min add. Reviewer flagged as non-blocking for PR #93 merge but worth queuing.
+2. **issue#11 main implementation** (post-Round-2-approve) — Option C fork-join particle eval pool. Architecture decision pre-validated by Phase-0 numbers: Option C alone projects **13.7 Hz** (37% margin over 10 Hz LiDAR). Plan elements that survived Round 1: ParallelEvalPool static lib (`src/parallel/`), 3 worker threads pinned to cpu 0/1/2, fork-join per `Amcl::step`, no Seqlock change (handoff seam unchanged). New TOML key `amcl.parallel_eval_workers` Recalibrate-class. ~280 LOC + tests. Writer task ordering already drafted in plan §10 (P4-2-11-1 through P4-2-11-8); skip P4-2-11-0 (already shipped as PR #96 trim form).
 
-3. **issue#26 — cross-device latency measurement tool** (PAUSED at Mode-A round 1 REJECT). Round 2 + Writer + HIL is half-day at broadcasting-room wired LAN. Plan + Mode-A fold ready at `.claude/tmp/plan_issue_26_latency_measurement_tool.md`. NOTE: issue#11 may now be unblocked from this — operator decision pending.
+3. **issue#19 — EDT 2D Felzenszwalb 3-way parallelization** (★ ELEVATED from "follow-up" to "important secondary"). Phase-0 HIL revealed LF rebuild is **29% (39.58 ms)** of every scan — not a small slice. Option C alone gets to 13.7 Hz; **Option C + issue#19 → 21.4 Hz** (114% margin). Reuses the same `ParallelEvalPool` primitive (Mode-A round 1 C6 surfaced the `parallel_for_with_scratch<S>` API extension needed because `edt_1d`'s `(v, z)` scratch buffers aren't thread-safe). Sequence: ship issue#11 first (validates the pool primitive), then issue#19 as small follow-up (~80 LOC).
 
-4. **issue#13 (continued) — distance-weighted AMCL likelihood** (`r_cutoff` near-LiDAR down-weight). Standalone single-knob algorithmic experiment.
+4. **issue#X (NEW) — UDS hang after RPLIDAR I/O fallback to Idle** (Medium priority — needs new-integer assignment, candidate is `issue#35` — see reservation table). Reproduced this session: artificial cpu 0/1/2 100% saturation (e.g., concurrent build) → `rplidar: grabScanDataHq failed 5 times in a row` → `cold_writer.cpp::run_cold_writer` falls back to Idle gracefully BUT UDS server thread's listen-backlog drops to 0 (kernel rejects accept; SPA + webctl see "tracker unreachable"). Tracker process alive, all threads state=S. Recovery: `systemctl restart godo-tracker`. **Investigation seam**: `src/localization/cold_writer.cpp` exception-catch path's interaction with `src/uds/uds_server.cpp` accept loop. Rare in normal ops (no cpu 100% saturation) but real bug worth fixing because it manifests as a "ghost" tracker that responds to nothing.
 
-5. **issue#4 — AMCL silent-converge diagnostic** — comprehensive HIL baseline through nineteenth-session.
+5. **issue#13 — distance-weighted AMCL likelihood** (`r_cutoff` near-LiDAR down-weight). Orthogonal to issue#11 (modifies `evaluate_scan` body, not the caller); composes with Option C without re-design. Standalone single-knob algorithmic experiment. Phase-0 numbers don't change priority here.
 
-6. **issue#29 — SHOTOKU base-move + two-point cal-reset workflow**. Spec at `/doc/shotoku_base_move_and_recal_design.md`. issue#30 dependency resolved (twenty-fourth) → can resume planning.
+6. **issue#26 — cross-device latency measurement tool** (PAUSED at Mode-A round 1 REJECT). Plan + Mode-A fold ready at `.claude/tmp/plan_issue_26_latency_measurement_tool.md`. Independent of issue#11 now (Phase-0 produced the in-tracker breakdown). Resume-when-needed; not blocking anything.
 
-7. **issue#17 — GPIO UART direct connection** (perma-deferred).
+7. **issue#29 — SHOTOKU base-move + two-point cal-reset workflow**. Spec at `/doc/shotoku_base_move_and_recal_design.md`. issue#30 dependency resolved (twenty-fourth) → can resume planning anytime.
 
-8. **Bug B — Live mode standstill jitter ~5cm widening** — analysis-first.
+8. **issue#7 — boom-arm angle masking (optional)** — Contingent on issue#4 diagnostic.
 
-9. **issue#7 — boom-arm angle masking (optional)** — Contingent on issue#4 diagnostic.
+9. **issue#17 — GPIO UART direct connection** (perma-deferred).
 
-10. **Future: SPA Config tab search input** (not in current scope but operator surfaced during PR #93 HIL — there's no in-page search box; manual scroll required to find a key. Track as low-priority UX follow-up; verify if `project_config_tab_grouping.md` (issue#15 candidate) covers this or if it's a separate ask).
+10. **Bug B — Live mode standstill jitter ~5cm widening** — analysis-first. Phase-0 may help by giving per-scan budget context; still operator-driven HIL needed.
 
-**Next free issue integer: `issue#35`** (issue#34 = doc hierarchy MERGED PR #91; issue#34.1 = CLAUDE.md polish MERGED PR #92; issue#28.1 = B-MAPEDIT-3 backlog MERGED PR #93; issue#28.2 = SSE producer-side pin candidate).
+11. **PR #96 / Phase-0 cleanup decision point** (after Mode-A round 2 absorbs the data): revert PR #96 (TEMPORARY contract honored — single-PR back-out clean) OR promote to permanent diagnostic via the documented mid-life path (Phase0BreakdownSnapshot Seqlock + UDS getter + webctl `/api/system/phase0` endpoint + `[phase0-publisher-grep]` build-grep + invariant `(s)` promotion). Operator decides post-round-2.
 
-## Where we are (2026-05-05 late-afternoon KST — twenty-sixth-session close)
+12. **Future: SPA Config tab search input** (not in current scope but operator surfaced during PR #93 HIL — there's no in-page search box; manual scroll required. Track as low-priority UX follow-up; verify if `project_config_tab_grouping.md` (issue#15 candidate) covers this or if it's a separate ask).
 
-**main = `27669fc`** — PR #93 merged. Three back-to-back ships this session (each squash-merged):
-- `6870475` — PR #91 issue#34 (Phase A doc hierarchy weekly archives — 5 master files: 16,586 → 2,623 lines; 14 weekly archives + 5 READMEs created via 5 parallel code-writer subagents)
-- `7cb76e8` — PR #92 issue#34.1 (Phase A.5 CLAUDE.md polish 459 → 371 + per-stack nav footers + RPi5 stale "as of 2026-04-26" Module map fix)
-- `27669fc` — PR #93 issue#28.1 (B-MAPEDIT-3 follow-up backlog: 13 items B1..B13 = 6 missing tests + 4 trivial cleanups + 3 deletion/hard-removal items including `cfg.amcl_origin_yaw_deg` hard-remove + `flat` legacy key removal from `/api/maps`)
+**Next free issue integer: `issue#35`** (issue#28.2 DONE in PR #95; issue#11 P4-2-11-0 DONE in PR #96; candidate issue#35 = UDS hang after RPLIDAR fallback).
 
-**Open PRs**: docs/2026-05-05-twenty-sixth-session-close (this PR, after merge → main rolls forward).
+## Where we are (2026-05-06 morning KST — twenty-seventh-session close)
 
-**Live system on news-pi01**: webctl + frontend + tracker on `27669fc`. PR #93 HIL passed across all 7 scenarios:
-- `/api/maps` response no longer carries `flat` key (B13 verified)
-- Map list / Activate / Map Edit / OverlayToggleRow toggles persist through hard reload (B6 migration verified)
-- `journalctl` clean post-restart (no DEPRECATED warning, no parse error — B12 hard-remove verified)
-- Calibrate / Live mode toggles work
-- All other features continue working
+**main = `3428431`** — PR #97 merged (twenty-seventh-session-close docs). Recent shipping order:
+- `61fc445` — PR #94 (twenty-sixth-session close, 2026-05-05)
+- `a0a3113` — PR #95 issue#28.2 (SSE producer-side pin, 2026-05-06 ~02:00 KST)
+- `53453f5` — PR #96 issue#11 P4-2-11-0 (trim Phase-0 instrumentation, 2026-05-06 ~09:30 KST)
+- `3428431` — PR #97 docs (twenty-seventh-session close, 2026-05-06 ~10:30 KST)
 
-**B12 preflight regex bug + recovery (the session's near-miss)**: my published preflight `sed -i '/^amcl\.origin_yaw_deg/d'` matched ZERO lines because `/var/lib/godo/tracker.toml` uses TOML **table syntax** (`[amcl]\norigin_yaw_deg = 0`), not the dotted form the regex expected. Tracker entered 70+ count auto-restart loop on first install. Recovery: `sudo sed -i '/^origin_yaw_deg = /d' /var/lib/godo/tracker.toml` (bare key — schema for `origin_yaw_deg` is unique to the `[amcl]` section so this is safe). `feedback_toml_branch_compat.md` extended with the table-syntax lesson. **Memory candidate (next session, NOT yet written)**: a separate "preflight commands must be tested against actual file shape, not the documented schema mental model" feedback — the existing `feedback_toml_branch_compat.md` boost may be sufficient.
+**Open PRs**: chore/2026-05-06-twenty-seventh-session-parent-territory (Parent territory follow-up, in progress at session-close).
 
-## Twenty-sixth-session merged-PR summary
+**Live system on news-pi01**: webctl + frontend + tracker on `3428431`. Tracker most recently restarted at session-close to clear `GODO_PHASE0=1` env (override.conf removed via `rm`). Mode = Idle (operator may toggle Live in SPA on next ops session). Long-running monitor `/tmp/cpu_monitor.py` (PID 1779299, started 21:32:44 2026-05-05 KST) still emitting heartbeats but tracking dead PID 1708747 — kill via `kill 1779299` if desired (CSV at `/tmp/cpu_monitor.csv` preserved as re-occurrence baseline).
 
-### PR #91 (`6870475`, MERGED): issue#34 — Phase A doc hierarchy weekly archive migration
-- 5 master files restructured into lean (invariants/scaffold + Index) + weekly archives:
-  - godo-webctl/CODEBASE.md  4293 → 1034 (-3259)
-  - godo-frontend/CODEBASE.md 3920 → 611 (-3309)
-  - production/RPi5/CODEBASE.md 4992 → 761 (-4231)
-  - PROGRESS.md  1420 → 196 (-1224)
-  - doc/history.md  1961 → 21 (-1940) [Korean]
-- 14 weekly archives + 5 READMEs created (W17, W18, W19 spans).
-- Migration via 5 parallel `code-writer` subagents (one per file). Conservation verified per agent: line/entry counts exact match, sha256 byte-identical for PROGRESS.md (1232 lines), Korean encoding intact for doc/history.md.
-- CLAUDE.md §5 directory structure + §6 cascade-edit rule absorb new convention. `.claude/agents/{code-writer, code-reviewer, code-planner}.md` updated. `.claude/memory/feedback_codebase_md_freshness.md` "How to apply" rewritten.
-- Operator-locked Option (b): master files keep invariants + Index ONLY — NO inline most-recent dated entry. Cascading doc links carry navigation.
-- Pipeline: direct parallel-writer (5 agents in parallel — `code-writer` + verbatim shared schema). No Mode-A on plan; no Mode-B on output (mechanical work, Parent verified post-write).
+**Near-miss recovered (the session's only incident)**: tracker UDS hung after build-CPU-saturation triggered RPLIDAR USB scan-reader failures (5× consecutive `grabScanDataHq` timeouts → cold_writer fallback to Idle, BUT UDS listen-backlog dropped to 0). Recovery via `systemctl restart godo-tracker`. Documented as candidate **issue#35** for next-session investigation.
 
-### PR #92 (`7cb76e8`, MERGED): issue#34.1 — Phase A.5 CLAUDE.md polish + per-stack nav footers
-- CLAUDE.md 459 → 371 lines (-88):
-  - §3 Phases ASCII timeline → 1-paragraph current-phase line + PROGRESS pointer.
-  - §4 Hardware connection sub-section folded into 1 line.
-  - §5 Directory tree (56 lines) → 13-line "Doc hierarchy at a glance" bulleted nav (full tree lives in root CODEBASE.md).
-  - §9 Open questions table (mostly resolved) → 6-line summary (Q4/Q5 still open).
-  - KEEP: §6 Golden Rules, §7 Agent pipeline, §8 Deploy, §10 References (operating-rule core).
-- Per-stack nav footers (godo-webctl, godo-frontend, production/RPi5 masters) added — mirrors PROGRESS.md `## Quick reference links` pattern operator approved at PR #91 close. Each footer points at: project guide, cross-stack scaffold, relevant design doc, sibling stacks (with one-line "how stacks connect" hint), project state, recent week archive, README.
-- production/RPi5/CODEBASE.md:30 stale "Module map (current — as of 2026-04-26 Phase 4-2 D Wave B)" + "per-date entries below this section" claim fixed (post-archive, both inaccurate).
-- Pipeline: direct-writer + Parent self-verify (small surface, no test impact).
+## Twenty-seventh-session merged-PR summary
 
-### PR #93 (`27669fc`, MERGED): issue#28.1 — B-MAPEDIT-3 follow-up backlog batch (B1..B13)
-- 49 files; +1028 / -956. 4 deletions (2 components + 2 mount tests), 3 new test files (12 new test cases all green).
-- B1-B6 tests; B7-B9 trivial cleanups; B11-B13 deletions including `cfg.amcl_origin_yaw_deg` hard-remove (9 source-tree sites + 8 test sites; schema array size + static_assert + 5 cross-stack mirrors all 68→67) and `/api/maps` `flat` legacy key removal (backend + frontend coupled).
-- Build clean across 3 stacks: tracker 48/48 ctest, webctl 1056 pytest, frontend 473 vitest, build 217 modules.
-- Pipeline: full (Planner → direct-Writer (in this session, the planner output from start was used as spec; no Mode-A round on it because operator authorised scope explicitly) → Mode-B APPROVE with M1 (queued as issue#28.2) + 3 Minor non-blocking findings).
-- HIL near-miss recovered: TOML preflight regex bug + tracker auto-restart loop → operator + Parent diagnosed via direct UDS test (`ConnectionRefusedError`) + journal showing `unknown TOML key 'amcl.origin_yaw_deg'` → corrected sed regex → tracker green.
+### PR #95 (`a0a3113`, MERGED): issue#28.2 — SSE producer-side end-to-end pin for `/api/map/edit/coord`
 
-## Live mode CPU thrashing observation (NEW this session — escalating)
+- Closes PR #93 Mode-B M1 carryover (relay tests pinned only broadcaster relay, not handler emit shape).
+- 2 integration test cases in `godo-webctl/tests/test_map_edit_sse_e2e.py` (177 LOC / 16 assertions): T1 happy path + T2 reject path. request_id consistency, monotonic progress, expected phase set, reason-on-rejection all pinned.
+- Drive-by: `tests/test_app_hardware_tracker.py` auth fix (added `_login_admin` + Bearer header on `/api/calibrate`); `pyproject.toml` `addopts = "-ra -m 'not hardware_tracker'"` so the marker is genuinely default-skipped.
+- 1058 webctl pytest pass + 1 deselected (default suite). Operator HIL: `uv run pytest -m hardware_tracker -v` → `1 passed in 2.31s` (calibrate auth fix verified end-to-end).
+- Pipeline: direct-Writer (Parent) → Mode-B implicit via test execution → squash-merge.
 
-**Initial empirical capture (~16:35 KST, ~minutes into Live mode)**:
-- TID 3438307 (cold-path AMCL kernel) sustains 40-60% CPU on a single core. utime/stime ratio = 99.8% user-mode.
-- CFS migrates this thread between cores 0/1/2 every few seconds — operator's "한 코어 100% → 다른 코어 100%" pattern.
-- RT hot path TID 3438312 (cpus_allowed=3, prio=-51) stays at 0.25% — hot path isolation working AT THIS POINT.
-- System load avg 7.35 (4-core box).
+### PR #96 (`53453f5`, MERGED): issue#11 P4-2-11-0 — Trim Phase-0 cold-path component instrumentation (TEMPORARY)
 
-**Long-running follow-up (~18:00 KST, ~1-2 hours into Live mode — NEW)**:
-- **All four cores pegged at 100%, including CPU 3.** RT isolation appears broken under sustained operation.
-- Possible mechanisms: particle-cloud growth over time, cache thrashing, scan backlog buildup, or `isolcpus=` kernel parameter not applied on this host.
-- Open question: is SCHED_FIFO + CPU 3 affinity alone sufficient, or does the project need full `isolcpus=3 nohz_full=3 rcu_nocbs=3` kernel cmdline? `cat /proc/cmdline` at next session start will answer.
+- env-var-gated (`GODO_PHASE0=1`) per-scan stderr emit of LF rebuild + jitter + evaluate_scan + normalize + resample ns slices.
+- Output line: `PHASE0 path=<oneshot|live_legacy|live_pipelined> scan=N iters=K lf_rebuild_ns=... ... total_ns=...`.
+- 6 files / +390 -6: new POD struct `Phase0InnerBreakdown` (32 B) in `core/rt_types.hpp`; new `Amcl::step` 5-arg + 3-arg overloads (existing 4-arg / 2-arg delegate with nullptr — zero-overhead path preserved); `cold_writer.cpp` env latch + thread-local accumulators + helpers + wire-in to all 3 wrappers; new test `tests/test_phase0_env.cpp` (3 cases / 16 assertions).
+- 49/49 ctest hardware-free + 1/1 python-required pass. Build greps clean (`[m1-no-mutex]`, `[scan-publisher-grep]`, etc.) — no new grep added (stderr emit, not Seqlock).
+- Mode-B reviewer APPROVE (zero blockers). HIL captured 3 windows totaling 2,716 scans → main dataset stored at `.claude/tmp/phase0_results_5min_20260506_095949.md`.
+- Pipeline: full (Mode-A round 1 lane decision → trim path resolution → direct-Writer → Mode-B APPROVE → squash-merge).
 
-This is the empirical motivator for issue#11 (Live pipelined-parallel multi-thread) AND raises a separate concern about CPU 3 isolation completeness (`project_cpu3_isolation.md` may need extension). Mode-A round 1 of issue#11 REJECTed on numerical foundations (K≈16 not K=1, N=500 not N=10000). Re-running with this CPU data + the issue#30 σ-schedule resolution should land cleaner.
+### PR #97 (`3428431`, MERGED): docs — twenty-seventh-session close
 
-Full memory + diagnostic command snippets: `.claude/memory/project_live_mode_cpu_thrashing_2026-05-05.md`.
+- chronicler skill output: PROGRESS/2026-W19.md, doc/history/2026-W19.md, godo-webctl/CODEBASE/2026-W19.md, production/RPi5/CODEBASE/2026-W19.md, doc/issue11_design_analysis.md.
+- Twenty-seventh-session block prepended (most recent first per weekly-archive convention). 281 insertions, 1 deletion.
+
+## Phase-0 capture summary (2026-05-06 09:50–10:00 KST, 3 windows)
+
+| Capture | Window | Scans | p50 TOTAL | LF % | eval % | residual |
+|---|---|---|---|---|---|---|
+| #1 | 90 s, 2 PIDs | 410 + 141 | 138 / 139 ms | 29.1% | 69.7% | 0.6% |
+| #2 | 2 min, 2 PIDs | 148 + 608 | 139 / 139 ms | 29.0% | 69.6% | 0.6% |
+| **#3 (main dataset)** | **5 min, 1 PID** | **2166** | **136.15 ms** | **29.1%** | **69.7%** | **0.5%** |
+
+| Stage | p50 (5-min, 2166 scans) | p90 | p99 | max |
+|---|---|---|---|---|
+| evaluate_scan | 94.85 ms | 103.60 | 112.65 | 142.74 |
+| LF rebuild | 39.58 ms | 42.70 | 46.20 | 62.44 |
+| jitter | 0.77 ms | 0.82 | 1.30 | 5.30 |
+| normalize | 0.14 ms | 0.15 | 0.21 | 0.88 |
+| resample | 0.07 ms | 0.08 | 0.11 | 0.57 |
+| **TOTAL** | **136.15 ms** | 147.99 | 158.85 | 207.04 |
+
+Capture results paths (kept in `.claude/tmp/`, gitignored):
+- `phase0_results_20260506_095254.md` (capture #1)
+- `phase0_results_20260506_095403.md` (capture #2)
+- `phase0_results_5min_20260506_095949.md` (★ main dataset — feed into Mode-A round 2 fold)
 
 ## Quick memory bookmarks (★ open these first on cold-start)
 
-This session updated/added 2 memory entries:
+This session updated/added 3 memory entries:
 
-1. ★ **NEW** `.claude/memory/project_live_mode_cpu_thrashing_2026-05-05.md` — empirical CPU data (per-thread + core migration). Open this first when resuming issue#11.
-2. **UPDATED** `.claude/memory/feedback_toml_branch_compat.md` — appended TOML table-syntax sed regex trap section (PR #93 HIL incident lesson; operator hit 70-count auto-restart loop because the dotted-form regex matched zero lines).
+1. **UPDATED** `.claude/memory/project_live_mode_cpu_thrashing_2026-05-05.md` — appended "Resume + reclassification" section (operator-locked normal-as-designed conclusion).
+2. ★ **NEW** `.claude/memory/feedback_systemctl_edit_empty_content_no_save.md` — systemctl edit empty-content gotcha + safe directive removal options A (comment) and B (rm).
+3. ★ **NEW** `.claude/memory/project_phase0_instrumentation_pattern.md` — Phase-0 trim instrumentation reusable pattern (env-var + thread-local + stderr emit + single-PR-revert clean) + promotion path to permanent diag.
 
 Carryover (still active from prior sessions):
+
 - `project_pipelined_compute_pattern.md` ★ — issue#11 reference design pattern.
-- `project_cpu3_isolation.md` — RT hot path isolation (verified working at TID 3438312).
-- `project_issue11_analysis_paused.md` — full Mode-A round 1 REJECT context.
+- `project_cpu3_isolation.md` — RT hot path isolation. (validated again this session: jitter p99=18.5 µs, cpu3 idle 99.6%)
+- `project_issue11_analysis_paused.md` — full Mode-A round 1 REJECT context (now closeable since Phase-0 numbers landed).
 - `project_issue26_measurement_tool.md` — paused at Mode-A round 1 REJECT.
-- `project_rplidar_cw_vs_ros_ccw.md` ★ 5-path SSOT (load-bearing for any LIDAR-angle code).
-- `project_pick_anchored_yaml_normalization_locked.md` ★ issue#30 SSOT for pick-anchored semantic + yaw direction lock.
-- `project_issue30_hil_findings_2026-05-05.md` — full Finding 1/2/3 history with all 3 fix rounds.
+- `project_rplidar_cw_vs_ros_ccw.md` ★ 5-path SSOT (load-bearing for any LiDAR-angle code).
+- `project_pick_anchored_yaml_normalization_locked.md` ★ issue#30 SSOT.
+- `project_issue30_hil_findings_2026-05-05.md` — full Finding 1/2/3 history.
 - `project_pristine_baseline_pattern.md`, `feedback_overlay_toggle_unification.md`.
 - `feedback_timestamp_kst_convention.md`, `project_amcl_yaw_metadata_only.md`.
 - `feedback_codebase_md_freshness.md`, `feedback_next_session_cache_role.md`, `feedback_check_branch_before_commit.md`, `feedback_two_problem_taxonomy.md`, `feedback_claudemd_concise.md`, `feedback_pipeline_short_circuit.md`, `feedback_emoji_allowed.md`, `feedback_toml_branch_compat.md`, `feedback_ssot_following_discipline.md`, `feedback_deploy_branch_check.md`, `feedback_relaxed_validator_strict_installer.md`, `feedback_post_mode_b_inline_polish.md`, `feedback_verify_before_plan.md`, `feedback_helper_injection_for_testability.md`, `feedback_build_grep_allowlist_narrowing.md`, `feedback_ship_vs_wire_check.md`, `feedback_docstring_implementation_drift.md`, `feedback_manual_maps_backup_pre_hil.md`.
@@ -126,23 +124,25 @@ Carryover (still active from prior sessions):
 
 ## Quick orientation files for next session
 
-1. **CLAUDE.md** §6 Golden Rules + §7 Agent pipeline + §8 Deployment (now lean — 371 lines).
-2. **`CODEBASE.md`** (root) — cross-stack scaffold. Updated this session with weekly-archive convention.
-3. **`DESIGN.md`** (root) — TOC. UNCHANGED.
-4. **`.claude/memory/MEMORY.md`** — full index (~57 entries; +1 added, 1 updated this session).
-5. **PROGRESS/2026-W19.md** — twenty-fifth + twenty-sixth session blocks (chronicler will rotate the most-recent one in here at session-close).
+1. **CLAUDE.md** §6 Golden Rules + §7 Agent pipeline + §8 Deployment.
+2. **`CODEBASE.md`** (root) — cross-stack scaffold.
+3. **`DESIGN.md`** (root) — TOC. UNCHANGED this session.
+4. **`.claude/memory/MEMORY.md`** — full index (~59 entries; 2 added + 1 updated this session).
+5. **PROGRESS/2026-W19.md** — twenty-sixth + twenty-seventh session blocks.
 6. **doc/history/2026-W19.md** — corresponding Korean narratives.
-7. **`.claude/tmp/plan_issue_11_live_pipelined_parallel.md`** — issue#11 Round 1 plan + Mode-A round 1 fold; load-bearing for next session's resume.
-8. **`.claude/tmp/plan_issue_28.1_and_doc_hierarchy.md`** — this session's plan; useful reference for cascade pattern + parallel-agent migration template.
+7. ★ **`.claude/tmp/plan_issue_11_live_pipelined_parallel.md`** — Round 1 plan + Mode-A round 1 fold + **Round 2 empirical fold (Parent — 2026-05-05 22:50 KST)**. Round 2 fold has the macroscopic 7 Hz / 137 ms / 16-iter empirical baseline; the new 5-min PHASE0 capture data fills in the per-stage decomposition.
+8. ★ **`.claude/tmp/plan_issue_11_phase0_instrumentation.md`** — Round 1 plan + Mode-A round 1 fold + Trim path resolution. Records the lane decision and what got trimmed.
+9. ★ **`.claude/tmp/phase0_results_5min_20260506_095949.md`** — main dataset for Mode-A round 2 fold.
 
 ## Issue labelling reminder (CLAUDE.md §6 SSOT)
 
-Operator-locked **issue#N.M** scheme. Sequential integer for distinct units (next free = 35); decimal for sub-issues (e.g. `issue#28.1`, `issue#28.2`, `issue#30.1`, `issue#34.1`); Greek letters deprecated; feature codes (B-MAPEDIT etc.) are a separate axis.
+Operator-locked **issue#N.M** scheme. Sequential integer for distinct units (next free = **35**); decimal for sub-issues (e.g. `issue#28.1`, `issue#28.2`, `issue#30.1`, `issue#34.1`); Greek letters deprecated; feature codes (B-MAPEDIT etc.) are a separate axis.
 
 **Reservations from /doc/issue11_design_analysis.md §8** (DO NOT use these integers for new issues):
-- `issue#19` — EDT 2D Felzenszwalb parallelization.
+
+- `issue#19` — EDT 2D Felzenszwalb parallelization. **★ ELEVATED to "important secondary"** (Phase-0 HIL: LF rebuild = 29% / ~40 ms per scan; issue#19 brings 13.7 Hz → 21.4 Hz).
 - `issue#20` — Track D-5-P (deeper σ schedule for OneShot, staggered-tier).
-- `issue#21` — NEON/SIMD vectorization of `evaluate_scan` per-beam loop.
+- `issue#21` — NEON/SIMD vectorization of `evaluate_scan` per-beam loop. Phase-0 reveals eval is 70% so this stays viable (orthogonal to Option C).
 - `issue#22` — Adaptive N (KLD-sampling).
 - `issue#23` — LF prefetch / gather-batch.
 - `issue#24` — Phase reduction 3→1 in Live carry (TOML-only).
@@ -150,27 +150,33 @@ Operator-locked **issue#N.M** scheme. Sequential integer for distinct units (nex
 - `issue#26` — Cross-device GPS-synced measurement tool.
 - `issue#27` — output_transform + SUBTRACT origin + LastOutput SSE — DONE in PR #79.
 - `issue#28` — B-MAPEDIT-3 yaw rotation — DONE in PR #81.
-- `issue#28.1` — B-MAPEDIT-3 follow-up backlog — **DONE in PR #93**.
-- `issue#28.2` — SSE producer-side end-to-end pin — candidate (Mode-B M1 carryover).
+- `issue#28.1` — B-MAPEDIT-3 follow-up backlog — DONE in PR #93.
+- `issue#28.2` — SSE producer-side end-to-end pin — **DONE in PR #95**.
 - `issue#29` — SHOTOKU base-move + two-point cal-reset workflow.
 - `issue#30` — YAML normalization to (0, 0, 0°) per Apply — DONE in PR #84 (3 HIL fold rounds).
 - `issue#30.1` — PR #84 Mode-B round 2 backlog — DONE in PR #87.
 - `issue#31` (candidate) — Vector map representation feasibility study (perma-deferred research).
 - `issue#32` — Backup TS regex + frontend formatter KST transition — DONE in PR #88.
 - `issue#33` — Apply-on-pristine lineage init + backup map-name column — DONE in PR #89.
-- `issue#34` — Doc hierarchy weekly archive migration — **DONE in PR #91**.
-- `issue#34.1` — CLAUDE.md polish + per-stack nav footers — **DONE in PR #92**.
+- `issue#34` — Doc hierarchy weekly archive migration — DONE in PR #91.
+- `issue#34.1` — CLAUDE.md polish + per-stack nav footers — DONE in PR #92.
+- `issue#11 P4-2-11-0` — Trim Phase-0 cold-path component instrumentation — **DONE in PR #96** (TEMPORARY; cleanup decision after Mode-A round 2).
+- **`issue#35` (candidate)** — UDS hang after RPLIDAR I/O fallback to Idle. Scope: investigate `cold_writer.cpp::run_cold_writer` exception path's interaction with `uds_server.cpp` accept loop; symptom `ss -lx` `LISTEN 0 0`; Medium priority.
 
 ## Throwaway scratch (`.claude/tmp/`)
 
 **Keep across sessions**:
+
+- `plan_issue_11_live_pipelined_parallel.md` ★ — Round 1 plan + Mode-A round 1 fold + Round 2 empirical fold. **Reload for next session** (top priority).
+- `plan_issue_11_phase0_instrumentation.md` — Round 1 plan + Mode-A round 1 fold + Trim path resolution. Reference for trim pattern future re-use.
 - `plan_issue_28.1_and_doc_hierarchy.md` — full Phase A + Phase B plan with operator decisions baked in. Useful template for future "doc reorg + code cleanup combo" PRs and for the parallel-agent migration pattern.
-- `plan_issue_11_live_pipelined_parallel.md` — Round 1 plan + Mode-A round 1 fold. **Reload for next session** (top priority).
 - `plan_issue_26_latency_measurement_tool.md` — Round 1 plan + Mode-A round 1 fold.
 - `plan_issue_30_yaml_normalization.md` — 1101 lines including all 5 review folds (issue#30 family). Still load-bearing for issue#29 (SHOTOKU base-move).
 - `plan_issue_30.1_mode_b_backlog.md` — Mode-B-backlog cleanup pattern reference.
+- `phase0_results_*.md` (3 files) — main HIL dataset for issue#11 Mode-A round 2.
 
 **Delete when convenient** (older plans no longer referenced):
+
 - `plan_issue_28_b_mapedit3_yaw_rotation.md` (PR #81 reference — superseded by issue#30 lock + issue#28.1 close)
 - `plan_issue_27_map_polish_and_output_transform.md` (PR #79 reference)
 - `plan_issue_18_uds_bootstrap_audit.md` (PR #75 reference)
@@ -179,44 +185,49 @@ Operator-locked **issue#N.M** scheme. Sequential integer for distinct units (nex
 
 ## Tasks alive for next session
 
-- **★ issue#11 — Live pipelined-parallel** (TL;DR #1 — RESUMED with empirical CPU motivator)
-- **issue#28.2 — SSE producer-side pin** (TL;DR #2 — NEW carryover from PR #93 Mode-B)
-- **issue#26 — measurement tool round 2 + Writer + HIL** (TL;DR #3 — may be unblocked / re-prioritized)
-- **issue#13 — distance-weighted likelihood** (TL;DR #4)
-- **issue#4 — AMCL silent-converge diagnostic** (TL;DR #5)
-- **issue#29 — SHOTOKU base-move** (TL;DR #6)
-- **issue#17 — GPIO UART migration** (TL;DR #7 — perma-deferred)
-- **Bug B — Live mode standstill jitter** (TL;DR #8)
-- **issue#7 — boom-arm angle masking** (TL;DR #9)
-- **SPA Config tab search input** (TL;DR #10 — UX follow-up)
+- **★ issue#11 Mode-A round 2** (TL;DR #1 — fold Phase-0 numbers into plan)
+- **issue#11 main implementation** (TL;DR #2 — Option C fork-join particle eval pool, post-round-2 approve)
+- **issue#19 EDT 3-way** (TL;DR #3 — ELEVATED, ships after issue#11)
+- **issue#35 candidate — UDS hang after RPLIDAR fallback** (TL;DR #4 — NEW, Medium priority)
+- **issue#13 distance-weighted likelihood** (TL;DR #5)
+- **issue#26 measurement tool round 2** (TL;DR #6 — paused, no longer blocking)
+- **issue#29 SHOTOKU base-move** (TL;DR #7)
+- **issue#7 boom-arm masking** (TL;DR #8)
+- **issue#17 GPIO UART** (TL;DR #9 — perma-deferred)
+- **Bug B Live mode standstill jitter** (TL;DR #10)
+- **PR #96 / Phase-0 cleanup decision** (TL;DR #11 — after Mode-A round 2)
 
-## Twenty-seventh-session warm-up note
+## Twenty-eighth-session warm-up note
 
-Twenty-sixth was a single afternoon arc (~3.5 h, 13:30–17:00 KST) that shipped 3 PRs:
-- One pure-doc PR (#91, issue#34 weekly archive migration) using 5 parallel writer subagents — first time the project used parallel agents for a coordinated reorg. Pattern: each agent gets one file + verbatim shared schema + 7-step verify; Parent integrates afterwards. Worked cleanly; conservation verified per agent (sha256 byte-identical for PROGRESS.md). Re-usable for future bulk-reorg.
-- One follow-up doc-polish PR (#92, issue#34.1) — direct-writer, no formal pipeline.
-- One feature PR (#93, issue#28.1) — single full-scope writer, then Mode-B APPROVE-WITH-NITS.
+Twenty-seventh was a **single overnight arc** (12.5+ hours, evening 2026-05-05 → morning 2026-05-06):
 
-Near-miss: TOML preflight regex bug nearly bricked the production tracker on news-pi01 (auto-restart loop hit count 70+). Recovery was clean (5 min — direct UDS test + journal grep + corrected sed). Lesson absorbed into `feedback_toml_branch_compat.md`. The Mode-B reviewer should add a "preflight commands must be tested against actual file shape" check to the deploy-readiness review block.
+- Started with operator merging twenty-sixth-session-close PR #94 + asking to continue Live mode CPU thrashing investigation.
+- ~12 hours of monitoring + 1s fastcap definitively resolved the CPU pattern as normal-as-designed (no bug; CFS migration of single saturated thread).
+- doc/issue11_design_analysis.md §2.6 added mid-session for operator's Option B vs C misunderstanding.
+- 2 PRs landed in arc: #95 (issue#28.2 SSE producer pin, ~2 AM KST) and #96 (issue#11 P4-2-11-0 trim Phase-0, ~9:30 AM KST).
+- HIL on PR #96: 3 capture windows totaling 2,716 scans on news-pi01, locked in p50 = 136.15 ms with 0.5% cross-capture variance.
+- Near-miss recovered: tracker UDS hung after build-CPU-saturation triggered RPLIDAR fallback path bug; recovered via `systemctl restart`. Candidate issue#35 logged.
+- 2 lessons surfaced into memory: `feedback_systemctl_edit_empty_content_no_save.md` + `project_phase0_instrumentation_pattern.md` (reusable trim pattern).
 
-Live-mode CPU thrashing is the new lead. Issue#11 plan is ready; the next session can open with that as the top priority.
+**Cold-start sequence for twenty-eighth session**:
 
-**Cold-start sequence for twenty-seventh session**:
+1. Read `CLAUDE.md` (operating rules).
+2. Read this `NEXT_SESSION.md`.
+3. ★ Open `.claude/tmp/plan_issue_11_live_pipelined_parallel.md` Round 2 fold + `.claude/tmp/phase0_results_5min_20260506_095949.md` for the empirical numbers.
+4. ★ Open `.claude/memory/project_phase0_instrumentation_pattern.md` for the reusable trim pattern (in case future measurement work needs it).
+5. PR #95/#96/#97 history in `PROGRESS/2026-W19.md` + per-stack `<stack>/CODEBASE/2026-W19.md` weekly archive entries.
 
-1. Read CLAUDE.md (now lean — 371 lines after PR #92).
-2. Read this NEXT_SESSION.md.
-3. **★ Open `.claude/memory/project_live_mode_cpu_thrashing_2026-05-05.md`** + `project_pipelined_compute_pattern.md` + `.claude/tmp/plan_issue_11_live_pipelined_parallel.md` for issue#11 resume.
-4. PR #91/#92/#93 history is in this NEXT_SESSION.md plus per-stack `<stack>/CODEBASE/2026-W19.md` weekly archive entries.
+**Most likely first task**: TL;DR #1 (issue#11 Mode-A round 2). Drop the Phase-0 numbers into the plan's Round 2 fold, replace estimates with measurements, re-derive K-budget + σ-schedule trade-offs + Option B/C/D scoring under empirical foundation. Should be a focused half-day of planner + reviewer Mode-A pass.
 
-**Most likely first task**: TL;DR #1 (issue#11 — Live pipelined-parallel). Operator may pivot to issue#28.2 (SSE producer-side pin, ~30 min add) as a warm-up before tackling the heavier issue#11 plan.
+## Session-end cleanup (twenty-seventh — Parent territory follow-up commit)
 
-## Session-end cleanup (twenty-sixth)
-
-- NEXT_SESSION.md: rewritten as a whole per cache-role rule. Stale TL;DR #1 (issue#28.1) absorbed → MERGED in PR #93. New TL;DR #1 = issue#11 (RESUMED) + new TL;DR #2 = issue#28.2 (SSE producer-side pin). issue#34 / 34.1 / 28.1 added to issue-label reservation table as DONE.
-- `.claude/memory/`: 1 new entry (`project_live_mode_cpu_thrashing_2026-05-05.md`), 1 updated (`feedback_toml_branch_compat.md` appended TOML table-syntax sed regex section). Index in `MEMORY.md` updated.
-- `.claude/tmp/plan_issue_28.1_and_doc_hierarchy.md`: kept (reference for future doc-reorg + cleanup combo + parallel-agent migration template).
-- PROGRESS / doc/history: chronicler will write the 26th-session block at session-close — Parent territory done here in NEXT_SESSION.md + memory.
-- Per-stack CODEBASE.md masters: each PR added its weekly archive entry inline — 2026-W19.md gained 3 dated entries on godo-webctl + 3 on godo-frontend + 2 on production/RPi5 spread across the 3 PRs. Master files unchanged (Option (b) lock).
-- SYSTEM_DESIGN.md / FRONT_DESIGN.md: PR #93 updated both (B11 past-tense + B12 §13.8 hard-removal section). chronicler may add a session-close cross-ref but no design decisions introduced.
-- Root CODEBASE.md: PR #91 + #92 updated. PR #93 did not touch.
-- Branches: 3 feature branches squash-merged with `--delete-branch` on origin (chore/issue-34-doc-hierarchy-weekly-archives, chore/issue-34.1-claude-md-polish-and-nav-footers, feat/issue-28.1-mapedit3-followup-backlog); local copies cleaned via `git branch -d`.
+- This file (`NEXT_SESSION.md`): rewritten as a whole per cache-role rule. Stale TL;DR items absorbed (issue#28.2 → DONE in PR #95; issue#11 was top priority → now Mode-A round 2 specific with measurements ready). New TL;DR ordering reflects post-Phase-0 priorities (issue#19 elevated; issue#35 candidate logged).
+- `.claude/memory/`: 2 new entries (`feedback_systemctl_edit_empty_content_no_save.md`, `project_phase0_instrumentation_pattern.md`); 1 updated (`project_live_mode_cpu_thrashing_2026-05-05.md` — Resume + reclassification). Index in `MEMORY.md` updated.
+- `.claude/tmp/plan_issue_11_phase0_instrumentation.md`: kept (trim pattern reference).
+- `.claude/tmp/phase0_results_*.md`: kept (Mode-A round 2 input data).
+- PROGRESS / doc/history: chronicler wrote the 27th-session block in PR #97.
+- Per-stack CODEBASE.md weekly archives: PR #95 added webctl entry; PR #96 added RPi5 entry. Master files unchanged (Option (b) lock).
+- SYSTEM_DESIGN.md / FRONT_DESIGN.md: UNCHANGED (no design decisions introduced; Phase-0 is a TEMPORARY measurement, not a design SSOT entry).
+- Root CODEBASE.md / DESIGN.md: UNCHANGED (no family-shape shift).
+- Branches: 2 feature branches squash-merged with `--delete-branch` on origin (`feat/issue-28.2-sse-producer-side-pin`, `feat/issue-11-phase0-trim-instrumentation`). Local: cleanup in this Parent commit.
+- Long-running monitor `/tmp/cpu_monitor.py` (PID 1779299): still emitting heartbeats but tracking dead PID 1708747 — operator may `kill 1779299` at convenience. CSV at `/tmp/cpu_monitor.csv` preserved as future re-occurrence comparison baseline.

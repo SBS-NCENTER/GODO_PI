@@ -99,3 +99,33 @@ done
 ```
 
 This will distinguish: (a) one cold thread saturated all cores (load spread by CFS) vs (b) MULTIPLE cold threads now busy vs (c) RT thread's CPU 3 truly contended (priority inversion or kernel-task interference).
+
+## Resume + reclassification (2026-05-05 22:50 KST, twenty-seventh-session)
+
+After explicit operator request to monitor live during a fresh tracker restart (PID 1708747 → 1779299, started 21:32:44 KST), 1+ hour of 5s-interval sampling on news-pi01:
+
+**Diagnostic output answered all the open questions from the earlier section**:
+- ✓ `/proc/cmdline` includes `isolcpus=3 nohz_full=3 rcu_nocbs=3` (kernel parameters ARE applied; earlier-section hypothesis "may not be applied" rejected).
+- ✓ `/sys/devices/system/cpu/isolated = 3` (kernel honoring it).
+- ✓ Single cold thread (TID 1708787 in this run) sustains 97-98% on whichever CPU 0/1/2 it's parked on; CFS migrates it every 3-10 s (median 3 s on 1 s sample). Cumulative residency cpu0/cpu1/cpu2 ≈ 32%/30%/38% over 30 min — near-uniform.
+- ✓ RT thread (cpus_allowed=3, prio=-51) holds last_cpu=3 throughout; jitter p99=18.5 µs; CPU 3 idle 99.6%; softirq SCHED on cpu3 = 0.
+- ✗ "All 4 cores 100%" pattern did NOT recur during this hour. The earlier daytime observation is unreproducible in this session.
+
+**Operator observation explained (the visual artifact)**: 1s-sampling shows 100% probability that any 60s observation window touches all 3 user cores; 80% at 30s; 33% at 10s. htop's per-core bars rendering at sub-second cadence will visually fill all 3 cpu 0/1/2 bars within any 1-minute viewing. Combined with brief cpu3 lighting from kernel work or transient RT bursts, the perceived "4 cores 100%" is a rendering artifact of single-thread bouncing — not actual 4-way saturation.
+
+**Reclassified**: current behavior is normal-as-designed for single-threaded cold path under issue#11-target workload. **Operator decision** (2026-05-05 22:45 KST): treat as normal; if "all 4 cores" pattern recurs, capture context (uptime, mode toggles, recent ops) and ping for re-investigation. The /tmp/cpu_monitor* logs preserved on news-pi01 are the comparison baseline.
+
+**Empirical numbers captured for issue#11 plan validation** (formally appended to `.claude/tmp/plan_issue_11_live_pipelined_parallel.md` "Round 2 empirical validation fold (Parent — 2026-05-05 22:50 KST)"):
+- Iter rate: 7.0-7.4 / sec (vs 10 Hz LiDAR → ~30% scan drop)
+- Per-iter wallclock: 8.6 ms (137 ms / 16 anneal iters; matches reviewer's eighteenth-session HIL evidence "iters mode=16, max=21, mean=15.7")
+- last_pose.iterations: 16 ± early-exit
+- CFS migration rate: ~10/min (median 3s residency, range 1-34s)
+- Thermal: stable 49.6-51.2 °C (Pi 5 cutoff ~85 °C)
+
+**New side-finding (separate from issue#11)**:
+- IRQ 186/187 (godo_tracker_rt own kernel-irq threads) have `affinity_list = 0-3` (includes CPU 3). USB IRQs 131/136 correctly pinned to 0-2. Currently low-traffic so harmless. Invariant-strict reading wants 0-2. Track as new low-priority hardening issue; may become a `project_cpu3_isolation.md` extension OR a systemd unit `IRQAffinity=` patch.
+
+**Diagnostic logs preserved on news-pi01** (not gitignored, useful for re-occurrence comparison):
+- `/tmp/cpu_monitor.csv`, `/tmp/cpu_monitor.log` (5s interval, ongoing)
+- `/tmp/cpu_monitor_round1.csv` (initial 30-min round)
+- `/tmp/cpu_fastcap.csv` (1s interval, 120 samples for sub-5s migration analysis)

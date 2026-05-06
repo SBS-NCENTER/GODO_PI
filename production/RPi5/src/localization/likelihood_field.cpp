@@ -11,6 +11,31 @@ namespace godo::localization {
 
 namespace {
 
+// issue#19 — Per-worker scratch for the parallel column / row passes of
+// `build_likelihood_field`. Caller-owned `std::vector<EdtScratch>(N)` lives
+// for the duration of one `build_likelihood_field` call; sized once to
+// `max(W, H)` so that every worker's `edt_1d` invocation uses the same
+// buffer without reallocation. Members mirror the sequential path's
+// scratch: `v` + `z` for `edt_1d`'s envelope, `pass_d` (output) + `pass_f`
+// (input copy) for one column or row at a time.
+//
+// POD by design: trivially default-constructable so the `std::vector`
+// allocation in the parallel branch is a single contiguous block.
+struct EdtScratch {
+    std::vector<int>   v;       // size max(W, H)
+    std::vector<float> z;       // size max(W, H) + 1
+    std::vector<float> pass_d;  // size max(W, H)   — per-iteration output
+    std::vector<float> pass_f;  // size max(W, H)   — per-iteration input copy
+
+    void resize(int max_dim) {
+        const std::size_t M = static_cast<std::size_t>(max_dim);
+        v.assign(M, 0);
+        z.assign(M + 1, 0.0f);
+        pass_d.assign(M, 0.0f);
+        pass_f.assign(M, 0.0f);
+    }
+};
+
 // Felzenszwalb 1D distance transform of the squared-distance source array
 // `f` of length `n`. Output `d` has length `n`. Scratch buffers `v` (size
 // n) and `z` (size n+1) are passed in to avoid re-allocation across rows.

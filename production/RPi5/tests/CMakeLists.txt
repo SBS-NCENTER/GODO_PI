@@ -276,6 +276,18 @@ target_compile_definitions(test_amcl_parallel_eval PRIVATE
 add_test(NAME test_amcl_parallel_eval COMMAND test_amcl_parallel_eval)
 set_tests_properties(test_amcl_parallel_eval PROPERTIES LABELS "hardware-free")
 
+# issue#11 P4-2-11-6 — Amcl::step parallel vs sequential wallclock
+# benchmark. Asserts a 2× speedup floor at N=500 and 1.5× at N=5000;
+# Phase-0 projects ~3× at both sizes. Hardware-free, runs in CI.
+add_executable(bench_amcl_converge bench_amcl_converge.cpp)
+target_link_libraries(bench_amcl_converge PRIVATE
+    doctest::doctest godo_localization godo_core godo_parallel)
+target_compile_definitions(bench_amcl_converge PRIVATE
+    GODO_FIXTURES_MAPS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/maps"
+)
+add_test(NAME bench_amcl_converge COMMAND bench_amcl_converge)
+set_tests_properties(bench_amcl_converge PROPERTIES LABELS "hardware-free")
+
 # issue#30 — pin tracker tolerance for origin.yaw_deg=0 (the new
 # normalized derived YAML always carries yaw=0).
 add_executable(test_origin_yaw_zero test_origin_yaw_zero.cpp)

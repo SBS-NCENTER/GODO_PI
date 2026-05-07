@@ -153,7 +153,7 @@ inline constexpr std::array<ConfigSchemaRow, 67> CONFIG_SCHEMA = {{
     {"amcl.particles_global_n",         ValueType::Int,    100.0,    10000.0,  "5000",                           ReloadClass::Recalibrate, "Global localization particle count."},
     {"amcl.particles_local_n",          ValueType::Int,    50.0,     2000.0,   "500",                            ReloadClass::Recalibrate, "Local-mode particle count."},
     {"amcl.range_max_m",                ValueType::Double, 1.0,      50.0,     "12.0",                           ReloadClass::Recalibrate, "Max beam range (m)."},
-    {"amcl.range_min_m",                ValueType::Double, 0.0,      2.0,      "0.15",                           ReloadClass::Recalibrate, "Min beam range (m); discards LiDAR housing returns."},
+    {"amcl.range_min_m",                ValueType::Double, 0.0,      5.0,      "0.15",                           ReloadClass::Recalibrate, "Min beam range (m); discards LiDAR housing returns AND no-feature near zones (issue#38 — operator may raise to 1.5+ m to ignore feature-less near regions in studio)."},
     {"amcl.sigma_hit_m",                ValueType::Double, 0.005,    5.0,      "0.05",                           ReloadClass::Recalibrate, "Beam likelihood sigma (m). Bound 5.0 m supports wide basin-lock seeds (Track D-5)."},
     {"amcl.sigma_hit_schedule_m",       ValueType::String, 0.0,      0.0,      "1.0,0.5,0.2,0.1,0.05",           ReloadClass::Recalibrate, "Track D-5: CSV sigma_hit schedule for OneShot AMCL annealing (monotonically decreasing, each in [0.005, 5.0])."},
     {"amcl.sigma_seed_xy_m",            ValueType::Double, 0.05,     5.0,      "0.1",                            ReloadClass::Recalibrate, "Particle filter seed cloud XY std (m)."},

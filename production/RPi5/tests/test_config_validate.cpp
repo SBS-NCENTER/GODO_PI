@@ -164,3 +164,18 @@ TEST_CASE("validate: t_ramp_ms is restart-class (Mode-A M2)") {
     REQUIRE(r.row != nullptr);
     CHECK(r.row->reload_class == ReloadClass::Restart);
 }
+
+TEST_CASE("validate (issue#38): amcl.range_min_m cap raised 2.0 -> 5.0 m") {
+    // Old cap (2.0) used to reject this; new cap (5.0) accepts. Operator
+    // wants to filter feature-less near zones up to ~1.5 m, with headroom.
+    const auto ok = validate("amcl.range_min_m", "4.0");
+    CHECK(ok.ok);
+    CHECK(ok.parsed_double == 4.0);
+    REQUIRE(ok.row != nullptr);
+    CHECK(ok.row->reload_class == ReloadClass::Recalibrate);
+
+    // Above-new-cap still rejected.
+    const auto over = validate("amcl.range_min_m", "5.5");
+    CHECK_FALSE(over.ok);
+    CHECK(over.err == "bad_value");
+}

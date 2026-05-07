@@ -188,7 +188,6 @@ EffectiveValue read_effective(const Config& c, const ConfigSchemaRow& row) {
     else if (k == "amcl.sigma_yaw_jitter_deg")       v.as_double = c.amcl_sigma_yaw_jitter_deg;
     else if (k == "amcl.sigma_yaw_jitter_live_deg")  v.as_double = c.amcl_sigma_yaw_jitter_live_deg;
     else if (k == "amcl.trigger_poll_ms")            v.as_int    = c.amcl_trigger_poll_ms;
-    else if (k == "amcl.yaw_tripwire_deg")           v.as_double = c.amcl_yaw_tripwire_deg;
     else if (k == "gpio.calibrate_pin")              v.as_int    = c.gpio_calibrate_pin;
     else if (k == "gpio.live_toggle_pin")            v.as_int    = c.gpio_live_toggle_pin;
     else if (k == "ipc.uds_socket")                  v.as_string = c.uds_socket;
@@ -272,7 +271,6 @@ bool apply_one(Config& c,
     else if (k == "amcl.sigma_yaw_jitter_deg")       c.amcl_sigma_yaw_jitter_deg       = vr.parsed_double;
     else if (k == "amcl.sigma_yaw_jitter_live_deg")  c.amcl_sigma_yaw_jitter_live_deg  = vr.parsed_double;
     else if (k == "amcl.trigger_poll_ms")            c.amcl_trigger_poll_ms            = static_cast<int>(vr.parsed_double);
-    else if (k == "amcl.yaw_tripwire_deg")           c.amcl_yaw_tripwire_deg           = vr.parsed_double;
     else if (k == "gpio.calibrate_pin")              c.gpio_calibrate_pin              = static_cast<int>(vr.parsed_double);
     else if (k == "gpio.live_toggle_pin")            c.gpio_live_toggle_pin            = static_cast<int>(vr.parsed_double);
     else if (k == "ipc.uds_socket")                  c.uds_socket                      = vr.parsed_string;

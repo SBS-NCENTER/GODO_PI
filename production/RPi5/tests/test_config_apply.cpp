@@ -228,7 +228,7 @@ TEST_CASE("apply_set: write to non-existent parent → write_failed; live_cfg un
     CHECK_FALSE(fs::exists(toml));
 }
 
-TEST_CASE("apply_get_all returns 68 keys, alphabetical, valid JSON-ish") {
+TEST_CASE("apply_get_all returns 67 keys, alphabetical, valid JSON-ish") {
     Config live_cfg = Config::make_default();
     std::mutex mtx;
     const std::string body = apply_get_all(live_cfg, mtx);
@@ -236,8 +236,9 @@ TEST_CASE("apply_get_all returns 68 keys, alphabetical, valid JSON-ish") {
     CHECK_FALSE(body.empty());
     CHECK(body.front() == '{');
     CHECK(body.back()  == '}');
-    // Count commas as "key separators" — exactly 67 between 68 items
-    // (issue#11 added amcl.parallel_eval_workers).
+    // Count commas as "key separators" — exactly 66 between 67 items
+    // (issue#36 dropped amcl.yaw_tripwire_deg; issue#11 added
+    // amcl.parallel_eval_workers).
     int commas = 0;
     int depth = 0;
     bool in_str = false;
@@ -249,7 +250,7 @@ TEST_CASE("apply_get_all returns 68 keys, alphabetical, valid JSON-ish") {
             else if (c == ',' && depth == 1) ++commas;
         }
     }
-    CHECK(commas == 67);
+    CHECK(commas == 66);
     // issue#11 — fork-join particle eval pool workers default = 3.
     CHECK(body.find("\"amcl.parallel_eval_workers\":3") != std::string::npos);
     // First key (alphabetical): "amcl.anneal_iters_per_phase" (Track D-5).
@@ -278,7 +279,7 @@ TEST_CASE("apply_get_all returns 68 keys, alphabetical, valid JSON-ish") {
     CHECK(body.find("\"webctl.scan_stream_hz\":") != std::string::npos);
 }
 
-TEST_CASE("apply_get_schema returns 68-element JSON array") {
+TEST_CASE("apply_get_schema returns 67-element JSON array") {
     const std::string body = apply_get_schema();
     CHECK(body.front() == '[');
     CHECK(body.back()  == ']');
@@ -293,7 +294,7 @@ TEST_CASE("apply_get_schema returns 68-element JSON array") {
             else if (c == ',' && depth == 1) ++commas;
         }
     }
-    CHECK(commas == 67);
+    CHECK(commas == 66);
     // issue#11 — schema row name surfaces.
     CHECK(body.find("\"name\":\"amcl.parallel_eval_workers\"") !=
           std::string::npos);

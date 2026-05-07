@@ -222,7 +222,6 @@ TEST_CASE("Config::make_default — wires AMCL Tier-2 defaults") {
     CHECK(c.amcl_range_max_m          == godo::config::defaults::AMCL_RANGE_MAX_M);
     CHECK(c.amcl_converge_xy_std_m    == godo::config::defaults::AMCL_CONVERGE_XY_STD_M);
     CHECK(c.amcl_converge_yaw_std_deg == godo::config::defaults::AMCL_CONVERGE_YAW_STD_DEG);
-    CHECK(c.amcl_yaw_tripwire_deg     == godo::config::defaults::AMCL_YAW_TRIPWIRE_DEG);
     CHECK(c.amcl_trigger_poll_ms      == godo::config::defaults::AMCL_TRIGGER_POLL_MS);
     CHECK(c.amcl_seed                 == godo::config::defaults::AMCL_SEED);
 }
@@ -246,7 +245,6 @@ TEST_CASE("Config::load — AMCL TOML round-trip (positive)") {
         "range_max_m = 8.0\n"
         "converge_xy_std_m = 0.01\n"
         "converge_yaw_std_deg = 0.5\n"
-        "yaw_tripwire_deg = 3.0\n"
         "trigger_poll_ms = 100\n"
         "seed = 42\n"
     );
@@ -269,7 +267,6 @@ TEST_CASE("Config::load — AMCL TOML round-trip (positive)") {
     CHECK(c.amcl_range_max_m          == 8.0);
     CHECK(c.amcl_converge_xy_std_m    == 0.01);
     CHECK(c.amcl_converge_yaw_std_deg == 0.5);
-    CHECK(c.amcl_yaw_tripwire_deg     == 3.0);
     CHECK(c.amcl_trigger_poll_ms      == 100);
     CHECK(c.amcl_seed                 == 42u);
 }
@@ -426,21 +423,6 @@ TEST_CASE("Config::load — range_max must exceed range_min") {
     Env  env({});
     CHECK_THROWS_AS(Config::load(argv.argc, argv.argv.data(), env.ptr()),
                     std::runtime_error);
-}
-
-TEST_CASE("Config::load — yaw_tripwire_deg may be zero but not negative") {
-    {
-        Argv argv({"--amcl-yaw-tripwire-deg=0"});
-        Env  env({});
-        Config c = Config::load(argv.argc, argv.argv.data(), env.ptr());
-        CHECK(c.amcl_yaw_tripwire_deg == 0.0);
-    }
-    {
-        Argv argv({"--amcl-yaw-tripwire-deg=-1"});
-        Env  env({});
-        CHECK_THROWS_AS(Config::load(argv.argc, argv.argv.data(), env.ptr()),
-                        std::runtime_error);
-    }
 }
 
 TEST_CASE("Config::load — amcl_seed must be non-negative") {

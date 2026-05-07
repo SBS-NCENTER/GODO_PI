@@ -69,7 +69,7 @@
 | Map building | One-time operation inside Docker (Ubuntu 24.04 + ROS 2 Jazzy + `slam_toolbox`) |
 | Production runtime | Native C++, no ROS dependency |
 | FreeD merge | RPi 5 receives FreeD serial, merges the offset, sends UDP (replaces the legacy Arduino) |
-| FreeD Pan | **base-local** (pan-head encoder, relative to the dolly). Because the wheels-parallel rule keeps dolly yaw constant, the reading is effectively world-frame. LiDAR yaw serves only as a safety tripwire for accidental base rotation |
+| FreeD Pan | **base-local** (pan-head encoder, relative to the dolly). Because the wheels-parallel rule keeps dolly yaw constant, the reading is effectively world-frame; pan motion is reported by the encoder, not by the LiDAR |
 | 59.94 fps RT | `SCHED_FIFO` + CPU pinning + `mlockall` + `clock_nanosleep(TIMER_ABSTIME)`. The p99 jitter target is to be measured on the target host during Phase 4-1 (the "comparable to Arduino" phrasing in prior drafts was aspirational; see §7 Phase 4-1 for the jitter-measurement harness) |
 | RT / cold path split | Hot path (59.94 Hz, Thread D): FreeD recv → apply offset → UDP send, hard deadline ≈ 16.7 ms. Cold path (LiDAR+AMCL): up to 1 s latency acceptable. Cross via **seqlock** (single writer per slot, N readers) — `std::atomic<T>` for 24–29 byte payloads is not lock-free on aarch64. See §6.1 |
 | Offset smoother | Linear ramp (method A): when AMCL writes a new generation, the hot-path smoother drives `live_offset` → `target_offset` linearly over `T_ramp` (default 500 ms). Uses the seqlock's integer generation counter for edge detection (not float equality), and snaps value-copy at `frac ≥ 1.0` to eliminate float drift. See §6.4 |
@@ -469,19 +469,6 @@ Tick t≥1:
 - `tests/test_cold_writer_live_pipelined.cpp` — 8 cases covering the contract surface.
 - `tests/test_amcl_scenarios.cpp` Scenario E — `converge_anneal_with_hint` stays in hint basin under tight σ.
 - `tests/test_cold_writer_live_iteration.cpp` — explicit rollback-path baseline pin.
-
-### Yaw safety tripwire (post-Track-D-5)
-
-The tripwire fires ONCE on the final result of `converge_anneal` (intermediate-phase poses are not tripwire candidates — the schedule's wider phases produce intentionally noisy poses that would spam stderr if checked).
-
-### Yaw safety tripwire
-
-Lives in the cold-writer wrapper, NOT in `Amcl` itself. Anchor is `grid.origin_yaw_deg` (the YAML `origin[2]` parsed at map load — see §13.8 for the SSOT migration), not the previous AMCL output:
-
-```
-if shortest_arc(pose.yaw_deg, grid.origin_yaw_deg) > amcl_yaw_tripwire_deg:
-    log("yaw_drift", ...)   # Phase 4-3 wires a UDP warning bit
-```
 
 ### Performance targets (RPi 5)
 
@@ -2253,8 +2240,9 @@ re-anchors the offset to a 0-degree path that ignores the grid.
 
 ## 14. Change log
 
+- **2026-05-07 (issue#36)**: yaw tripwire feature eliminated end-to-end — removed §5 tripwire subsection, §1 row 72 trailing clause, §13.x informational mention. Operator-locked design flaw: LiDAR sits on crane pan-axis center → yaw follows pan rotation 1:1 (CLAUDE.md §2/§9), so the tripwire fired every Live tick during normal panning (2994 events / 5 min on news-pi01 issue#19 HIL). Cross-link to `.claude/memory/project_yaw_tripwire_design_flaw.md` for design-flaw rationale. C++ surfaces dropped: `apply_yaw_tripwire` function, `Config::amcl_yaw_tripwire_deg`, `HotConfig::amcl_yaw_tripwire_deg` (sizeof 40 → 32 B), schema row, plumbing, isolated tests. Python: parity test pinned `EXPECTED_ROW_COUNT = 67` already matched post-issue#36 C++ (drift naturally resolved).
 - **2026-05-04 (issue#28, B-MAPEDIT-3 twenty-second-session close — HIL fix retrospective)**: §13 Map edit pipeline retains its body (still accurate post-HIL), but two important runtime details surfaced during operator HIL that future readers should know:
-  - **`grid.origin_yaw_deg` is NOT consumed by `evaluate_scan`**. AMCL particle filter operates as if origin_yaw = 0; the YAML yaw is a static OUTPUT-stage offset (`compute_offset` subtracts it from `pose.yaw` to produce FreeD output dyaw) plus an informational tripwire input. This is why Option B (bake-into-bitmap) is the only correct path for yaw correction — Option A (metadata-only) would change output dyaw without moving the likelihood field, leaving walls at the wrong world angles.
+  - **`grid.origin_yaw_deg` is NOT consumed by `evaluate_scan`**. AMCL particle filter operates as if origin_yaw = 0; the YAML yaw is a static OUTPUT-stage offset (`compute_offset` subtracts it from `pose.yaw` to produce FreeD output dyaw). This is why Option B (bake-into-bitmap) is the only correct path for yaw correction — Option A (metadata-only) would change output dyaw without moving the likelihood field, leaving walls at the wrong world angles.
   - **Bitmap rotation sign**: `map_rotate.py` calls `Image.rotate(-typed_yaw_deg)` so the operator's typed +θ rotates the world frame (not the bitmap content) by +θ CCW. Equivalently the bitmap content moves -θ in PIL terms (visually CW), aligning the picked direction with the new horizontal +x. Pinned by `test_rotation_direction_negates_typed_yaw`.
   - **YAML SUBTRACT and bitmap rotation are mutually exclusive**: pipeline now passes `theta_deg=None` to `apply_origin_edit_in_memory` when bitmap rotation is the source-of-truth (Option B). Pinned by `test_post_map_edit_coord_with_theta_does_not_double_count`.
 - **2026-05-04 (issue#28, B-MAPEDIT-3 cascade close)**: new §13 Map edit pipeline added (pristine vs derived file model, translate-then-rotate composition, Lanczos-3 intent + BICUBIC implementation + 3-class re-threshold, atomic pair-write protocol with PGM-rollback on YAML failure, SSE progress channel with `request_id`-tagged frames, `asyncio.Lock` concurrency guard, restart-pending sentinel handoff to operator, `cfg.amcl_origin_yaw_deg` deprecation in favour of YAML `origin[2]` SSOT). §13 Change log renumbered to §14. Cross-references new memory files `project_pristine_baseline_pattern.md` and `feedback_overlay_toggle_unification.md`.

@@ -12,8 +12,6 @@
 // origin.yaw_deg)`. This matches `udp::apply_offset_inplace`'s "add to
 // signed-24 pan and `wrap_signed24`" path. `dyaw` is always in [0, 360).
 
-#include <cstddef>
-
 #include "core/rt_types.hpp"
 #include "pose.hpp"
 

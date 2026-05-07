@@ -1,4 +1,4 @@
-// Phase 4-2 B Wave 2 — compute_offset / apply_yaw_tripwire pose helpers.
+// Phase 4-2 B Wave 2 — compute_offset pose helper.
 //
 // Pinned semantics (M3): `Offset::dyaw = canonical_360(current.yaw - origin.yaw)`
 // — the result is always in [0, 360). This matches udp::apply_offset_inplace's
@@ -16,7 +16,6 @@
 
 using godo::localization::Pose2D;
 using godo::localization::compute_offset;
-using godo::localization::apply_yaw_tripwire;
 
 TEST_CASE("compute_offset — direction signs of dx / dy / dyaw match (current - origin)") {
     Pose2D current{1.0, 2.0, 10.0};
@@ -83,19 +82,3 @@ TEST_CASE("compute_offset — dyaw stays in [0, 360) for assorted inputs") {
     }
 }
 
-TEST_CASE("apply_yaw_tripwire — fires only when shortest-arc deviation exceeds threshold") {
-    Pose2D pose{0.0, 0.0, 10.0};
-    // pose.yaw = 10°, origin = 0°, tripwire = 5° → 10° > 5° → fires.
-    CHECK(apply_yaw_tripwire(pose, 0.0, 5.0) == true);
-
-    // 10° vs 7°, tripwire = 5° → diff = 3° → does NOT fire.
-    CHECK(apply_yaw_tripwire(pose, 7.0, 5.0) == false);
-
-    // Across-the-seam: 359° vs 1°, tripwire = 5° → shortest arc = 2° → no fire.
-    Pose2D near_seam{0.0, 0.0, 359.0};
-    CHECK(apply_yaw_tripwire(near_seam, 1.0, 5.0) == false);
-
-    // Disabled when tripwire <= 0: never fires.
-    CHECK(apply_yaw_tripwire(pose, 0.0, 0.0)  == false);
-    CHECK(apply_yaw_tripwire(pose, 0.0, -1.0) == false);
-}

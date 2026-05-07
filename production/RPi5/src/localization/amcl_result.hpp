@@ -37,12 +37,4 @@ struct AmclResult {
 godo::rt::Offset compute_offset(const Pose2D& current,
                                 const Pose2D& origin) noexcept;
 
-// Tripwire predicate for Phase 4-2 B's "did the base rotate?" check.
-// Returns true when `|pose.yaw_deg - origin_yaw_deg|`, taken on the shortest
-// arc on the circle, exceeds `tripwire_deg`. The cold writer logs a warning
-// when this returns true; we never block the publish path on yaw drift here.
-bool apply_yaw_tripwire(const Pose2D& pose,
-                        double        origin_yaw_deg,
-                        double        tripwire_deg) noexcept;
-
 }  // namespace godo::localization

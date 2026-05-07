@@ -437,8 +437,6 @@ AmclResult run_one_iteration(const godo::core::Config&         cfg,
     const godo::core::HotConfig hot = hot_cfg_seq.load();
     const double deadband_mm  = hot.valid ? hot.deadband_mm  : cfg.deadband_mm;
     const double deadband_deg = hot.valid ? hot.deadband_deg : cfg.deadband_deg;
-    const double yaw_tripwire = hot.valid ? hot.amcl_yaw_tripwire_deg
-                                          : cfg.amcl_yaw_tripwire_deg;
 
     // 1. Decimate the scan into AMCL beams.
     downsample(frame,
@@ -457,25 +455,6 @@ AmclResult run_one_iteration(const godo::core::Config&         cfg,
     Pose2D anneal_pose{};
     AmclResult result = converge_anneal(cfg, beams_buf, grid,
                                         lf_inout, amcl, anneal_pose, rng);
-
-    // 4. Tripwire — informational only. Runs ONCE on the final-phase
-    //    result only (Mode-A M6); intermediate-phase poses are NOT
-    //    tripwire candidates and converge_anneal deliberately does not
-    //    check them.
-    //
-    // issue#28: yaw frame SSOT is the active map YAML `origin[2]`,
-    // parsed into `grid.origin_yaw_deg`. The legacy cfg
-    // `amcl.origin_yaw_deg` field was hard-removed in issue#28.1.
-    if (apply_yaw_tripwire(result.pose,
-                           grid.origin_yaw_deg,
-                           yaw_tripwire)) {
-        std::fprintf(stderr,
-            "cold_writer: yaw tripwire fired — pose.yaw=%.3f deg "
-            "vs origin.yaw=%.3f deg (tripwire=%.3f deg). Studio base "
-            "may have rotated; re-run calibration when convenient.\n",
-            result.pose.yaw_deg, grid.origin_yaw_deg,
-            yaw_tripwire);
-    }
 
     // 5. Compute Offset against calibration origin (M3 canonical-360 dyaw).
     Pose2D origin{};
@@ -583,8 +562,6 @@ AmclResult run_live_iteration(const godo::core::Config&         cfg,
     const godo::core::HotConfig hot = hot_cfg_seq.load();
     const double deadband_mm  = hot.valid ? hot.deadband_mm  : cfg.deadband_mm;
     const double deadband_deg = hot.valid ? hot.deadband_deg : cfg.deadband_deg;
-    const double yaw_tripwire = hot.valid ? hot.amcl_yaw_tripwire_deg
-                                          : cfg.amcl_yaw_tripwire_deg;
 
     // 1. Decimate the scan into AMCL beams (same shape as OneShot).
     downsample(frame,
@@ -613,19 +590,6 @@ AmclResult run_live_iteration(const godo::core::Config&         cfg,
     AmclResult result = amcl.step(beams_buf, rng,
                                   cfg.amcl_sigma_xy_jitter_live_m,
                                   cfg.amcl_sigma_yaw_jitter_live_deg);
-
-    // 4. Tripwire — informational only (same as OneShot).
-    //    issue#28: yaw frame SSOT is grid.origin_yaw_deg.
-    if (apply_yaw_tripwire(result.pose,
-                           grid.origin_yaw_deg,
-                           yaw_tripwire)) {
-        std::fprintf(stderr,
-            "cold_writer: yaw tripwire fired (Live) — pose.yaw=%.3f deg "
-            "vs origin.yaw=%.3f deg (tripwire=%.3f deg). Studio base "
-            "may have rotated; re-run calibration when convenient.\n",
-            result.pose.yaw_deg, grid.origin_yaw_deg,
-            yaw_tripwire);
-    }
 
     // 5. Compute Offset against calibration origin (M3 canonical-360 dyaw).
     Pose2D origin{};
@@ -733,8 +697,6 @@ AmclResult run_live_iteration_pipelined(
     const godo::core::HotConfig hot = hot_cfg_seq.load();
     const double deadband_mm  = hot.valid ? hot.deadband_mm  : cfg.deadband_mm;
     const double deadband_deg = hot.valid ? hot.deadband_deg : cfg.deadband_deg;
-    const double yaw_tripwire = hot.valid ? hot.amcl_yaw_tripwire_deg
-                                          : cfg.amcl_yaw_tripwire_deg;
 
     // 1. Decimate the scan into AMCL beams.
     downsample(frame,
@@ -753,19 +715,6 @@ AmclResult run_live_iteration_pipelined(
         cfg.amcl_live_carry_sigma_yaw_deg,
         cfg.amcl_live_carry_schedule_m,
         anneal_pose, rng);
-
-    // 3. Tripwire — informational only (mirror of OneShot / Live legacy).
-    //    issue#28: yaw frame SSOT is grid.origin_yaw_deg.
-    if (apply_yaw_tripwire(result.pose,
-                           grid.origin_yaw_deg,
-                           yaw_tripwire)) {
-        std::fprintf(stderr,
-            "cold_writer: yaw tripwire fired (Live pipelined) — pose.yaw=%.3f deg "
-            "vs origin.yaw=%.3f deg (tripwire=%.3f deg). Studio base "
-            "may have rotated; re-run calibration when convenient.\n",
-            result.pose.yaw_deg, grid.origin_yaw_deg,
-            yaw_tripwire);
-    }
 
     // 4. Compute Offset against calibration origin.
     Pose2D origin{};

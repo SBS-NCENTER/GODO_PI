@@ -737,12 +737,110 @@ OneShot first-tick / Live re-entry N=5000 → 500 ms (~2.5× safety
 over plan §3.7's parallel ~190 ms projection). Flat 50 ms triggered
 permanent fallback on the very first N=5000 dispatch (verified
 2026-05-06 HIL); the range-proportional rule resolves the §3.7 / §4
-self-inconsistency. Timeout flips the `degraded` flag for the rest
-of the tracker process; the timeout path drains stragglers before
+self-inconsistency. The timeout path drains stragglers before
 returning so caller-stack lambdas do not dangle. Worker stacks are
 bounded to the default pthread size (8 MB × N) — total
 `mlockall(MCL_FUTURE)` cost fits within the `rt_setup.cpp:31` 128 MiB
 headroom for N ≤ 3.
+
+**Fate-coupling property + K=3 consecutive-misses gate (issue#37)**.
+The single `ParallelEvalPool` instance is shared between issue#11
+`Amcl::step` evaluate_scan (via `parallel_for`) and issue#19 EDT 2D
+row/col passes (via `dispatch_with_scratch_erased`). A degradation
+trip on either dispatcher kills BOTH lift sources for the rest of
+the process — fate-coupling is intrinsic to the single-pool design.
+The 6h12min HIL on news-pi01 build `7a91806`
+(`.claude/tmp/phase0_results_long_run_2026-05-07_160813.md`) measured
+exactly 1 isolated trip in 6h12min — surrounded by clean dispatches
+both before and after — that nevertheless extinguished both the
+issue#11 (~2.25×) and issue#19 (~1.43×) lifts for the remaining 4h19min
+(LF rebuild p50 28 → 41 ms +48 %, evaluate_scan p50 42 → 97 ms +129 %,
+TOTAL p50 71 → 140 ms +97 %, Hz 9.99 → 7.06 −29 %). Operator's
+non-RTOS framing locked 2026-05-07 KST: under Raspberry Pi OS / Linux
+one isolated 50 ms scheduling jitter per ~6 hours is **수학적 필연**
+(mathematical inevitability) given CFS preemption + kernel softirqs,
+NOT signal of a real worker hang. Treating that single inevitability
+as 1-Strike-Out is environmentally too brittle.
+
+issue#37 ships **K=3 consecutive-misses gate**: `kConsecutiveMissesGate
+= 3` Tier-1 constant in `parallel_eval_pool.cpp` anonymous namespace;
+`Impl::consecutive_misses_` atomic counter shared between both
+dispatchers; counter increments on every deadline-overrun and resets
+to 0 on the first success-completion. The pool transitions to
+`degraded_=true` only when the streak reaches K=3. Intermediate
+overruns (K-1 = 1 or 2 in a row) log `[pool-miss-streak]` and absorb
+the jitter; only the K-th miss logs `[pool-degraded]` and flips the
+sticky degraded flag. `fallback_count_` increments only on the K-th
+trip and on each subsequent inline dispatch — K-1 absorbed streaks
+contribute 0. Counter is single-writer through the existing
+`in_dispatch_` CAS guard (line 401 / line 583); `memory_order_relaxed`
+is correct because the CAS already serializes dispatchers. Range-
+aware-by-construction: the deadline used to compare against fn
+wallclock is range-proportional, so the counter measures "consecutive
+failures to meet the appropriate deadline" regardless of mode shifts.
+
+Worst-case time-to-trip for a real worker hang (a hung worker that
+stays hung produces 3 deadline-overruns back-to-back):
+- Live steady-state (N=500, deadline=50 ms): 3 × 50 ms = **150 ms**.
+- OneShot first-tick (N=5000, deadline=500 ms): 3 × 500 ms = **1.5 s**.
+
+The 1.5 s first-tick worst case is honest: typical OneShot first-tick
+wallclock is ~190 ms (PR #99 standalone bench measurement, NOT the
+500 ms deadline), so the user-visible OneShot stays at ~190 ms in
+the typical path; only a real K=3-streak hang spends up to 1.5 s
+before the gate fires. The 150 ms steady-state worst case sits well
+inside a single 60 Hz frame budget × 10 frames; the FreeD smoother
+on Thread D stays renderable through the gate window.
+
+**Algorithmic-stability link**. Operator's round-2 observation
+(2026-05-07 KST): the iters distribution drifted from PRE [11..18]
+to POST [9..23] across the 11:47:10 KST trip boundary. The regression
+is not purely throughput — slow eval_scan also perturbs AMCL's
+KLD-sampling convergence behavior. Post-fix HIL re-measures iters
+distribution per 1-hour bucket; if it re-tightens to PRE [11..18]
+the algorithmic-stability link is confirmed and issue#37 closes both
+surfaces.
+
+**Operator restart cadence as defense-in-depth**. SPA System tab
+restart (`project_godo_service_management_model.md`) remains the
+recovery mechanism once K=3 actually fires — operator restart
+cleanly clears `degraded_` and the streak counter for the new
+process. NOT marketed as the primary fix.
+
+**HIL probe**. `pool.fallback_count` and `pool.degraded` UDS getter
+(`uds_protocol.md` §C.11) is the post-shift instrument: `degraded == 0`
+AND `fallback_count == 0` after a clean run is the acceptance bar;
+`[pool-miss-streak]` lines in journal are acceptable noise (they
+prove the gate absorbed isolated jitter without flipping `degraded`).
+Acceptance bar for issue#37: ≥ 6 h Live HIL on news-pi01 with 0
+`[pool-degraded]` events.
+
+**Escalation ladder** (reservations if K=3 proves insufficient under
+richer HIL data):
+- `issue#37.1` — pool separation (`eval_pool_` + `edt_pool_`).
+  Trigger: K=3 trips frequently AND trip evidence attributes them
+  disproportionately to one dispatcher AND CPU oversubscription on
+  cores {0, 1, 2} is not the dominant cost. Operator's 4-core
+  oversubscription concern is the load-bearing reason this is not
+  the round-2 path.
+- `issue#37.2` — trip-and-recover state machine. Trigger: K=3 trips
+  on real worker hangs requiring auto-recovery. Operator's
+  ping-pong concern is the load-bearing reason this is not the
+  round-2 path.
+- `issue#37.3` — deadline raise (50 → 80+ ms). Was round-1 main
+  path. Trigger: HIL shows 2-in-a-row near-clusters that a higher
+  base would have absorbed.
+- `issue#37.4` — per-dispatcher K-gate split. Trigger: HIL shows
+  EDT-originated misses biasing the shared counter unfairly.
+- `issue#37.5` — time-windowed K-gate variant + Tier-2 K config
+  promotion (`amcl.parallel_eval_consecutive_miss_gate`). Trigger:
+  HIL shows trips arriving as miss-success-miss-success without
+  3-in-a-row.
+- `issue#37.6` — `ParallelEvalSnapshot.consecutive_misses_max_window`
+  field for SPA "near-miss streak" visibility. UDS wire-format
+  bump required.
+- `issue#37.7` — stress-test harness for synthetic trip
+  reproduction.
 
 **Bit-equality of parallel-vs-sequential `Amcl::step` output** depends
 on `weighted_mean()` remaining a sequential summation
@@ -762,10 +860,13 @@ Recalibrate-class) maps int → `cpus_to_pin` in `main.cpp`:
 - `3 → {0, 1, 2}` (production default)
 
 Pinned by:
-- `tests/test_parallel_eval_pool.cpp` — 9 unit cases covering
+- `tests/test_parallel_eval_pool.cpp` — 13 unit cases covering
   lifecycle / 5000-particle bit-equality / 10⁵ stress / worker
-  affinity / workers=1 fallback / range-proportional deadline timeout
-  (Case 6: 100 ms fn over 16-element range → 50 ms base deadline) /
+  affinity / workers=1 fallback / K=3 consecutive-misses gate
+  (issue#37 Case 6: 3 × 150 ms-fn-vs-50 ms-deadline trips at the
+  K-th, Case 6a single-overrun absorbed, Case 6b K-1 streak
+  absorbed, Case 6c miss-miss-success resets counter, Case 6d
+  scaled-range 1500 with fn=300 ms vs 150 ms deadline) /
   concurrent-dispatch reject / healthy steady-state diag / CPU 3
   rejection at ctor.
 - `tests/test_amcl_parallel_eval.cpp` — 5 integration cases pinning

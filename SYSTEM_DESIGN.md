@@ -1137,9 +1137,36 @@ re-deriving the proof — see CODEBASE.md `(s)`.
 acceptance bar: `dispatch_count` grows in step with cold-writer
 iters, `fallback_count == 0` in steady state, `degraded == 0`,
 `p99_us` ≤ 4000 µs. `degraded == 1` means the pool transitioned to
-permanent inline-sequential mode (ctor 1 s timeout OR a single 50 ms
-join overrun); the cold writer continues at the pre-issue#11
-sequential speed without accuracy regression.
+permanent inline-sequential mode (ctor 1 s timeout OR
+`kConsecutiveMissesGate=3` consecutive deadline-overruns on the
+range-proportional join — issue#37 K-gate); the cold writer
+continues at the pre-issue#11 sequential speed without accuracy
+regression.
+
+**issue#37 K=3 consecutive-misses gate**. The 50 ms range-proportional
+deadline (50 ms × max(1, range/500), base unchanged from issue#11)
+is no longer 1-Strike-Out. 6h12min HIL on news-pi01 build `7a91806`
+(2026-05-07) measured 1 isolated `[pool-degraded]` event surrounded
+by clean dispatches both before and after — textbook isolated-jitter
+signature that nevertheless extinguished both the issue#11 (~2.25×)
+and issue#19 (~1.43×) lifts for the remaining 4h19min. Operator
+framing locks the non-RTOS interpretation: under Raspberry Pi OS /
+Linux one isolated 50 ms scheduling jitter per ~6 hours is
+mathematical inevitability (CFS preemption + kernel softirqs), NOT
+signal of a real worker hang. The K=3 gate ignores K=1 and K=2
+streaks (logged as `[pool-miss-streak]`) and trips only on K=3
+in-a-row (logged as `[pool-degraded]`). Counter resets on the first
+success-completion. Worst-case time-to-trip for a real worker hang:
+150 ms steady-state Live (3 × 50 ms) / 1.5 s OneShot first-tick
+(3 × 500 ms); typical OneShot first-tick wallclock stays at the PR
+#99 standalone-bench ~190 ms in the no-streak path. Once K=3 fires,
+`degraded` sticks for the lifetime of the process; operator restart
+via SPA System tab is the recovery. Counter is shared between
+`parallel_for` (issue#11) and `dispatch_with_scratch_erased`
+(issue#19) — both dispatchers serialize through the same
+`in_dispatch_` CAS, so a miss on EDT followed by 2 misses on
+evaluate_scan still trips at K=3 (`issue#37.4` reserves a per-
+dispatcher counter split if HIL shows EDT bias).
 
 **Rollback**: TOML `amcl.parallel_eval_workers = 1` boots the pool
 with no worker threads — `parallel_for` runs fn on the caller thread

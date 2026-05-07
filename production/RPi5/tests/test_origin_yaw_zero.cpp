@@ -10,10 +10,6 @@
 //      i.e. the operator's pose-dyaw equals the AMCL pose yaw with no
 //      hidden subtraction.
 //
-//   2. apply_yaw_tripwire(pose, 0, tripwire_deg) treats the tripwire
-//      relative to yaw=0 (the new world frame's +x axis), which is
-//      the operator-locked behaviour for issue#30.
-//
 // No production code change is required; this is a pin against a
 // hypothetical regression where someone adds a `if (origin.yaw_deg ==
 // 0) { ... }` short-circuit that breaks the contract.
@@ -30,7 +26,6 @@
 #include "localization/pose.hpp"
 
 using godo::localization::Pose2D;
-using godo::localization::apply_yaw_tripwire;
 using godo::localization::compute_offset;
 using godo::rt::Offset;
 
@@ -58,32 +53,6 @@ TEST_CASE("issue#30 — compute_offset with origin.yaw_deg=0 returns dyaw=curren
         const Pose2D current{0.0, 0.0, 359.999};
         const Offset off = compute_offset(current, origin);
         CHECK(off.dyaw == doctest::Approx(359.999));
-    }
-}
-
-TEST_CASE("issue#30 — apply_yaw_tripwire with origin_yaw_deg=0 disables when tripwire<=0") {
-    const Pose2D pose{0.0, 0.0, 30.0};
-    CHECK_FALSE(apply_yaw_tripwire(pose, 0.0, 0.0));
-    CHECK_FALSE(apply_yaw_tripwire(pose, 0.0, -1.0));
-}
-
-TEST_CASE("issue#30 — apply_yaw_tripwire with origin_yaw_deg=0 fires when |yaw| > tripwire") {
-    {
-        const Pose2D pose{0.0, 0.0, 30.0};
-        // |30 - 0| = 30 > 20  → fires.
-        CHECK(apply_yaw_tripwire(pose, 0.0, 20.0));
-        // |30 - 0| = 30 < 40  → does not fire.
-        CHECK_FALSE(apply_yaw_tripwire(pose, 0.0, 40.0));
-    }
-    {
-        const Pose2D pose{0.0, 0.0, -30.0};
-        // shortest_arc(0, -30) = -30 → |−30| = 30 > 20  → fires.
-        CHECK(apply_yaw_tripwire(pose, 0.0, 20.0));
-    }
-    {
-        // Wrap edge: pose=359 → shortest_arc(0, 359) = -1 → |-1| < 20.
-        const Pose2D pose{0.0, 0.0, 359.0};
-        CHECK_FALSE(apply_yaw_tripwire(pose, 0.0, 20.0));
     }
 }
 

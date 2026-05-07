@@ -45,7 +45,7 @@ Earlier phases:
 - **Yaw handling**: Approach B — **AMCL outputs (x, y, yaw) 3-DOF simultaneously**. The LiDAR's yaw is inferred from how walls/features line up against the pre-built map. No separate yaw-correction step.
 - **Localization**: O3 first (pre-built map + AMCL), then O4 extension (retro-reflector markers). The marker layer is gated on the Phase 1 measurement of C1 marker distinguishability.
 - **SHOTOKU FreeD Pan semantics**: **base-local** (the pan-head encoder, relative to the dolly). Because the wheels-parallel rule keeps dolly yaw constant, the base-local reading is effectively world-frame in practice. We only merge (dx, dy); Pan is not touched.
-- **Uses of LiDAR yaw**: (1) as the 3-DOF state variable inside AMCL, (2) as a safety tripwire — if yaw drifts more than `cfg.amcl_yaw_tripwire_deg` from `cfg.amcl_origin_yaw_deg`, log a warning (Phase 4-3 wires a UDP warning bit).
+- **Uses of LiDAR yaw**: (1) as the 3-DOF state variable inside AMCL.
 
 ### Operating modes (clarified 2026-04-26)
 

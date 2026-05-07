@@ -81,7 +81,6 @@ inline constexpr double           AMCL_RANGE_MIN_M         = 0.15;    // discard
 inline constexpr double           AMCL_RANGE_MAX_M         = 12.0;    // C1 quality-degraded beyond ~12 m
 inline constexpr double           AMCL_CONVERGE_XY_STD_M   = 0.015;   // 1.5 cm; tighter than 1-2 cm UE budget
 inline constexpr double           AMCL_CONVERGE_YAW_STD_DEG = 0.3;    // circular std
-inline constexpr double           AMCL_YAW_TRIPWIRE_DEG    = 5.0;     // vs origin_yaw_deg; flags suspected base rotation
 inline constexpr int              AMCL_TRIGGER_POLL_MS     = 50;      // idle wake cadence for cold writer
 inline constexpr std::uint64_t    AMCL_SEED                = 0;       // 0 = time-derived; non-zero = deterministic
 

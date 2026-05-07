@@ -1,10 +1,9 @@
 // Track B-CONFIG (PR-CONFIG-β) — pins that `run_one_iteration` and
 // `run_live_iteration` consume `hot_cfg_seq.load()` once at the head of
-// every iteration for the deadband + yaw tripwire reads. Also pins the
-// boot-race fallback: when `hot.valid == 0` (the Seqlock<HotConfig>
-// default-constructed payload), the kernel falls back to `cfg.deadband_*`
-// / `cfg.amcl_yaw_tripwire_deg` so OneShot stays correct under fixtures
-// that forget to publish.
+// every iteration for the deadband reads. Also pins the boot-race
+// fallback: when `hot.valid == 0` (the Seqlock<HotConfig> default-
+// constructed payload), the kernel falls back to `cfg.deadband_*` so
+// OneShot stays correct under fixtures that forget to publish.
 //
 // The test does NOT cross the build-grep boundary: `hot_cfg_seq.store`
 // inside the test is permitted because the grep allow-lists test files
@@ -96,9 +95,8 @@ Config make_test_config() {
 
 TEST_CASE("run_one_iteration — hot.valid==0 falls back to cfg.deadband_*") {
     // Default-constructed Seqlock<HotConfig> has valid=0. The kernel
-    // must NOT crash and MUST behave as if cfg.deadband_* / cfg
-    // .amcl_yaw_tripwire_deg were used. Smoke check: the call returns
-    // and publishes a finite Offset.
+    // must NOT crash and MUST behave as if cfg.deadband_* were used.
+    // Smoke check: the call returns and publishes a finite Offset.
     Config cfg = make_test_config();
     OccupancyGrid grid = load_map(cfg.amcl_map_path);
     LikelihoodField lf = build_likelihood_field(grid, cfg.amcl_sigma_hit_m);
@@ -158,9 +156,8 @@ TEST_CASE("run_one_iteration — hot.valid==1 honours hot.deadband_mm") {
 
     Seqlock<HotConfig>  hot_cfg_seq;
     HotConfig snap = snapshot_hot(cfg);
-    snap.deadband_mm           = 50.0;     // wide
-    snap.deadband_deg          = 1.0;      // wide
-    snap.amcl_yaw_tripwire_deg = 90.0;     // very loose
+    snap.deadband_mm  = 50.0;     // wide
+    snap.deadband_deg = 1.0;      // wide
     snap.published_mono_ns =
         static_cast<std::uint64_t>(godo::rt::monotonic_ns());
     snap.valid = 1;
@@ -212,7 +209,6 @@ TEST_CASE("run_one_iteration — mid-call hot publish takes effect on next iter"
     HotConfig snap = snapshot_hot(cfg);
     snap.deadband_mm  = 0.0;
     snap.deadband_deg = 0.0;
-    snap.amcl_yaw_tripwire_deg = 5.0;
     snap.published_mono_ns =
         static_cast<std::uint64_t>(godo::rt::monotonic_ns());
     snap.valid = 1;
@@ -254,7 +250,6 @@ TEST_CASE("hot_cfg_seq.load() is wait-free under repeated reads") {
     HotConfig snap{};
     snap.deadband_mm = 12.0;
     snap.deadband_deg = 0.2;
-    snap.amcl_yaw_tripwire_deg = 7.5;
     snap.published_mono_ns = 1000;
     snap.valid = 1;
     seq.store(snap);
@@ -265,6 +260,5 @@ TEST_CASE("hot_cfg_seq.load() is wait-free under repeated reads") {
     }
     CHECK(observed.deadband_mm  == doctest::Approx(12.0));
     CHECK(observed.deadband_deg == doctest::Approx(0.2));
-    CHECK(observed.amcl_yaw_tripwire_deg == doctest::Approx(7.5));
     CHECK(observed.valid == 1);
 }

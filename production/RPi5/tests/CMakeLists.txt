@@ -538,7 +538,7 @@ set_tests_properties(test_cold_writer_amcl_rate_records PROPERTIES
     LABELS "hardware-free")
 
 # Track B-CONFIG (PR-CONFIG-β) — pin that the cold-writer kernels read
-# the hot-class Tier-2 keys (deadband_*, amcl_yaw_tripwire_deg) through
+# the hot-class Tier-2 keys (deadband_*) through
 # `hot_cfg_seq.load()` once per iteration, with cfg-fallback on the
 # valid=0 boot sentinel.
 add_executable(test_cold_writer_reads_hot_config

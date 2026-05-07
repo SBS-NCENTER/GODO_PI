@@ -119,17 +119,16 @@ using LidarFactory =
 //     writer's natural cadence. Same ordering discipline as last_pose_seq.
 // Track B-CONFIG (PR-CONFIG-β): the kernel reads `hot_cfg_seq.load()`
 // once at the head of each iteration to pick up operator edits to the
-// Hot-class Tier-2 keys (deadband_mm, deadband_deg, amcl_yaw_tripwire_deg)
-// without restart. The non-hot fields of `cfg` (origin, sigma_*, range_*,
+// Hot-class Tier-2 keys (deadband_mm, deadband_deg) without restart.
+// The non-hot fields of `cfg` (origin, sigma_*, range_*,
 // downsample_stride, etc.) are still read directly because they are
 // `restart` or `recalibrate` class — changes take effect on next boot or
 // next OneShot, not mid-iteration.
 //
 // `hot.valid == 0` is the boot sentinel (Seqlock<HotConfig> default-
-// constructed); the kernel falls back to `cfg.deadband_*` /
-// `cfg.amcl_yaw_tripwire_deg` so the OneShot path stays correct even if
-// the test fixture forgets to publish before calling. Pinned by
-// `test_cold_writer_reads_hot_config.cpp`.
+// constructed); the kernel falls back to `cfg.deadband_*` so the
+// OneShot path stays correct even if the test fixture forgets to publish
+// before calling. Pinned by `test_cold_writer_reads_hot_config.cpp`.
 // Track D-5 — Coarse-to-fine sigma_hit annealing for OneShot AMCL.
 // Public so tests can drive it directly with synthetic scans (Scenario D
 // in test_amcl_scenarios.cpp).

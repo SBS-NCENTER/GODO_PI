@@ -45,3 +45,7 @@ Operator preference (per 2026-05-07 KST briefing): leaning toward option 1 (elim
 ## Forensic anchor
 
 issue#19 HIL on news-pi01 2026-05-07 KST: 5-minute Live-mode capture produced 2994 yaw tripwire events alongside ~3000 PHASE0 lines. Tripwire spam was the immediate symptom that surfaced this design flaw — operator clarification ("LiDAR yaw varies with pan; tripwire is wrong") locked the resolution path on the spot.
+
+## Status
+
+issue#36 RESOLVED 2026-05-07 KST. Option 1 (full elimination) shipped via PR #<N>. HIL on news-pi01: 0 `cold_writer: yaw tripwire fired` events post-deploy (vs 2994 / 5 min pre-fix). All schema / Config / HotConfig / test surfaces removed.

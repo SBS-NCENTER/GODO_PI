@@ -69,7 +69,6 @@ const std::set<std::string>& allowed_keys() {
         "amcl.range_max_m",
         "amcl.converge_xy_std_m",
         "amcl.converge_yaw_std_deg",
-        "amcl.yaw_tripwire_deg",
         "amcl.trigger_poll_ms",
         "amcl.seed",
         "amcl.sigma_xy_jitter_live_m",
@@ -199,7 +198,6 @@ void apply_toml_file(Config& c, const std::filesystem::path& path) {
     if (auto v = tbl["amcl"]["range_max_m"].value<double>();          v) c.amcl_range_max_m        = *v;
     if (auto v = tbl["amcl"]["converge_xy_std_m"].value<double>();    v) c.amcl_converge_xy_std_m  = *v;
     if (auto v = tbl["amcl"]["converge_yaw_std_deg"].value<double>(); v) c.amcl_converge_yaw_std_deg = *v;
-    if (auto v = tbl["amcl"]["yaw_tripwire_deg"].value<double>();     v) c.amcl_yaw_tripwire_deg   = *v;
     if (auto v = tbl["amcl"]["trigger_poll_ms"].value<int64_t>();     v) c.amcl_trigger_poll_ms    = static_cast<int>(*v);
     if (auto v = tbl["amcl"]["seed"].value<int64_t>();                v) {
         if (*v < 0) {
@@ -499,7 +497,6 @@ void apply_env(Config& c, char** envp) {
     if (auto v = env_get(envp, "GODO_AMCL_RANGE_MAX_M"))          c.amcl_range_max_m        = parse_double_or_throw(*v, "GODO_AMCL_RANGE_MAX_M");
     if (auto v = env_get(envp, "GODO_AMCL_CONVERGE_XY_STD_M"))    c.amcl_converge_xy_std_m  = parse_double_or_throw(*v, "GODO_AMCL_CONVERGE_XY_STD_M");
     if (auto v = env_get(envp, "GODO_AMCL_CONVERGE_YAW_STD_DEG")) c.amcl_converge_yaw_std_deg = parse_double_or_throw(*v, "GODO_AMCL_CONVERGE_YAW_STD_DEG");
-    if (auto v = env_get(envp, "GODO_AMCL_YAW_TRIPWIRE_DEG"))     c.amcl_yaw_tripwire_deg   = parse_double_or_throw(*v, "GODO_AMCL_YAW_TRIPWIRE_DEG");
     if (auto v = env_get(envp, "GODO_AMCL_TRIGGER_POLL_MS"))      c.amcl_trigger_poll_ms    = parse_int_or_throw(*v, "GODO_AMCL_TRIGGER_POLL_MS");
     if (auto v = env_get(envp, "GODO_AMCL_SEED"))                 c.amcl_seed               = parse_u64_or_throw(*v, "GODO_AMCL_SEED");
     if (auto v = env_get(envp, "GODO_AMCL_SIGMA_XY_JITTER_LIVE_M"))    c.amcl_sigma_xy_jitter_live_m    = parse_double_or_throw(*v, "GODO_AMCL_SIGMA_XY_JITTER_LIVE_M");
@@ -649,7 +646,6 @@ void apply_cli(Config& c, int argc, char** argv) {
         {"amcl-range-max-m",         [](Config& cc, const std::string& v){ cc.amcl_range_max_m        = parse_double_or_throw(v, "--amcl-range-max-m"); }},
         {"amcl-converge-xy-std-m",   [](Config& cc, const std::string& v){ cc.amcl_converge_xy_std_m  = parse_double_or_throw(v, "--amcl-converge-xy-std-m"); }},
         {"amcl-converge-yaw-std-deg",[](Config& cc, const std::string& v){ cc.amcl_converge_yaw_std_deg = parse_double_or_throw(v, "--amcl-converge-yaw-std-deg"); }},
-        {"amcl-yaw-tripwire-deg",    [](Config& cc, const std::string& v){ cc.amcl_yaw_tripwire_deg   = parse_double_or_throw(v, "--amcl-yaw-tripwire-deg"); }},
         {"amcl-trigger-poll-ms",     [](Config& cc, const std::string& v){ cc.amcl_trigger_poll_ms    = parse_int_or_throw(v, "--amcl-trigger-poll-ms"); }},
         {"amcl-seed",                [](Config& cc, const std::string& v){ cc.amcl_seed               = parse_u64_or_throw(v, "--amcl-seed"); }},
         {"amcl-sigma-xy-jitter-live-m",    [](Config& cc, const std::string& v){ cc.amcl_sigma_xy_jitter_live_m    = parse_double_or_throw(v, "--amcl-sigma-xy-jitter-live-m"); }},
@@ -823,7 +819,6 @@ void validate_amcl(const Config& c) {
             ") must exceed amcl_range_min_m (" +
             std::to_string(c.amcl_range_min_m) + ")");
     }
-    require_nonneg_double(c.amcl_yaw_tripwire_deg, "amcl_yaw_tripwire_deg");
 
     // Track D-5 — annealing schedule + seed_xy schedule + iters_per_phase.
     require_positive_int(c.amcl_anneal_iters_per_phase,
@@ -983,7 +978,6 @@ Config Config::make_default() {
     c.amcl_range_max_m          = cfg_defaults::AMCL_RANGE_MAX_M;
     c.amcl_converge_xy_std_m    = cfg_defaults::AMCL_CONVERGE_XY_STD_M;
     c.amcl_converge_yaw_std_deg = cfg_defaults::AMCL_CONVERGE_YAW_STD_DEG;
-    c.amcl_yaw_tripwire_deg     = cfg_defaults::AMCL_YAW_TRIPWIRE_DEG;
     c.amcl_trigger_poll_ms      = cfg_defaults::AMCL_TRIGGER_POLL_MS;
     c.amcl_seed                 = cfg_defaults::AMCL_SEED;
 

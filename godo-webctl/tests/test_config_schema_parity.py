@@ -237,7 +237,7 @@ def test_alphabetical_ordering() -> None:
 
 
 def test_known_hot_keys_present() -> None:
-    """The 3 hot-class keys read by cold_writer.cpp's per-iteration body
+    """The 2 hot-class keys read by cold_writer.cpp's per-iteration body
     MUST appear in the schema with reload_class='hot'. Any drift here
     means cold_writer would silently fall back to cfg.* on every read."""
     rows = schema_mod.load_schema()
@@ -245,6 +245,5 @@ def test_known_hot_keys_present() -> None:
     required = {
         "smoother.deadband_mm",
         "smoother.deadband_deg",
-        "amcl.yaw_tripwire_deg",
     }
     assert required <= hot_keys, f"hot-class drift: missing {required - hot_keys}"

@@ -20,15 +20,6 @@ double canonical_360(double deg) noexcept {
     return r;
 }
 
-// Shortest signed arc (degrees) from `from` to `to` on the unit circle:
-// returns a value in (-180, 180].
-double shortest_arc_deg(double from, double to) noexcept {
-    double d = std::fmod(to - from, k360);
-    if (d > 180.0)  d -= k360;
-    if (d <= -180.0) d += k360;
-    return d;
-}
-
 }  // namespace
 
 godo::rt::Offset compute_offset(const Pose2D& current,
@@ -38,14 +29,6 @@ godo::rt::Offset compute_offset(const Pose2D& current,
     off.dy   = current.y - origin.y;
     off.dyaw = canonical_360(current.yaw_deg - origin.yaw_deg);
     return off;
-}
-
-bool apply_yaw_tripwire(const Pose2D& pose,
-                        double        origin_yaw_deg,
-                        double        tripwire_deg) noexcept {
-    if (!(tripwire_deg > 0.0)) return false;  // disabled
-    return std::fabs(shortest_arc_deg(origin_yaw_deg, pose.yaw_deg)) >
-           tripwire_deg;
 }
 
 }  // namespace godo::localization

@@ -1,6 +1,7 @@
-// issue#11 P4-2-11-1 / P4-2-11-6 — ParallelEvalPool unit tests.
+// issue#11 P4-2-11-1 / P4-2-11-6 + issue#37 P4-2-37-1 — ParallelEvalPool
+// unit tests.
 //
-// 8 cases per plan §6.1:
+// Cases:
 //   1. Lifecycle              — ctor spawns workers; dtor joins cleanly.
 //   2. Output equivalence     — parallel_for(0, N, fn) writes identical
 //                                array to a sequential loop.
@@ -10,8 +11,17 @@
 //                                CPU bit, in {0, 1, 2}.
 //   5. workers=1 fallback     — empty cpus_to_pin runs fn on caller; no
 //                                spawn; degraded() == false.
-//   6. Deadline timeout       — fn that sleeps > 50 ms; returns false;
-//                                pool transitions to degraded.
+//   6. K=3 trip on streak     — issue#37: 3 consecutive deadline-overruns
+//                                trip the gate; pool transitions to
+//                                degraded after the K-th miss only.
+//   6a. Single overrun no-trip — issue#37: K=1 absorbed; degraded stays
+//                                false; fallback_count stays 0.
+//   6b. K-1 streak no-trip    — issue#37: K=2 absorbed; degraded stays
+//                                false; fallback_count stays 0.
+//   6c. Reset on success      — issue#37: miss-miss-success-miss chain
+//                                does NOT trip (counter goes 1,2,0,1).
+//   6d. Scaled-range trip     — issue#37: K=3 trips at scaled deadline
+//                                (range=1500 → scale=3 → 150 ms deadline).
 //   7. Concurrent dispatch    — second concurrent dispatch from same
 //                                instance is rejected.
 //   8. Ctor timeout fallback  — covered by §3.5 inline-degraded note;
@@ -20,6 +30,10 @@
 //                                snapshot_diag().degraded == 0 in the
 //                                healthy steady state and documents the
 //                                fault-injection path in a comment.
+//
+// Test fn-vs-deadline ratio standardized at 1.875× (round-1 n3 / round-2
+// m2'): fn=150 ms vs 50 ms steady-state deadline; fn=300 ms vs 150 ms
+// scaled deadline (Case 6d, 2.0× ratio above the 1.875× floor).
 //
 // Hardware-free; runs on any Linux x86_64 / arm64 with pthreads.
 
@@ -173,32 +187,150 @@ TEST_CASE("Case 5: workers=1 fallback — empty cpus runs fn on caller, not degr
     CHECK(s.degraded == 0);
 }
 
-TEST_CASE("Case 6: Deadline timeout — fn sleeps > 50 ms; returns false; degraded") {
+TEST_CASE("Case 6: K=3 trip — three consecutive overruns flip degraded; "
+          "intermediate K-1 streaks absorb without flipping (issue#37)") {
     ParallelEvalPool pool(available_cpus_for_test());
     REQUIRE_FALSE(pool.degraded());
 
-    // fn deliberately sleeps 100 ms — exceeds the pool's 50 ms hard
-    // deadline. parallel_for must return false; pool transitions to
-    // degraded; subsequent dispatches run inline.
-    const bool first = pool.parallel_for(0, 16, [](std::size_t) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    });
+    // fn=150 ms vs 50 ms range-proportional deadline (1.875× ratio).
+    // range=(0, 16) → scale=1 → deadline=50 ms. Each call must return
+    // false; only the K-th call flips degraded.
+    auto slow_fn = [](std::size_t) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    };
+
+    // Miss #1 — streak=1, gate not tripped.
+    const bool first = pool.parallel_for(0, 16, slow_fn);
     CHECK_FALSE(first);
+    CHECK_FALSE(pool.degraded());
+    CHECK(pool.snapshot_diag().fallback_count == 0);
+
+    // Miss #2 — streak=2, gate not tripped.
+    const bool second = pool.parallel_for(0, 16, slow_fn);
+    CHECK_FALSE(second);
+    CHECK_FALSE(pool.degraded());
+    CHECK(pool.snapshot_diag().fallback_count == 0);
+
+    // Miss #3 — streak reaches K=3, gate trips.
+    const bool third = pool.parallel_for(0, 16, slow_fn);
+    CHECK_FALSE(third);
     CHECK(pool.degraded());
 
-    // Subsequent dispatch runs inline-sequentially and reports true.
+    // Subsequent dispatch sees the pool degraded and runs inline.
     std::atomic<int> count{0};
-    const bool second = pool.parallel_for(0, 16, [&](std::size_t) {
+    const bool fourth = pool.parallel_for(0, 16, [&](std::size_t) {
         count.fetch_add(1);
     });
-    CHECK(second);
+    CHECK(fourth);
     CHECK(count.load() == 16);
 
     const ParallelEvalSnapshot s = pool.snapshot_diag();
     CHECK(s.degraded == 1);
-    // fallback_count incremented at least once by the timeout itself, +1
-    // for each subsequent inline dispatch.
-    CHECK(s.fallback_count >= 1);
+    // fallback_count = 1 for the K-th trip + 1 for the inline dispatch.
+    // K-1 absorbed streaks contribute 0 (m1' fold-in).
+    CHECK(s.fallback_count == 2);
+}
+
+TEST_CASE("Case 6a: Single overrun does not degrade (issue#37 K=1 absorbed)") {
+    ParallelEvalPool pool(available_cpus_for_test());
+    REQUIRE_FALSE(pool.degraded());
+
+    const bool ok = pool.parallel_for(0, 16, [](std::size_t) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    });
+    CHECK_FALSE(ok);
+    CHECK_FALSE(pool.degraded());
+
+    const ParallelEvalSnapshot s = pool.snapshot_diag();
+    CHECK(s.degraded == 0);
+    CHECK(s.fallback_count == 0);  // K-1 absorbed → no fallback
+}
+
+TEST_CASE("Case 6b: K-1=2 consecutive overruns do not degrade (issue#37)") {
+    ParallelEvalPool pool(available_cpus_for_test());
+    REQUIRE_FALSE(pool.degraded());
+
+    auto slow_fn = [](std::size_t) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    };
+
+    const bool first = pool.parallel_for(0, 16, slow_fn);
+    CHECK_FALSE(first);
+    CHECK_FALSE(pool.degraded());
+
+    const bool second = pool.parallel_for(0, 16, slow_fn);
+    CHECK_FALSE(second);
+    CHECK_FALSE(pool.degraded());
+
+    const ParallelEvalSnapshot s = pool.snapshot_diag();
+    CHECK(s.degraded == 0);
+    CHECK(s.fallback_count == 0);
+}
+
+TEST_CASE("Case 6c: miss-miss-success resets streak counter (issue#37)") {
+    ParallelEvalPool pool(available_cpus_for_test());
+    REQUIRE_FALSE(pool.degraded());
+
+    auto slow_fn = [](std::size_t) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    };
+    auto fast_fn = [](std::size_t) {
+        // Well under 50 ms — guaranteed success-completion.
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    };
+
+    // Miss #1 (streak=1)
+    CHECK_FALSE(pool.parallel_for(0, 16, slow_fn));
+    CHECK_FALSE(pool.degraded());
+
+    // Miss #2 (streak=2)
+    CHECK_FALSE(pool.parallel_for(0, 16, slow_fn));
+    CHECK_FALSE(pool.degraded());
+
+    // Success — counter resets to 0.
+    CHECK(pool.parallel_for(0, 16, fast_fn));
+    CHECK_FALSE(pool.degraded());
+
+    // Miss #3 — but counter went 0 → 1 (NOT 3); gate stays untripped.
+    CHECK_FALSE(pool.parallel_for(0, 16, slow_fn));
+    CHECK_FALSE(pool.degraded());
+
+    const ParallelEvalSnapshot s = pool.snapshot_diag();
+    CHECK(s.degraded == 0);
+    CHECK(s.fallback_count == 0);  // still 0 — gate never tripped
+}
+
+TEST_CASE("Case 6d: K=3 trip at scaled-range deadline — range=1500 → "
+          "scale=3 → 150 ms deadline; fn=300 ms (2.0× ratio)") {
+    ParallelEvalPool pool(available_cpus_for_test());
+    REQUIRE_FALSE(pool.degraded());
+
+    // range=(0, 1500) so scale = max(1, 1500/500) = 3 → deadline=150 ms.
+    // fn=300 ms (2.0× ratio above the 1.875× floor — m2' fold-in).
+    // Only worker 0 sleeps 300 ms; workers 1 and 2 do trivial work.
+    // The dispatch waits for ALL workers, so the timeout still fires
+    // because worker 0 cannot finish within 150 ms regardless of the
+    // others. Use a small atomic to make the test deterministic without
+    // sleeping 300 ms × 1500 iters (would take 7+ minutes per dispatch).
+    auto slow_fn = [](std::size_t i) {
+        if (i == 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        }
+    };
+
+    // Three consecutive overruns at the scaled deadline.
+    CHECK_FALSE(pool.parallel_for(0, 1500, slow_fn));
+    CHECK_FALSE(pool.degraded());
+
+    CHECK_FALSE(pool.parallel_for(0, 1500, slow_fn));
+    CHECK_FALSE(pool.degraded());
+
+    CHECK_FALSE(pool.parallel_for(0, 1500, slow_fn));
+    CHECK(pool.degraded());
+
+    const ParallelEvalSnapshot s = pool.snapshot_diag();
+    CHECK(s.degraded == 1);
+    CHECK(s.fallback_count == 1);  // only the K-th trip incremented
 }
 
 TEST_CASE("Case 7: Concurrent dispatch from same instance — second is rejected") {
@@ -207,10 +339,10 @@ TEST_CASE("Case 7: Concurrent dispatch from same instance — second is rejected
     std::atomic<bool> first_can_finish{false};
 
     // First dispatch: a slow fn that blocks until first_can_finish flips.
-    // Note: fn must not exceed the 50 ms deadline OR the test races the
-    // degraded transition — we keep the inner sleep short (5 ms) and
-    // gate on `first_started` / `first_can_finish` so the second
-    // dispatch happens DURING the first.
+    // Note: the inner sleep (20 µs poll, well below the 50 ms deadline)
+    // keeps the dispatch within budget so the test does not race the
+    // K-gate streak counter — we gate on `first_started` /
+    // `first_can_finish` so the second dispatch happens DURING the first.
     std::thread t1([&]() {
         const bool ok = pool.parallel_for(0, 8, [&](std::size_t) {
             first_started.store(true);
@@ -386,35 +518,50 @@ TEST_CASE("issue#19 (c): workers=0 rollback runs fn on caller, per_worker[0] see
     CHECK_FALSE(pool.degraded());
 }
 
-TEST_CASE("issue#19 (d): caller-supplied deadline overrun returns false + flips degraded") {
+TEST_CASE("issue#19 (d): caller-supplied deadline overrun — 3 consecutive "
+          "trip K=3 gate; intermediate misses absorbed (issue#37)") {
     ParallelEvalPool pool(available_cpus_for_test());
     REQUIRE_FALSE(pool.degraded());
 
     struct Scratch { int x{0}; };
     std::vector<Scratch> per_worker(3);
 
-    // 100 ms sleep per iter against a 1 ms deadline ⇒ guaranteed timeout.
-    const bool ok = pool.parallel_for_with_scratch<Scratch>(
-        0, 16, per_worker,
-        [](std::size_t, Scratch&) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        },
-        1'000'000LL);  // 1 ms
-    CHECK_FALSE(ok);
+    // 100 ms sleep per iter against a 1 ms deadline ⇒ guaranteed timeout
+    // on every dispatch. The K=3 gate (issue#37) is shared between
+    // parallel_for and dispatch_with_scratch_erased — three consecutive
+    // overruns on this dispatcher trip it.
+    auto slow_fn = [](std::size_t, Scratch&) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    };
+
+    // Miss #1 — absorbed (streak=1).
+    CHECK_FALSE(pool.parallel_for_with_scratch<Scratch>(
+        0, 16, per_worker, slow_fn, 1'000'000LL));
+    CHECK_FALSE(pool.degraded());
+
+    // Miss #2 — absorbed (streak=2).
+    CHECK_FALSE(pool.parallel_for_with_scratch<Scratch>(
+        0, 16, per_worker, slow_fn, 1'000'000LL));
+    CHECK_FALSE(pool.degraded());
+
+    // Miss #3 — K reached, gate trips.
+    CHECK_FALSE(pool.parallel_for_with_scratch<Scratch>(
+        0, 16, per_worker, slow_fn, 1'000'000LL));
     CHECK(pool.degraded());
 
     // Subsequent dispatch sees pool degraded ⇒ runs inline + returns false.
     std::atomic<int> count{0};
-    const bool second = pool.parallel_for_with_scratch<Scratch>(
+    const bool fourth = pool.parallel_for_with_scratch<Scratch>(
         0, 8, per_worker,
         [&](std::size_t, Scratch&) { count.fetch_add(1); },
         100'000'000LL);
-    CHECK_FALSE(second);            // degraded path returns false
+    CHECK_FALSE(fourth);            // degraded path returns false
     CHECK(count.load() == 8);       // but iterations did run inline
 
     const ParallelEvalSnapshot s = pool.snapshot_diag();
     CHECK(s.degraded == 1);
-    CHECK(s.fallback_count >= 1);
+    // fallback_count = 1 for the K-th trip + 1 for the inline dispatch.
+    CHECK(s.fallback_count == 2);
 }
 
 TEST_CASE("issue#19 (e): issue#11 parallel_for(begin, end, fn) is byte-identical regression pin") {

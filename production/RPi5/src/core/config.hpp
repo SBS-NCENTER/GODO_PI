@@ -66,7 +66,6 @@ struct Config {
     double        amcl_range_max_m{};
     double        amcl_converge_xy_std_m{};
     double        amcl_converge_yaw_std_deg{};
-    double        amcl_yaw_tripwire_deg{};
     int           amcl_trigger_poll_ms{};
     std::uint64_t amcl_seed{};
 

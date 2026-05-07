@@ -49,6 +49,12 @@ struct ConfigSchemaRow {
     std::string_view description;
 };
 
+// 67 rows — issue#36 fold (2026-05-07 KST). The `amcl.yaw_tripwire_deg`
+// row was hard-removed (operator-locked design flaw — LiDAR yaw follows
+// pan rotation by physical invariant; tripwire fired spuriously every
+// Live tick during normal panning, 2994 events / 5 min on news-pi01
+// issue#19 HIL). 68 → 67. See .claude/memory/project_yaw_tripwire_design_flaw.md.
+//
 // 68 rows — issue#11 fold (2026-05-06 KST). New
 // `amcl.parallel_eval_workers` row (Int [1, 3], default 3, Recalibrate
 // class). Production maps the value → ParallelEvalPool's cpus_to_pin
@@ -128,7 +134,7 @@ struct ConfigSchemaRow {
 // CODEBASE.md invariant (q).
 
 // clang-format off
-inline constexpr std::array<ConfigSchemaRow, 68> CONFIG_SCHEMA = {{
+inline constexpr std::array<ConfigSchemaRow, 67> CONFIG_SCHEMA = {{
     {"amcl.anneal_iters_per_phase",     ValueType::Int,    1.0,      200.0,    "10",                             ReloadClass::Recalibrate, "Track D-5: per-phase upper-bound iteration count for sigma annealing."},
     {"amcl.converge_xy_std_m",          ValueType::Double, 0.001,    1.0,      "0.015",                          ReloadClass::Recalibrate, "AMCL converge() xy_std exit threshold (m)."},
     {"amcl.converge_yaw_std_deg",       ValueType::Double, 0.01,     30.0,     "0.3",                            ReloadClass::Recalibrate, "AMCL converge() yaw_std exit threshold (deg)."},
@@ -158,7 +164,6 @@ inline constexpr std::array<ConfigSchemaRow, 68> CONFIG_SCHEMA = {{
     {"amcl.sigma_yaw_jitter_deg",       ValueType::Double, 0.05,     30.0,     "0.5",                            ReloadClass::Recalibrate, "OneShot motion-model yaw sigma (deg)."},
     {"amcl.sigma_yaw_jitter_live_deg",  ValueType::Double, 0.05,     30.0,     "1.5",                            ReloadClass::Recalibrate, "Live mode motion-model yaw sigma (per-tick injected noise)."},
     {"amcl.trigger_poll_ms",            ValueType::Int,    10.0,     1000.0,   "50",                             ReloadClass::Hot,         "Cold-writer Idle wake cadence (ms)."},
-    {"amcl.yaw_tripwire_deg",           ValueType::Double, 0.5,      45.0,     "5.0",                            ReloadClass::Hot,         "Yaw drift WARN threshold (deg) vs. origin_yaw_deg."},
     {"gpio.calibrate_pin",              ValueType::Int,    0.0,      27.0,     "16",                             ReloadClass::Restart,     "BCM pin for calibrate button."},
     {"gpio.live_toggle_pin",            ValueType::Int,    0.0,      27.0,     "20",                             ReloadClass::Restart,     "BCM pin for live toggle button."},
     {"ipc.uds_socket",                  ValueType::String, 0.0,      0.0,      "/run/godo/ctl.sock",             ReloadClass::Restart,     "UDS control-plane socket path."},
@@ -200,7 +205,7 @@ inline constexpr std::array<ConfigSchemaRow, 68> CONFIG_SCHEMA = {{
 }};
 // clang-format on
 
-static_assert(CONFIG_SCHEMA.size() == 68,
+static_assert(CONFIG_SCHEMA.size() == 67,
               "CONFIG_SCHEMA row count drifted; update tests + schema mirror");
 
 // O(N) lookup. N=40 keeps this trivially fine; O(log N) binary search is

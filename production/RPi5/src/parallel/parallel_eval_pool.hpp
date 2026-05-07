@@ -117,10 +117,17 @@ public:
     // Caller must be a single thread (the cold writer). A second concurrent
     // `parallel_for` from the same instance returns false immediately.
     //
-    // 50 ms hard timeout on the join wait (R5). On timeout the function
-    // returns false, the pool is marked degraded (permanent until restart),
-    // and `fallback_count` increments. The caller is expected to fall back
-    // to sequential evaluation for that step.
+    // Range-proportional hard deadline (50 ms × max(1, range/500)) on
+    // the join wait (R5). On a deadline overrun the function returns
+    // false and drains stragglers before returning so caller-stack
+    // captures stay live. The pool transitions to degraded only after
+    // `kConsecutiveMissesGate=3` consecutive deadline-overruns (issue#37
+    // K-gate); intermediate K-1 overruns log a `[pool-miss-streak]` line
+    // and absorb the jitter without flipping `degraded`. The counter
+    // resets on the first success-completion. `fallback_count` increments
+    // only on the K-th miss (the trip itself) and on each subsequent
+    // inline-sequential dispatch. The caller is expected to fall back to
+    // sequential evaluation on any false return regardless of K state.
     //
     // When the pool was constructed with an empty `cpus_to_pin` vector the
     // call runs fn sequentially on the caller thread and returns true with
@@ -204,7 +211,10 @@ public:
     [[nodiscard]] ParallelEvalSnapshot snapshot_diag() const noexcept;
 
     // True if the pool is operating in degraded inline-sequential mode
-    // (ctor timeout OR a `parallel_for` join exceeded the 50 ms deadline).
+    // (ctor timeout OR `kConsecutiveMissesGate=3` consecutive
+    // deadline-overruns on the range-proportional 50 ms × max(1, range/500)
+    // join wait — issue#37 K-gate). Sticky for the lifetime of the process
+    // once it flips.
     [[nodiscard]] bool degraded() const noexcept;
 
     // Number of workers spawned (== cpus_to_pin.size() at construction;

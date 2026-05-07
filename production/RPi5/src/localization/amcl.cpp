@@ -206,11 +206,13 @@ AmclResult Amcl::step(const std::vector<RangeBeam>& beams,
     // per-particle eval across workers pinned to CPU {0, 1, 2}. Workers
     // each write to a partition-disjoint subrange of `front_[i].weight`;
     // bit-equality with the sequential path is preserved (plan §3.6
-    // proof). The pool's degraded-inline mode (ctor timeout / 50 ms join
+    // proof). The pool's degraded-inline mode (ctor timeout OR issue#37
+    // K=3 consecutive-misses gate on the 50 ms range-proportional join
     // deadline) runs fn on the caller thread and still produces
-    // bit-equal output; on a join-timeout `parallel_for` returns false
-    // and we re-run that eval sequentially as a belt-and-braces guard
-    // against half-populated weights.
+    // bit-equal output; on any join-timeout false return (whether a
+    // K-1 absorbed streak or the K-th trip) `parallel_for` returns
+    // false and we re-run that eval sequentially as a belt-and-braces
+    // guard against half-populated weights.
     const std::int64_t t_eval_start = phase0_out ? godo::rt::monotonic_ns() : 0;
     auto eval_one = [this, &beams](std::size_t i) {
         front_[i].weight = evaluate_scan(front_[i].pose,

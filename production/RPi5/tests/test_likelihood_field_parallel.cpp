@@ -176,23 +176,26 @@ TEST_CASE("issue#19 (4): 1000x1000 grid (1M cells) — parallel == sequential bi
 }
 
 TEST_CASE("issue#19 (5): degraded pool — output bit-equal to sequential (graceful fallback)") {
-    // Drive the pool into permanent-degraded mode first via a 1 ms
-    // deadline + 100 ms fn (mirrors test_parallel_eval_pool case 6 / 19d).
-    // Then build_likelihood_field with the now-degraded pool must still
-    // produce a bit-equal result by short-circuiting to the sequential
-    // path (`use_parallel = !pool->degraded()`).
+    // Drive the pool into permanent-degraded mode via 3 consecutive
+    // 100 ms-fn-vs-1 ms-deadline overruns (issue#37 K=3 gate; mirrors
+    // test_parallel_eval_pool case 6 / 19d). Then build_likelihood_field
+    // with the now-degraded pool must still produce a bit-equal result
+    // by short-circuiting to the sequential path
+    // (`use_parallel = !pool->degraded()`).
     ParallelEvalPool pool({0, 1, 2});
     REQUIRE_FALSE(pool.degraded());
 
     struct Scratch { int x{0}; };
     std::vector<Scratch> per_worker(3);
-    const bool first = pool.parallel_for_with_scratch<Scratch>(
-        0, 16, per_worker,
-        [](std::size_t, Scratch&) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        },
-        1'000'000LL);
-    CHECK_FALSE(first);
+    auto slow_fn = [](std::size_t, Scratch&) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    };
+    // 3 consecutive overruns to trip K=3 gate.
+    for (int i = 0; i < 3; ++i) {
+        const bool ok = pool.parallel_for_with_scratch<Scratch>(
+            0, 16, per_worker, slow_fn, 1'000'000LL);
+        CHECK_FALSE(ok);
+    }
     REQUIRE(pool.degraded());
 
     OccupancyGrid g = make_grid(64, 64, 0xDEAD);

@@ -54,6 +54,40 @@ namespace {
 constexpr std::int64_t kJoinTimeoutBaseNs  = 50'000'000LL;  // 50 ms
 constexpr std::size_t  kJoinTimeoutAnchorN = 500;
 
+// issue#37 — Consecutive-misses gate on the join deadline (K=3).
+//
+// A single deadline-overrun no longer trips the pool to permanent
+// inline-sequential mode (round-1 1-Strike-Out behavior). Operator's
+// non-RTOS framing (Raspberry Pi OS / Linux): one isolated 50 ms
+// scheduling jitter per ~6 hours is mathematical inevitability under
+// CFS preemption + kernel softirqs, NOT signal of a real worker hang.
+// Treating that single inevitability as a permanent halt is too
+// brittle for the production cadence.
+//
+// K=3 raises the bar to "3 consecutive deadline-overruns within a
+// streak" — pattern, not noise. The counter is shared between
+// `parallel_for` (issue#11 evaluate_scan path) and
+// `dispatch_with_scratch_erased` (issue#19 EDT 2D path); both
+// dispatchers serialize through the same `in_dispatch_` CAS so the
+// counter is single-writer by construction. A success-completion
+// (parallel join finished within the appropriate deadline) resets the
+// counter to 0 — range-aware-by-construction because the deadline
+// itself is range-proportional.
+//
+// Worst-case time-to-trip for a real worker hang:
+//   - Live steady-state (N=500, deadline=50 ms):   3 × 50 ms = 150 ms.
+//   - OneShot first-tick (N=5000, deadline=500 ms): 3 × 500 ms = 1.5 s.
+// Both bounded under the implicit OneShot UX budget (typical first-tick
+// wallclock ~190 ms per PR #99 standalone bench; 1.5 s only if 3
+// consecutive overruns occur, which has never been observed in HIL).
+//
+// Empirical anchor: 6h12min HIL on news-pi01 build `7a91806`
+// (`.claude/tmp/phase0_results_long_run_2026-05-07_160813.md`) showed
+// exactly 1 isolated `[pool-degraded]` event surrounded by clean
+// dispatches both before and after — textbook isolated-jitter
+// signature that K=3 would have absorbed outright.
+constexpr std::uint32_t kConsecutiveMissesGate = 3;
+
 // Pool ctor waits this long for every worker to publish ready=1 before
 // transitioning to degraded inline-sequential mode (M4 / R12).
 constexpr std::int64_t kCtorReadyTimeoutNs = 1'000'000'000LL;  // 1 s
@@ -185,6 +219,18 @@ private:
     std::atomic<std::uint64_t> dispatch_count_{0};
     std::atomic<std::uint64_t> fallback_count_{0};
     std::atomic<bool>          degraded_{false};
+
+    // issue#37 — Consecutive deadline-overruns counter for the K-gate.
+    // Shared between `parallel_for` (issue#11) and
+    // `dispatch_with_scratch_erased` (issue#19) — both dispatchers
+    // serialize through the in_dispatch_ CAS, so the counter is
+    // single-writer by construction (cold-writer thread). Increments
+    // on every overrun; resets to 0 on success-completion. The pool
+    // flips `degraded_` only when this reaches kConsecutiveMissesGate.
+    // Memory order is relaxed — the in_dispatch_ critical section
+    // already serializes dispatchers; no inter-thread happens-before
+    // is needed beyond that.
+    std::atomic<std::uint32_t> consecutive_misses_{0};
 
     // Latency history ring + decaying max. Single-writer (cold writer
     // calling `parallel_for`); single-reader (diag publisher calling
@@ -458,42 +504,68 @@ bool ParallelEvalPool::Impl::parallel_for(
     dispatch_count_.fetch_add(1, std::memory_order_relaxed);
 
     if (!ok) {
-        // Timeout — pool transitions to degraded inline-sequential mode
-        // for the rest of this process's lifetime (M8). Increment
-        // fallback_count_ so the operator can see this transition once;
-        // subsequent inline dispatches will increment it further.
+        // Deadline overrun — issue#37 K=3 consecutive-misses gate.
         //
-        // After flipping degraded_ we BLOCK until completed_ reaches
-        // target so the workers' inflight references to dispatch_.fn
-        // are released before this function returns. This trades an
-        // unbounded wait for memory safety on the timeout path; the
-        // caller observes a timeout via the false return value but
-        // can't safely free its captured state until the workers have
-        // visibly finished. Combined with the in_dispatch_ guard this
-        // also keeps the next parallel_for call from racing with the
-        // straggler workers.
-        degraded_.store(true, std::memory_order_release);
-        fallback_count_.fetch_add(1, std::memory_order_relaxed);
-        std::fprintf(stderr,
-            "[pool-degraded] ParallelEvalPool: parallel_for join exceeded "
-            "%lld ms hard deadline (workers=%zu, range=[%zu,%zu), N=%zu, "
-            "base=%lld ms × %lld); falling back to inline-sequential mode "
-            "for the remainder of this tracker process. Draining stragglers "
-            "before return.\n",
-            static_cast<long long>(deadline_ns / 1'000'000),
-            workers_.size(), begin, end, range,
-            static_cast<long long>(kJoinTimeoutBaseNs / 1'000'000),
-            static_cast<long long>(scale_n));
+        // R5 lifetime invariant (preserved in BOTH the K-1 and K-th
+        // paths): we MUST drain stragglers before returning false so
+        // the workers' inflight references to dispatch_.fn are
+        // released before this function returns. fn lifetime extends
+        // past the timeout regardless of the gate decision.
+        const std::uint32_t streak = consecutive_misses_.fetch_add(
+            1, std::memory_order_relaxed) + 1;
+        if (streak >= kConsecutiveMissesGate) {
+            // K-th miss — flip degraded for the rest of the process's
+            // lifetime, increment fallback_count for the trip itself,
+            // and log the [pool-degraded] line. Subsequent dispatches
+            // short-circuit at the top of parallel_for and run inline.
+            degraded_.store(true, std::memory_order_release);
+            fallback_count_.fetch_add(1, std::memory_order_relaxed);
+            std::fprintf(stderr,
+                "[pool-degraded] ParallelEvalPool: parallel_for join "
+                "exceeded %lld ms hard deadline (workers=%zu, "
+                "range=[%zu,%zu), N=%zu, base=%lld ms × %lld); "
+                "streak reached K=%u, falling back to inline-sequential "
+                "mode for the remainder of this tracker process. "
+                "Draining stragglers before return.\n",
+                static_cast<long long>(deadline_ns / 1'000'000),
+                workers_.size(), begin, end, range,
+                static_cast<long long>(kJoinTimeoutBaseNs / 1'000'000),
+                static_cast<long long>(scale_n),
+                kConsecutiveMissesGate);
+        } else {
+            // K-1 absorbed streak — log [pool-miss-streak] but do NOT
+            // flip degraded and do NOT increment fallback_count. The
+            // dispatch returns false so the caller can take its
+            // sequential fallback branch for THIS tick; future ticks
+            // continue to use the parallel path until the streak
+            // either reaches K or is broken by a success.
+            std::fprintf(stderr,
+                "[pool-miss-streak] ParallelEvalPool: parallel_for "
+                "join exceeded %lld ms hard deadline (workers=%zu, "
+                "range=[%zu,%zu), N=%zu, base=%lld ms × %lld); "
+                "streak=%u/%u, gate not yet tripped — draining "
+                "stragglers and continuing.\n",
+                static_cast<long long>(deadline_ns / 1'000'000),
+                workers_.size(), begin, end, range,
+                static_cast<long long>(kJoinTimeoutBaseNs / 1'000'000),
+                static_cast<long long>(scale_n),
+                streak, kConsecutiveMissesGate);
+        }
         // Bounded straggler drain — workers respect dispatch_seq_ and
         // are guaranteed to bump completed_ when they finish their
-        // partition. Worst case is bounded by fn's wallclock; the test
-        // exercises a 100 ms fn against a 50 ms deadline.
+        // partition. Worst case is bounded by fn's wallclock; the
+        // tests exercise a 150 ms fn against a 50 ms deadline (1.875×).
         while (completed_.load(std::memory_order_acquire) < target) {
             std::this_thread::yield();
         }
         in_dispatch_.store(false, std::memory_order_release);
         return false;
     }
+    // Success — reset the K-gate streak counter so isolated jitter
+    // does not accumulate across long quiet windows. Memory ordering
+    // matches the increment side (relaxed under the in_dispatch_
+    // critical section).
+    consecutive_misses_.store(0, std::memory_order_relaxed);
     in_dispatch_.store(false, std::memory_order_release);
     return true;
 }
@@ -605,9 +677,16 @@ bool ParallelEvalPool::Impl::dispatch_with_scratch_erased(
     cv_.notify_all();
 
     // Spin-wait on completion against caller-supplied deadline (D2).
+    // The fallback default is a literal 50 ms (NOT kJoinTimeoutBaseNs)
+    // so EDT semantics stay decoupled from issue#11 evaluate_scan even
+    // if the latter's anchor is later tuned. Today's EDT call sites
+    // (likelihood_field.cpp:234 and :266) always pass an explicit
+    // positive deadline derived from EDT_PARALLEL_DEADLINE_BASE_NS, so
+    // this fallback branch is dead code in production — kept for
+    // defensive completeness (round-1 m1 fold).
     const std::int64_t deadline_ns =
         (deadline_ns_override > 0) ? deadline_ns_override
-                                   : kJoinTimeoutBaseNs;
+                                   : 50'000'000LL;
     const std::int64_t deadline = t0 + deadline_ns;
     const std::uint32_t target  = static_cast<std::uint32_t>(workers_.size());
     bool ok = false;
@@ -629,16 +708,37 @@ bool ParallelEvalPool::Impl::dispatch_with_scratch_erased(
     dispatch_count_.fetch_add(1, std::memory_order_relaxed);
 
     if (!ok) {
-        degraded_.store(true, std::memory_order_release);
-        fallback_count_.fetch_add(1, std::memory_order_relaxed);
-        std::fprintf(stderr,
-            "[pool-degraded] dispatch_with_scratch_erased: scratch join "
-            "exceeded %lld ms caller-specified deadline (workers=%zu, "
-            "range=[%zu,%zu)); falling back to inline-sequential mode "
-            "for the remainder of this tracker process. Draining "
-            "stragglers before return.\n",
-            static_cast<long long>(deadline_ns / 1'000'000),
-            workers_.size(), begin, end);
+        // Deadline overrun — issue#37 K=3 consecutive-misses gate.
+        // Counter is shared with parallel_for so an EDT miss + 2
+        // evaluate_scan misses (or any other interleaving) still
+        // trips at K=3 in a row. R5 lifetime invariant preserved in
+        // both branches via the straggler-drain below.
+        const std::uint32_t streak = consecutive_misses_.fetch_add(
+            1, std::memory_order_relaxed) + 1;
+        if (streak >= kConsecutiveMissesGate) {
+            degraded_.store(true, std::memory_order_release);
+            fallback_count_.fetch_add(1, std::memory_order_relaxed);
+            std::fprintf(stderr,
+                "[pool-degraded] dispatch_with_scratch_erased: scratch "
+                "join exceeded %lld ms caller-specified deadline "
+                "(workers=%zu, range=[%zu,%zu)); streak reached K=%u, "
+                "falling back to inline-sequential mode for the "
+                "remainder of this tracker process. Draining stragglers "
+                "before return.\n",
+                static_cast<long long>(deadline_ns / 1'000'000),
+                workers_.size(), begin, end,
+                kConsecutiveMissesGate);
+        } else {
+            std::fprintf(stderr,
+                "[pool-miss-streak] dispatch_with_scratch_erased: "
+                "scratch join exceeded %lld ms caller-specified "
+                "deadline (workers=%zu, range=[%zu,%zu)); streak=%u/%u, "
+                "gate not yet tripped — draining stragglers and "
+                "continuing.\n",
+                static_cast<long long>(deadline_ns / 1'000'000),
+                workers_.size(), begin, end,
+                streak, kConsecutiveMissesGate);
+        }
         // Bounded straggler drain — mirrors parallel_for timeout path so
         // caller-side per_worker / fn_erased lifetimes are safe to free
         // after this returns false.
@@ -648,6 +748,8 @@ bool ParallelEvalPool::Impl::dispatch_with_scratch_erased(
         in_dispatch_.store(false, std::memory_order_release);
         return false;
     }
+    // Success — reset the K-gate streak counter (mirrors parallel_for).
+    consecutive_misses_.store(0, std::memory_order_relaxed);
     in_dispatch_.store(false, std::memory_order_release);
     return true;
 }

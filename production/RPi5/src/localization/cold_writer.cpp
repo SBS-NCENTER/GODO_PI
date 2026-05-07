@@ -66,16 +66,26 @@ inline void phase0_reset_and_stamp_start(std::int64_t& scan_start_ns_out) {
 // bottom of each `run_*_iteration` wrapper when kPhase0On. `path_label`
 // distinguishes oneshot vs live vs live_pipelined; `iters` is the
 // AmclResult.iterations value for this scan.
+//
+// Round A measurement infrastructure (issue#22 / #13): the trailing
+// pose_x_m / pose_y_m / xy_std_m / yaw_std_deg fields let HIL post-
+// analysis extract a sigma_xy regression baseline straight from the
+// journal (no separate publish path needed — pulled from the same
+// AmclResult that publish() consumes).
 [[gnu::cold]]
 inline void phase0_emit(const char* path_label,
                         std::int64_t scan_start_ns,
-                        std::int32_t iters) {
+                        std::int32_t iters,
+                        double       pose_x_m,
+                        double       pose_y_m,
+                        double       xy_std_m,
+                        double       yaw_std_deg) {
     const std::int64_t total_ns = godo::rt::monotonic_ns() - scan_start_ns;
     ++g_phase0_scan_seq;
     std::fprintf(stderr,
         "PHASE0 path=%s scan=%lld iters=%d "
         "lf_rebuild_ns=%lld jitter_ns=%lld eval_ns=%lld norm_ns=%lld resamp_ns=%lld "
-        "total_ns=%lld\n",
+        "total_ns=%lld pose_x_m=%.6f pose_y_m=%.6f xy_std_m=%.9g yaw_std_deg=%.9g\n",
         path_label,
         static_cast<long long>(g_phase0_scan_seq),
         static_cast<int>(iters),
@@ -84,7 +94,8 @@ inline void phase0_emit(const char* path_label,
         static_cast<long long>(g_phase0_inner_sum.evaluate_scan_ns),
         static_cast<long long>(g_phase0_inner_sum.normalize_ns),
         static_cast<long long>(g_phase0_inner_sum.resample_ns),
-        static_cast<long long>(total_ns));
+        static_cast<long long>(total_ns),
+        pose_x_m, pose_y_m, xy_std_m, yaw_std_deg);
 }
 
 }  // namespace
@@ -530,7 +541,9 @@ AmclResult run_one_iteration(const godo::core::Config&         cfg,
     // unless the operator places a new hint via webctl.
     godo::rt::g_calibrate_hint_valid.store(false, std::memory_order_release);
 
-    if (kPhase0On) phase0_emit("oneshot", phase0_scan_start_ns, result.iterations);
+    if (kPhase0On) phase0_emit("oneshot", phase0_scan_start_ns, result.iterations,
+                               result.pose.x, result.pose.y,
+                               result.xy_std_m, result.yaw_std_deg);
     return result;
 }
 
@@ -638,7 +651,9 @@ AmclResult run_live_iteration(const godo::core::Config&         cfg,
     //    around the freshly refined pose.
     last_pose_inout = result.pose;
     live_first_iter_inout = false;
-    if (kPhase0On) phase0_emit("live_legacy", phase0_scan_start_ns, result.iterations);
+    if (kPhase0On) phase0_emit("live_legacy", phase0_scan_start_ns, result.iterations,
+                               result.pose.x, result.pose.y,
+                               result.xy_std_m, result.yaw_std_deg);
     return result;
 }
 
@@ -760,7 +775,9 @@ AmclResult run_live_iteration_pipelined(
     //    `live_first_iter` latch is intentionally not consulted on the
     //    pipelined path.
     last_pose_inout = result.pose;
-    if (kPhase0On) phase0_emit("live_pipelined", phase0_scan_start_ns, result.iterations);
+    if (kPhase0On) phase0_emit("live_pipelined", phase0_scan_start_ns, result.iterations,
+                               result.pose.x, result.pose.y,
+                               result.xy_std_m, result.yaw_std_deg);
     return result;
 }
 

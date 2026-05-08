@@ -164,3 +164,29 @@ TEST_CASE("validate: t_ramp_ms is restart-class (Mode-A M2)") {
     REQUIRE(r.row != nullptr);
     CHECK(r.row->reload_class == ReloadClass::Restart);
 }
+
+TEST_CASE("validate (issue#38): amcl.range_min_m cap 2.0 -> 5.0 -> 10.0 m") {
+    // issue#38 first bumped cap 2.0 -> 5.0 (commit 482689e). Operator HIL
+    // 2026-05-08 KST showed range_min=5m eliminates Bug B 5cm wobble; cap
+    // raised again 5.0 -> 10.0 m to give room for studio-tuning at 6/7/8/9 m.
+    // Runtime guard at scan_ops.cpp:30 (`if (range_max_m > range_min_m)`)
+    // catches degenerate min >= max at runtime.
+    const auto ok4 = validate("amcl.range_min_m", "4.0");
+    CHECK(ok4.ok);
+    CHECK(ok4.parsed_double == 4.0);
+    REQUIRE(ok4.row != nullptr);
+    CHECK(ok4.row->reload_class == ReloadClass::Recalibrate);
+
+    // Mid-cap value used in production HIL.
+    const auto ok5 = validate("amcl.range_min_m", "5.0");
+    CHECK(ok5.ok);
+
+    // New (post 5->10 bump) admissible value.
+    const auto ok9 = validate("amcl.range_min_m", "9.0");
+    CHECK(ok9.ok);
+
+    // Above-new-cap still rejected.
+    const auto over = validate("amcl.range_min_m", "10.5");
+    CHECK_FALSE(over.ok);
+    CHECK(over.err == "bad_value");
+}
